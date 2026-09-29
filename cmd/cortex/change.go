@@ -155,11 +155,37 @@ func commitChangeIn(dir, message string) (string, error) {
 	return head, nil
 }
 
-// commitChange stages everything and commits on the active change branch. It
-// requires being on a change branch (so an automated commit can't land on main
-// or a feature branch by accident) and refuses an empty commit. Local only.
-func commitChange(message string) (string, error) {
-	return commitChangeIn("", message)
+// commitChangeWithAttribution stages everything and commits on the active
+// change branch, appending the attribution trailer when attribution is
+// enabled (cfg.attributionCommit non-empty). It requires being on a change
+// branch and refuses an empty commit. Local only.
+//
+// The trailer is appended with git interpret-trailers --if-exists
+// addIfDifferent, so a message that already carries it is committed
+// unchanged. The model name is the one cfg resolves for the code role from
+// config alone (no fleet discovery), substituted for "<model>" unless
+// include_model is false; when none resolves, the " (<model>)" part is
+// dropped. A nil cfg (no config file at all) is attribution's default:
+// enabled, default template. Returns the short commit hash and whether the
+// commit carries the trailer (false only when attribution is disabled or
+// the commit template is "").
+func commitChangeWithAttribution(dir, message string, cfg *Config) (string, bool, error) {
+	trailer := cfg.attributionCommit(cfg.resolveBinding(roleCode, nil).Model)
+	if trailer == "" {
+		head, err := commitChangeIn(dir, message)
+		return head, false, err
+	}
+
+	cmd := exec.Command("git", "interpret-trailers", "--if-exists", "addIfDifferent", "--trailer", trailer)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(message)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", false, fmt.Errorf("failed to add attribution trailer: %w", err)
+	}
+	finalMessage := strings.TrimSpace(string(output))
+	head, err := commitChangeIn(dir, finalMessage)
+	return head, true, err
 }
 
 // slugifyChange turns a free-text change name into a safe branch suffix:
@@ -212,7 +238,7 @@ func runChangeCLI(args []string) error {
 		if message == "" {
 			return fmt.Errorf("usage: cortex change commit <message>")
 		}
-		head, err := commitChange(message)
+		head, _, err := commitChangeWithAttribution("", message, LoadConfig())
 		if err != nil {
 			return err
 		}

@@ -49,6 +49,12 @@ type LoopRunPayload struct {
 	NextMinutes int    `json:"next_minutes,omitempty"`
 	NextReason  string `json:"next_reason,omitempty"`
 	Done        bool   `json:"done,omitempty"`
+	// Attributed reports whether the commit this run landed (ChangeRef) was
+	// stamped with the configured attribution trailer (cmd/cortex/change.go's
+	// commitChangeWithAttribution). False for a plain commit — attribution
+	// off, empty template, or no resolvable model — and omitempty keeps
+	// skipped/no-change firings (no commit at all) byte-identical to before.
+	Attributed bool `json:"attributed,omitempty"`
 }
 
 // NewLoopRunEntry builds a journal entry for one loop.run event.

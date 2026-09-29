@@ -49,6 +49,10 @@ In long sessions, older turns appear only as an outline with @session/… citati
 var (
 	promptBase   = SystemPrompt
 	promptAppend = ""
+	// promptAttribution is the attribution line (configureAttributionPrompt);
+	// "" until a session configures it, so an unconfigured prompt is the
+	// built-in one verbatim.
+	promptAttribution = ""
 )
 
 // configurePrompt resolves the prompt.* config section into the live prompt
@@ -74,6 +78,38 @@ func resolvePrompt(cfg *Config) (base, appendix string) {
 		}
 	}
 	return base, strings.TrimSpace(cfg.Prompt.Append)
+}
+
+// attributionPromptLine is the system-prompt line the attribution config
+// contributes when it is on: one principle, no recipe — commit messages the
+// agent authors end with the configured trailer, pull request bodies with
+// the configured footer, both spelled out verbatim so the model can write
+// them. model is substituted into the trailer by attributionCommit's rules.
+// Returns "" when attribution is disabled or both surfaces are "". The PR
+// footer has no mechanical backstop (Cortex never composes a PR body
+// itself), so this line is its only delivery; commits are also covered by
+// the bash tool's --trailer backstop and change.go's interpret-trailers path.
+func (c *Config) attributionPromptLine(model string) string {
+	commit, pr := c.attributionCommit(model), c.attributionPR()
+	switch {
+	case commit != "" && pr != "":
+		return fmt.Sprintf("Attribution: end every git commit message you author with the trailer line %q, and end every pull request body you write with the line %q.", commit, pr)
+	case commit != "":
+		return fmt.Sprintf("Attribution: end every git commit message you author with the trailer line %q.", commit)
+	case pr != "":
+		return fmt.Sprintf("Attribution: end every pull request body you write with the line %q.", pr)
+	default:
+		return ""
+	}
+}
+
+// configureAttributionPrompt sets the attribution line systemPromptContent
+// appends. NewCortexSession calls it once, after the code model is resolved
+// and before the first request is built, so every coder session (REPL,
+// `cortex turn`, serve/web, discord, loop firings) carries it in its stable
+// system prefix rather than per turn.
+func configureAttributionPrompt(cfg *Config, model string) {
+	promptAttribution = cfg.attributionPromptLine(model)
 }
 
 // readPromptFile reads a prompt.file path: ~ expands to the home directory,

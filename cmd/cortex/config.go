@@ -472,6 +472,31 @@ type Config struct {
 	// start alongside the memory index (docs/configuration.md's `skills.*`
 	// section; see internal/skills and cmd/cortex/skills.go).
 	Skills SkillsConfig `json:"skills"`
+
+	// Attribution configures markers for commits and PRs that Cortex
+	// authors (docs/configuration.md's `attribution.*` section): a commit
+	// trailer, and a PR-body footer the system prompt asks the agent to add.
+	Attribution AttributionConfig `json:"attribution"`
+}
+
+// AttributionConfig collects configurable attribution markers for Cortex-authored
+// commits and PRs (docs/configuration.md's `attribution.*` section).
+type AttributionConfig struct {
+	// Enabled gates attribution entirely. Nil means enabled. When false, no
+	// trailer is added and the system prompt carries no attribution line.
+	Enabled *bool `json:"enabled"`
+	// Commit is the trailer line (git "Key: value" form). The token
+	// "<model>" is replaced with the code model's name unless IncludeModel
+	// is false. Nil means the default "Co-Authored-By: Cortex (<model>)";
+	// an explicit "" disables commit attribution only.
+	Commit *string `json:"commit"`
+	// PR is the line the system prompt asks the agent to end pull request
+	// bodies with. Nil means the default "Generated with Cortex"; an
+	// explicit "" disables PR attribution only. No model substitution.
+	PR *string `json:"pr"`
+	// IncludeModel controls "<model>" substitution in the commit trailer.
+	// Nil means true; false strips " (<model>)" from the template.
+	IncludeModel *bool `json:"include_model"`
 }
 
 // SkillsConfig collects Agent Skills discovery tunables
@@ -1138,6 +1163,7 @@ func mergeConfig(base, over *Config) *Config {
 	out.Context = mergeContext(base.Context, over.Context)
 	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
 	out.Skills = mergeSkills(base.Skills, over.Skills)
+	out.Attribution = mergeAttribution(base.Attribution, over.Attribution)
 	return &out
 }
 
@@ -1278,6 +1304,29 @@ func mergeSkills(base, over SkillsConfig) SkillsConfig {
 		IndexMax: mergeIntField(base.IndexMax, over.IndexMax),
 		Dirs:     dirs,
 	}
+}
+
+// mergeAttribution threads a project-level override over the user-level default,
+// field-by-field. Every field is a pointer override: a set project field
+// wins, an absent one inherits — so a project's explicit "" for Commit or PR
+// survives the merge and disables that surface.
+func mergeAttribution(base, over AttributionConfig) AttributionConfig {
+	out := base
+	if over.Enabled != nil {
+		out.Enabled = over.Enabled
+	}
+	// Overriding with a non-nil pointer (including empty string) takes precedence
+	if over.Commit != nil {
+		out.Commit = over.Commit
+	}
+	// Overriding with a non-nil pointer (including empty string) takes precedence
+	if over.PR != nil {
+		out.PR = over.PR
+	}
+	if over.IncludeModel != nil {
+		out.IncludeModel = over.IncludeModel
+	}
+	return out
 }
 
 func mergeRead(base, over ReadConfig) ReadConfig {
@@ -1712,4 +1761,70 @@ func (c *Config) skillsDirsOverride() []string {
 		return nil
 	}
 	return c.Skills.Dirs
+}
+
+// attributionEnabled reports whether attribution is on. Nil/absent means
+// enabled — an availability kill-switch, not consent.
+func (c *Config) attributionEnabled() bool {
+	if c == nil || c.Attribution.Enabled == nil {
+		return true
+	}
+	return *c.Attribution.Enabled
+}
+
+// attributionCommit returns the commit trailer, with the model name
+// substituted for the "<model>" token. It is nil-safe: a nil config behaves
+// like an empty one (attribution enabled, default template). Returns "" when
+// attribution is disabled or the commit template is explicitly "".
+func (c *Config) attributionCommit(model string) string {
+	if c == nil {
+		c = &Config{}
+	}
+	// Check if attribution is enabled (nil/absent = enabled)
+	if !c.attributionEnabled() {
+		return ""
+	}
+
+	// Use default commit template if not set
+	commit := "Co-Authored-By: Cortex (<model>)"
+	if c.Attribution.Commit != nil {
+		// An explicit "" disables commit attribution only.
+		if *c.Attribution.Commit == "" {
+			return ""
+		}
+		commit = *c.Attribution.Commit
+	}
+
+	if model != "" && (c.Attribution.IncludeModel == nil || *c.Attribution.IncludeModel) {
+		return strings.ReplaceAll(commit, "<model>", model)
+	}
+	// Model excluded (include_model=false) or unknown (zero-config fleet
+	// default): drop the placeholder — the conventional " (<model>)" form
+	// first, then any bare token — so no literal "<model>" lands in a commit.
+	commit = strings.ReplaceAll(commit, " (<model>)", "")
+	return strings.TrimSpace(strings.ReplaceAll(commit, "<model>", ""))
+}
+
+// attributionPR returns the PR footer. It is nil-safe like
+// attributionCommit. Returns "" when attribution is disabled or the PR
+// footer is explicitly ""; the default footer is "Generated with Cortex".
+func (c *Config) attributionPR() string {
+	if c == nil {
+		c = &Config{}
+	}
+	// Check if attribution is enabled (nil/absent = enabled)
+	if !c.attributionEnabled() {
+		return ""
+	}
+
+	// Use default PR footer if not set
+	pr := "Generated with Cortex"
+	if c.Attribution.PR != nil {
+		// An explicit "" disables PR attribution only.
+		if *c.Attribution.PR == "" {
+			return ""
+		}
+		pr = *c.Attribution.PR
+	}
+	return pr
 }

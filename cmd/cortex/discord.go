@@ -567,7 +567,7 @@ func parseRouteDecision(resp string) (routeDecision, bool) {
 // before the rebase).
 func (b *discordBot) startNewChange(channelID, name string) *managedSession {
 	if clean, _ := gitClean(); !clean {
-		if head, err := commitChange("checkpoint: " + b.goalOrWIP(channelID)); err == nil {
+		if head, _, err := commitChangeWithAttribution("", "checkpoint: "+b.goalOrWIP(channelID), LoadConfig()); err == nil {
 			log.Printf("discord: checkpointed WIP %s", head)
 		}
 	}

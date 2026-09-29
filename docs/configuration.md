@@ -326,7 +326,7 @@ config gate — every session with memory enabled gets both tiers. See
 | Field | Default | Meaning |
 |---|---|---|
 | `file` | (unset) | Path to a file that replaces the built-in base system prompt. `~` expands; a relative path resolves upward from CWD (the AGENTS.md rule, so `.cortex/prompt.md` works from any subdirectory); truncated at the instruction cap. An unreadable or whitespace-only file warns on stderr and keeps the built-in — a broken path degrades to a working agent, never a silent empty prompt. |
-| `append` | (unset) | Text appended after the base prompt (and before any AGENTS.md section), whether the base is built-in or file-replaced. |
+| `append` | (unset) | Text appended after the base prompt and the `attribution.*` line when one is on (and before any AGENTS.md section), whether the base is built-in or file-replaced. |
 
 ## `repl.*` — interactive REPL tunables
 
@@ -470,6 +470,81 @@ The rendered index is injected at turn start alongside the memory index
 Study/Learn/Agent subagent profiles are seeded from their own static system
 prompt and never see it. `/context` surfaces it as a `skills` row (░ glyph)
 in the grid legend when non-empty.
+
+## `attribution.*` — commit and PR attribution markers
+
+Marks work Cortex authors: a trailer on commits, and a footer the agent is
+asked to put on pull request bodies. On by default.
+
+```json
+{
+  "attribution": {
+    "enabled": true,
+    "commit": "Co-Authored-By: Cortex (<model>)",
+    "pr": "Generated with Cortex",
+    "include_model": true
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` turns attribution off entirely: no trailer is added anywhere and the system prompt carries no attribution line. |
+| `commit` | `Co-Authored-By: Cortex (<model>)` | The commit trailer line. `<model>` is replaced with the code model's name. An explicit `""` turns off commit attribution only (and survives the user→project merge). |
+| `pr` | `Generated with Cortex` | The line the system prompt asks the agent to end pull request bodies with. No `<model>` substitution. An explicit `""` turns off PR attribution only. |
+| `include_model` | `true` | `false` removes the model from the trailer: ` (<model>)` is stripped (and any other `<model>` token). The same happens when no code model is known. |
+
+The default trailer has no email address. GitHub only credits a
+`Co-Authored-By` trailer in its contributor UI when it has the form
+`Name <email>`, so set `commit` to include one if you want that.
+
+### Where it applies
+
+- **System prompt (every coder session).** When attribution is on, one line
+  is added to the coder's system prompt, after the base prompt and before
+  `prompt.append` and AGENTS.md. It names the trailer (with the code model
+  resolved at session start) and the PR footer verbatim, e.g. *Attribution:
+  end every git commit message you author with the trailer line
+  "Co-Authored-By: Cortex (qwen3-coder)", and end every pull request body you
+  write with the line "Generated with Cortex".* A surface set to `""` is left
+  out of the line. This covers the REPL, `cortex turn`, `cortex serve`,
+  `cortex discord` and loop firings, which all build their session the same
+  way. It is fixed for the session's lifetime (it is part of the cached
+  prefix), and a resumed session keeps the system prompt stored in its
+  transcript.
+- **PR footer: prompt only.** Cortex never creates a pull request itself, so
+  the footer has no mechanical backstop; whether a PR body ends with it is up
+  to the model following the line above.
+- **`cortex change commit`, loop-firing commits, Discord WIP checkpoints.**
+  These commit mechanically through `git interpret-trailers --if-exists
+  addIfDifferent --trailer <trailer>`: a message that already carries the
+  identical trailer is not given a second copy, and a different trailer (a
+  human `Co-Authored-By`, say) is kept alongside it. The model comes from
+  `models.code` in config (no fleet discovery); without one, the model part
+  is dropped. `cortex change commit` and the Discord checkpoint load config
+  from the current directory; a loop firing uses its session's config.
+- **`git commit` run by the agent through the `bash` tool.** Before the
+  shell-risk gate classifies the command, the tool splices
+  `--trailer='<trailer>'` in directly after `commit` (so it lands before any
+  `--` and pathspecs), single-quoted so `$`, backticks and quotes in the
+  template are never expanded. The gate and any confirmation prompt see the
+  rewritten command. The trailer names the session's current code model. It
+  is only applied when the whole command is one simple `git commit …`
+  invocation that doesn't already contain the trailer text. Pipelines,
+  `&&`/`||`/`;` chains, redirections or heredocs, subshells and command
+  substitution, `git` options before `commit` (`git -C dir commit`),
+  `--amend`, and `-F -`/`--file=-` are left exactly as written. When a
+  command left alone this way still contains `git commit` and couldn't be
+  parsed as one simple command, or reads its message from stdin (and isn't
+  an `--amend`), the tool result gets a note naming the trailer the message
+  should end with.
+
+### What is recorded
+
+Loop firings record whether the commit they made carried the trailer, as
+`attributed` on the `loop.run` journal event (omitted when false or when the
+firing made no commit). Commits from `cortex change commit`, Discord
+checkpoints and the `bash` tool are not journaled with an attribution flag.
 
 ## Validation
 

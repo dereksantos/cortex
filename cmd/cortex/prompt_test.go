@@ -11,8 +11,8 @@ import (
 // so tests can't leak a configured prompt into each other.
 func resetPrompt(t *testing.T) {
 	t.Helper()
-	base, appendix := promptBase, promptAppend
-	t.Cleanup(func() { promptBase, promptAppend = base, appendix })
+	base, appendix, attribution := promptBase, promptAppend, promptAttribution
+	t.Cleanup(func() { promptBase, promptAppend, promptAttribution = base, appendix, attribution })
 }
 
 func TestSystemPromptContentDefault(t *testing.T) {

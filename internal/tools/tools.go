@@ -154,6 +154,17 @@ type Quieter interface {
 	Quiet() bool
 }
 
+// AttributionProvider exposes the commit-attribution trailer for the bash
+// tool's git-commit backstop (maybeAddAttributionTrailer). The provider
+// resolves it fully itself (the code role's resolved model included) —
+// AttributionCommit returns "" when attribution is disabled or no commit
+// trailer is configured.
+type AttributionProvider interface {
+	// AttributionCommit returns the commit trailer to add to a git commit
+	// (model already substituted), or "" for none.
+	AttributionCommit() string
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -181,6 +192,8 @@ type ToolDeps interface {
 	OutlineModifier
 	// WatermarkAdjuster provides methods to adjust working set watermarks.
 	WatermarkAdjuster
+	// AttributionProvider exposes attribution configuration.
+	AttributionProvider
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -241,6 +254,7 @@ func (headlessDeps) MergeOutlineEntries(string, string) (string, error) {
 func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
 }
+func (headlessDeps) AttributionCommit() string { return "" }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -1515,6 +1529,12 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("empty command")
 	}
+	// Attribution backstop BEFORE the risk gate: when attribution is on and
+	// the command is a single git commit without the trailer, add it — the
+	// gate must classify (and a confirm prompt must show) the command that
+	// will actually run, not a pre-rewrite version of it. A commit it could
+	// not safely rewrite gets attributionNote appended to its result instead.
+	command, attributionNote := maybeAddAttributionTrailer(command, deps)
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
 	// reads the reason plainly and adapts.
@@ -1563,7 +1583,10 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 			leadBin == "grep" && strings.TrimSpace(result) == "" {
 			return "(no matches)", nil
 		}
-		return result + "\n[exit error: " + runErr.Error() + "]", nil
+		result += "\n[exit error: " + runErr.Error() + "]"
+	}
+	if attributionNote != "" {
+		result += "\n" + attributionNote
 	}
 	return result, nil
 }
