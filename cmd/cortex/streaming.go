@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -572,4 +573,97 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 	<-drained
 	r.Close()
 	return anchor.Stop(), turnErr
+}
+
+// runUnderAnchor runs fn inside a pinned anchor (interactive + render), the
+// same way runAnchoredTurn runs a single Turn: the prompt is pinned to the
+// bottom row and every byte of fn's output (fmt.Print, tool-action lines, …)
+// is funneled above it via a stdout pipe; keystrokes typed during fn edit the
+// pinned line live. The pinned line is erased on return and its (possibly
+// edited) text is returned to seed the next prompt. ESC/Ctrl-C cancels ctx.
+//
+// It exists so MULTI-turn paths (the /plan REPL command's TurnWithPlan, #150)
+// get the same anchored display and cancel handling as a single turn, without
+// duplicating runAnchoredTurn's pipe/anchor plumbing. runAnchoredTurn's
+// body is the single-turn specialization (it calls fn = Turn inside it);
+// both share this helper's anchor-lifecycle shape.
+func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed string, fn func(ctx context.Context) error) (string, error) {
+	anchor, ctx := editor.Anchor(session.Prompt(), seed)
+	r, w, err := os.Pipe()
+	if err != nil {
+		// Pipe setup failed (rare): run fn WITHOUT the anchor so it still runs
+		// and cancels cleanly, mirroring runAnchoredTurn's fallback.
+		anchor.Stop()
+		c, stop := editor.Interruptible(context.Background())
+		e := fn(c)
+		return stop(), e
+	}
+	realStdout := os.Stdout
+	os.Stdout = w
+	session.live = anchor
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			anchor.EmitLine(sc.Text())
+		}
+	}()
+
+	turnErr := fn(ctx)
+
+	// Restore stdout, then close the write end so the drain goroutine sees EOF
+	// and flushes the last line before we erase the pinned block.
+	os.Stdout = realStdout
+	session.live = nil
+	w.Close()
+	<-drained
+	r.Close()
+	return anchor.Stop(), turnErr
+}
+
+// afterTurn is the REPL's post-turn safety net, shared by the normal single
+// turn and the /plan (multi-turn) path so the two stay in sync. It reacts to
+// the error of a just-completed turn (or plan run):
+//
+//   - clean: compact at the turn boundary when the context gauge is red —
+//     the boundary is the only safe point (mid-turn compaction orphans
+//     tool_call sequences);
+//   - interrupted (context.Canceled): print "interrupted";
+//   - otherwise: print the error, diagnose a model error, and — if the error
+//     names a real context-window overflow — learn the window (the gauge and
+//     read_file guard self-correct, C2), compact, and ask the user to
+//     re-send.
+//
+// A plan run is up to planStepCap turns in a row — the place context grows
+// most — so it must reach this same safety net; without it the /plan path was
+// the only multi-turn path that never checked the compaction threshold.
+func afterTurn(session *CortexSession, err error) {
+	switch {
+	case err == nil:
+		// Red gauge: compact at the turn boundary, before the window actually
+		// overflows. The boundary is the only safe point — mid-turn
+		// compaction would orphan tool_call sequences.
+		if session.contextRatio() >= compactThreshold {
+			compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
+		}
+	case errors.Is(err, context.Canceled):
+		fmt.Println(withColor("interrupted", yellow))
+	default:
+		fmt.Printf("turn error: %v\n", err)
+		if d := diagnoseModelError(err); d != "" {
+			fmt.Println(withColor(d, yellow))
+		}
+		// An overflow error names the code model's real window: learn it
+		// (the gauge and read_file guard self-correct, C2) and compact so the
+		// next request fits. The failed request is in the digest; the user
+		// re-asks.
+		if real := parseCtxSize(err.Error()); real > 0 {
+			session.learnWindow(real)
+			compactNow(session, "context overflowed")
+			fmt.Println("please re-send your request")
+		}
+	}
 }

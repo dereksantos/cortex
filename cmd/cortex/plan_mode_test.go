@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -142,6 +144,13 @@ type planTestBackend struct {
 	haveTools []bool
 	toolCount []int    // toolCount[i] is the number of tools the i-th request advertised
 	lastUser  []string // lastUser[i] is the last user message in the i-th request
+	// cancelAt, when set, invokes cancelCtx on the request with index cancelAt
+	// (0-based, in arrival order) — the way a test simulates a user pressing
+	// Ctrl-C mid-turn without racing a watcher goroutine. cancelCtx is the
+	// cancel func for the context the test passes to TurnWithPlan; the backend
+	// holds it so it can fire from the handler.
+	cancelAt  int
+	cancelCtx context.CancelFunc
 	srv       *httptest.Server
 }
 
@@ -170,6 +179,14 @@ func newPlanTestBackend(t *testing.T, replies ...string) *planTestBackend {
 		b.toolCount = append(b.toolCount, len(tools))
 		b.lastUser = append(b.lastUser, lastUserContent)
 		b.mu.Unlock()
+
+		// Simulate a user pressing Ctrl-C mid-turn: cancel the run's context on
+		// the Nth request (0-based). The in-flight Send then observes
+		// ctx.Err() == context.Canceled and returns it, exactly as a real
+		// interrupt would.
+		if b.cancelAt == idx && b.cancelCtx != nil {
+			b.cancelCtx()
+		}
 
 		reply := ""
 		if idx < len(b.replies) {
@@ -242,6 +259,12 @@ func planTestSession(t *testing.T, b *planTestBackend, root string) *CortexSessi
 	cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 	cs.Request.BaseURL = b.srv.URL
 	cs.Request.Tools = toolSet[:2] // strict subset — see the note above
+	// One attempt, no backoff: a test that injects a failure or cancels the
+	// context (the StopOnFailure and CancelledContext tests) must see the
+	// error surface IMMEDIATELY, not after the default 3-attempt × 500 ms
+	// retry loop. Production uses the ModelSpec-driven defaults.
+	cs.Request.MaxAttempts = 1
+	cs.Request.Backoff = time.Millisecond
 	ws, err := NewWorkspace(root)
 	if err != nil {
 		t.Fatalf("NewWorkspace(%q): %v", root, err)
@@ -333,6 +356,14 @@ func TestTurnWithPlanHappyPath(t *testing.T) {
 			t.Errorf("reply missing %q:\n%s", want, res.Reply)
 		}
 	}
+	// No command is discoverable in the empty temp root, so each done step's
+	// note is the short skip summary — NOT a wall of raw test output (the
+	// #150 review: a done step's report line must stay a single status line).
+	for i, s := range res.Steps {
+		if !strings.HasPrefix(s.Note, "check skipped:") {
+			t.Errorf("step %d note = %q, want a short 'check skipped: …' summary, not raw output", i+1, s.Note)
+		}
+	}
 }
 
 func TestTurnWithPlanUnparseableFallsBackToSingleTurn(t *testing.T) {
@@ -378,24 +409,35 @@ func TestTurnWithPlanStopOnFailure(t *testing.T) {
 	cs := planTestSession(t, backend, root)
 
 	// Force step 2's post-step check to fail (and step 1's to pass) by
-	// swapping the session's check behavior per call. step 1 → ok, step 2 →
-	// fail. We override by planting a failing go.mod-backed root for the
-	// check: simplest deterministic path is to stub runProjectCheck via a
-	// package var.
+	// swapping the session's check behavior per call. runProjectCheck is
+	// called ONCE as a baseline before step 1 (call 1), then once after each
+	// completed step (calls 2, 3, …). The baseline must PASS (a clean
+	// baseline keeps the gate armed); call 2 = step 1's post-step check →
+	// pass; call 3 = step 2's post-step check → fail. We override by stubbing
+	// runProjectCheck via a package var.
 	orig := runProjectCheckStub
 	t.Cleanup(func() { runProjectCheckStub = orig })
 	var calls int
-	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (string, bool, string) {
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
 		calls++
-		if calls == 1 {
-			return "ok", true, "check ok (go test ./...)"
+		switch calls {
+		case 1:
+			return "go test ./...", "ok", true, "ok" // baseline: clean, gate stays armed
+		case 2:
+			return "go test ./...", "ok", true, "ok" // step 1 post-step check: pass
+		case 3:
+			return "go test ./...", "boom", false, "check failed: boom" // step 2 post-step check: fail → stops
 		}
-		return "boom", false, "check failed: boom"
+		// Step 3: reached only if the run continued past step 2's failure (a bug).
+		return "go test ./...", "ok", true, "ok"
 	}
 
 	res, err := cs.TurnWithPlan(context.Background(), "multi-part task")
-	if err != nil {
-		t.Fatalf("TurnWithPlan: %v", err)
+	// A step's check failure now SURFACES as an error (the report tells the
+	// reader where it stopped, and the error keeps a headless driver's exit
+	// code non-zero) — the report is still returned alongside it.
+	if err == nil {
+		t.Fatal("TurnWithPlan returned nil error, want a non-nil error (step 2's check failed)")
 	}
 	if !res.Planned {
 		t.Fatal("Planned = false, want true")
@@ -413,6 +455,14 @@ func TestTurnWithPlanStopOnFailure(t *testing.T) {
 	if !strings.Contains(res.Steps[1].Note, "check failed") {
 		t.Errorf("step 2 note = %q, want the failed check's output", res.Steps[1].Note)
 	}
+	// The baseline check ran exactly once, BEFORE step 1; the gate stays armed
+	// (baseline passed), so each completed step runs its own post-step check.
+	// Total calls: 1 baseline + step1 (pass) + step2 (fail, stops the run).
+	// If the baseline were missing, the failure would land on step 1 instead
+	// of step 2 — so this also proves the baseline didn't swallow the signal.
+	if calls != 3 {
+		t.Errorf("runProjectCheck calls = %d, want 3 (1 baseline + step1 + step2)", calls)
+	}
 	if !strings.Contains(res.Reply, "2. [failed]") || !strings.Contains(res.Reply, "3. [not reached]") {
 		t.Errorf("reply missing per-step status:\n%s", res.Reply)
 	}
@@ -424,5 +474,138 @@ func TestTurnWithPlanStopOnFailure(t *testing.T) {
 	}
 	if n := backend.requestCount(); n != 3 {
 		t.Fatalf("requests = %d, want 3 (one planning send + two step sends)", n)
+	}
+}
+
+// TestTurnWithPlanBaselineFailureSkipsCheckGate covers the #150 review's
+// baseline case: the project's own suite ALREADY fails (or times out) before
+// the plan starts. The baseline runProjectCheck is called once up front; when
+// it fails, the between-step gate is disabled for the whole run and every step
+// still runs and is reported done (with a note naming why the check was
+// skipped). Without the baseline, step 1's post-step check would fail and the
+// whole run would stop there.
+func TestTurnWithPlanBaselineFailureSkipsCheckGate(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. first step\n2. second step\n3. third step\n", // planning turn
+		"first done",  // step 1 turn
+		"second done", // step 2 turn
+		"third done",  // step 3 turn
+	)
+	cs := planTestSession(t, backend, root)
+
+	// The baseline (call 1) FAILS — the suite was already broken. With the
+	// gate disabled by the baseline, NO per-step check may run, so the stub
+	// must be called EXACTLY once (the baseline). If the baseline were missing
+	// or the gate stayed armed, step 1's post-step check would be call 2 and
+	// would fail too, stopping the run.
+	orig := runProjectCheckStub
+	t.Cleanup(func() { runProjectCheckStub = orig })
+	var calls int
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
+		calls++
+		// The baseline reports the pre-existing failure: a real non-zero exit.
+		return "go test ./...", "FAIL\n\tmodule [build failed]", false, "check failed: FAIL\n\tmodule [build failed]"
+	}
+
+	res, err := cs.TurnWithPlan(context.Background(), "multi-part task")
+	if err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true")
+	}
+	if len(res.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3", len(res.Steps))
+	}
+	for i, s := range res.Steps {
+		if s.Status != stepDone {
+			t.Errorf("step %d status = %v, want done (baseline failure must not gate the steps)", i+1, s.Status)
+		}
+		if !strings.Contains(s.Note, "check skipped: failing before plan") {
+			t.Errorf("step %d note = %q, want 'check skipped: failing before plan (…)'", i+1, s.Note)
+		}
+	}
+	// Only the baseline check ran; the between-step gate was disabled.
+	if calls != 1 {
+		t.Errorf("runProjectCheck calls = %d, want 1 (baseline only; gate disabled after a failing baseline)", calls)
+	}
+	// All three step turns ran (one planning + three steps = four requests).
+	if n := backend.stepCount(); n != 3 {
+		t.Fatalf("step sends = %d, want 3 (every step ran despite the failing baseline)", n)
+	}
+	if n := backend.requestCount(); n != 4 {
+		t.Fatalf("requests = %d, want 4 (one planning + three step sends)", n)
+	}
+	for _, want := range []string{"1. [done]", "2. [done]", "3. [done]", "3/3 steps done"} {
+		if !strings.Contains(res.Reply, want) {
+			t.Errorf("reply missing %q:\n%s", want, res.Reply)
+		}
+	}
+}
+
+// TestTurnWithPlanCancelledContextInterrupts covers the #150 review's
+// interrupt case: a cancelled context (Ctrl-C) during a STEP is an INTERRUPT,
+// not a step failure. TurnWithPlan must return the per-step report so far and
+// an error that satisfies errors.Is(err, context.Canceled), so the REPL's
+// afterTurn and the headless --plan path can tell an interrupt apart from a
+// genuine step failure.
+//
+// The backend is told to cancel the request context on the SECOND request
+// (index 1) — the first STEP turn (request 0 is the tools-less planning turn).
+// So the planning turn completes, step 1 is the interrupted one, and the test
+// asserts step 1 is marked failed (with an 'interrupted' note) and the
+// remaining steps are not reached.
+func TestTurnWithPlanCancelledContextInterrupts(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. first step\n2. second step\n", // planning turn (request 0, tools-less)
+		"first done",                      // step 1 turn (request 1) — cancelled
+		// step 2 is never requested.
+	)
+	backend.cancelAt = 1 // cancel the run's context on request 1 (the first step)
+	cs := planTestSession(t, backend, root)
+
+	// The test owns the run's context and hands its cancel func to the backend,
+	// which fires it on request 1 (the first step turn). The planning turn
+	// (request 0) completes; step 1 is the interrupted one.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backend.cancelCtx = cancel
+
+	// No stub: the empty temp root has no go.mod, so runProjectCheck reports a
+	// skip (ok) and never fails the run — only the context cancel stops it.
+	res, err := cs.TurnWithPlan(ctx, "multi-part task")
+	if err == nil {
+		t.Fatal("TurnWithPlan returned nil error, want a context.Canceled error (interrupt)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want an error satisfying errors.Is(…, context.Canceled)", err)
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true (the planning turn succeeded before the interrupt)")
+	}
+	// The report is still returned: step 1 failed (interrupted), step 2 not
+	// reached.
+	if len(res.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(res.Steps))
+	}
+	if res.Steps[0].Status != stepFailed {
+		t.Errorf("step 1 status = %v, want failed (interrupted)", res.Steps[0].Status)
+	}
+	if !strings.Contains(res.Steps[0].Note, "interrupted") {
+		t.Errorf("step 1 note = %q, want an 'interrupted: …' note", res.Steps[0].Note)
+	}
+	if res.Steps[1].Status != stepNotReached {
+		t.Errorf("step 2 status = %v, want not reached", res.Steps[1].Status)
+	}
+	if res.Reply == "" {
+		t.Error("Reply = empty, want the per-step report even on interrupt")
+	}
+	// Prove from the send side: the planning turn (request 0) and step 1
+	// (request 1) were sent; step 2 was never sent (the cancel stopped the
+	// run before it).
+	if n := backend.requestCount(); n != 2 {
+		t.Fatalf("requests = %d, want 2 (planning + step 1; step 2 never sent)", n)
 	}
 }

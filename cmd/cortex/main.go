@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -620,21 +619,40 @@ func main() {
 		// between. The task is the rest of the line; a bare /plan with no
 		// task prints the usage hint. The per-step report is printed to the
 		// REPL exactly as the headless `cortex turn --plan` prints it.
+		//
+		// The run goes through the SAME context choice and post-turn safety
+		// net as a normal turn (runUnderAnchor / Interruptible for the cancel
+		// and type-ahead, afterTurn for the compaction / diagnose / learnWindow
+		// handling) — a plan is up to planStepCap turns in a row, the place
+		// context grows most, so it must reach the compaction safety net too.
 		if input == "/plan" || strings.HasPrefix(input, "/plan ") {
 			task := strings.TrimSpace(strings.TrimPrefix(input, "/plan"))
 			if task == "" {
 				fmt.Println(withColor("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", gray))
 				continue
 			}
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-			plan, planErr := session.TurnWithPlan(ctx, task)
-			stop()
-			if planErr != nil {
-				fmt.Fprintf(os.Stderr, "plan error: %v\n", planErr)
+			var plan PlanRunResult
+			var planErr error
+			switch {
+			case editor != nil && anchoredInput():
+				typeAhead, planErr = runUnderAnchor(session, editor, typeAhead, func(ctx context.Context) error {
+					var runErr error
+					plan, runErr = session.TurnWithPlan(ctx, task)
+					return runErr
+				})
+			case editor != nil:
+				ctx, stop := editor.Interruptible(context.Background())
+				plan, planErr = session.TurnWithPlan(ctx, task)
+				typeAhead = stop()
+			default:
+				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+				plan, planErr = session.TurnWithPlan(ctx, task)
+				cancel()
 			}
 			if plan.Reply != "" {
 				fmt.Println(plan.Reply)
 			}
+			afterTurn(session, planErr)
 			continue
 		}
 
@@ -714,31 +732,7 @@ func main() {
 			_, err = session.Turn(ctx, input)
 			cancel()
 		}
-		switch {
-		case err == nil:
-			// Red gauge: compact at the turn boundary, before the window
-			// actually overflows. The boundary is the only safe point —
-			// mid-turn compaction would orphan tool_call sequences.
-			if session.contextRatio() >= compactThreshold {
-				compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
-			}
-		case errors.Is(err, context.Canceled):
-			fmt.Println(withColor("interrupted", yellow))
-		default:
-			fmt.Printf("turn error: %v\n", err)
-			if d := diagnoseModelError(err); d != "" {
-				fmt.Println(withColor(d, yellow))
-			}
-			// An overflow error names the code model's real window: learn it
-			// (the gauge and read_file guard self-correct, C2) and compact so
-			// the next request fits. The failed request is in the digest; the
-			// user re-asks.
-			if real := parseCtxSize(err.Error()); real > 0 {
-				session.learnWindow(real)
-				compactNow(session, "context overflowed")
-				fmt.Println("please re-send your request")
-			}
-		}
+		afterTurn(session, err)
 	}
 
 	// Report and record the session. emitSessionMetrics rides the eval journal class.
