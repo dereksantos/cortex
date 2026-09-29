@@ -104,6 +104,16 @@ func TestParsePlan(t *testing.T) {
 			reply: "   \n  \n  ",
 			want:  nil,
 		},
+		{
+			name:  "step text starting with a digit or dot is preserved",
+			reply: "1. 3 new endpoints\n2. .gitignore update\n",
+			want:  []string{"3 new endpoints", ".gitignore update"},
+		},
+		{
+			name:  "step text starting with multiple digits is preserved",
+			reply: "1. 404 handler\n2. 2x2 matrix\n",
+			want:  []string{"404 handler", "2x2 matrix"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

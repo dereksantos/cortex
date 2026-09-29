@@ -82,11 +82,14 @@ Rules:
 - Do not use any tools; just output the numbered list.`
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
-// number, a dot, then at least one space) is followed by step text. Lines
-// that don't start at the column — a prose preamble, an indented sub-bullet,
-// a markdown "1." with no space, an out-of-order number — are skipped rather
-// than mis-parsed as a step.
-var planStepLineRe = regexp.MustCompile(`^\d+\.\s+\S`)
+// number, a dot, then at least one space) is followed by step text. The
+// leading marker is captured in group 1 and the step text — which may itself
+// start with digits or a dot, e.g. "3 new endpoints" or ".gitignore update" —
+// in group 2; parsePlan takes group 2 verbatim. Lines that don't start at
+// the column — a prose preamble, an indented sub-bullet, a markdown "1."
+// with no space, an out-of-order number — are skipped rather than
+// mis-parsed as a step.
+var planStepLineRe = regexp.MustCompile(`^(\d+)\.\s+(\S.*)$`)
 
 // parsePlan extracts the ordered step list from a planning turn's reply.
 // It returns the trimmed step texts in order, capped at planStepCap. A
@@ -96,10 +99,11 @@ func parsePlan(reply string) []string {
 	var steps []string
 	for _, line := range strings.Split(reply, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if !planStepLineRe.MatchString(trimmed) {
+		m := planStepLineRe.FindStringSubmatch(trimmed)
+		if m == nil {
 			continue
 		}
-		text := strings.TrimSpace(strings.TrimLeft(trimmed, "0123456789. \t"))
+		text := strings.TrimSpace(m[2])
 		if text == "" {
 			continue
 		}
