@@ -183,6 +183,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// closure is the composition root's, not the engine's.
 	ts.OnReasoningFallback = func(stats loopStats) {
 		cs.appendReasoningFallback(roleCode, journal.ReasoningFallbackPathNatural, cs.Request.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.transcriptNote(reasoningFallbackNote())
 	}
 
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)

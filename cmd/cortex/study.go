@@ -167,6 +167,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	// subagent's ("study").
 	ts.OnReasoningFallback = func(stats loopStats) {
 		cs.appendReasoningFallback(sa.Role, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.transcriptNote(reasoningFallbackNote())
 	}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	bounds := sa.Bounds

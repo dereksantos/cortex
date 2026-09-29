@@ -410,7 +410,6 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 					if ts.OnReasoningFallback != nil {
 						ts.OnReasoningFallback(stats)
 					}
-					appendMsg(Message{Role: RoleSystem, Content: reasoningFallbackNote()})
 					req.Tools = ts.Tools
 					return a2, stats, nil
 				} else if retry != nil {
@@ -636,9 +635,14 @@ func retryText(msg *Message) string {
 }
 
 // reasoningFallbackNote is the transcript marker for a fired issue #149
-// fallback (issue #149: "record the fallback in the transcript"). A
-// short system line, written only when the recovery actually recovers an
-// answer; the retry's own reply follows it in the transcript.
+// fallback (issue #149: "record the fallback in the transcript"). A short
+// system line, written ONLY to the transcript (cs.transcriptNote — never
+// appended to req.Messages, which is the wire conversation and the resumable
+// session log): a mid-conversation system message is not part of the
+// model-visible history and some chat templates reject or mishandle system
+// messages that aren't first. The journal receipt (recovery.reasoning_fallback)
+// is the authoritative record; the transcript line keeps the fallback visible
+// in the human-readable log.
 func reasoningFallbackNote() string {
 	return "Harness note: the previous reply came back empty (the model's reasoning consumed the whole completion). The same request was re-sent once with reasoning disabled and recovered an answer."
 }

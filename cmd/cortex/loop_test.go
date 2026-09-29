@@ -337,18 +337,36 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	t.Run("natural empty clamped finish is salvaged", func(t *testing.T) {
 		// The live failure mode: the model returns NO tool calls with EMPTY content
 		// because it spiraled to the token clamp on a normal turn (out == MaxTokens).
-		// The natural-finish path must salvage it, not return "". The role runs
-		// with reasoning ON (the code role's default), so the issue #149
-		// off-retry fires FIRST (it answers, clamped) — the salvage re-ask is
-		// never consulted. The original prompt-based salvage case is covered
-		// by the "natural empty unclamped finish" subtest (reasoning OFF).
+		// The natural-finish path must salvage it, not return "".
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil { // the salvage re-ask
+				return fakeResp("salvaged answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", nil, 1, 100), false, nil // empty + clamped (out == MaxTokens), no tool calls
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
+			t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
+		}
+	})
+	t.Run("natural empty clamped finish is recovered by the reasoning-off retry", func(t *testing.T) {
+		// The issue #149 path: the role runs with reasoning ON (the code role's
+		// default), so an empty natural finish triggers the one-shot
+		// reasoning-off retry before any prompt-based salvage. Here the retry
+		// answers, clamped.
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
-			if r.Tools == nil { // the salvage re-ask (unreachable: the off-retry answers first)
-				return fakeResp("salvaged answer", nil, 1, 5), false, nil
-			}
 			if r.Effort.Level == llm.EffortOff {
 				return fakeResp("salvaged answer", nil, 1, 100), false, nil // the off-retry answers, clamped (out == MaxTokens)
 			}

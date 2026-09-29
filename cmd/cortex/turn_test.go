@@ -278,11 +278,8 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
 	// finalize. This fixture keeps returning tool_calls even with tools
 	// withheld, so the empty-answer salvage fires once more (still empty)
-	// before giving up. The role runs with reasoning ON (the code role's
-	// default), so step 2's forced-finalize on-retry fires when the forced
-	// finalize comes back empty (still tool_calls, no visible content), for
-	// one extra model call — hence +3, not +2.
-	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+3 {
+	// before giving up.
+	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+2 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}
 	if calls >= maxToolIterations {
@@ -378,6 +375,80 @@ func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	}
 	if calls != 4 {
 		t.Errorf("model calls = %d, want 4 (tool round, empty finish, one reasoning-off retry, one salvage)", calls)
+	}
+}
+
+// TestTurnReasoningFallbackWritesReceipt: the issue #149 end-to-end receipt —
+// the natural finish comes back empty (the model's reasoning consumed the
+// whole completion), the one-shot reasoning-off retry recovers an answer, and
+// the turn persists a recovery.reasoning_fallback entry under
+// .cortex/journal/recovery/. The fake backend answers the effort-off send
+// with a non-empty reply and nothing else.
+func TestTurnReasoningFallbackWritesReceipt(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			// Natural finish: no tool_calls, empty content, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		// The reasoning-off retry: the answer.
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "recovered answer" {
+		t.Errorf("Reply = %q, want recovered answer", res.Reply)
+	}
+	if calls != 2 {
+		t.Errorf("model calls = %d, want 2 (empty finish, one reasoning-off retry)", calls)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "recovery"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var p *journal.ReasoningFallbackPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p2, perr := journal.ParseReasoningFallback(e); perr == nil {
+			if p != nil {
+				t.Fatalf("more than one recovery.reasoning_fallback entry")
+			}
+			p = p2
+		}
+	}
+	if p == nil {
+		t.Fatal("no recovery.reasoning_fallback entry under .cortex/journal/recovery/")
+	}
+	if p.Model != "m" || p.Role != "code" || p.Path != "natural" {
+		t.Errorf("receipt = %+v, want model=m role=code path=natural", p)
 	}
 }
 

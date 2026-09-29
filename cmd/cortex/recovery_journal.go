@@ -74,3 +74,17 @@ func (cs *CortexSession) appendReasoningFallback(role, path, model, stopReason s
 	defer w.Close()
 	_, _ = w.Append(entry)
 }
+
+// transcriptNote writes a one-line record to the session transcript ONLY —
+// never to req.Messages. Unlike cs.Append, it must not touch the wire
+// conversation: the note is a human-readable marker of a harness-side event,
+// and appending a system message mid-conversation would put a non-leading
+// system message into every later request and the resumable session log.
+// No-op when the transcript is not started (bare test constructions), the
+// same best-effort posture as writeTranscript.
+func (cs *CortexSession) transcriptNote(content string) {
+	if cs.transcript == nil {
+		return
+	}
+	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: Message{Role: RoleSystem, Content: content}})
+}

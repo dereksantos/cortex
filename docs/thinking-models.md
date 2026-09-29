@@ -348,8 +348,13 @@ fall-through goes straight to the existing prompt-based salvage
 recovers a non-empty answer appends one `recovery.reasoning_fallback` entry
 to the project-scope class dir (`.cortex/journal/recovery/`) — best-effort,
 a failed write is swallowed, the recovery itself already ran — and a short
-system note is appended to the session transcript, so the fallback is visible
-in both run history and the session JSONL. The receipt records the model that
+system note is written to the session transcript, so the fallback is visible
+in both run history and the session JSONL. The note is transcript-only by
+design: it is **never** appended to `req.Messages` (the wire conversation and
+the resumable session log), because a system message in the middle of a
+conversation is not part of the model-visible history and some chat
+templates reject or mishandle system messages that aren't first. The
+journal receipt is the authoritative record. The receipt records the model that
 needed it, the role (`code`/`study`), the path that fired it, the stop
 reason, and the clamp state, so telemetry shows *which models keep needing
 it* per project (see docs/journal.md's writer-class taxonomy and
