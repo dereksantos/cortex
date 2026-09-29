@@ -101,6 +101,15 @@ func TestWorkspaceFromCWDMatchesExplicitRootInstructions(t *testing.T) {
 	if resolvedPath(t, implicitPath) != resolvedPath(t, explicitPath) {
 		t.Errorf("Instructions path mismatch:\nimplicit=%q\nexplicit=%q", implicitPath, explicitPath)
 	}
+	// The CWD-implicit leg (projectInstructions) must agree with both
+	// workspace legs from the same nested CWD.
+	freePath, free := projectInstructions()
+	if free != implicitInst {
+		t.Errorf("projectInstructions() = %q, want %q (must match Workspace.Instructions())", free, implicitInst)
+	}
+	if resolvedPath(t, freePath) != resolvedPath(t, implicitPath) {
+		t.Errorf("projectInstructions() path = %q, want %q", freePath, implicitPath)
+	}
 }
 
 // TestResolveInstructionFileMatchesWorkspaceRoot pins the per-root contract

@@ -24,7 +24,7 @@ func (a CortexArgs) Request() *AgentRequest {
 	path, instructions := projectInstructions()
 	return &AgentRequest{
 		Model:       defaultModel,
-		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(fileLabel(path), instructions)}},
+		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(fileLabel(WorkspaceFromCWD().Root, path), instructions)}},
 		Temperature: defaultTemperature,
 		Tools:       toolSet,
 		MaxTokens:   codeMaxOutputTokens,

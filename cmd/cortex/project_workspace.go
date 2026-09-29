@@ -56,7 +56,7 @@ func applyProjectByName(cs *CortexSession, reg registry.Registry, name string) e
 	cs.deleteRoot = ws.Root
 	if len(cs.Request.Messages) > 0 && cs.Request.Messages[0].Role == RoleSystem {
 		path, instructions := ws.Instructions()
-		cs.Request.Messages[0].Content = systemPromptContent(fileLabel(path), instructions)
+		cs.Request.Messages[0].Content = systemPromptContent(fileLabel(ws.Root, path), instructions)
 	}
 	return nil
 }

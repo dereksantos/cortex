@@ -347,8 +347,8 @@ Search rule: the walk starts at the working directory and goes up to the
 filesystem root — the nearest directory from the CWD upward that contains any
 candidate file wins, and within that directory the first file in the
 priority order above is the one loaded (findUp semantics with the list
-applied per level — an ancestor's `AGENTS.md` beats a deeper directory's
-`CLAUDE.md`). The loaded file is trimmed, truncated at
+applied per level — a deeper directory's `CLAUDE.md` beats an ancestor's
+`AGENTS.md`). The loaded file is trimmed, truncated at
 `limits.max_instruction_bytes` (with a marker naming the file), and appended
 to the system prompt as a
 `# Project instructions (<file>)` section — the header names the file, and

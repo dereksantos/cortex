@@ -973,12 +973,12 @@ var instructionBytesCap = maxInstructionBytes
 
 // projectInstructions resolves and reads the CWD-implicit project
 // instructions: starting at the working directory and walking up to the
-// filesystem root, the FIRST directory holding any entry of
-// agentInstructionFiles (AGENTS.md, then CLAUDE.md, then
+// filesystem root, the NEAREST directory from the CWD upward holding any
+// entry of agentInstructionFiles (AGENTS.md, then CLAUDE.md, then
 // .github/copilot-instructions.md) wins, and within that directory the first
 // file in priority order is read — exactly findUp semantics with the
-// priority list applied per level (an ancestor's AGENTS.md beats a
-// deeper dir's CLAUDE.md; no concatenation: exactly one file is ever
+// priority list applied per level (a deeper dir's CLAUDE.md beats an
+// ancestor's AGENTS.md; no concatenation: exactly one file is ever
 // loaded). It returns the resolved file's path ("" when none exists) alongside
 // its body, so the caller can name the file in the system-prompt section
 // header (systemPromptContent's label) — the seed shows which file it came
@@ -999,17 +999,20 @@ func projectInstructions() (path, instructions string) {
 
 // fileLabel renders a resolved instruction file's path as the name
 // systemPromptContent's "# Project instructions (<file>)" header and the
-// /context system legend row show: the path relative to the workspace root
-// when the file lies under one (a copilot-instructions.md at the root's
+// /context system legend row show: the path relative to the given workspace
+// root when the file lies under one (a copilot-instructions.md at the root's
 // .github/ subdir → ".github/copilot-instructions.md"), the basename
-// otherwise ("AGENTS.md", "CLAUDE.md"). Pure function of (path, workspace
-// root) — never a filesystem read. "" when no file resolved.
-func fileLabel(path string) string {
+// otherwise ("AGENTS.md", "CLAUDE.md"). The caller passes the root the file
+// was resolved against — WorkspaceFromCWD().Root on the CWD-implicit leg,
+// ws.Root on the explicit --project leg — so both legs label the same file
+// identically ("" when no file resolved). Pure function of (root, path) —
+// never a filesystem read.
+func fileLabel(root, path string) string {
 	if path == "" {
 		return ""
 	}
-	if ws := WorkspaceFromCWD(); ws.Root != "" {
-		if rel, err := filepath.Rel(ws.Root, path); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if root != "" {
+		if rel, err := filepath.Rel(root, path); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			return filepath.ToSlash(rel)
 		}
 	}

@@ -357,6 +357,30 @@ func TestProjectInstructionsInjection(t *testing.T) {
 		}
 	})
 
+	t.Run("deeper dir's CLAUDE.md beats an ancestor's AGENTS.md", func(t *testing.T) {
+		// The walk is nearest-wins: with AGENTS.md at the root and CLAUDE.md
+		// one level down, running from below the CLAUDE.md directory loads
+		// the deeper CLAUDE.md — the ancestor's AGENTS.md never wins once a
+		// nearer directory carries any candidate file.
+		root := t.TempDir()
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("root agents\n"), 0644)
+		os.WriteFile(filepath.Join(root, "a", "CLAUDE.md"), []byte("deeper claude\n"), 0644)
+		t.Chdir(child)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "deeper claude") {
+			t.Error("the deeper dir's CLAUDE.md body should be seeded (nearest wins)")
+		}
+		if !strings.Contains(sys, agentsMarkerPrefix+"CLAUDE.md)\n\ndeeper claude") {
+			t.Error("the header must name CLAUDE.md")
+		}
+		if strings.Contains(sys, "root agents") {
+			t.Error("the ancestor's AGENTS.md body must not appear (no concatenation, nearest dir wins)")
+		}
+	})
+
 	t.Run("found at the .cortex-anchored root from a nested directory", func(t *testing.T) {
 		// A .cortex dir anchors the project root (findUp(".cortex")); the file
 		// at that root is reached from a nested subdirectory too.
@@ -373,11 +397,9 @@ func TestProjectInstructionsInjection(t *testing.T) {
 	})
 
 	t.Run("CLAUDE.md is appended when AGENTS.md is absent", func(t *testing.T) {
-		// A .cortex dir anchors WorkspaceFromCWD (and thus fileLabel) at THIS
-		// dir: without it, findUp(".cortex") walks the test runner's whole
-		// home chain — on a machine whose home tree contains an AGENTS.md,
-		// the ancestor file would win and the subtest could never observe the
-		// CWD's CLAUDE.md.
+		// The .cortex dir anchors WorkspaceFromCWD (findUp(".cortex")) at
+		// THIS dir, so fileLabel labels the loaded file relative to it —
+		// without it the walk would reach the test runner's own tree.
 		dir := t.TempDir()
 		os.MkdirAll(filepath.Join(dir, ".cortex"), 0755)
 		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("CLAUDE conventions\n"), 0644)

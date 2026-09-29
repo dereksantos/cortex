@@ -236,7 +236,7 @@ func TestSystemLegendDetailCoversEveryCandidateFile(t *testing.T) {
 	}
 	for _, rel := range agentInstructionFiles {
 		t.Run(rel, func(t *testing.T) {
-			label := fileLabel(filepath.Join(root, rel))
+			label := fileLabel(root, filepath.Join(root, rel))
 			wantLabel := filepath.Base(rel)
 			if strings.Contains(rel, string(os.PathSeparator)) {
 				wantLabel = rel // a file UNDER the root labels by its relative path
