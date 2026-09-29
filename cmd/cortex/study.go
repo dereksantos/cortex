@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -160,11 +161,17 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 		fmt.Println(tools.TimestampPrefix() + tools.IndentPrefix() +
 			withColor(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), green))
 	}
-	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa), RecoveryRole: sa.Role}
+	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
+	// Issue #149 receipt: same hook as the coder turn (turn.go) — the subagent's
+	// own request is the model that needed the fallback; the role is the
+	// subagent's ("study").
+	ts.OnReasoningFallback = func(stats loopStats) {
+		cs.appendReasoningFallback(sa.Role, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+	}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	bounds := sa.Bounds
 	bounds.EscalateEffort = cs.Config.effortEscalationEnabled()
-	digest, stats, err := runLoop(ctx, cs.healingSender(sa.Role, cs.blockingSender()), cs, req, ts, bounds, nil, appendMsg, nil)
+	digest, stats, err := runLoop(ctx, cs.healingSender(sa.Role, cs.blockingSender()), req, ts, bounds, nil, appendMsg, nil)
 	// Fold the subagent's billed usage into the session totals (it does not set
 	// LastPromptTokens — that gauge belongs to the coder's own context).
 	cs.tokensIn += stats.InputTokens

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,7 +85,7 @@ func TestCoderLoopCharacterization(t *testing.T) {
 	})
 
 	ts := Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp}
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		ts, Bounds{MaxTokens: 1000, MaxIter: 100}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
@@ -151,7 +150,7 @@ func TestCoderLoopNoProgressFinalizes(t *testing.T) {
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "same" })
 
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg, nil)
 	if err != nil {
@@ -195,7 +194,7 @@ func TestRunLoopBytesBudgetFinalizes(t *testing.T) {
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return strings.Repeat("x", 5000) })
 
-	_, stats, err := runLoop(context.Background(), send, nil, req,
+	_, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 100, ReadBudgetBytes: 8000}, nil, appendMsg, nil)
 	if err != nil {
@@ -224,7 +223,7 @@ func TestRunLoopMaxIterFinalizes(t *testing.T) {
 		return fakeResp("", []ToolCall{readCall("c", strings.Repeat("a", i))}, 1, 1), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 4}, nil, appendMsg, nil)
 	if err != nil {
@@ -261,7 +260,7 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 			return nil, false, errFake // the second tool-call round fails
 		})
 		disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg, nil)
 		if err != nil {
@@ -276,28 +275,13 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 		send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
 			return nil, false, errFake
 		})
-		_, stats, err := runLoop(context.Background(), send, nil, req,
+		_, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: DispatchFunc(func(context.Context, ToolCall) string { return "" })},
 			Bounds{MaxTokens: 100, MaxIter: 100}, nil, func(m Message) { req.Messages = append(req.Messages, m) }, nil)
 		if err == nil || stats.StopReason != "error" {
 			t.Errorf("a first-send failure must abort: err=%v stop=%q", err, stats.StopReason)
 		}
 	})
-}
-
-// cloneAgentRequest returns a deep copy of req suitable for handing to
-// runLoop/finalizeLoop: the loop MUTATES the request it's given (effort wire
-// fields for the issue #149 reasoning retry and its salvage chain, Tools for
-// the finalize withhold). Tests that assert on the request after runLoop
-// must pass in a copy rather than their own live request, or the assertions
-// read the mutated state. Tests that don't assert on the request can skip
-// the clone.
-func cloneAgentRequest(src *AgentRequest) *AgentRequest {
-	c := *src
-	c.Messages = append([]Message(nil), src.Messages...)
-	c.Tools = append([]Tool(nil), src.Tools...)
-	c.ChatTemplateKwargs = maps.Clone(src.ChatTemplateKwargs)
-	return &c
 }
 
 // TestRunLoopSalvagesEmptyClampedFinalize locks the spiral-salvage fix: when the
@@ -307,65 +291,44 @@ func cloneAgentRequest(src *AgentRequest) *AgentRequest {
 // (north) that over-deliberates a finalize and emits no prose. A non-empty
 // clamped answer is also salvaged into a concise rewrite; a non-clamped answer
 // must NOT trigger the retry (the gate stays off for healthy runs).
-// The first subtest runs the role with reasoning ON (the code role's default),
-// so step 1's natural-finish off-retry fires first: the natural empty finish
-// (round 2, tools carried) is recovered by the off-retry (round 3), and the
-// forced finalize (and its on-retry) is never reached — the recovery is
-// attributed salvaged-finalize/ReasoningFallback=true/SalvagedUnclamped=false
-// (the empty finish was clamped: out == MaxTokens). The other subtests
-// exercise the natural-finish path (no forced finalize) and keep their
-// original expectations.
 func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	t.Run("empty clamped finalize is salvaged", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		// Effort pinned off so the issue #149 natural-finish off-retry is
+		// skipped and this subtest exercises exactly what it was named for:
+		// the forced finalize empty at the clamp, recovered by ONE salvage
+		// re-ask (finalizes == 2).
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
-		var finalizes, toolRounds, offRetries int
+		var finalizes int
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
 			if r.Tools == nil { // a finalize round (tools withheld)
 				finalizes++
 				if finalizes == 1 {
 					return fakeResp("", nil, 1, 100), false, nil // clamp: out == MaxTokens, empty
 				}
-				return fakeResp("salvaged answer", nil, 1, 5), false, nil // the reasoning-on retry answers
+				return fakeResp("salvaged answer", nil, 1, 5), false, nil
 			}
-			toolRounds++
-			if toolRounds == 1 {
-				return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
-			}
-			if r.Effort.Level == llm.EffortOff {
-				offRetries++
-				return fakeResp("salvaged answer", nil, 1, 100), false, nil // the off-retry answers, clamped (out == MaxTokens)
-			}
-			return fakeResp("", nil, 1, 100), false, nil // natural empty finish, clamped (out == MaxTokens) → the off-retry fires (step 1)
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		req = cloneAgentRequest(req)
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
-		// The fake's natural-finish off-retry (step 1) answers "salvaged
-		// answer" on the second send with tools carried; the forced finalize
-		// (and its on-retry) are never reached. The recovery is attributed
-		// salvaged-finalize/ReasoningFallback=true/SalvagedUnclamped=false
-		// (the empty finish was clamped: out == MaxTokens).
 		if content != "salvaged answer" {
 			t.Errorf("content = %q, want salvaged answer", content)
 		}
 		if stats.StopReason != "salvaged-finalize" {
 			t.Errorf("stop = %q, want salvaged-finalize", stats.StopReason)
 		}
-		if finalizes != 0 {
-			t.Errorf("finalize calls = %d, want 0 (the natural-finish off-retry recovered before the forced finalize was ever reached)", finalizes)
+		if finalizes != 2 {
+			t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
 		}
-		if offRetries != 1 {
-			t.Errorf("off-retries = %d, want 1 (exactly one reasoning-off retry on the natural empty finish)", offRetries)
-		}
-		if !stats.ReasoningFallback {
-			t.Errorf("ReasoningFallback = false, want true (the natural-finish empty branch recovered via the off-retry)")
+		if stats.ReasoningFallback {
+			t.Errorf("ReasoningFallback = true, want false (effort off: no off-retry fired)")
 		}
 		if stats.SalvagedUnclamped {
 			t.Errorf("SalvagedUnclamped = true, want false (this recovery was clamped)")
@@ -374,19 +337,25 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	t.Run("natural empty clamped finish is salvaged", func(t *testing.T) {
 		// The live failure mode: the model returns NO tool calls with EMPTY content
 		// because it spiraled to the token clamp on a normal turn (out == MaxTokens).
-		// The natural-finish path must salvage it, not return "".
+		// The natural-finish path must salvage it, not return "". The role runs
+		// with reasoning ON (the code role's default), so the issue #149
+		// off-retry fires FIRST (it answers, clamped) — the salvage re-ask is
+		// never consulted. The original prompt-based salvage case is covered
+		// by the "natural empty unclamped finish" subtest (reasoning OFF).
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
-			if r.Tools == nil { // the salvage re-ask
+			if r.Tools == nil { // the salvage re-ask (unreachable: the off-retry answers first)
 				return fakeResp("salvaged answer", nil, 1, 5), false, nil
 			}
-			return fakeResp("", nil, 1, 100), false, nil // empty + clamped (out == MaxTokens), no tool calls
+			if r.Effort.Level == llm.EffortOff {
+				return fakeResp("salvaged answer", nil, 1, 100), false, nil // the off-retry answers, clamped (out == MaxTokens)
+			}
+			return fakeResp("", nil, 1, 100), false, nil // empty + clamped (out == MaxTokens), no tool calls → the off-retry fires
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		req = cloneAgentRequest(req)
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 		if err != nil {
@@ -394,6 +363,12 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		}
 		if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
 			t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
+		}
+		if !stats.ReasoningFallback {
+			t.Errorf("ReasoningFallback = false, want true (recovered by the off-retry)")
+		}
+		if stats.SalvagedUnclamped {
+			t.Errorf("SalvagedUnclamped = true, want false (the off-retry's answer was clamped)")
 		}
 	})
 	t.Run("empty clamped finish can salvage from explicit tool candidate", func(t *testing.T) {
@@ -419,8 +394,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		disp := DispatchFunc(func(context.Context, ToolCall) string {
 			return "Root-file candidate hits:\nx:1:AGENTS.md\nsummary: AGENTS.md=3\nmost_frequent_candidate: AGENTS.md"
 		})
-		req = cloneAgentRequest(req)
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 		if err != nil {
@@ -445,8 +419,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		req = cloneAgentRequest(req)
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
@@ -474,8 +447,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 			return fakeResp("runaway but factual answer", nil, 1, 100), false, nil
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		req = cloneAgentRequest(req)
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 		if err != nil {
@@ -500,8 +472,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		req = cloneAgentRequest(req)
-		content, _, err := runLoop(context.Background(), send, nil, req,
+		content, _, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
@@ -514,15 +485,9 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 }
 
 // TestRunLoopSalvagesNaturalEmptyUnclampedFinish: an empty final message with
-// no tool calls and no clamp must still trigger the salvage. The role runs
-// with reasoning OFF so step 1's natural-finish off-retry is skipped: the
-// empty finish falls straight through to the prompt-based salvage chain
-// (salvageEmptyFinalize re-asks once and answers). Without this gate the
-// off-retry would fire first and answer "salvaged answer" before the
-// salvage re-ask is ever consulted.
+// no tool calls and no clamp must still trigger the salvage.
 func TestRunLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
 		if r.Tools == nil { // the salvage re-ask
@@ -531,8 +496,7 @@ func TestRunLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 		return fakeResp("", nil, 1, 5), false, nil // empty, NOT clamped (out << MaxTokens), no tool calls
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-	req = cloneAgentRequest(req)
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 	if err != nil {
@@ -551,14 +515,9 @@ func TestRunLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 
 // TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish is the same case via
 // the forced-finalize path (max-iter/stuck/read-budget) instead of a natural
-// mid-loop finish — both call sites share the fix. The role runs with
-// reasoning ON (the code role's default), so the forced-finalize empty branch
-// fires the issue #149 recovery first: the forced finalize comes back empty,
-// the one-shot ON retry answers (sends 1, 2), and the salvage re-ask is never
-// consulted — 2 sends, not 3.
+// mid-loop finish — both call sites share the fix.
 func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	var finalizes int
 	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
@@ -567,13 +526,12 @@ func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 			if finalizes == 1 {
 				return fakeResp("", nil, 1, 5), false, nil // empty, NOT clamped (out << MaxTokens)
 			}
-			return fakeResp("salvaged answer", nil, 1, 5), false, nil // the reasoning-on retry answers
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
 		}
 		return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-	req = cloneAgentRequest(req)
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 	if err != nil {
@@ -588,14 +546,11 @@ func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
 		t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
 	}
-	if !stats.ReasoningFallback {
-		t.Errorf("ReasoningFallback = false, want true (the forced-finalize empty branch recovered via the on-retry)")
-	}
 	if !stats.SalvagedUnclamped {
 		t.Errorf("SalvagedUnclamped = false, want true")
 	}
 	if finalizes != 2 {
-		t.Errorf("finalize calls = %d, want 2 (one empty + one reasoning-on retry; the salvage re-ask is never consulted)", finalizes)
+		t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
 	}
 }
 
@@ -658,7 +613,7 @@ func TestRunLoopSalvagesEmptyFinishWithReasoningOffRetry(t *testing.T) {
 			var retrySawOff, retryCarriedTools bool
 			send := salvageReasoningRetryScripted(&retrySawOff, &retryCarriedTools, &sends)
 			disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-			content, stats, err := runLoop(context.Background(), send, nil, req,
+			content, stats, err := runLoop(context.Background(), send, req,
 				Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 				Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 			if err != nil {
@@ -733,7 +688,7 @@ func TestRunLoopReasoningOffRetryFallsThroughWhenRetryIsEmpty(t *testing.T) {
 		}
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 	if err != nil {
@@ -759,6 +714,71 @@ func TestRunLoopReasoningOffRetryFallsThroughWhenRetryIsEmpty(t *testing.T) {
 	}
 }
 
+// TestRunLoopReasoningOffRetryToolCallsDispatch: the issue #149 off-retry
+// re-sends the SAME request — tools still advertised. When the retry returns
+// tool calls (the model had work to do once the deliberation channel closed),
+// the loop must treat it like a normal tool round: dispatch the calls and
+// append their results, then let the next round answer — not append a bare
+// assistant(tool_calls) message and ignore it.
+func TestRunLoopReasoningOffRetryToolCallsDispatch(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	sends := 0
+	var retrySawOff, retryCarriedTools bool
+	var dispatched []string
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // empty finish, reasoning on
+		case 2:
+			// The off-retry: tools must be carried (the same request), and it
+			// answers with a tool call — the work the deliberation hid.
+			retrySawOff = r.Effort.Level == llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == false
+			retryCarriedTools = r.Tools != nil
+			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 8), false, nil
+		case 3:
+			return fakeResp("recovered answer", nil, 1, 8), false, nil // normal round after the tool result
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
+		dispatched = append(dispatched, call.Function.Name)
+		return "OBS:" + call.Function.Name
+	})
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if sends != 3 {
+		t.Fatalf("sends = %d, want 3 (empty finish, off-retry with tool calls, final round)", sends)
+	}
+	if !retrySawOff {
+		t.Error("the retry send did not go out with reasoning pinned off")
+	}
+	if !retryCarriedTools {
+		t.Error("the retry send did not carry the role's tools (the retry must be the same request)")
+	}
+	if len(dispatched) != 1 || dispatched[0] != tools.FunctionReadFile {
+		t.Errorf("dispatched = %v, want [read_file] (the retry's tool call must be dispatched like a normal round)", dispatched)
+	}
+	if content != "recovered answer" {
+		t.Errorf("content = %q, want recovered answer (the loop continued after dispatching the retry's calls)", content)
+	}
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize (the loop continued; the retry was a tool round, not an answer)", stats.StopReason)
+	}
+	if stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = true, want false (the retry's tool calls were dispatched, not recovered as an answer)")
+	}
+}
+
 // TestRunLoopNonEmptyFinishDoesNotRetryWithReasoningOff: a non-empty answer
 // from a reasoning-on role triggers no retry at all — the recovery is gated
 // on the empty branch of the loop.
@@ -773,7 +793,7 @@ func TestRunLoopNonEmptyFinishDoesNotRetryWithReasoningOff(t *testing.T) {
 		return fakeResp("a normal answer", nil, 1, 5), false, nil
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 	if err != nil {
@@ -793,169 +813,11 @@ func TestRunLoopNonEmptyFinishDoesNotRetryWithReasoningOff(t *testing.T) {
 	}
 }
 
-// TestFinalizeLoopSalvagesEmptyWithReasoningOnRetry covers issue #149's
-// finalizeLoop side: a forced finalize that comes back empty from a role that
-// runs with reasoning ON is recovered by re-sending the SAME prompt once with
-// reasoning pinned ON — the mirror of the natural branch's off-retry (the
-// forced finalize itself always goes out with reasoning off). The retry's
-// answer is used as the finalize result (salvaged-finalize, ReasoningFallback
-// set, Salvaged NOT set — the recovery IS the finalize, and the !Salvaged
-// clamp-rewrite guard still distinguishes it from a prompt-based salvage),
-// the retry's wire fields (reasoning on, tools still withheld) and the
-// restoration of the role's effort are verified. A role that already runs
-// with reasoning off never triggers it.
-func TestFinalizeLoopSalvagesEmptyWithReasoningOnRetry(t *testing.T) {
-	tests := []struct {
-		name         string
-		effort       llm.EffortLevel
-		wantRecovery bool
-	}{
-		{name: "reasoning on", effort: llm.EffortOn, wantRecovery: true},
-		{name: "reasoning high", effort: llm.EffortHigh, wantRecovery: true},
-		{name: "reasoning off", effort: llm.EffortOff, wantRecovery: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-			applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: tt.effort})
-			appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
-
-			sends := 0
-			var retrySawOn, retryCarriedTools bool
-			send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
-				sends++
-				// Every send here has tools withheld (finalize rounds).
-				if r.Tools != nil {
-					t.Errorf("finalize send %d carried tools", sends)
-				}
-				switch sends {
-				case 1:
-					return fakeResp("", nil, 1, 5), false, nil // forced finalize, empty (effort off)
-				case 2:
-					// In the recovery subtests this is the reasoning-ON retry;
-					// in the off subtest it is the prompt-based salvage re-ask.
-					retrySawOn = r.Effort.Level == llm.EffortOn &&
-						(tt.effort != llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == true)
-					retryCarriedTools = r.Tools == nil
-					if tt.wantRecovery {
-						return fakeResp("reasoning-on answer", nil, 1, 8), false, nil
-					}
-					return fakeResp("salvaged answer", nil, 1, 5), false, nil
-				}
-				return fakeResp("salvaged answer", nil, 1, 5), false, nil
-			})
-
-			content, stats, err := finalizeLoop(context.Background(), send, nil, req, Toolset{}, "finish now", &loopStats{}, appendMsg, "")
-			if err != nil {
-				t.Fatalf("finalizeLoop: %v", err)
-			}
-			// The one-shot mutation must restore the role's configured effort.
-			if req.Effort.Level != tt.effort {
-				t.Errorf("req.Effort after finalizeLoop = %+v, want restored to %q", req.Effort, tt.effort)
-			}
-			if !tt.wantRecovery {
-				if stats.ReasoningFallback {
-					t.Errorf("ReasoningFallback = true, want false (reasoning-off role never retries)")
-				}
-				if content != "salvaged answer" {
-					t.Errorf("content = %q, want salvaged answer (existing salvage chain, no retry)", content)
-				}
-				if sends != 2 {
-					t.Errorf("sends = %d, want 2 (empty finalize + salvage re-ask)", sends)
-				}
-				if stats.StopReason != "salvaged-finalize" || !stats.Salvaged {
-					t.Errorf("stop=%q salvaged=%v, want salvaged-finalize/true (prompt-based salvage attribution preserved)",
-						stats.StopReason, stats.Salvaged)
-				}
-				return
-			}
-			if content != "reasoning-on answer" {
-				t.Errorf("content = %q, want reasoning-on answer (the retry's result is used)", content)
-			}
-			if sends != 2 {
-				t.Errorf("sends = %d, want 2 (exactly one reasoning-on retry)", sends)
-			}
-			if !retrySawOn {
-				t.Error("the retry send did not go out with the role's reasoning on")
-			}
-			if !retryCarriedTools {
-				t.Error("the retry send did not keep tools withheld (same finalize prompt re-sent)")
-			}
-			if stats.StopReason != "salvaged-finalize" {
-				t.Errorf("stop = %q, want salvaged-finalize", stats.StopReason)
-			}
-			if !stats.ReasoningFallback {
-				t.Errorf("ReasoningFallback = false, want true")
-			}
-			if stats.Salvaged {
-				t.Errorf("Salvaged = true, want false (the recovery IS the finalize, not a prompt-based salvage)")
-			}
-		})
-	}
-}
-
-// TestFinalizeLoopEmptyReasoningOnRetryFallsThroughWhenRetryIsEmpty: if the
-// reasoning-on retry ALSO comes back empty, the existing salvage chain
-// (salvageEmptyFinalize) still runs with its own Salvaged/SalvagedUnclamped
-// attribution — the retry is one attempt, not a retry storm, and it never
-// masks a later successful salvage.
-func TestFinalizeLoopEmptyReasoningOnRetryFallsThroughWhenRetryIsEmpty(t *testing.T) {
-	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
-	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
-
-	sends := 0
-	var retrySawOn bool
-	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
-		sends++
-		switch sends {
-		case 1:
-			return fakeResp("", nil, 1, 5), false, nil // forced finalize, empty (effort off)
-		case 2:
-			retrySawOn = r.Effort.Level == llm.EffortOn && r.ChatTemplateKwargs["enable_thinking"] == true
-			return fakeResp("", nil, 1, 5), false, nil // retry also empty
-		case 3:
-			return fakeResp("salvaged answer", nil, 1, 5), false, nil // salvage re-ask answers
-		default:
-			t.Fatalf("send %d: unexpected extra send", sends)
-			return nil, false, nil
-		}
-	})
-
-	content, stats, err := finalizeLoop(context.Background(), send, nil, req, Toolset{}, "finish now", &loopStats{}, appendMsg, "")
-	if err != nil {
-		t.Fatalf("finalizeLoop: %v", err)
-	}
-	if sends != 3 {
-		t.Errorf("sends = %d, want 3 (empty finalize + one failed retry + salvage re-ask)", sends)
-	}
-	if !retrySawOn {
-		t.Error("the retry send did not go out with the role's reasoning on")
-	}
-	if content != "salvaged answer" {
-		t.Errorf("content = %q, want salvaged answer (fall-through to existing salvage)", content)
-	}
-	if stats.ReasoningFallback {
-		t.Errorf("ReasoningFallback = true, want false (the retry recovered nothing)")
-	}
-	if stats.StopReason != "salvaged-finalize" || !stats.Salvaged {
-		t.Errorf("stop=%q salvaged=%v, want salvaged-finalize/true (salvageEmptyFinalize's own attribution)",
-			stats.StopReason, stats.Salvaged)
-	}
-	if req.Effort.Level != llm.EffortOn {
-		t.Errorf("req.Effort after finalizeLoop = %+v, want restored to on", req.Effort)
-	}
-}
-
 // TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty: when every
 // finalize attempt comes back empty, runLoop still returns cleanly —
-// exactly two calls, no retry storm. The role runs with reasoning OFF so
-// step 2's forced-finalize on-retry is skipped: the empty forced finalize
-// falls straight through to the prompt-based salvage chain (which also
-// fails empty), for exactly 2 sends (forced finalize + salvage re-ask).
+// exactly two calls, no retry storm.
 func TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	var finalizes int
 	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
@@ -966,8 +828,7 @@ func TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty(t *testing.T) {
 		return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" }) // no candidate pattern
-	req = cloneAgentRequest(req)
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 	if err != nil {
@@ -987,14 +848,9 @@ func TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty(t *testing.T) {
 // TestRunLoopRestoresToolsAfterFailedEmptySalvage: the salvage re-ask withholds
 // tools; when it also comes back empty, runLoop must still hand the caller's
 // long-lived request back with its tools, or the coder's next turn runs with
-// none. It must also label the turn empty-finalize, not clean-finalize. The
-// role runs with reasoning OFF so step 1's natural-finish off-retry is
-// skipped: the empty finish falls straight through to the prompt-based salvage
-// chain (which also fails empty), for exactly 2 sends (empty finish + salvage
-// re-ask) and a clean empty-finalize stop reason.
+// none. It must also label the turn empty-finalize, not clean-finalize.
 func TestRunLoopRestoresToolsAfterFailedEmptySalvage(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	send := SenderFunc(func(context.Context, *AgentRequest) (*AgentResponse, bool, error) {
 		return fakeResp("", nil, 1, 5), false, nil // always empty, never clamped
@@ -1002,8 +858,7 @@ func TestRunLoopRestoresToolsAfterFailedEmptySalvage(t *testing.T) {
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 	ts := Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp}
 	req.Tools = ts.Tools
-	req = cloneAgentRequest(req)
-	content, stats, err := runLoop(context.Background(), send, nil, req, ts,
+	content, stats, err := runLoop(context.Background(), send, req, ts,
 		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
@@ -1061,7 +916,7 @@ func TestRunLoopDetectsStuckErrorLoop(t *testing.T) {
 		}
 		return "@x:1-5 lines"
 	})
-	_, stats, err := runLoop(context.Background(), send, nil, req,
+	_, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg, nil)
 	if err != nil {
@@ -1109,7 +964,7 @@ func TestRunLoopBlockingSubagentPath(t *testing.T) {
 		return "FILE BODY"
 	})
 	var progress []string
-	content, stats, err := runLoop(context.Background(), cs.blockingSender(), cs, req,
+	content, stats, err := runLoop(context.Background(), cs.blockingSender(), req,
 		Toolset{Tools: req.Tools, Dispatch: disp},
 		Bounds{MaxTokens: 1000, MaxIter: 10, ReadBudgetBytes: 96000},
 		func(line string) { progress = append(progress, line) },
@@ -1321,7 +1176,7 @@ func TestSalvageDisablesEffortOnDeliberationClamp(t *testing.T) {
 		return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 	if err != nil {
@@ -1362,7 +1217,7 @@ func TestFinalizeSendsAlwaysGoEffortOff(t *testing.T) {
 			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		content, _, err := runLoop(context.Background(), send, nil, req,
+		content, _, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 1}, nil, appendMsg, nil)
 		if err != nil {
@@ -1400,7 +1255,7 @@ func TestFinalizeSendsAlwaysGoEffortOff(t *testing.T) {
 			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 		})
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
-		content, stats, err := runLoop(context.Background(), send, nil, req,
+		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
@@ -1465,7 +1320,7 @@ func TestStuckGuardEscalatesEffortOnce(t *testing.T) {
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		var observed []llm.EffortLevel
 		send, disp := stuckErrorScripted(&observed)
-		_, stats, err := runLoop(context.Background(), send, nil, req,
+		_, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg, nil) // EscalateEffort left false
 		if err != nil {
@@ -1487,7 +1342,7 @@ func TestStuckGuardEscalatesEffortOnce(t *testing.T) {
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		var observed []llm.EffortLevel
 		send, disp := stuckErrorScripted(&observed)
-		_, stats, err := runLoop(context.Background(), send, nil, req,
+		_, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 12, EscalateEffort: true}, nil, appendMsg, nil)
 		if err != nil {
@@ -1518,7 +1373,7 @@ func TestStuckGuardEscalatesEffortOnce(t *testing.T) {
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		var observed []llm.EffortLevel
 		send, disp := stuckErrorScripted(&observed)
-		_, stats, err := runLoop(context.Background(), send, nil, req,
+		_, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
 			Bounds{MaxTokens: 100, MaxIter: 12, EscalateEffort: true}, nil, appendMsg, nil)
 		if err != nil {

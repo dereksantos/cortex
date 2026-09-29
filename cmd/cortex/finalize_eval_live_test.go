@@ -115,7 +115,7 @@ func TestFinalizeHonesty_Live(t *testing.T) {
 	timeout := time.Duration(envInt("CORTEX_STUDY_PROBE_TIMEOUT", 300)) * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	digest, stats, err := runLoop(ctx, cs.healingSender(sa.Role, cs.blockingSender()), cs, req, ts, sa.Bounds, nil, appendMsg, nil)
+	digest, stats, err := runLoop(ctx, cs.healingSender(sa.Role, cs.blockingSender()), req, ts, sa.Bounds, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}

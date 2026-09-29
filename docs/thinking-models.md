@@ -308,18 +308,25 @@ change.
 
 **The rule.** When a finish comes back empty from a role whose resolved
 effort is non-off (`req.Effort.Level != EffortOff`), the engine re-sends the
-**same request once** with reasoning pinned in the opposite direction, and
-uses the retry's answer if it is non-empty:
+**same request once** with reasoning pinned **off**, and uses the retry's
+answer if it is non-empty. The empty assistant turn the loop already appended
+is dropped from the request first, so the retry is byte-identical to the
+request that came back empty. If the retry returns tool calls (the model had
+work to do), they are dispatched like a normal tool round — the recovery does
+not force an answer it was not given.
 
 - **Natural branch** (`salvageEmptyReasoningRetry`, `cmd/cortex/loop.go`) —
   the empty finish is a plain mid-loop answer with no tool calls. The retry
   pins reasoning **off**: a Qwen-style model that was mid-deliberation often
   produces its answer once the deliberation channel is suppressed.
-- **Forced-finalize branch** (`finalizeLoop`, `cmd/cortex/loop.go`) — a bound
-  (max-iter, stuck, read-budget, …) tripped and the forced finalize itself
-  came back empty. The forced finalize *always* goes out with reasoning off
-  (§5a), so the recovery is the mirror: it re-sends the **same prompt once
-  with reasoning pinned on**.
+
+There is deliberately **no recovery on the forced-finalize path.** §5a's
+invariant — every finalize send goes out with reasoning off — holds
+unconditionally, and the issue #149 evidence is that those reasoning-off
+finalizes always produced an answer; their empties are already covered by
+the existing prompt-based salvage chain (one terse re-ask, then the
+observation fallback). Re-enabling reasoning on a finalize would invite the
+same budget-burn empty reply the recovery exists to undo.
 
 Roles that already run with reasoning **off** never pay for it: there is no
 opposite direction to fall back to, so the recovery is skipped entirely and
@@ -337,14 +344,15 @@ that keeps coming back empty cannot trigger a retry storm — the second empty
 fall-through goes straight to the existing prompt-based salvage
 (`salvageEmptyFinalize` / `salvageObservationFinalize`).
 
-**Journal receipt.** Every recovery that actually recovers a non-empty answer
-appends one `recovery.reasoning_fallback` entry to the project-scope class
-dir (`.cortex/journal/recovery/`), best-effort — a failed write is
-swallowed, the recovery itself already ran. The receipt records the model
-that needed it, the role (`code`/`study`), which path fired it (natural
-off-retry vs forced on-retry), the stop reason, and the clamp state, so
-telemetry shows *which models keep needing it* per project (see
-docs/journal.md's writer-class taxonomy and
+**Journal receipt and transcript record.** Every recovery that actually
+recovers a non-empty answer appends one `recovery.reasoning_fallback` entry
+to the project-scope class dir (`.cortex/journal/recovery/`) — best-effort,
+a failed write is swallowed, the recovery itself already ran — and a short
+system note is appended to the session transcript, so the fallback is visible
+in both run history and the session JSONL. The receipt records the model that
+needed it, the role (`code`/`study`), the path that fired it, the stop
+reason, and the clamp state, so telemetry shows *which models keep needing
+it* per project (see docs/journal.md's writer-class taxonomy and
 `cmd/cortex/recovery_journal.go`). `loopStats.ReasoningFallback` is set on
 the run's in-memory stats the same way, for the study-eval / session-metrics
 rows. The receipt fires on recovery *success only* — an empty retry that fell

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
-	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -60,21 +59,24 @@ func (f DispatchFunc) Dispatch(ctx context.Context, call ToolCall) string { retu
 // line separating prose from its tool actions); nil for subagents and tests.
 // AfterToolResult is an optional callback invoked after each tool result is
 // appended, allowing the caller to update display with current context state.
-// RecoveryRole is the role binding that was running ("code" or "study") —
-// stamped into the issue #149 reasoning-fallback receipt (recovery_journal.go's
-// appendReasoningFallback) when a recovery fires. Empty for tests that don't
-// care about the receipt; the write is still skipped when the session is nil
-// (appendReasoningFallback's nil guard), so the empty role never lands in a
-// journal entry.
+// OnReasoningFallback is an optional receipt hook: when a natural-finish
+// empty reply is recovered by the issue #149 one-shot reasoning-off retry
+// (salvageEmptyReasoningRetry), the engine calls it (if non-nil) with the
+// recovered run's stats so the caller can persist the fallback's journal
+// receipt (cmd/cortex/recovery_journal.go). nil for subagents and tests that
+// don't care about the receipt.
 type Toolset struct {
 	Tools           []Tool
 	Dispatch        AgentDispatcher
 	BeforeBatch     func()
 	AfterToolResult func()
-	RecoveryRole    string // "code" | "study" — for the issue #149 receipt
 	// Finalize selects the forced-finalize closing (see FinalizeStyle). Zero
 	// value = FinalizeSubagent, so subagent callers need no change.
 	Finalize FinalizeStyle
+	// OnReasoningFallback receives the recovered run's stats when the
+	// issue #149 natural-finish off-retry recovers an empty reply; nil
+	// skips the receipt (see the type doc).
+	OnReasoningFallback func(stats loopStats)
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
@@ -286,7 +288,7 @@ const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewr
 // its own request. req is the caller's request, re-sent (grown) each round.
 // onStatusUpdate is an optional callback invoked after each iteration to update
 // the display with the current context usage (for interactive REPL).
-func runLoop(ctx context.Context, send Sender, cs *CortexSession, req *AgentRequest, ts Toolset, b Bounds, p Progress, appendMsg func(Message), onStatusUpdate func(lastPromptTokens int, maxTokens int)) (string, loopStats, error) {
+func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b Bounds, p Progress, appendMsg func(Message), onStatusUpdate func(lastPromptTokens int, maxTokens int)) (string, loopStats, error) {
 	var stats loopStats
 	req.Tools = ts.Tools
 	if b.MaxTokens > 0 {
@@ -369,10 +371,13 @@ func runLoop(ctx context.Context, send Sender, cs *CortexSession, req *AgentRequ
 		// it's EMPTY, salvaged with one terse re-ask instead of returning
 		// nothing. Not gated on MaxTokensClamped: a hybrid-reasoning model can
 		// also land here empty without hitting the clamp (docs/thinking-models.md's
-		// blocking-path gap).
-		if len(msg.ToolCalls) == 0 {
+		// blocking-path gap). (The issue #149 off-retry may REPLACE msg with a
+		// tool-carrying message below; the empty-finish gate is checked BEFORE
+		// that happens, so the fall-through dispatch runs in the same round.)
+		finishedNaturally := len(msg.ToolCalls) == 0
+		if finishedNaturally {
 			answer := strings.TrimSpace(msg.Content)
-			if answer == "" {
+			if answer == "" && req.Effort.Level != llm.EffortOff {
 				// Issue #149: an empty finish from a role whose reasoning is on
 				// (a Qwen-style model that spent its whole turn deliberating) is
 				// recovered by re-sending the SAME request once with reasoning
@@ -380,43 +385,69 @@ func runLoop(ctx context.Context, send Sender, cs *CortexSession, req *AgentRequ
 				// falling through to the prompt-based salvages. Recovery, not
 				// policy: the configured effort default is never changed, and
 				// roles that already run with reasoning off never trigger it.
-				if a2 := salvageEmptyReasoningRetry(ctx, send, req, &stats, appendMsg); a2 != "" {
+				// The empty assistant message appended above is dropped first so
+				// the retry is byte-identical to the request that came back
+				// empty — a trailing empty turn would not be the same request
+				// (and providers reject the transcript shape it would produce
+				// when the retry returns tool calls).
+				if len(req.Messages) > 0 {
+					req.Messages = req.Messages[:len(req.Messages)-1]
+				}
+				retry := salvageEmptyReasoningRetry(ctx, send, req, &stats, appendMsg)
+				if retry != nil && len(retry.ToolCalls) > 0 {
+					// The retry returned TOOL CALLS, not an answer: it is an
+					// ordinary tool round. Replace the empty message and fall
+					// through to the dispatch below — the model's requested
+					// actions are neither dropped nor left dangling without
+					// results.
+					msg = *retry
+					finishedNaturally = false
+				} else if a2 := retryText(retry); a2 != "" {
+					stats.Salvaged = true
+					stats.ReasoningFallback = true
 					stats.SalvagedUnclamped = !stats.MaxTokensClamped
 					stats.StopReason = "salvaged-finalize"
-					stats.ReasoningFallback = true
-					cs.appendReasoningFallback(ts.RecoveryRole, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+					if ts.OnReasoningFallback != nil {
+						ts.OnReasoningFallback(stats)
+					}
+					appendMsg(Message{Role: RoleSystem, Content: reasoningFallbackNote()})
 					req.Tools = ts.Tools
 					return a2, stats, nil
+				} else if retry != nil {
+					// The retry also came back empty (or errored): re-append the
+					// empty assistant message so the transcript mirrors the wire
+					// conversation, then fall through to the prompt-based salvages.
+					appendMsg(*retry)
 				}
-				wasClamped := stats.MaxTokensClamped
-				if a2 := salvageEmptyFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
-					stats.SalvagedUnclamped = !wasClamped
-					req.Tools = ts.Tools // salvage withheld them; restore for the caller's reuse
-					return a2, stats, nil
-				}
-				if a2 := salvageObservationFinalize(lastObservation, &stats); a2 != "" {
-					stats.SalvagedUnclamped = !wasClamped
+			}
+			if finishedNaturally {
+				if answer == "" {
+					wasClamped := stats.MaxTokensClamped
+					if a2 := salvageEmptyFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
+						stats.SalvagedUnclamped = !wasClamped
+						req.Tools = ts.Tools // salvage withheld them; restore for the caller's reuse
+						return a2, stats, nil
+					}
+					if a2 := salvageObservationFinalize(lastObservation, &stats); a2 != "" {
+						stats.SalvagedUnclamped = !wasClamped
+						req.Tools = ts.Tools
+						return a2, stats, nil
+					}
+					// Nothing salvageable: say so rather than passing an empty turn
+					// off as a clean finish.
+					stats.StopReason = "empty-finalize"
 					req.Tools = ts.Tools
-					return a2, stats, nil
+					return "", stats, nil
 				}
-			}
-			if answer != "" && stats.MaxTokensClamped {
-				if a2 := salvageClampedFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
-					req.Tools = ts.Tools
-					return a2, stats, nil
+				if answer != "" && stats.MaxTokensClamped {
+					if a2 := salvageClampedFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
+						req.Tools = ts.Tools
+						return a2, stats, nil
+					}
 				}
+				stats.StopReason = "clean-finalize"
+				return answer, stats, nil
 			}
-			// A failed salvage leaves the tools withheld; restore them so the
-			// caller's long-lived request (cs.Request) keeps its tools next turn.
-			req.Tools = ts.Tools
-			if answer == "" {
-				// Nothing salvageable: say so rather than passing an empty turn
-				// off as a clean finish.
-				stats.StopReason = "empty-finalize"
-				return "", stats, nil
-			}
-			stats.StopReason = "clean-finalize"
-			return answer, stats, nil
 		}
 
 		// No-progress guard: a weak model can re-issue the identical batch
@@ -502,7 +533,7 @@ func runLoop(ctx context.Context, send Sender, cs *CortexSession, req *AgentRequ
 	}
 	stats.StopReason = stop
 	stats.FinalizeForced = true
-	content, finalStats, err := finalizeLoop(ctx, send, cs, req, ts, finalizePromptFor(stop, ts.Finalize), &stats, appendMsg, lastObservation)
+	content, finalStats, err := finalizeLoop(ctx, send, req, finalizePromptFor(stop, ts.Finalize), &stats, appendMsg, lastObservation)
 	// Restore the advertised tools: finalize withheld them, but the caller's
 	// request (cs.Request for the coder) is long-lived and reused next turn.
 	req.Tools = ts.Tools
@@ -516,13 +547,8 @@ func runLoop(ctx context.Context, send Sender, cs *CortexSession, req *AgentRequ
 // (docs/thinking-models.md §5a): tools are withheld, so this is a pure
 // formatting ask — generalizes P4's clamp-gated salvage-only fix to every
 // finalize send, unconditionally.
-func finalizeLoop(ctx context.Context, send Sender, cs *CortexSession, req *AgentRequest, ts Toolset, prompt string, stats *loopStats, appendMsg func(Message), lastObservation string) (string, loopStats, error) {
+func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt string, stats *loopStats, appendMsg func(Message), lastObservation string) (string, loopStats, error) {
 	req.Tools = nil
-	// The role's own (non-off) effort is captured BEFORE the forced finalize's
-	// effort-off defer pins it, so the issue #149 recovery below can tell a
-	// reasoning-on role (which gets its one-shot ON retry when the forced
-	// finalize comes back empty) from one that already runs off (skipped).
-	salvageOnRetry := req.Effort.Level != llm.EffortOff
 	defer disableEffortForSend(req)()
 	appendMsg(Message{Role: RoleUser, Content: prompt})
 	res, _, err := send.Send(ctx, req)
@@ -538,45 +564,8 @@ func finalizeLoop(ctx context.Context, send Sender, cs *CortexSession, req *Agen
 	msg := res.Choices[0].Message
 	appendMsg(msg)
 	answer := strings.TrimSpace(msg.Content)
-	// Issue #149 (finalizeLoop side): the forced finalize ALWAYS goes out with
-	// reasoning off (the defer disableEffortForSend above), so an empty forced
-	// finalize from a role that runs with reasoning ON is "the reasoning was
-	// suppressed before the model could answer". The recovery re-sends the
-	// SAME prompt once with reasoning pinned ON — the mirror of the natural
-	// branch's off-retry (salvageEmptyReasoningRetry) — and uses its answer
-	// as the finalize result, before salvageEmptyFinalize's
-	// Salvaged/SalvagedUnclamped attribution is consulted. A role that already
-	// runs with reasoning off never triggers it: its forced finalize already
-	// ran off, so there is nothing to fall back to. salvageOnRetry captures
-	// the role's configured level BEFORE the defer pins it off. The retry's
-	// own one-shot mutation rides the same pattern as disableEffortForSend's
-	// existing uses; the defer restores the role on exit. Exactly one retry,
-	// enforced by construction. Salvaged is NOT set on this path's success:
-	// the recovery IS the finalize, and the !Salvaged clamp-rewrite guard
-	// below still distinguishes it from a prompt-based salvage (a clamped
-	// on-retry answer is still concise enough to warrant a rewrite).
-	if answer == "" && salvageOnRetry {
-		applyEffort(req, req.Dialect, llm.Effort{Level: llm.EffortOn})
-		if rres, _, rerr := send.Send(ctx, req); rerr == nil && rres != nil && len(rres.Choices) > 0 {
-			accountUsage(stats, rres, req.MaxTokens)
-			appendMsg(rres.Choices[0].Message)
-			if a2 := strings.TrimSpace(rres.Choices[0].Message.Content); a2 != "" {
-				answer = a2
-				stats.StopReason = "salvaged-finalize"
-				stats.ReasoningFallback = true
-				stats.SalvagedUnclamped = !stats.MaxTokensClamped
-				cs.appendReasoningFallback(ts.RecoveryRole, journal.ReasoningFallbackPathForced, req.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
-			}
-		}
-		applyEffort(req, req.Dialect, llm.Effort{Level: llm.EffortOff}) // until the defer restores the role
-	}
 	// Not gated on MaxTokensClamped — see runLoop's empty-answer branch above.
 	if answer == "" {
-		// The prompt-based salvage re-ask runs only when the on-retry did NOT
-		// already recover (the `answer == ""` guard above): one empty finish,
-		// one retry, one salvage — no retry storm. salvageEmptyFinalize's
-		// Salvaged/SalvagedUnclamped attribution is preserved for this
-		// fall-through case (retry empty or errored).
 		wasClamped := stats.MaxTokensClamped
 		if a2 := salvageEmptyFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
 			answer = a2
@@ -613,32 +602,45 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 // is recovered by re-sending the SAME request once with reasoning pinned off.
 // The role's configured effort is untouched (recovery, not policy): the
 // one-shot mutation rides the same pattern as disableEffortForSend's existing
-// uses and is restored before return. Gated on req.Effort.Level != EffortOff
-// so roles that already run without reasoning never pay for it; a retry that
-// also comes back empty (or errors) falls through to the existing salvage
-// chain (salvageEmptyFinalize / salvageObservationFinalize). Exactly one
+// uses and is restored before return. The caller drops the empty assistant
+// message BEFORE calling this, so the retry is byte-identical to the request
+// that came back empty. The result is the whole retry message, not just its
+// text: it can come back with tool calls (the model had work to do), and the
+// caller dispatches those like any normal tool round (continue the loop) —
+// the message is already appended here, in the assistant(tool_calls) position
+// the API requires. A retry that also comes back empty (or errors) returns
+// nil/empty text and the caller re-appends the empty message (or nothing,
+// on error) before falling through to the existing salvage chain. Exactly one
 // retry per empty finish, enforced by construction: the caller invokes this
 // at most once per empty branch.
-func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
-	if req.Effort.Level == llm.EffortOff {
-		return ""
-	}
+func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) *Message {
 	restore := disableEffortForSend(req)
 	defer restore()
 	res, _, err := send.Send(ctx, req)
 	if err != nil || res == nil || len(res.Choices) == 0 {
-		return ""
+		return nil
 	}
 	accountUsage(stats, res, req.MaxTokens)
 	msg := res.Choices[0].Message
 	appendMsg(msg)
-	a := strings.TrimSpace(msg.Content)
-	if a != "" {
-		stats.StopReason = "salvaged-finalize"
-		stats.Salvaged = true
-		stats.ReasoningFallback = true
+	return &msg
+}
+
+// retryText reports a retry message's trimmed content ("" when it carries
+// tool calls, which the caller dispatches instead of reading as an answer).
+func retryText(msg *Message) string {
+	if msg == nil || len(msg.ToolCalls) > 0 {
+		return ""
 	}
-	return a
+	return strings.TrimSpace(msg.Content)
+}
+
+// reasoningFallbackNote is the transcript marker for a fired issue #149
+// fallback (issue #149: "record the fallback in the transcript"). A
+// short system line, written only when the recovery actually recovers an
+// answer; the retry's own reply follows it in the transcript.
+func reasoningFallbackNote() string {
+	return "Harness note: the previous reply came back empty (the model's reasoning consumed the whole completion). The same request was re-sent once with reasoning disabled and recovered an answer."
 }
 
 // salvageEmptyFinalize re-asks ONCE (tools withheld) with a hard brevity floor

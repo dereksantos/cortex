@@ -104,7 +104,7 @@ func runScripted(t *testing.T, script []scriptStep, ts Toolset, b Bounds) (strin
 		round++
 		return s.resp, false, s.err
 	})
-	content, stats, err := runLoop(context.Background(), send, nil, req, ts, b, nil, appendMsg, nil)
+	content, stats, err := runLoop(context.Background(), send, req, ts, b, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}

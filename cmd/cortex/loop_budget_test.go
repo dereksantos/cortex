@@ -36,7 +36,7 @@ func TestRunLoopTokenBudgetFinalizes(t *testing.T) {
 		return fakeResp("", []ToolCall{readCall("c", strings.Repeat("a", i))}, 8, 4), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
-	content, stats, err := runLoop(context.Background(), send, nil, req,
+	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
 		Bounds{MaxTokens: 100, MaxIter: 100, TokenBudget: 10}, nil, appendMsg, nil)
 	if err != nil {

@@ -41,20 +41,16 @@ func (cs *CortexSession) recoveryClassDir() string {
 // the project-scope class dir. Best-effort: a failed write (workspace missing,
 // disk error) is swallowed — the recovery already ran, the receipt is a
 // post-hoc record, and a write failure is not an engine error the caller
-// should surface. The caller (runLoop / finalizeLoop) passes the fields the
-// recovery attributed at the time of the recovery (model, role, path, stop
-// reason, clamp state) — the receipt is a snapshot of that attribution, not
-// a re-derivation from the turn's transcript. role is the role binding that
-// was running ("code" or "study"), the same vocabulary model.substitution /
-// model.failure receipts use. cs may be nil (tests build bare requests and
-// hand them to runLoop without a session) — the write is skipped, the
-// recovery itself still runs.
+// should surface. The caller (runLoop's natural-finish branch, via
+// Toolset.OnReasoningFallback) passes the fields the recovery attributed at
+// the time of the recovery (model, role, path, stop reason, clamp state) —
+// the receipt is a snapshot of that attribution, not a re-derivation from the
+// turn's transcript. role is the role binding that was running ("code" or
+// "study"), the same vocabulary model.substitution / model.failure receipts
+// use.
 func (cs *CortexSession) appendReasoningFallback(role, path, model, stopReason string, maxTokensClamped, salvagedUnclamped bool) {
-	if cs == nil {
-		return
-	}
 	if role == "" {
-		return // no role to attribute — skip the receipt (tests pass empty)
+		return // no role to attribute — skip the receipt
 	}
 	dir := cs.recoveryClassDir()
 	if dir == "" {

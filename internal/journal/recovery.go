@@ -8,30 +8,23 @@ import (
 // TypeReasoningFallback is the entry type for one issue #149 reasoning
 // fallback receipt: an empty finish (no content, no tool calls) from a role
 // whose reasoning is ON was recovered by re-sending the SAME request once
-// with reasoning pinned off (the natural-finish path) or with the role's
-// own (on) reasoning (the forced-finalize path, whose deferred
-// disableEffortForSend had pinned it off for the forced finalize itself).
-// One event type covers both paths — the recovery is the same in spirit
+// with reasoning pinned off (runLoop's natural-finish path —
+// salvageEmptyReasoningRetry). One event type covers the whole recovery
 // (a reasoning model that spent its whole turn deliberating and came back
-// with nothing, recovered by one targeted retry); the Path field tells
-// them apart for a reader building per-path frequency counts. Written to
-// the project-scope recovery class dir (.cortex/journal/recovery/) — see
+// with nothing, recovered by one targeted retry); the Path field is the
+// call site that fired it, kept so a future second path could be told apart
+// for per-path frequency counts without a new entry type. Written to the
+// project-scope recovery class dir (.cortex/journal/recovery/) — see
 // cmd/cortex/recovery_journal.go's appendReasoningFallback for the write
 // path — so telemetry shows which models keep needing it per project,
 // alongside the project-scope study.result / eval / capture receipts.
 const TypeReasoningFallback = "recovery.reasoning_fallback"
 
-// ReasoningFallbackPath distinguishes the two call sites that can fire the
-// recovery. "natural" is runLoop's natural-finish branch (no tool calls,
-// empty content, mid-loop — the model answered with nothing); "forced" is
-// finalizeLoop's forced-finalize empty branch (a bound tripped — max-iter,
-// stuck, read-budget, token-budget, no-progress — and the forced finalize
-// itself came back empty). Both set loopStats.ReasoningFallback; this is
-// the field that tells them apart, mirroring SalvagedUnclamped's
-// narrow-a-broader-field role on the prompt-based salvage paths.
+// ReasoningFallbackPath distinguishes the call sites that can fire the
+// recovery. Today only "natural" exists: runLoop's natural-finish branch
+// (no tool calls, empty content, mid-loop — the model answered with nothing).
 const (
 	ReasoningFallbackPathNatural = "natural"
-	ReasoningFallbackPathForced  = "forced"
 )
 
 // ReasoningFallbackPayload is one fallback receipt. Change is never
@@ -51,8 +44,7 @@ type ReasoningFallbackPayload struct {
 	// Role is the role binding that was running ("code" or "study") — the
 	// same vocabulary model.substitution / model.failure use.
 	Role string `json:"role"`
-	// Path is ReasoningFallbackPathNatural or ReasoningFallbackPathForced —
-	// see the const block above.
+	// Path is ReasoningFallbackPathNatural — see the const block above.
 	Path string `json:"path"`
 	// StopReason is the stop reason the recovery attributed (always
 	// "salvaged-finalize" today — the recovery's attribution; a future
@@ -82,9 +74,9 @@ func NewReasoningFallbackEntry(p ReasoningFallbackPayload) (*Entry, error) {
 	if p.Role == "" {
 		return nil, fmt.Errorf("journal: recovery.reasoning_fallback requires Role")
 	}
-	if p.Path != ReasoningFallbackPathNatural && p.Path != ReasoningFallbackPathForced {
-		return nil, fmt.Errorf("journal: recovery.reasoning_fallback requires Path (%q or %q), got %q",
-			ReasoningFallbackPathNatural, ReasoningFallbackPathForced, p.Path)
+	if p.Path != ReasoningFallbackPathNatural {
+		return nil, fmt.Errorf("journal: recovery.reasoning_fallback requires Path (%q), got %q",
+			ReasoningFallbackPathNatural, p.Path)
 	}
 	data, err := json.Marshal(p)
 	if err != nil {
