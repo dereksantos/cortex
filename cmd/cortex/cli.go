@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -135,7 +136,7 @@ func runTurnCLI(args []string) {
 		var turnErr error
 		if a.plan {
 			plan, planErr := session.TurnWithPlan(ctx, a.input)
-			res = TurnResult{Reply: plan.Reply, Interrupted: false}
+			res = TurnResult{Reply: plan.Reply, Interrupted: errors.Is(planErr, context.Canceled)}
 			turnErr = planErr
 		} else {
 			res, turnErr = session.Turn(ctx, a.input)

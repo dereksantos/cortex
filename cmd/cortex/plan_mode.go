@@ -129,12 +129,14 @@ type StepResult struct {
 	Note   string     // a short detail: the check's output, or the turn's error
 }
 
-// PlanRunResult is the whole plan-then-execute run.
+// PlanRunResult is the whole plan-then-execute run. A non-nil error from
+// TurnWithPlan means the run itself failed (the planning turn could not run,
+// or the fallback turn failed); the per-step report below is empty in that
+// case.
 type PlanRunResult struct {
 	Planned bool // true when a real plan was produced; false for the single-turn fallback
 	Steps   []StepResult
 	Reply   string // the final per-step report (or the fallback turn's reply)
-	Err     error  // set when the run itself failed (e.g. the planning/step turn could not run)
 }
 
 // TurnWithPlan runs the plan-then-execute path for a multi-part task:
@@ -153,21 +155,35 @@ type PlanRunResult struct {
 // lets context demotion (#131) act at every boundary.
 func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRunResult, error) {
 	// --- 1. Planning turn -----------------------------------------------
-	// Withhold tools for exactly the planning round-trip so the model can
-	// only produce the list (it has nothing to call), then restore the full
-	// set before any step runs. The planning turn goes through Turn with an
-	// empty toolset, so nil-ing cs.Request.Tools is the guard — runLoop
-	// stamps/restores it around its own runs, but the planning turn builds
-	// its toolset straight from this field.
+	// Withhold the session's tools for exactly the planning round-trip so
+	// the model can only produce the list (it has nothing to call).
+	//
+	// runLoop stamps req.Tools = ts.Tools before EVERY send and only
+	// restores it on clean exit — the empty final answer (planning's happy
+	// path) leaves cs.Request.Tools nil for the REST of the session, and
+	// every later coder turn inherits the toolless request. The fix: save
+	// the session's OWN filtered list (NewCortexSession's IsToolEnabled
+	// filtering, --project shape, allowDelete's remove exclusion), nil it
+	// for the planning turn, then restore it explicitly the instant the
+	// planning turn returns — before the parsePlan branch, the fallback,
+	// or any step — so the steps and every later REPL turn see the tools
+	// the user actually enabled. (Config-disabled tools stay withheld
+	// because the saved list is the FILTERED one, not the full registry.)
+	savedTools := cs.Request.Tools
 	cs.Request.Tools = nil
 	planRes, planErr := cs.Turn(ctx, planModeInstruction+"\n\nTask: "+task)
-	cs.Request.Tools = cs.coderTools() // restore the full toolset for the step turns
+	// Restore the session's own filtered tool list NOW — before any step or
+	// fallback turn runs — because runLoop left cs.Request.Tools nil (it
+	// stamps req.Tools = ts.Tools = nil on the tool-less planning turn).
+	// A deferred restore would only fire at the end of TurnWithPlan, after
+	// the steps had already run with no tools.
+	cs.Request.Tools = savedTools
 
 	if planErr != nil {
 		// The planning turn could not run at all — surface it; there is no
 		// plan to execute and (unlike an unparseable reply) no sensible
 		// single-turn fallback to retry (the model is not reachable).
-		return PlanRunResult{Err: fmt.Errorf("failed to run the planning turn: %w", planErr)}, planErr
+		return PlanRunResult{}, fmt.Errorf("failed to run the planning turn: %w", planErr)
 	}
 
 	// --- 2. Parse the plan -----------------------------------------------
@@ -178,7 +194,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 		// task in one plain turn — the pre-step-mode behavior (#150).
 		res, err := cs.Turn(ctx, task)
 		if err != nil {
-			return PlanRunResult{Planned: false, Err: fmt.Errorf("planning reply was not a step list; the fallback single turn failed: %w", err)}, err
+			return PlanRunResult{Planned: false}, fmt.Errorf("planning reply was not a step list; the fallback single turn failed: %w", err)
 		}
 		return PlanRunResult{Planned: false, Steps: nil, Reply: res.Reply}, nil
 	}
@@ -191,7 +207,12 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 			stepResults = append(stepResults, StepResult{Step: step, Status: stepNotReached})
 			continue
 		}
-		_, err := cs.Turn(ctx, fmt.Sprintf("Plan step %d of %d: %s", i+1, len(steps), step))
+		// Every step prompt carries the ORIGINAL task, not just the step
+		// line: demotion at the turn boundaries (#131) can fold the planning
+		// turn — the only place the full task text lived — into the outline,
+		// and a later step must not run blind to the overall goal or the
+		// requirements the step text didn't restate (#94's failure mode).
+		_, err := cs.Turn(ctx, fmt.Sprintf("Overall task: %s\n\nPlan step %d of %d: %s", task, i+1, len(steps), step))
 		if err != nil {
 			note := err.Error()
 			stepResults = append(stepResults, StepResult{Step: step, Status: stepFailed, Note: note})
@@ -216,18 +237,6 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 
 	// --- 4. Final per-step report ----------------------------------------
 	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))}, nil
-}
-
-// coderTools returns the tool list a planning turn restores after
-// withholding it: the session's request tools (the canonical list
-// NewCortexSession filtered and --project/IsToolEnabled shaped), falling
-// back to the full registry when a hand-built session left it nil.
-func (cs *CortexSession) coderTools() []Tool {
-	r := cs.Request.Tools
-	if r == nil {
-		r = toolSet
-	}
-	return r
 }
 
 // renderPlanReport renders the final per-step answer: a summary header

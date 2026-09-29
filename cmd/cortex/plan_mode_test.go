@@ -140,6 +140,8 @@ type planTestBackend struct {
 	replies   []string // reply[i] is the assistant content for the i-th request
 	count     int
 	haveTools []bool
+	toolCount []int    // toolCount[i] is the number of tools the i-th request advertised
+	lastUser  []string // lastUser[i] is the last user message in the i-th request
 	srv       *httptest.Server
 }
 
@@ -151,10 +153,22 @@ func newPlanTestBackend(t *testing.T, replies ...string) *planTestBackend {
 		var req map[string]any
 		_ = json.Unmarshal(body, &req)
 		tools, _ := req["tools"].([]any)
+		var lastUserContent string
+		if msgs, ok := req["messages"].([]any); ok {
+			for _, m := range msgs {
+				if mm, ok := m.(map[string]any); ok && mm["role"] == "user" {
+					if content, ok := mm["content"].(string); ok {
+						lastUserContent = content
+					}
+				}
+			}
+		}
 		b.mu.Lock()
 		idx := b.count
 		b.count++
 		b.haveTools = append(b.haveTools, len(tools) > 0)
+		b.toolCount = append(b.toolCount, len(tools))
+		b.lastUser = append(b.lastUser, lastUserContent)
 		b.mu.Unlock()
 
 		reply := ""
@@ -181,6 +195,24 @@ func (b *planTestBackend) requestCount() int {
 	return b.count
 }
 
+// toolCounts returns the number of tools each request advertised, in order.
+// A test uses this to prove the step turns carry the session's OWN filtered
+// tool list (a strict subset here, so the full registry can't sneak in as a
+// restore fallback).
+func (b *planTestBackend) toolCounts() []int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]int(nil), b.toolCount...)
+}
+
+// lastUserMessages returns each request's last user message, in order —
+// the test's way of proving the step prompts carry the original task.
+func (b *planTestBackend) lastUserMessages() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.lastUser...)
+}
+
 // stepCount is the number of tools-present (STEP) requests — the planning
 // turn is tools-less, so requests with tools are exactly the per-step
 // turns. A test proves "later steps were never sent" by checking this stays
@@ -201,11 +233,15 @@ func (b *planTestBackend) stepCount() int {
 // backend — the turnTestSessionFactory shape (serve_turn_test.go) minus the
 // SessionManager, with a workspace rooted at root so runProjectCheck has a
 // deterministic directory (no go.mod → the check is skipped, no execution).
+// Its tool list is a strict SUBSET of toolSet: if TurnWithPlan ever restored
+// the full registry (the #150 review bug) instead of the session's own list,
+// the step requests would advertise all of toolSet and the per-request count
+// checks below would fail.
 func planTestSession(t *testing.T, b *planTestBackend, root string) *CortexSession {
 	t.Helper()
 	cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 	cs.Request.BaseURL = b.srv.URL
-	cs.Request.Tools = toolSet // non-nil so step turns are distinguishable from the planning turn
+	cs.Request.Tools = toolSet[:2] // strict subset — see the note above
 	ws, err := NewWorkspace(root)
 	if err != nil {
 		t.Fatalf("NewWorkspace(%q): %v", root, err)
@@ -242,8 +278,47 @@ func TestTurnWithPlanHappyPath(t *testing.T) {
 	if flags := backend.requests(); len(flags) != 4 || flags[0] || !flags[1] || !flags[2] || !flags[3] {
 		t.Fatalf("request tool-flags = %v, want [false true true true]", flags)
 	}
+	// The session was seeded with a strict 2-tool subset. Every STEP request
+	// must advertise exactly those 2 — not the full registry (the #150
+	// restore bug) and not zero. This fails on the code that restored
+	// toolSet instead of the session's own filtered list.
+	counts := backend.toolCounts()
+	if len(counts) != 4 {
+		t.Fatalf("tool counts = %v, want 4 requests", counts)
+	}
+	if counts[0] != 0 {
+		t.Errorf("planning turn advertised %d tools, want 0", counts[0])
+	}
+	for i := 1; i < len(counts); i++ {
+		if counts[i] != 2 {
+			t.Errorf("step request %d advertised %d tools, want exactly 2 (the session's own list)", i, counts[i])
+		}
+	}
+	// The session's own list must be intact when TurnWithPlan returns — the
+	// later REPL turns reuse it.
+	if got := len(cs.Request.Tools); got != 2 {
+		t.Errorf("len(cs.Request.Tools) after TurnWithPlan = %d, want 2 (the session's own list)", got)
+	}
 	if n := backend.stepCount(); n != 3 {
 		t.Fatalf("step sends = %d, want 3 (one per planned step)", n)
+	}
+	// Every step prompt must carry the ORIGINAL task, not just the step line:
+	// demotion at turn boundaries can fold the planning turn (the only other
+	// place the task text lived) into the outline (#94's failure mode).
+	task := "build a feature"
+	users := backend.lastUserMessages()
+	if len(users) != 4 {
+		t.Fatalf("recorded user messages = %d, want 4", len(users))
+	}
+	// The planning turn's prompt is the full instruction plus the task, so
+	// check it *contains* the task rather than equaling it.
+	if !strings.Contains(users[0], task) {
+		t.Errorf("planning turn's prompt does not contain the task %q:\n%s", task, users[0])
+	}
+	for i := 1; i < len(users); i++ {
+		if !strings.Contains(users[i], task) {
+			t.Errorf("step %d prompt %q does not contain the original task %q", i, users[i], task)
+		}
 	}
 	if len(res.Steps) != 3 {
 		t.Fatalf("len(Steps) = %d, want 3", len(res.Steps))
