@@ -366,17 +366,24 @@ func (cs *CortexSession) outlineTokens() int {
 	return cache.TokensOf(len(cs.renderOutlineBlock()))
 }
 
-// memoryIndexTokens returns the injected memory-index note's token size, 0
-// when memory isn't wired for this session or has no notes yet.
+// memoryIndexTokens returns the memory component's total token size on the
+// wire: the injected memory-index note plus the full memory section
+// (memoryPromptSection) that rides the same ephemeral slot. The section is
+// present whenever there's something to use it on — notes exist or a demoted
+// outline is visible (live entries or the folded digest) — mirroring
+// turn.go's per-turn decision exactly, so /context counts what the turn
+// actually sends: an outline-only turn counts the section alone, notes add
+// the index on top, and neither gives 0. Returns 0 when memory isn't wired
+// for this session (no store to index).
 func (cs *CortexSession) memoryIndexTokens() int {
 	if cs.memory == nil {
 		return 0
 	}
-	notes, err := cs.memory.List()
-	if err != nil || len(notes) == 0 {
-		return 0
-	}
-	return cache.TokensOf(len(cs.memoryIndexNote()))
+	memIndex := cs.memoryIndexNote()
+	outlinePresent := len(cs.outline) > 0 || cs.outlineFolded != ""
+	tokens := cache.TokensOf(len(memorySectionFor(memIndex, outlinePresent)))
+	tokens += cache.TokensOf(len(memIndex))
+	return tokens
 }
 
 // skillsIndexTokens returns the injected skills-index note's token size, 0

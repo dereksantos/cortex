@@ -12,7 +12,9 @@ import (
 func resetPrompt(t *testing.T) {
 	t.Helper()
 	base, appendix, attribution := promptBase, promptAppend, promptAttribution
-	t.Cleanup(func() { promptBase, promptAppend, promptAttribution = base, appendix, attribution })
+	t.Cleanup(func() {
+		promptBase, promptAppend, promptAttribution = base, appendix, attribution
+	})
 }
 
 func TestSystemPromptContentDefault(t *testing.T) {
@@ -155,6 +157,76 @@ func TestMergePromptConfig(t *testing.T) {
 			got := mergeConfig(&Config{Prompt: tt.user}, &Config{Prompt: tt.proj}).Prompt
 			if got != tt.want {
 				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMemorySectionSplit(t *testing.T) {
+	// The base prompt keeps one short memory line but not the full section.
+	if !strings.Contains(SystemPrompt, "You have a persistent memory") {
+		t.Error("base prompt must keep the short memory line")
+	}
+	if strings.Contains(SystemPrompt, "memory_search") {
+		t.Error("base prompt must NOT contain the full memory section (should be in memoryPromptSection)")
+	}
+	// memoryPromptSection carries the guidance the base prompt drops.
+	if !strings.Contains(memoryPromptSection, "memory_search") {
+		t.Error("memoryPromptSection must carry the memory guidance")
+	}
+	if !strings.Contains(memoryPromptSection, "outline") {
+		t.Error("memoryPromptSection must carry the outline/recall paragraph")
+	}
+	// The two together should cover everything the old SystemPrompt had.
+	combined := SystemPrompt + memoryPromptSection
+	for _, probe := range []string{"# Memory", "memory_read", "memory_write", "memory_forget", "@session/"} {
+		if !strings.Contains(combined, probe) {
+			t.Errorf("SystemPrompt + memoryPromptSection missing %q", probe)
+		}
+	}
+}
+
+func TestMemorySectionComposition(t *testing.T) {
+	resetPrompt(t)
+	configurePrompt(nil)
+
+	got := systemPromptContent("", "")
+	if got != SystemPrompt {
+		t.Errorf("unconfigured prompt must yield the base prompt verbatim; got %d bytes, want %d", len(got), len(SystemPrompt))
+	}
+	if strings.Contains(got, "memory_search") {
+		t.Error("the composed system prompt must not contain the full memory section — it is delivered per turn through the ephemeral slot")
+	}
+}
+
+// TestMemorySectionForState table-tests the per-turn decision helper turn.go
+// calls — not an inlined copy of it, so a change to turn.go's decision fails
+// here. The outline arrives as the same present/absent condition turn.go
+// uses for the outline block (live entries OR folded digest), and the skills
+// index is deliberately absent from the inputs: it must not switch the
+// section on (its real-turn coverage is
+// TestTurnMemorySectionSkillsOnlyDoesNotTrigger).
+func TestMemorySectionForState(t *testing.T) {
+	tests := []struct {
+		name           string
+		outlinePresent bool
+		note           string // the memory index, before the skills note is merged in
+		want           bool
+	}{
+		{"notes absent, no outline", false, "", false},
+		{"notes present, no outline", false, "## Project memory\n- my-note — a hook", true},
+		{"no notes, outline present", true, "", true},
+		{"notes present, outline present", true, "## Project memory\n- my-note — a hook", true},
+		{"no notes, only the folded digest remains (live entries evicted)", true, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := memorySectionFor(tt.note, tt.outlinePresent)
+			if (got != "") != tt.want {
+				t.Errorf("memorySectionFor = %q (present=%v), want present=%v", got, got != "", tt.want)
+			}
+			if got != "" && got != memoryPromptSection {
+				t.Error("when present, the section must be the full memoryPromptSection verbatim")
 			}
 		})
 	}

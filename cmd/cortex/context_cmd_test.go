@@ -346,6 +346,65 @@ func TestOutlineSpanCitation(t *testing.T) {
 	}
 }
 
+// TestMemoryIndexTokensCoversTheSection verifies /context's memory count
+// mirrors turn.go's ephemeral-slot decision: the full memory section
+// (memoryPromptSection) rides the slot whenever notes exist or a demoted
+// outline is visible, and must be counted alongside the index note — not the
+// index alone. Covers the issue #151 fix where an outline-only session was
+// under-reported as 0 tokens for memory even though the section was on the
+// wire.
+func TestMemoryIndexTokensCoversTheSection(t *testing.T) {
+	// Fresh store (no notes) and a store with one note.
+	freshStore, err := memory.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New: %v", err)
+	}
+	noteStore, err := memory.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New: %v", err)
+	}
+	if _, err := noteStore.Write("a-note", "note body", time.Now()); err != nil {
+		t.Fatalf("memory.Write: %v", err)
+	}
+
+	sectionTokens := cache.TokensOf(len(memorySectionFor("", true)))
+	// The index note's token size, computed through the same path turn.go
+	// uses so the expected value can't drift from the implementation.
+	noteSession := &CortexSession{memory: noteStore}
+	indexTokens := cache.TokensOf(len(noteSession.memoryIndexNote()))
+	if indexTokens == 0 {
+		t.Fatal("noteStore's memoryIndexNote() must be non-empty with a note written")
+	}
+
+	tests := []struct {
+		name string
+		cs   *CortexSession
+		want int
+	}{
+		{"no memory store", &CortexSession{}, 0},
+		{"memory wired, no notes, no outline", &CortexSession{memory: freshStore}, 0},
+		{"outline only, no notes",
+			&CortexSession{memory: freshStore, outline: outlineFixture()},
+			sectionTokens},
+		{"folded outline only, no notes",
+			&CortexSession{memory: freshStore, outlineFolded: "FOLDED @session/x#m1-2"},
+			sectionTokens},
+		{"notes, no outline",
+			&CortexSession{memory: noteStore},
+			sectionTokens + indexTokens},
+		{"notes AND outline",
+			&CortexSession{memory: noteStore, outline: outlineFixture()},
+			sectionTokens + indexTokens},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cs.memoryIndexTokens(); got != tt.want {
+				t.Errorf("memoryIndexTokens() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOutlineSpanCitationEmpty(t *testing.T) {
 	cs := &CortexSession{}
 	if got := cs.outlineSpanCitation(); got != "" {
