@@ -52,11 +52,17 @@ managed through tools.
 
 When there's something to use it on — a note index exists, or the session
 outline has demoted turns — the full guidance section rides on top for that
-turn. The decision is a pure per-request helper (`memorySectionFor` in
-`cmd/cortex/prompt.go`; called from `turn.go`), and the section is delivered
-through the same ephemeral wire slot as the memory index — it never touches
-the stored system message, which stays byte-stable for the whole session so
-the prompt cache survives:
+turn, provided the session's base prompt is the built-in one. The decision
+is a pure per-request helper (`memorySectionFor` in `cmd/cortex/prompt.go`;
+called from `turn.go`), and the section is delivered through the same
+ephemeral wire slot as the memory index — it never touches the stored system
+message, which stays byte-stable for the whole session so the prompt cache
+survives.
+
+A `prompt.file` replacement suppresses the section: the file REPLACES the
+built-in base prompt (see `docs/configuration.md`), so a custom prompt owns
+its own memory guidance rather than having the built-in section ride on top
+of it — the memory INDEX note still injects either way.
 
 ```
 When notes exist, their index is appended to the turn so you can see what you
@@ -85,12 +91,6 @@ it" read as a per-turn duty and produced hoarding. The default is now
 not-saving; `TestMemoryEndToEnd_Live/mundane_turn_writes_no_note` is the
 negative gate, alongside the existing recall scenarios that keep the bar
 from rising too high.)
-
-**Deferred (issue #151, acceptance item 2):** the delegation measurement is
-not done — it needs a live-fleet or polyglot A/B run (`CORTEX_LIVE_FLEET=1`)
-comparing the `agent`/`study` delegation guidance present vs. removed. The
-delegation paragraph in the system prompt is unchanged by this change; keep
-#151 open or split item 2 into its own issue.
 
 ## What's removed vs kept
 

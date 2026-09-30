@@ -325,7 +325,7 @@ config gate — every session with memory enabled gets both tiers. See
 
 | Field | Default | Meaning |
 |---|---|---|
-| `file` | (unset) | Path to a file that replaces the built-in base system prompt. `~` expands; a relative path resolves upward from CWD (the AGENTS.md rule, so `.cortex/prompt.md` works from any subdirectory); truncated at the instruction cap. An unreadable or whitespace-only file warns on stderr and keeps the built-in — a broken path degrades to a working agent, never a silent empty prompt. |
+| `file` | (unset) | Path to a file that replaces the built-in base system prompt. `~` expands; a relative path resolves upward from CWD (the AGENTS.md rule, so `.cortex/prompt.md` works from any subdirectory); truncated at the instruction cap. An unreadable or whitespace-only file warns on stderr and keeps the built-in — a broken path degrades to a working agent, never a silent empty prompt. A file-replaced base owns its own memory guidance: the built-in per-turn memory section (`memoryPromptSection`) is NOT injected on top of it — the memory INDEX note still injects either way (see `docs/memory-tools.md`). |
 | `append` | (unset) | Text appended after the base prompt and the `attribution.*` line when one is on (and before any project-instructions section), whether the base is built-in or file-replaced. |
 
 ## Project instructions (seeded from the repo)

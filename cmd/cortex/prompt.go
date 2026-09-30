@@ -98,15 +98,30 @@ func resolvePrompt(cfg *Config) (base, appendix string) {
 // when there's something to use it on — memory notes exist or demoted turns
 // are visible to the model (live outline entries or the folded digest) — and
 // "" otherwise. Pure and per request: turn.go calls it once per turn with
-// that turn's memory index and outline-present state, so concurrent sessions
-// in one process (cortex serve, cortex discord) never share mutable state.
+// that turn's memory index, outline-present state, and whether the session's
+// base prompt is the built-in one (builtinBase — promptBase == SystemPrompt),
+// so concurrent sessions in one process (cortex serve, cortex discord) never
+// share mutable state.
+//
+// builtinBase is load-bearing: prompt.file is documented to REPLACE the
+// built-in base prompt (docs/configuration.md), so a custom prompt fully
+// controls its own memory guidance — the built-in section must not ride on
+// top of it. The section's opening line ("When notes exist, their index is
+// appended to the turn…") also assumes the built-in prompt's short memory
+// line ("You have a persistent memory…"), which a custom prompt need not
+// carry. A missing or empty prompt.file falls back to the built-in (base is
+// still SystemPrompt), so its sessions keep the section exactly as before.
+//
 // The outline-present condition mirrors turn.go's outline-block condition
 // (len(cs.outline) > 0 || cs.outlineFolded != ""): once context_evict has
 // removed every live entry while the folded digest's @session citations are
 // still on the wire, the recall guidance must not be dropped along with the
 // entries. The skills index deliberately plays no part: a project with Agent
 // Skills but zero memory notes still gets no memory section.
-func memorySectionFor(memIndex string, outlinePresent bool) string {
+func memorySectionFor(memIndex string, outlinePresent, builtinBase bool) string {
+	if !builtinBase {
+		return ""
+	}
 	if memIndex != "" || outlinePresent {
 		return memoryPromptSection
 	}

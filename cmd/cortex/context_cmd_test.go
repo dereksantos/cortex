@@ -354,6 +354,7 @@ func TestOutlineSpanCitation(t *testing.T) {
 // under-reported as 0 tokens for memory even though the section was on the
 // wire.
 func TestMemoryIndexTokensCoversTheSection(t *testing.T) {
+	resetPrompt(t) // the section only rides with the built-in base (promptBase == SystemPrompt)
 	// Fresh store (no notes) and a store with one note.
 	freshStore, err := memory.New(t.TempDir())
 	if err != nil {
@@ -367,7 +368,7 @@ func TestMemoryIndexTokensCoversTheSection(t *testing.T) {
 		t.Fatalf("memory.Write: %v", err)
 	}
 
-	sectionTokens := cache.TokensOf(len(memorySectionFor("", true)))
+	sectionTokens := cache.TokensOf(len(memorySectionFor("", true, true)))
 	// The index note's token size, computed through the same path turn.go
 	// uses so the expected value can't drift from the implementation.
 	noteSession := &CortexSession{memory: noteStore}
@@ -381,7 +382,10 @@ func TestMemoryIndexTokensCoversTheSection(t *testing.T) {
 		cs   *CortexSession
 		want int
 	}{
-		{"no memory store", &CortexSession{}, 0},
+		{"no memory store, no outline", &CortexSession{}, 0},
+		{"no memory store, outline present (turn.go still sends the section)",
+			&CortexSession{outline: outlineFixture()},
+			sectionTokens},
 		{"memory wired, no notes, no outline", &CortexSession{memory: freshStore}, 0},
 		{"outline only, no notes",
 			&CortexSession{memory: freshStore, outline: outlineFixture()},

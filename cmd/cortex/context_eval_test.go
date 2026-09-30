@@ -551,6 +551,67 @@ func TestTurnMemorySectionSkillsOnlyDoesNotTrigger(t *testing.T) {
 	}
 }
 
+// TestTurnMemorySectionPromptFileSuppresses guards the prompt.file regression
+// (issue #151): prompt.file REPLACES the built-in base prompt, so the
+// built-in memory section must not ride on top of a custom base — the custom
+// prompt owns its own memory guidance (and the section's opening line assumes
+// the built-in base's short memory line, which a custom prompt may not have).
+// The memory INDEX note still rides the ephemeral slot (index injection is
+// orthogonal to the base prompt); only the built-in guidance section is
+// suppressed, and the stored system message stays the custom base, byte
+// stable.
+func TestTurnMemorySectionPromptFileSuppresses(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	// A file-replaced base: configurePrompt sets the live promptBase, exactly
+	// as NewCortexSession does for a prompt.file config — the same state
+	// turn.go's builtinBase check (promptBase == SystemPrompt) keys off.
+	resetPrompt(t)
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("You are a custom agent."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configurePrompt(&Config{Prompt: PromptConfig{File: promptPath}})
+
+	backend := newContextEvalBackend(t)
+	cs := newContextEvalSession(t, backend, 4000)
+	if promptBase != "You are a custom agent." {
+		t.Fatalf("prompt.file config did not replace the base prompt; got %q", promptBase)
+	}
+	cs.Request.Messages[0].Content = promptBase // the stored system message is the custom base
+
+	// Memory without a capturer: EnableMemory wires the note store and the
+	// journal capturer together, but capture writes are best-effort (an
+	// error is a no-op) and the user tier reads the developer's real
+	// ~/.cortex/memory, so neither belongs in this test's assertion surface.
+	if mem, err := memory.New(cs.ContextDir()); err == nil {
+		cs.memory = mem
+	}
+	if _, err := cs.MemoryWrite("custom-base-note", "A durable note under a custom base.", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cs.Turn(context.Background(), "first turn"); err != nil {
+		t.Fatal(err)
+	}
+	got := ephemeralSlot(backend.lastWire())
+	// The index note still rides — notes exist and index injection is
+	// orthogonal to the base prompt.
+	if !strings.Contains(got, "custom-base-note") {
+		t.Error("prompt.file base: the ephemeral slot must still carry the memory index note")
+	}
+	// The built-in guidance section must NOT ride on top of the custom base.
+	if strings.Contains(got, memoryPromptSection) {
+		t.Error("prompt.file base: the built-in memory section must NOT be injected (the custom base owns its memory guidance)")
+	}
+	if strings.Contains(got, "memory_search") {
+		t.Error("prompt.file base: the built-in memory guidance (memory_search) must NOT ride the ephemeral slot")
+	}
+	if cs.Request.Messages[0].Content != promptBase {
+		t.Error("the custom base system message must stay byte-stable")
+	}
+}
+
 // TestTurnMemorySectionOutlinePresentThroughTurn drives a real Turn() through
 // demotion (no memory notes at all) and checks the acceptance case the
 // pure-helper table covers only in isolation: once the outline exists, the
