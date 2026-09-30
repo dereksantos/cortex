@@ -370,18 +370,20 @@ func (cs *CortexSession) outlineTokens() int {
 // wire: the injected memory-index note plus the full memory section
 // (memoryPromptSection) that rides the same ephemeral slot. The section is
 // present whenever there's something to use it on — notes exist or a demoted
-// outline is visible (live entries or the folded digest) — mirroring
-// turn.go's per-turn decision exactly, so /context counts what the turn
-// actually sends: an outline-only turn counts the section alone, notes add
-// the index on top, and neither gives 0. Returns 0 when memory isn't wired
-// for this session (no store to index).
+// outline is visible (live entries or the folded digest) — and the base
+// prompt is the built-in one (a prompt.file replacement owns its own memory
+// guidance, and its section never rides) — mirroring turn.go's per-turn
+// decision exactly, so /context counts what the turn actually sends: an
+// outline-only turn counts the section alone, notes add the index on top,
+// and neither gives 0. There is no early return for an unwired store
+// (cs.memory == nil): turn.go sends the section and user-tier notes without
+// a project store, and memoryIndexNote already handles nil tiers, so the
+// count must too (a nil store with an outline present still counts the
+// section, exactly as the turn sends it).
 func (cs *CortexSession) memoryIndexTokens() int {
-	if cs.memory == nil {
-		return 0
-	}
 	memIndex := cs.memoryIndexNote()
 	outlinePresent := len(cs.outline) > 0 || cs.outlineFolded != ""
-	tokens := cache.TokensOf(len(memorySectionFor(memIndex, outlinePresent)))
+	tokens := cache.TokensOf(len(memorySectionFor(memIndex, outlinePresent, promptBase == SystemPrompt)))
 	tokens += cache.TokensOf(len(memIndex))
 	return tokens
 }

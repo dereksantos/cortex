@@ -131,10 +131,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// skills index below must not count as a reason to include it. The
 	// outline-present condition mirrors the outline-block one above (a
 	// folded digest with live @session citations counts too, even when
-	// context_evict has emptied the live entries).
+	// context_evict has emptied the live entries). The section is built-in
+	// guidance: it rides only when the base prompt is the built-in one
+	// (prompt.file replaces the base and owns its own memory guidance).
 	memNote := cs.memoryIndexNote()
 	outlinePresent := len(cs.outline) > 0 || cs.outlineFolded != ""
-	if section := memorySectionFor(memNote, outlinePresent); section != "" {
+	builtinBase := promptBase == SystemPrompt
+	if section := memorySectionFor(memNote, outlinePresent, builtinBase); section != "" {
 		memNote = section + "\n\n" + memNote
 	}
 	note := memNote

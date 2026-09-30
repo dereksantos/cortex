@@ -202,26 +202,32 @@ func TestMemorySectionComposition(t *testing.T) {
 // TestMemorySectionForState table-tests the per-turn decision helper turn.go
 // calls — not an inlined copy of it, so a change to turn.go's decision fails
 // here. The outline arrives as the same present/absent condition turn.go
-// uses for the outline block (live entries OR folded digest), and the skills
-// index is deliberately absent from the inputs: it must not switch the
-// section on (its real-turn coverage is
-// TestTurnMemorySectionSkillsOnlyDoesNotTrigger).
+// uses for the outline block (live entries OR folded digest), the skills
+// index is deliberately absent from the inputs (it must not switch the
+// section on — its real-turn coverage is
+// TestTurnMemorySectionSkillsOnlyDoesNotTrigger), and builtinBase says
+// whether the session's base prompt is the built-in one: a prompt.file
+// replacement suppresses the section even when notes or an outline exist.
 func TestMemorySectionForState(t *testing.T) {
 	tests := []struct {
 		name           string
 		outlinePresent bool
+		builtinBase    bool
 		note           string // the memory index, before the skills note is merged in
 		want           bool
 	}{
-		{"notes absent, no outline", false, "", false},
-		{"notes present, no outline", false, "## Project memory\n- my-note — a hook", true},
-		{"no notes, outline present", true, "", true},
-		{"notes present, outline present", true, "## Project memory\n- my-note — a hook", true},
-		{"no notes, only the folded digest remains (live entries evicted)", true, "", true},
+		{"notes absent, no outline", false, true, "", false},
+		{"notes present, no outline", false, true, "## Project memory\n- my-note — a hook", true},
+		{"no notes, outline present", true, true, "", true},
+		{"notes present, outline present", true, true, "## Project memory\n- my-note — a hook", true},
+		{"no notes, only the folded digest remains (live entries evicted)", true, true, "", true},
+		{"notes present but the base prompt is a prompt.file replacement", false, false, "## Project memory\n- my-note — a hook", false},
+		{"outline present but the base prompt is a prompt.file replacement", true, false, "", false},
+		{"notes and outline but the base prompt is a prompt.file replacement", true, false, "## Project memory\n- my-note — a hook", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := memorySectionFor(tt.note, tt.outlinePresent)
+			got := memorySectionFor(tt.note, tt.outlinePresent, tt.builtinBase)
 			if (got != "") != tt.want {
 				t.Errorf("memorySectionFor = %q (present=%v), want present=%v", got, got != "", tt.want)
 			}
