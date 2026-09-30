@@ -38,11 +38,14 @@ func (a CortexArgs) Request() *AgentRequest {
 // prompt.append text, then an optional "# Project instructions (<file>)"
 // section when instructions is non-empty — <file> (label) names which
 // instruction file was loaded (AGENTS.md, CLAUDE.md, .github/
-// copilot-instructions.md, #147) so the seed shows its own provenance.
-// Shared by CortexArgs.Request() (CWD-implicit, via
-// projectInstructions()) and applyProjectByName (project_workspace.go,
-// M3.5's --project, via Workspace.Instructions()) so the two stay
-// provably identical modulo their instructions source.
+// copilot-instructions.md, #147) so the seed shows its own provenance. The
+// content is byte-stable for the life of the session — the per-turn memory
+// section never rides here, it is delivered through the ephemeral wire slot
+// (turn.go's memorySectionFor) — so the append-stable prefix and the prompt
+// cache built on it survive every turn. Shared by CortexArgs.Request()
+// (CWD-implicit, via projectInstructions()) and applyProjectByName
+// (project_workspace.go, M3.5's --project, via Workspace.Instructions()) so
+// the two stay provably identical modulo their instructions source.
 func systemPromptContent(label, instructions string) string {
 	content := promptBase
 	if promptAttribution != "" {

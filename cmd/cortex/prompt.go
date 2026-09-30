@@ -35,7 +35,17 @@ Keep replies simple and brief. Lead with the outcome in plain words; a short lis
 
 # Memory
 
-You have a persistent memory: named notes you've written in earlier sessions, managed through tools. When notes exist, their index is appended to the turn so you can see what you can recall.
+You have a persistent memory: named notes you've written in earlier sessions, managed through tools.`
+
+// memoryPromptSection is the full memory guidance — the four bullets plus the
+// outline/recall paragraph — appended to the system prompt only when there's
+// something to use it on (notes exist, or the outline has demoted turns).
+// Kept as a separate const so the always-present base prompt stays small for
+// small local models; the short line in SystemPrompt above always appears, and
+// this section rides on top per turn — delivered through the ephemeral wire
+// slot (turn.go's memorySectionFor), never through the stored system message.
+const memoryPromptSection = `
+When notes exist, their index is appended to the turn so you can see what you can recall.
 
 - Read the notes relevant to the task before answering — memory_read by name, or memory_search to find them.
 - Saving is rare; most turns produce nothing worth a note. The journal already records every turn mechanically (files touched, commands run, outcomes), and the code and git history record themselves. Save with memory_write only what would change how you act in a future session and that none of those records can give you — a decision and its why, a standing constraint, a user preference. If in doubt, don't save. Update an existing note if one fits; don't duplicate.
@@ -82,6 +92,25 @@ func resolvePrompt(cfg *Config) (base, appendix string) {
 		}
 	}
 	return base, strings.TrimSpace(cfg.Prompt.Append)
+}
+
+// memorySectionFor returns the full memory guidance (memoryPromptSection)
+// when there's something to use it on — memory notes exist or demoted turns
+// are visible to the model (live outline entries or the folded digest) — and
+// "" otherwise. Pure and per request: turn.go calls it once per turn with
+// that turn's memory index and outline-present state, so concurrent sessions
+// in one process (cortex serve, cortex discord) never share mutable state.
+// The outline-present condition mirrors turn.go's outline-block condition
+// (len(cs.outline) > 0 || cs.outlineFolded != ""): once context_evict has
+// removed every live entry while the folded digest's @session citations are
+// still on the wire, the recall guidance must not be dropped along with the
+// entries. The skills index deliberately plays no part: a project with Agent
+// Skills but zero memory notes still gets no memory section.
+func memorySectionFor(memIndex string, outlinePresent bool) string {
+	if memIndex != "" || outlinePresent {
+		return memoryPromptSection
+	}
+	return ""
 }
 
 // attributionPromptLine is the system-prompt line the attribution config

@@ -122,7 +122,22 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// (study.go) builds a subagent's opening request from its own static
 	// System + seed and never touches this slot, so neither index reaches
 	// Study/Learn/Agent.
-	note := cs.memoryIndexNote()
+	//
+	// The full memory section (memoryPromptSection) rides in this same
+	// ephemeral slot when there's something to use it on (notes or demoted
+	// turns) — again never the stored system message, which must stay
+	// byte-stable for the whole session so the prompt cache survives.
+	// memorySectionFor decides per turn from the memory index alone: the
+	// skills index below must not count as a reason to include it. The
+	// outline-present condition mirrors the outline-block one above (a
+	// folded digest with live @session citations counts too, even when
+	// context_evict has emptied the live entries).
+	memNote := cs.memoryIndexNote()
+	outlinePresent := len(cs.outline) > 0 || cs.outlineFolded != ""
+	if section := memorySectionFor(memNote, outlinePresent); section != "" {
+		memNote = section + "\n\n" + memNote
+	}
+	note := memNote
 	if skillsNote := cs.skillsIndexNote(); skillsNote != "" {
 		if note != "" {
 			note += "\n\n"
