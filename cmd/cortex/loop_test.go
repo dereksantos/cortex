@@ -1512,3 +1512,116 @@ func TestStuckGuardEscalatesEffortOnce(t *testing.T) {
 		}
 	})
 }
+
+// TestRunLoopRestoresToolsAfterFailedClampedSalvage: a natural NON-empty
+// finish whose completion hit the clamp (out == MaxTokens) runs
+// salvageClampedFinalize, which withholds the tools for its re-send. When
+// that re-send comes back empty (or errors), runLoop must still hand the
+// caller's long-lived request back with its tools, or the coder's next turn
+// runs with none — the regression the #149 restructure introduced when it
+// dropped the pre-clean-finalize restore.
+func TestRunLoopRestoresToolsAfterFailedClampedSalvage(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // the clamped-finalize re-ask: comes back empty
+			return fakeResp("", nil, 1, 5), false, nil
+		}
+		// Natural NON-empty finish, clamped: out == MaxTokens, no tool calls.
+		return fakeResp("a long answer that ran into the cap", nil, 1, 100), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	ts := Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp}
+	content, stats, err := runLoop(context.Background(), send, req, ts,
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "a long answer that ran into the cap" {
+		t.Errorf("content = %q, want the clamped answer (the failed salvage falls through to clean-finalize)", content)
+	}
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize", stats.StopReason)
+	}
+	if req.Tools == nil || len(req.Tools) != len(ts.Tools) {
+		t.Errorf("req.Tools after failed clamped salvage = %v, want the toolset restored (%d tools) for the caller's next turn",
+			req.Tools, len(ts.Tools))
+	}
+}
+
+// TestRunLoopReasoningFallbackReceiptFiresOncePerGenuineRecovery: the
+// issue #149 receipt is round-local. Round 1's empty finish is recovered by
+// the reasoning-off retry's tool calls (one genuine recovery → one receipt).
+// A LATER round (3) comes back empty again and its retry errors (send
+// failure → nil): the receipt must NOT fire a second time (it recovered
+// nothing, and the run-level flag must not be read as a per-round gate),
+// and the run's stats must keep recording the earlier genuine recovery.
+// With the old flag-gated receipt, this scenario wrote a second, false
+// receipt.
+func TestRunLoopReasoningFallbackReceiptFiresOncePerGenuineRecovery(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var receipts int
+	var receiptOutcomes []string
+	sends := 0
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // round 1: empty finish, reasoning on
+		case 2:
+			// Round 1's off-retry: recovers with a tool call (genuine recovery #1).
+			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 8), false, nil
+		case 3:
+			// After the tool result, round 3 comes back empty again.
+			return fakeResp("", nil, 1, 5), false, nil
+		case 4:
+			// Round 3's off-retry ERRORS: the retry recovered nothing.
+			return nil, false, errors.New("backend down")
+		case 5:
+			// Fall-through salvage re-ask (tools withheld): recovers the turn.
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	ts := Toolset{
+		Tools:    []Tool{tools.ReadFile},
+		Dispatch: disp,
+		OnReasoningFallback: func(stats loopStats) {
+			receipts++
+			receiptOutcomes = append(receiptOutcomes, stats.ReasoningFallbackOutcome)
+		},
+	}
+	content, stats, err := runLoop(context.Background(), send, req, ts,
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "salvaged answer" {
+		t.Errorf("content = %q, want salvaged answer (round 3's fall-through salvage)", content)
+	}
+	if receipts != 1 {
+		t.Errorf("OnReasoningFallback fired %d times, want exactly 1 (round 1's genuine recovery; round 3's failed retry must not write a second receipt)",
+			receipts)
+	}
+	if len(receiptOutcomes) == 1 && receiptOutcomes[0] != journal.OutcomeToolCalls {
+		t.Errorf("receipt outcome = %q, want %q (the single genuine recovery was the tool-call one)",
+			receiptOutcomes[0], journal.OutcomeToolCalls)
+	}
+	// The run-level flag keeps the earlier genuine recovery: a failed retry
+	// in a later round must not clear it.
+	if !stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = false, want true (round 1's recovery stands for the run's stats)")
+	}
+	if stats.ReasoningFallbackOutcome != journal.OutcomeToolCalls {
+		t.Errorf("ReasoningFallbackOutcome = %q, want %q (never overwritten by the later failed retry)",
+			stats.ReasoningFallbackOutcome, journal.OutcomeToolCalls)
+	}
+	if stats.StopReason != "salvaged-finalize" {
+		t.Errorf("stop = %q, want salvaged-finalize (round 3's prompt-based salvage)", stats.StopReason)
+	}
+}

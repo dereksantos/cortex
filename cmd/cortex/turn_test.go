@@ -452,6 +452,100 @@ func TestTurnReasoningFallbackWritesReceipt(t *testing.T) {
 	}
 }
 
+// TestTurnReasoningFallbackToolRoundReceipt: the issue #149 receipt's
+// tool-calls variant. The empty natural finish is recovered by the
+// reasoning-off retry's tool call (dispatched like an ordinary round; the
+// following round answers), so the turn persists exactly ONE
+// recovery.reasoning_fallback entry — attributed "tool-round" (the receipt's
+// own stop-reason attribution, distinct from the run's final stop reason),
+// outcome "tool_calls". This is the case the loop-level unit test pins at
+// engine level and the doc-comment in internal/journal/recovery.go names.
+func TestTurnReasoningFallbackToolRoundReceipt(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Natural finish: empty content, no tool_calls, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		case 2:
+			// The reasoning-off retry: a tool call, not prose.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		default:
+			// The round after the tool result: the answer.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"final answer"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	res, err := cs.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "final answer" {
+		t.Errorf("Reply = %q, want final answer (the loop continued after the retry's tool round)", res.Reply)
+	}
+	if calls != 3 {
+		t.Errorf("model calls = %d, want 3 (empty finish, off-retry with a tool call, final round)", calls)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "recovery"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var p *journal.ReasoningFallbackPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p2, perr := journal.ParseReasoningFallback(e); perr == nil {
+			if p != nil {
+				t.Fatalf("more than one recovery.reasoning_fallback entry")
+			}
+			p = p2
+		}
+	}
+	if p == nil {
+		t.Fatal("no recovery.reasoning_fallback entry under .cortex/journal/recovery/")
+	}
+	if p.Model != "m" || p.Role != "code" || p.Path != "natural" {
+		t.Errorf("receipt = %+v, want model=m role=code path=natural", p)
+	}
+	if p.Outcome != journal.OutcomeToolCalls {
+		t.Errorf("receipt outcome = %q, want %q (the retry recovered the round with a tool call)",
+			p.Outcome, journal.OutcomeToolCalls)
+	}
+	if p.StopReason != "tool-round" {
+		t.Errorf("receipt stop_reason = %q, want tool-round (the receipt's own attribution; the run ended clean-finalize)",
+			p.StopReason)
+	}
+}
+
 func TestEmitSessionMetrics(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cs := &CortexSession{Request: CortexArgs{}.Request(), sessionStart: time.Now()}

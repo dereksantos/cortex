@@ -309,9 +309,10 @@ change.
 **The rule.** When a finish comes back empty from a role whose resolved
 effort is non-off (`req.Effort.Level != EffortOff`), the engine re-sends the
 **same request once** with reasoning pinned **off**, and uses the retry's
-answer if it is non-empty. The empty assistant turn the loop already appended
-is dropped from the request first, so the retry is byte-identical to the
-request that came back empty. If the retry returns tool calls (the model had
+answer if it is non-empty. The empty assistant turn is not appended before
+the retry, so the retry re-sends the exact request that came back empty;
+only the surviving message — the retry's, or the original empty one on
+fall-through — is appended. If the retry returns tool calls (the model had
 work to do), they are dispatched like a normal tool round — the recovery does
 not force an answer it was not given.
 

@@ -112,6 +112,10 @@ type loopStats struct {
 	// its whole turn deliberating and came back with no content and no tool
 	// calls). Distinguished from Salvaged so a model that keeps needing it
 	// shows up in telemetry separately from the prompt-based salvages.
+	// Run-scoped: set only when a recovery actually recovers a round, never
+	// cleared once set — a failed retry in a later round does not undo an
+	// earlier genuine recovery of the same run (the per-round receipt is
+	// what stays round-accurate).
 	ReasoningFallback bool
 	// ReasoningFallbackOutcome names HOW the #149 off-retry recovered the
 	// round: journal.OutcomeAnswer (it answered with prose, returned as the
@@ -410,6 +414,13 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				// retry returns tool calls), so only the message that survives the
 				// decision below is appended — the retry's (replacing the empty
 				// one) or the original empty one on fall-through.
+				// The receipt is round-local: it fires inside the branch that
+				// actually recovered THIS round (see below), never at a gate that
+				// reads run-scoped stats — a recovery in a later round must not
+				// produce a second, false receipt, and a failed retry records
+				// nothing. stats.ReasoningFallback itself is run-scoped and is
+				// never cleared once set, so an earlier genuine recovery still
+				// stands for the run's stats no matter how later rounds go.
 				retry := salvageEmptyReasoningRetry(ctx, send, req, &stats)
 				if retry != nil && len(retry.ToolCalls) > 0 {
 					// The retry returned TOOL CALLS, not an answer: it is an
@@ -417,12 +428,22 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 					// the append happens at the round's dispatch point below (the
 					// tool-round appendMsg), so the model's requested actions are
 					// neither dropped nor left dangling without results. The
-					// fallback fired and recovered the turn, so it is recorded
-					// (receipt + flag) just like the prose recovery.
+					// fallback fired and recovered the round with tool calls, so it
+					// is recorded (receipt + flag) just like the prose recovery.
+					// The receipt's StopReason is attributed "tool-round" (the
+					// recovery's own attribution, per internal/journal/recovery.go)
+					// — the run's StopReason is left to the round the loop actually
+					// ends in, because the calls are dispatched, not answered.
 					msg = *retry
 					finishedNaturally = false
 					stats.ReasoningFallback = true
 					stats.ReasoningFallbackOutcome = journal.OutcomeToolCalls
+					salvagedStop := stats.StopReason // receipt attribution: the recovery's own label
+					stats.StopReason = "tool-round"
+					if ts.OnReasoningFallback != nil {
+						ts.OnReasoningFallback(stats)
+					}
+					stats.StopReason = salvagedStop // the run's stop reason stays with the round it ends in
 				} else if a2 := retryText(retry); a2 != "" {
 					stats.Salvaged = true
 					stats.ReasoningFallback = true
@@ -435,18 +456,12 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 					}
 					req.Tools = ts.Tools
 					return a2, stats, nil
-				} else if retry != nil {
-					// The retry also came back empty (or errored): fall through to
-					// the prompt-based salvages with the ORIGINAL empty message
-					// standing in for the round (appended once, below), so the
-					// transcript mirrors the wire conversation — the empty message
-					// is written once, not twice.
-					stats.ReasoningFallback = false
-					stats.ReasoningFallbackOutcome = ""
 				}
-				if ts.OnReasoningFallback != nil && stats.ReasoningFallback {
-					ts.OnReasoningFallback(stats)
-				}
+				// else: the retry also came back empty (or errored): fall through
+				// to the prompt-based salvages with the ORIGINAL empty message
+				// standing in for the round (appended once, below), so the
+				// transcript mirrors the wire conversation — the empty message is
+				// written once, not twice. No receipt: the retry recovered nothing.
 			}
 			if finishedNaturally {
 				// Natural finish: append the original message so the transcript
@@ -477,6 +492,10 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 						return a2, stats, nil
 					}
 				}
+				// A failed (clamped) salvage leaves the tools withheld; restore
+				// them so the caller's long-lived request (cs.Request) keeps its
+				// tools next turn.
+				req.Tools = ts.Tools
 				stats.StopReason = "clean-finalize"
 				return answer, stats, nil
 			}

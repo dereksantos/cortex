@@ -63,10 +63,12 @@ type ReasoningFallbackPayload struct {
 	Role string `json:"role"`
 	// Path is ReasoningFallbackPathNatural — see the const block above.
 	Path string `json:"path"`
-	// StopReason is the stop reason the recovery attributed (always
-	// "salvaged-finalize" today — the recovery's attribution; a future
-	// reason the recovery could attribute without relabeling the turn
-	// would still land here rather than inventing a new field).
+	// StopReason is the stop reason the recovery attributed — the recovery's
+	// own attribution, not the run's final stop reason: "salvaged-finalize"
+	// when the retry answered with prose (OutcomeAnswer), and "tool-round"
+	// when it answered with tool calls (OutcomeToolCalls) that the loop then
+	// dispatches as an ordinary round — the run's StopReason is left to the
+	// round the loop actually ends in, which the receipt does not predict.
 	StopReason string `json:"stop_reason"`
 	// MaxTokensClamped is the clamp state at the time of the recovery —
 	// the same field loopStats.MaxTokensClamped records, kept here so a
