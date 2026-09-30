@@ -274,7 +274,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 		// the baseline said the suite was clean, so we don't blame a step for
 		// a failure that pre-dated the plan (see the baseline above).
 		if checkGated {
-			cmdLine, out, ok, note := cs.runProjectCheck(ctx)
+			cmdLine, _, ok, note := cs.runProjectCheck(ctx)
 			if !ok {
 				// A real check failure means the step left the project broken —
 				// stop and don't let the next step build on it.
@@ -295,7 +295,6 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 				// skip reason instead of an empty command.
 				sr.Note = "check skipped: " + note
 			}
-			_ = out // raw output kept only for the failure path
 			stepResults = append(stepResults, sr)
 		} else {
 			// The baseline failed: run the step but don't gate it. Attach the

@@ -532,61 +532,25 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 }
 
 // runAnchoredTurn runs one turn with the prompt pinned to the bottom row and
-// every byte of turn output funneled above it. os.Stdout is redirected through
-// a pipe whose lines feed the anchor (so ad-hoc fmt.Print output, tool-action
-// lines, and the streamed answer all land above the prompt); the anchor draws
-// the input and "thinking" status straight to the real terminal. Keystrokes
-// typed during the turn edit the pinned line live and are returned to seed the
-// next prompt. ESC/Ctrl-C cancels via the anchor's context.
+// every byte of turn output funneled above it — the single-turn case of
+// runUnderAnchor.
 func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
-	anchor, ctx := editor.Anchor(session.Prompt(), seed)
-	r, w, err := os.Pipe()
-	if err != nil {
-		// Pipe setup failed (rare): fall back to the silent-capture path so the
-		// turn still runs and cancels cleanly.
-		anchor.Stop()
-		c, stop := editor.Interruptible(context.Background())
-		_, e := session.Turn(c, input)
-		return stop(), e
-	}
-	realStdout := os.Stdout
-	os.Stdout = w
-	session.live = anchor
-
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		sc := bufio.NewScanner(r)
-		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for sc.Scan() {
-			anchor.EmitLine(sc.Text())
-		}
-	}()
-
-	_, turnErr := session.Turn(ctx, input)
-
-	// Restore stdout, then close the write end so the drain goroutine sees EOF
-	// and flushes the last line before we erase the pinned block.
-	os.Stdout = realStdout
-	session.live = nil
-	w.Close()
-	<-drained
-	r.Close()
-	return anchor.Stop(), turnErr
+	return runUnderAnchor(session, editor, seed, func(ctx context.Context) error {
+		_, err := session.Turn(ctx, input)
+		return err
+	})
 }
 
-// runUnderAnchor runs fn inside a pinned anchor (interactive + render), the
-// same way runAnchoredTurn runs a single Turn: the prompt is pinned to the
-// bottom row and every byte of fn's output (fmt.Print, tool-action lines, …)
-// is funneled above it via a stdout pipe; keystrokes typed during fn edit the
-// pinned line live. The pinned line is erased on return and its (possibly
-// edited) text is returned to seed the next prompt. ESC/Ctrl-C cancels ctx.
+// runUnderAnchor runs fn inside a pinned anchor (interactive + render): the
+// prompt is pinned to the bottom row and every byte of fn's output
+// (fmt.Print, tool-action lines, …) is funneled above it via a stdout pipe;
+// keystrokes typed during fn edit the pinned line live. The pinned line is
+// erased on return and its (possibly edited) text is returned to seed the
+// next prompt. ESC/Ctrl-C cancels ctx.
 //
-// It exists so MULTI-turn paths (the /plan REPL command's TurnWithPlan, #150)
-// get the same anchored display and cancel handling as a single turn, without
-// duplicating runAnchoredTurn's pipe/anchor plumbing. runAnchoredTurn's
-// body is the single-turn specialization (it calls fn = Turn inside it);
-// both share this helper's anchor-lifecycle shape.
+// It is the general form of the anchored turn path: runAnchoredTurn is its
+// single-turn specialization (fn = one session.Turn), and the /plan REPL
+// command's TurnWithPlan (#150) is a multi-turn one.
 func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed string, fn func(ctx context.Context) error) (string, error) {
 	anchor, ctx := editor.Anchor(session.Prompt(), seed)
 	r, w, err := os.Pipe()
