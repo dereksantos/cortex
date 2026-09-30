@@ -226,7 +226,13 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 	// step check is meaningful again, so we keep gating.
 	checkGated := true
 	checkSkipNote := ""
-	_, baseOut, baseOk, _ := cs.runProjectCheck(ctx)
+	baseCmd, baseOut, baseOk, baseNote := cs.runProjectCheck(ctx)
+	// "Clean" means the command actually RAN and exited 0: cmdLine non-empty
+	// and ok. A timed-out (or otherwise skipped) baseline — ok=true but
+	// cmdLine=="" — is NOT clean: the baseline tells us nothing about the
+	// project's state, so gating on it would stack one full check timeout on
+	// top of every step (each step waiting out another 90 s just to be
+	// reported). Disarm the gate for the whole run, with a note naming why.
 	if !baseOk {
 		// The suite was already failing before we did anything. A real check
 		// failure from a step is a signal the step itself broke the project,
@@ -235,6 +241,15 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 		// Disable the gate for the whole run and note why on each step.
 		checkGated = false
 		checkSkipNote = fmt.Sprintf("check skipped: failing before plan (%s)", truncateNote(baseOut))
+	} else if baseCmd == "" {
+		// The baseline did not actually run (it timed out, or no command or
+		// root could be discovered): it tells us nothing about the project's
+		// state, so don't gate the steps on a check that would only time out
+		// again. Disarm the gate and carry the baseline's own skip note — it
+		// already says why (the timeout's error, the missing command) — on
+		// every step instead of a generic one.
+		checkGated = false
+		checkSkipNote = baseNote
 	}
 	// --- 4. Execute each step as its own turn ----------------------------
 	stepResults := make([]StepResult, 0, len(steps))
@@ -252,12 +267,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 			// (errors.Is(err, context.Canceled)) can tell an interrupt apart
 			// from a genuine step failure.
 			if errors.Is(err, context.Canceled) {
-				stepResults = append(stepResults, StepResult{Step: step, Status: stepFailed, Note: "interrupted: " + err.Error()})
-				for _, later := range steps[i+1:] {
-					stepResults = append(stepResults, StepResult{Step: later, Status: stepNotReached})
-				}
-				return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))},
-					fmt.Errorf("plan interrupted at step %d: %w", i+1, err)
+				return interruptPlan(stepResults, steps, i, err)
 			}
 			stepResults = append(stepResults, StepResult{Step: step, Status: stepFailed, Note: err.Error()})
 			for _, later := range steps[i+1:] {
@@ -275,6 +285,15 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 		// a failure that pre-dated the plan (see the baseline above).
 		if checkGated {
 			cmdLine, _, ok, note := cs.runProjectCheck(ctx)
+			// A cancelled context (Ctrl-C) DURING the check is an INTERRUPT,
+			// not a step outcome: the check's context was derived from the
+			// run's, so it can report a timeout-skip (ok=true) even though the
+			// parent was cancelled. Treat it the same as a step that was
+			// cancelled — never mark the step done on a check that didn't run
+			// to completion.
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return interruptPlan(stepResults, steps, i, ctx.Err())
+			}
 			if !ok {
 				// A real check failure means the step left the project broken —
 				// stop and don't let the next step build on it.
@@ -288,12 +307,15 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 			// On success the note is a SHORT fixed summary naming the command —
 			// not the raw multi-line test output, which would turn every done
 			// step's report line into a wall of "ok  pkg 0.3s" lines. Raw
-			// output is kept only for failures (the note above).
-			sr := StepResult{Step: step, Status: stepDone, Note: "check passed (" + cmdLine + ")"}
-			if cmdLine == "" {
-				// No command was discovered (or the check was skipped): name the
-				// skip reason instead of an empty command.
-				sr.Note = "check skipped: " + note
+			// output is kept only for failures (the note above). A SKIP (no
+			// command discovered, an unresolvable root, or a timeout) is
+			// reported as its own note verbatim — those notes already carry
+			// the "check skipped: " prefix — and must never be rendered as a
+			// "check passed" with a command the user believes ran.
+			sr := StepResult{Step: step, Status: stepDone, Note: note}
+			if cmdLine != "" {
+				// The command actually ran and exited 0: name it.
+				sr.Note = "check passed (" + cmdLine + ")"
 			}
 			stepResults = append(stepResults, sr)
 		} else {
@@ -305,6 +327,20 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 
 	// --- 5. Final per-step report ----------------------------------------
 	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))}, nil
+}
+
+// interruptPlan records the interrupted step (failed, with an 'interrupted'
+// note) and every later step as not reached, renders the per-step report, and
+// wraps the cancel error as an interrupt so the caller (the REPL's afterTurn,
+// the headless --plan path) can tell an interrupt apart from a genuine step
+// failure via errors.Is(err, context.Canceled).
+func interruptPlan(stepResults []StepResult, steps []string, i int, err error) (PlanRunResult, error) {
+	stepResults = append(stepResults, StepResult{Step: steps[i], Status: stepFailed, Note: "interrupted: " + err.Error()})
+	for _, later := range steps[i+1:] {
+		stepResults = append(stepResults, StepResult{Step: later, Status: stepNotReached})
+	}
+	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))},
+		fmt.Errorf("plan interrupted at step %d: %w", i+1, err)
 }
 
 // truncateNote bounds a raw note (check output) embedded in a skip note, so a
@@ -364,7 +400,10 @@ var runProjectCheckStub func(cs *CortexSession, ctx context.Context) (cmdLine, o
 //     command, a project root that could not be resolved, and a TIMEOUT are
 //     all reported as ok=true with a "check skipped: …" note instead: a check
 //     that can't run (or didn't finish in time) tells us nothing about the
-//     step, so it must not mark the step failed.
+//     step, so it must not mark the step failed. Every skip also returns
+//     cmdLine="" — a skip never names a command, so the caller can tell
+//     "ran and passed" (cmdLine set) apart from "skipped" (cmdLine empty) and
+//     report each correctly.
 //   - out: the check's trimmed combined output (or the command line when the
 //     output was empty), for the failure note.
 //   - note: a short human summary — the check's trimmed output on success,
@@ -399,7 +438,7 @@ func (cs *CortexSession) runProjectCheck(ctx context.Context) (cmdLine, out stri
 	// (ok=true) with a note rather than failing the step. A step must not be
 	// blamed for a check that hung or was interrupted.
 	if checkCtx.Err() != nil {
-		return cmdLine, out, true, fmt.Sprintf("check skipped: %s (%s)", cmdLine, checkCtx.Err())
+		return "", out, true, fmt.Sprintf("check skipped: %s (%s)", cmdLine, checkCtx.Err())
 	}
 	if err != nil {
 		if len(out) > planCheckNoteCap {

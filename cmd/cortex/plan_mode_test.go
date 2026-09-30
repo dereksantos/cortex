@@ -369,9 +369,14 @@ func TestTurnWithPlanHappyPath(t *testing.T) {
 	// No command is discoverable in the empty temp root, so each done step's
 	// note is the short skip summary — NOT a wall of raw test output (the
 	// #150 review: a done step's report line must stay a single status line).
+	// Each skip note carries EXACTLY ONE "check skipped: " prefix: the note
+	// is the check's own (already prefixed), not a re-prefixed one.
 	for i, s := range res.Steps {
-		if !strings.HasPrefix(s.Note, "check skipped:") {
-			t.Errorf("step %d note = %q, want a short 'check skipped: …' summary, not raw output", i+1, s.Note)
+		if strings.Count(s.Note, "check skipped:") != 1 {
+			t.Errorf("step %d note = %q, want exactly one 'check skipped: …' prefix", i+1, s.Note)
+		}
+		if s.Note != "check skipped: no test/build command found for this project" {
+			t.Errorf("step %d note = %q, want %q", i+1, s.Note, "check skipped: no test/build command found for this project")
 		}
 	}
 }
@@ -617,5 +622,137 @@ func TestTurnWithPlanCancelledContextInterrupts(t *testing.T) {
 	// run before it).
 	if n := backend.requestCount(); n != 2 {
 		t.Fatalf("requests = %d, want 2 (planning + step 1; step 2 never sent)", n)
+	}
+}
+
+// TestTurnWithPlanCheckTimeoutIsSkipNotPass covers the #150 review's
+// timeout case: a check that TIMES OUT (ok=true, cmdLine non-empty, note
+// "check skipped: …") must NOT be reported as "check passed (cmd)" — a
+// suite that didn't finish tells us nothing about the step, and a report
+// line that names the command as passed misleads the reader about what
+// actually ran. The step still completes (done); its note is the check's
+// own skip summary.
+func TestTurnWithPlanCheckTimeoutIsSkipNotPass(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. first step\n2. second step\n", // planning turn
+		"first done",                      // step 1 turn
+		"second done",                     // step 2 turn
+	)
+	cs := planTestSession(t, backend, root)
+
+	// The baseline (call 1) is clean; every post-step check (calls 2, 3) is
+	// the timeout-skip shape runProjectCheck produces when the check's
+	// context hits its deadline: ok=true, cmdLine EMPTY (a skip never names
+	// a command — the fix), and a "check skipped: …" note. A step that
+	// keyed its report on cmdLine alone would mis-report this as a pass.
+	orig := runProjectCheckStub
+	t.Cleanup(func() { runProjectCheckStub = orig })
+	var calls int
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
+		calls++
+		if calls == 1 {
+			return "go test ./...", "ok", true, "ok" // baseline: clean, gate stays armed
+		}
+		// Timeout-skip shape: ok=true, cmdLine empty, skip note.
+		return "", "", true, "check skipped: go test ./... (context deadline exceeded)"
+	}
+
+	res, err := cs.TurnWithPlan(context.Background(), "multi-part task")
+	if err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true")
+	}
+	if len(res.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(res.Steps))
+	}
+	for i, s := range res.Steps {
+		if s.Status != stepDone {
+			t.Errorf("step %d status = %v, want done (a timed-out check skips, it does not fail the step)", i+1, s.Status)
+		}
+		// THE point of the fix: a timed-out check is never reported as
+		// having passed, with or without a command named.
+		if strings.Contains(s.Note, "check passed") {
+			t.Errorf("step %d note = %q, must NOT contain 'check passed' (the check timed out)", i+1, s.Note)
+		}
+		if strings.Count(s.Note, "check skipped:") != 1 {
+			t.Errorf("step %d note = %q, want exactly one 'check skipped: …' prefix", i+1, s.Note)
+		}
+	}
+	// 1 baseline + 2 post-step checks = 3; the gate stayed armed the whole
+	// run (a timeout is not a failing baseline), so every step ran its own
+	// check.
+	if calls != 3 {
+		t.Errorf("runProjectCheck calls = %d, want 3 (1 baseline + 2 post-step)", calls)
+	}
+	if n := backend.stepCount(); n != 2 {
+		t.Errorf("step sends = %d, want 2 (both steps ran)", n)
+	}
+}
+
+// TestTurnWithPlanBaselineTimeoutDisarmsGate covers the #150 review's
+// baseline blind spot: a baseline check that TIMES OUT (not fails) must
+// disable the between-step gate for the whole run, exactly like a failing
+// baseline. Without the fix, a timed-out baseline left the gate armed, so
+// every step then waited out another full check timeout just to be
+// mis-reported — a slow suite stacked one 90 s timeout on top of another.
+func TestTurnWithPlanBaselineTimeoutDisarmsGate(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. first step\n2. second step\n", // planning turn
+		"first done",                      // step 1 turn
+		"second done",                     // step 2 turn
+	)
+	cs := planTestSession(t, backend, root)
+
+	// The baseline (call 1) TIMES OUT — the same skip shape the timeout
+	// branch produces: ok=true (so a naive !ok check can't catch it),
+	// cmdLine empty (a skip never names a command — the fix), and a
+	// "check skipped: …" note. After the fix, such a baseline disarms the
+	// gate for the whole run.
+	orig := runProjectCheckStub
+	t.Cleanup(func() { runProjectCheckStub = orig })
+	var calls int
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
+		calls++
+		return "", "", true, "check skipped: go test ./... (context deadline exceeded)"
+	}
+
+	res, err := cs.TurnWithPlan(context.Background(), "multi-part task")
+	if err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true")
+	}
+	if len(res.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(res.Steps))
+	}
+	for i, s := range res.Steps {
+		if s.Status != stepDone {
+			t.Errorf("step %d status = %v, want done (a timed-out baseline must not gate the steps)", i+1, s.Status)
+		}
+		if strings.Contains(s.Note, "check passed") {
+			t.Errorf("step %d note = %q, must NOT contain 'check passed' (no check completed)", i+1, s.Note)
+		}
+		if strings.Count(s.Note, "check skipped:") != 1 {
+			t.Errorf("step %d note = %q, want exactly one 'check skipped: …' prefix", i+1, s.Note)
+		}
+	}
+	// ONLY the baseline check ran: the timed-out baseline disarmed the gate,
+	// so no per-step check ran. If the gate stayed armed (the pre-fix
+	// behavior), step 1's post-step check would be call 2 and step 2's call
+	// 3 — three calls instead of one.
+	if calls != 1 {
+		t.Errorf("runProjectCheck calls = %d, want 1 (baseline only; gate disarmed after a timed-out baseline)", calls)
+	}
+	// Both step turns ran (one planning + two steps = three requests).
+	if n := backend.stepCount(); n != 2 {
+		t.Errorf("step sends = %d, want 2 (both steps ran despite the timed-out baseline)", n)
+	}
+	if n := backend.requestCount(); n != 3 {
+		t.Errorf("requests = %d, want 3 (one planning + two step sends)", n)
 	}
 }
