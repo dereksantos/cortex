@@ -73,7 +73,7 @@ func TestSystemPromptCarriesAttribution(t *testing.T) {
 			resetPrompt(t)
 			configurePrompt(tt.cfg)
 			configureAttributionPrompt(tt.cfg, "m-code")
-			got := systemPromptContent("agents body")
+			got := systemPromptContent("AGENTS.md", "agents body")
 			if has := strings.Contains(got, "Co-Authored-By: Cortex (m-code)"); has != tt.wantTrailer {
 				t.Errorf("system prompt has trailer = %v, want %v", has, tt.wantTrailer)
 			}
@@ -83,7 +83,7 @@ func TestSystemPromptCarriesAttribution(t *testing.T) {
 			if !tt.wantTrailer && !tt.wantFooter && strings.Contains(got, "Attribution:") {
 				t.Errorf("disabled attribution still left a line in the system prompt")
 			}
-			if !strings.HasPrefix(got, SystemPrompt) || !strings.Contains(got, agentsMarker+"agents body") {
+			if !strings.HasPrefix(got, SystemPrompt) || !strings.Contains(got, agentsMarkerPrefix+"AGENTS.md)\n\nagents body") {
 				t.Errorf("attribution line must sit between the base prompt and AGENTS.md without displacing either")
 			}
 		})

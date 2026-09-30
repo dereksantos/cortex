@@ -25,9 +25,12 @@ import (
 	"github.com/dereksantos/cortex/internal/skills"
 )
 
-// agentsMarker is the exact separator systemPromptContent (session_core.go)
-// inserts between the base SystemPrompt and an injected AGENTS.md body.
-const agentsMarker = "\n\n# Project instructions (AGENTS.md)\n\n"
+// agentsMarkerPrefix is the exact prefix of the separator systemPromptContent
+// (session_core.go) inserts before the loaded instruction file's body —
+// "# Project instructions (<file>)" (#147). The full marker is
+// agentsMarkerPrefix + <file> + "\n\n"; the /context legend parses it (the
+// header's filename and the legend's detail name the same file).
+const agentsMarkerPrefix = "\n\n# Project instructions ("
 
 // cacheHitGreenPct / cacheHitYellowPct: the prefix-cache headline's hit-rate
 // color thresholds — green at/above cacheHitGreenPct, yellow at/above
@@ -229,7 +232,7 @@ func (cs *CortexSession) gridLegendLines() []string {
 	var lines []string
 
 	if t := cs.systemPromptTokens(); t > 0 {
-		lines = append(lines, gridLegendRow(glyphSystem, "", "system", t, ""))
+		lines = append(lines, gridLegendRow(glyphSystem, "", "system", t, cs.systemLegendDetail()))
 	}
 	if t := cs.outlineTokens(); t > 0 {
 		lines = append(lines, gridLegendRow(glyphOutline, blue, "outline", t, cs.outlineLegendDetail()))
@@ -249,6 +252,28 @@ func (cs *CortexSession) gridLegendLines() []string {
 	}
 
 	return lines
+}
+
+// systemLegendDetail reports which instruction file the seeded system
+// message carries (#147): the filename parsed out of the
+// "# Project instructions (<file>)" header systemPromptContent inserted
+// (agentsMarkerPrefix). "" when the system message carries no instructions
+// section (the row renders bare, as it did before #147).
+func (cs *CortexSession) systemLegendDetail() string {
+	if cs.Request == nil || len(cs.Request.Messages) == 0 {
+		return ""
+	}
+	content := cs.Request.Messages[0].Content
+	i := strings.Index(content, agentsMarkerPrefix)
+	if i < 0 {
+		return ""
+	}
+	rest := content[i+len(agentsMarkerPrefix):]
+	j := strings.IndexByte(rest, ')')
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // outlineLegendDetail reports the demoted-turn outline's entry count plus a

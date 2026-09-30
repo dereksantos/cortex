@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,7 +34,7 @@ func TestApplyProjectByNameRunsAgainstRegisteredRootFromUnrelatedCWD(t *testing.
 	elsewhere := t.TempDir()
 	t.Chdir(elsewhere)
 
-	cs := &CortexSession{Request: &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: systemPromptContent("")}}}}
+	cs := &CortexSession{Request: &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: systemPromptContent("", "")}}}}
 	if err := applyProjectByName(cs, reg, "blog"); err != nil {
 		t.Fatalf("applyProjectByName: %v", err)
 	}
@@ -62,12 +63,59 @@ func TestApplyProjectByNameRunsAgainstRegisteredRootFromUnrelatedCWD(t *testing.
 		t.Errorf("root() = %q, want %q (confinement root must follow --project, not CWD)", got, wantRoot)
 	}
 
-	wantInst := want.Instructions()
+	_, wantInst := want.Instructions()
 	if wantInst == "" {
 		t.Fatal("fixture AGENTS.md instructions unexpectedly empty")
 	}
 	if !strings.Contains(cs.Request.Messages[0].Content, wantInst) {
 		t.Errorf("system prompt does not carry the project's AGENTS.md instructions %q: got %q", wantInst, cs.Request.Messages[0].Content)
+	}
+	// #147: the section header names the loaded file.
+	if !strings.Contains(cs.Request.Messages[0].Content, "# Project instructions (AGENTS.md)") {
+		t.Errorf("system prompt section header should name AGENTS.md; got %q", cs.Request.Messages[0].Content)
+	}
+}
+
+// TestApplyProjectByNameLabelsCopilotInstructionsFromUnrelatedCWD pins the
+// fileLabel fix on the --project leg: a project whose only instruction file
+// is .github/copilot-instructions.md gets the header
+// ".github/copilot-instructions.md" — the same label the CWD leg produces
+// for the same file — even when the process runs from an unrelated
+// directory (the file is labeled relative to ws.Root, not the CWD).
+func TestApplyProjectByNameLabelsCopilotInstructionsFromUnrelatedCWD(t *testing.T) {
+	fixture := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(fixture, ".cortex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copilot := filepath.Join(fixture, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(copilot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(copilot, []byte("copilot conventions\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	regPath := filepath.Join(t.TempDir(), "projects.json")
+	reg := registry.NewAt(regPath)
+	if err := reg.Save(registry.Project{Name: "blog", Root: fixture}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	t.Chdir(t.TempDir()) // unrelated CWD
+
+	cs := &CortexSession{Request: &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: systemPromptContent("", "")}}}}
+	if err := applyProjectByName(cs, reg, "blog"); err != nil {
+		t.Fatalf("applyProjectByName: %v", err)
+	}
+
+	sys := cs.Request.Messages[0].Content
+	if !strings.Contains(sys, "copilot conventions") {
+		t.Errorf("system prompt must carry the copilot-instructions body: %q", sys)
+	}
+	if !strings.Contains(sys, "# Project instructions (.github/copilot-instructions.md)") {
+		t.Errorf("header must label the file root-relative, even from an unrelated CWD; got %q", sys)
+	}
+	if strings.Contains(sys, "# Project instructions (copilot-instructions.md)") {
+		t.Errorf("header must not drop the .github/ prefix: %q", sys)
 	}
 }
 

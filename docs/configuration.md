@@ -282,7 +282,7 @@ default to today's hardcoded value.
 | Field | Default | Meaning |
 |---|---|---|
 | `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. |
-| `max_instruction_bytes` | 16384 | `AGENTS.md` truncation cap. |
+| `max_instruction_bytes` | 16384 | Truncation cap on the seeded project-instructions file (the first present, in priority order, of `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` — see "Project instructions" below). An over-cap file is cut at this size and marked `...[<file> truncated]`. |
 | `memory_index_cap_chars` | 4000 | Truncation cap on the injected PROJECT-tier memory-note index. |
 | `user_memory_index_cap_chars` | 1500 | Truncation cap on the injected USER-tier memory-note index (`~/.cortex/memory`, shared across every project on the machine) — independent of `memory_index_cap_chars`; the user tier renders first, above it, in the turn-start injection. See `docs/cross-source-learning.md` piece 1. |
 | `capture_excerpt_cap_chars` | 280 | Truncation cap on the final-answer excerpt the journal capture records. |
@@ -326,7 +326,39 @@ config gate — every session with memory enabled gets both tiers. See
 | Field | Default | Meaning |
 |---|---|---|
 | `file` | (unset) | Path to a file that replaces the built-in base system prompt. `~` expands; a relative path resolves upward from CWD (the AGENTS.md rule, so `.cortex/prompt.md` works from any subdirectory); truncated at the instruction cap. An unreadable or whitespace-only file warns on stderr and keeps the built-in — a broken path degrades to a working agent, never a silent empty prompt. |
-| `append` | (unset) | Text appended after the base prompt and the `attribution.*` line when one is on (and before any AGENTS.md section), whether the base is built-in or file-replaced. |
+| `append` | (unset) | Text appended after the base prompt and the `attribution.*` line when one is on (and before any project-instructions section), whether the base is built-in or file-replaced. |
+
+## Project instructions (seeded from the repo)
+
+At session construction, Cortex seeds the system prompt with the repo's own
+agent-instruction file. Resolution is **priority-ordered, first match wins —
+no concatenation**: the first file present, in this order, is the one loaded
+(`agentInstructionFiles`, `cmd/cortex/config.go`):
+
+1. `AGENTS.md` — the cross-harness convention; stays first.
+2. `CLAUDE.md`
+3. `.github/copilot-instructions.md`
+
+The list is deliberately short and documented in the code: every entry is a
+file a real repo ships, and the order encodes intent (a repo with several
+still loads exactly one).
+
+Search rule: the walk starts at the working directory and goes up to the
+filesystem root — the nearest directory from the CWD upward that contains any
+candidate file wins, and within that directory the first file in the
+priority order above is the one loaded (findUp semantics with the list
+applied per level — a deeper directory's `CLAUDE.md` beats an ancestor's
+`AGENTS.md`). The loaded file is trimmed, truncated at
+`limits.max_instruction_bytes` (with a marker naming the file), and appended
+to the system prompt as a
+`# Project instructions (<file>)` section — the header names the file, and
+`/context`'s system legend row shows it, so the seed always says where it came
+from. When no candidate file exists anywhere up the chain, no section is
+added (behavior identical to the old AGENTS.md-only rule).
+
+The explicit-root leg (`--project`, serve) resolves the same list at the
+project root via `Workspace.Instructions()`; the two legs are provably
+identical for the same resolved file (`TestProjectInstructionsEquivalence`).
 
 ## `repl.*` — interactive REPL tunables
 
@@ -407,7 +439,8 @@ entirely):
   (`compactThreshold`, `main.go`; Derek's option-2 decision keeps it out of
   this config group). `0.16` (`contextPrefixHeadroom`, `config.go`) is a
   conservative constant standing in for the two zone-A pieces this section
-  doesn't configure — the system prompt (+ AGENTS.md, capped by
+  doesn't configure — the system prompt (+ the seeded project-instructions
+  file, capped by
   `limits.max_instruction_bytes`) and the memory index (capped by
   `limits.memory_index_cap_chars`) — sized against the smallest window these
   caps would plausibly still run against (`fallbackWindow`, 32768) so a
@@ -502,7 +535,8 @@ The default trailer has no email address. GitHub only credits a
 
 - **System prompt (every coder session).** When attribution is on, one line
   is added to the coder's system prompt, after the base prompt and before
-  `prompt.append` and AGENTS.md. It names the trailer (with the code model
+  `prompt.append` and the project-instructions section (AGENTS.md, or the
+  fallback files — see "Project instructions" above). It names the trailer (with the code model
   resolved at session start) and the PR footer verbatim, e.g. *Attribution:
   end every git commit message you author with the trailer line
   "Co-Authored-By: Cortex (qwen3-coder)", and end every pull request body you

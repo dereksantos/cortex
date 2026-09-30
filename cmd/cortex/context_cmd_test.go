@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func seededContextSession(t *testing.T) *CortexSession {
 		Request: &AgentRequest{
 			Model: "context-report-test-model",
 			Messages: []Message{
-				{Role: RoleSystem, Content: base + agentsMarker + agentsBody},
+				{Role: RoleSystem, Content: base + agentsMarkerPrefix + "AGENTS.md)\n\n" + agentsBody},
 			},
 		},
 		memory:           mem,
@@ -177,6 +179,82 @@ func TestContextReportOmitsUntrackedSections(t *testing.T) {
 	}
 	if !strings.Contains(got, "system") {
 		t.Errorf("contextReport() should still render the system legend row; got:\n%s", got)
+	}
+}
+
+// TestContextReportShowsLoadedInstructionFile is #147's seed-surfacing
+// check: /context's system legend row must say WHICH file the project
+// instructions came from — here CLAUDE.md (the source when no AGENTS.md
+// exists), not just "system <tokens>". The legend's detail is parsed out
+// of the same "# Project instructions (<file>)" header that names the file
+// in the system message, so the two name the same file by construction.
+func TestContextReportShowsLoadedInstructionFile(t *testing.T) {
+	cs := &CortexSession{
+		Window: 4000,
+		Request: &AgentRequest{
+			Model: "context-report-instructions-model",
+			Messages: []Message{
+				{Role: RoleSystem, Content: "You are a test agent." + agentsMarkerPrefix + "CLAUDE.md)\n\nFollow these repo rules exactly."},
+			},
+		},
+	}
+	got := stripANSI(cs.contextReport())
+
+	if !strings.Contains(got, "system") {
+		t.Fatalf("contextReport() missing the system legend row; got:\n%s", got)
+	}
+	if !strings.Contains(got, "CLAUDE.md") {
+		t.Errorf("contextReport() must name the loaded instruction file (CLAUDE.md) on the system legend row; got:\n%s", got)
+	}
+	// The system legend detail is parsed from the header, so a session
+	// whose system message carries no instructions section shows no detail
+	// (the row renders bare, as it did before #147).
+	bare := &CortexSession{
+		Window: 4000,
+		Request: &AgentRequest{
+			Model:    "bare-model",
+			Messages: []Message{{Role: RoleSystem, Content: "just a system prompt"}},
+		},
+	}
+	if detail := bare.systemLegendDetail(); detail != "" {
+		t.Errorf("systemLegendDetail() on a section-less system message = %q, want \"\"", detail)
+	}
+}
+
+// TestSystemLegendDetailCoversEveryCandidateFile pins that the legend
+// parser round-trips each candidate filename through the header
+// systemPromptContent builds — the label and the legend detail always name
+// the same file for every agentInstructionFiles entry. The CWD is the root
+// (no .cortex anywhere up the temp tree, so WorkspaceFromCWD falls back to
+// the CWD): a file AT the root labels by its basename, and the
+// .github/copilot-instructions.md labels by its root-relative path.
+func TestSystemLegendDetailCoversEveryCandidateFile(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if found := findUp(".cortex"); found != "" {
+		t.Skipf("test environment has a .cortex dir up the tree (%q) — root fallback unobservable", found)
+	}
+	for _, rel := range agentInstructionFiles {
+		t.Run(rel, func(t *testing.T) {
+			label := fileLabel(root, filepath.Join(root, rel))
+			wantLabel := filepath.Base(rel)
+			if strings.Contains(rel, string(os.PathSeparator)) {
+				wantLabel = rel // a file UNDER the root labels by its relative path
+			}
+			if label != wantLabel {
+				t.Fatalf("fileLabel(%q) = %q, want %q", rel, label, wantLabel)
+			}
+			cs := &CortexSession{
+				Window: 4000,
+				Request: &AgentRequest{
+					Model:    "m",
+					Messages: []Message{{Role: RoleSystem, Content: "base" + agentsMarkerPrefix + label + ")\n\nbody"}},
+				},
+			}
+			if got := cs.systemLegendDetail(); got != label {
+				t.Errorf("systemLegendDetail() = %q, want %q", got, label)
+			}
+		})
 	}
 }
 

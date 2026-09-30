@@ -21,9 +21,10 @@ import (
 type CortexArgs []string
 
 func (a CortexArgs) Request() *AgentRequest {
+	path, instructions := projectInstructions()
 	return &AgentRequest{
 		Model:       defaultModel,
-		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(projectInstructions())}},
+		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(fileLabel(WorkspaceFromCWD().Root, path), instructions)}},
 		Temperature: defaultTemperature,
 		Tools:       toolSet,
 		MaxTokens:   codeMaxOutputTokens,
@@ -34,12 +35,15 @@ func (a CortexArgs) Request() *AgentRequest {
 // (built-in SystemPrompt, or prompt.file's replacement — promptBase, set by
 // configurePrompt), then the attribution line when attribution is on
 // (promptAttribution, set by configureAttributionPrompt), then any
-// prompt.append text, then an optional "# Project instructions (AGENTS.md)"
-// section when instructions is non-empty. Shared by CortexArgs.Request()
-// (CWD-implicit, via projectInstructions()) and applyProjectByName
-// (project_workspace.go, M3.5's --project, via Workspace.Instructions()) so
-// the two stay provably identical modulo their instructions source.
-func systemPromptContent(instructions string) string {
+// prompt.append text, then an optional "# Project instructions (<file>)"
+// section when instructions is non-empty — <file> (label) names which
+// instruction file was loaded (AGENTS.md, CLAUDE.md, .github/
+// copilot-instructions.md, #147) so the seed shows its own provenance.
+// Shared by CortexArgs.Request() (CWD-implicit, via
+// projectInstructions()) and applyProjectByName (project_workspace.go,
+// M3.5's --project, via Workspace.Instructions()) so the two stay
+// provably identical modulo their instructions source.
+func systemPromptContent(label, instructions string) string {
 	content := promptBase
 	if promptAttribution != "" {
 		content += "\n\n" + promptAttribution
@@ -48,7 +52,7 @@ func systemPromptContent(instructions string) string {
 		content += "\n\n# Additional instructions\n\n" + promptAppend
 	}
 	if instructions != "" {
-		content += "\n\n# Project instructions (AGENTS.md)\n\n" + instructions
+		content += "\n\n# Project instructions (" + label + ")\n\n" + instructions
 	}
 	return content
 }
