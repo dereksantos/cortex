@@ -266,6 +266,8 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 - Table-driven tests with `t.Run` subtests.
 - Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
 
+Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
+
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,
 and the test suite green.

@@ -139,6 +139,17 @@ type CortexSession struct {
 	testwatchBash      map[string]testguard.Baseline
 	testwatchBashArmed bool
 
+	// testwatchScratchBefore is the leftover-debug arm's (issue #154)
+	// PRE-bash baseline of scratch-named paths: the set of workdir-relative
+	// scratch-named files that EXISTED before this turn's first bash call.
+	// Armed by the same armTestwatch walk as the test-file baselines (before
+	// the command runs); sweepScratchFiles then records only scratch files
+	// NEW since this baseline — a pre-existing scratch file (testdata/foo.bak,
+	// scripts/tmp_setup.sh, ...) is already in the baseline, so it is not
+	// snapshotted and never gets a false "scratch file left behind" receipt
+	// on every turn that runs bash. Dropped with the snapshot (testwatchDrop).
+	testwatchScratchBefore map[string]bool
+
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to
 	// MaybeCaptureScanRoots (scanroots.go) treats that reply as the

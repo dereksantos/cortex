@@ -52,6 +52,16 @@ type TurnResult struct {
 	// the request before the final answer (see turn's finalize hook); this
 	// field is the durable, always-present half of that.
 	TestReceipt string
+	// DebugReceipt is the harness's own "leftover debug: …" line for this
+	// turn (issue #154, testwatch.go's ScanDebug): non-empty when the turn
+	// added debug prints to non-test production files or left scratch-named
+	// files in the workspace. It rides the result the same way TestReceipt
+	// does, so the CALLER of Turn can surface it to a human (and a headless
+	// driver) — the journal capture records it but reaches no one reading
+	// the turn. It is surfaced to the model in the same finalize note as
+	// TestReceipt (turn's finalize hook), so the model's final answer
+	// accounts for the leftover debug too.
+	DebugReceipt string
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -245,14 +255,17 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// self-dev driver — can print it to a human. Compute it here, after
 	// runLoop has settled every tool call, so the before/after is final;
 	// captureTurn re-derives it (cheap, idempotent) for the journal record.
-	testReceipt := cs.testwatchReceipt()
+	// Issue #154: the "leftover debug" receipt is computed the same way and
+	// surfaced the same way — TurnResult.DebugReceipt.
+	testReceipt := cs.testwatchTestsReceipt()
+	debugReceipt := cs.testwatchDebugReceipt()
 
 	if err != nil {
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
 	}
 
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, nil
 }

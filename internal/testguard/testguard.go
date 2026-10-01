@@ -126,10 +126,15 @@ func isTestDefinitionLine(path, line string) bool {
 }
 
 // FilePair is one file's before/after content for the turn being scanned.
-// An empty After marks a deleted file.
+// An empty After marks a deleted file. Created marks a file the TURN created
+// (it did not exist before the turn) — the harness sets it when it knows;
+// ScanDebug only fires its scratch-file signal on files it was created by
+// the turn, so a pre-existing scratch-named file the turn merely edited or
+// deleted is not reported as "left behind".
 type FilePair struct {
-	Before string
-	After  string
+	Before  string
+	After   string
+	Created bool
 }
 
 // Baseline is the compact per-file before-side for a file the harness

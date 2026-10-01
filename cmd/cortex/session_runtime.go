@@ -211,7 +211,22 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 	// FinalizeHook) so its final answer accounts for it — three surfaces,
 	// one fact. Best-effort: an empty snapshot (no mutating calls, or
 	// nothing test-relevant) adds nothing.
-	if receipt := cs.testwatchReceipt(); receipt != "" {
+	if receipt := cs.testwatchTestsReceipt(); receipt != "" {
+		if outcome == "" {
+			outcome = receipt
+		} else {
+			outcome += " | " + receipt
+		}
+	}
+	// Issue #154: a "leftover debug: …" line — the harness's own view of
+	// debug prints the turn added to production files and scratch files it
+	// left behind (testwatch.go's ScanDebug). It rides the SAME capture
+	// summary as the tests line (a second fact, joined by " | "), is
+	// surfaced on TurnResult.DebugReceipt (turn.go), and is folded into the
+	// same finalize note (loop.go's FinalizeHook) — three surfaces, one
+	// fact. Best-effort: an empty snapshot (no mutating calls, or nothing
+	// debug-shaped added) adds nothing.
+	if receipt := cs.testwatchDebugReceipt(); receipt != "" {
 		if outcome == "" {
 			outcome = receipt
 		} else {
