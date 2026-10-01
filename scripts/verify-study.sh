@@ -153,9 +153,32 @@ import_only "internal/outline imports no cmd/cortex" "$MOD/internal/outline" "^$
 ############################################################################
 hdr "6. Build / vet / tests + eval gate (the green-at-every-phase invariant)"
 ############################################################################
-if go build ./... >/dev/null 2>&1; then ok "go build ./..."; else no "go build ./..." "see: go build ./..."; fi
-if go vet ./...   >/dev/null 2>&1; then ok "go vet ./...";   else no "go vet ./..."   "see: go vet ./...";   fi
-if go test ./...  >/dev/null 2>&1; then ok "go test ./...";  else no "go test ./..."  "see: go test ./...";  fi
+# run_gate runs a go gate (build/vet/test) and, on failure, prints the
+# failure instead of hiding it (issue #124: `go test ./... >/dev/null 2>&1`
+# used to swallow the failing test's name, so a flake showed up in CI as an
+# undiagnosable "FAIL go test ./..."). Each gate's output is captured to a
+# temp file; on a non-zero exit the failing test names (the `--- FAIL` lines,
+# plus the package-level FAIL summary) are printed first, followed by a
+# bounded tail of the file for anything those lines don't explain. The file
+# is removed on success and on script exit either way.
+gate_output=""
+cleanup_gate_output() { [ -n "$gate_output" ] && [ -f "$gate_output" ] && rm -f "$gate_output"; }
+trap cleanup_gate_output EXIT
+run_gate() { # label  args...
+  local label=$1; shift
+  gate_output=$(mktemp) || { no "$label" "mktemp failed"; return 1; }
+  "$@" >"$gate_output" 2>&1
+  local rc=$?
+  if [ $rc -eq 0 ]; then rm -f "$gate_output"; gate_output=""; ok "$label"; return; fi
+  no "$label" "exit $rc — failing tests:"
+  grep -E '^(--- )?FAIL' "$gate_output" | sed 's/^/       /'
+  tail -n 25 "$gate_output" | sed 's/^/       /'
+  rm -f "$gate_output"
+  gate_output=""
+}
+run_gate "go build ./..." go build ./...
+run_gate "go vet ./..."   go vet ./...
+run_gate "go test ./..."  go test ./...
 # ø is a HARD gate, not a report: study-eval must pin T (every probe passes) and
 # exit non-zero otherwise, so an autonomous run reads pass/fail from the exit code.
 present "study-eval pins T (all probes pass)" 'passes != total'
