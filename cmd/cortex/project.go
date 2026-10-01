@@ -20,7 +20,7 @@ import (
 
 // ErrProjectUsage is returned (and printed) when `cortex project` is
 // called with a missing or malformed subcommand/argument list.
-var ErrProjectUsage = errors.New("usage: cortex project <add <name> <root>|list|remove <name>>")
+var ErrProjectUsage = errors.New("usage: cortex project <add <name> <root>|list|remove <name>|commands|trust <add|remove|list> ...>")
 
 // addProject resolves root to an absolute path (relative to the current
 // working directory, matching how a user would type it at a shell) and
@@ -111,6 +111,17 @@ func runProjectCLI(args []string) {
 			os.Exit(1)
 		}
 		fmt.Print(renderProjectList(projects))
+	case "commands":
+		// `cortex project commands [--json] [--project <name>]` (issue #129
+		// step 5). Resolves its own registry lookup for the --project leg,
+		// so the `reg` handle opened above is unused for this subcommand.
+		runProjectCommandsCLI(args[1:])
+	case "trust":
+		// `cortex project trust <add <root>|remove <root>|list>` (issue
+		// #129 round 7): the operator's persisted per-workspace trust
+		// decision for code-executing project commands — user config only,
+		// never the repository's own config.
+		runProjectTrustCLI(args[1:])
 	case "remove":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "project:", ErrProjectUsage)

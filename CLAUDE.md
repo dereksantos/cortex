@@ -100,6 +100,7 @@ Three capabilities distinguish it:
 | `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19) |
 | `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
 | `cortex project <add\|list\|remove>` | Manage the project registry |
+| `cortex project commands [--json] [--project <name>]` | Show the project's resolved format/lint/test/build commands (discovery + declarations; `--json` for the machine-readable shape) |
 | `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
@@ -173,6 +174,12 @@ the model-driven memory tools
   redirects to `study`; large Go files return a declaration skeleton.
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits.
+- After `write_file`/`edit_file` lands, a post-edit hook runs the project's
+  own format/lint on the file just touched — only allowlisted per-file (or
+  per-package, `{dir}`) commands, each with a 10s budget — and appends a
+  note (what ran, what it reported) to the result; the note never fails the
+  edit. Commands are declared in `project.commands` or AGENTS.md `## Commands`
+  (docs/configuration.md) and shown by `cortex project commands`.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked.

@@ -677,9 +677,9 @@ func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, erro
 	case FunctionReadFile:
 		return readFile(tc, deps)
 	case FunctionWriteFile:
-		return writeFile(tc, deps)
+		return writeFile(ctx, tc, deps)
 	case FunctionEditFile:
-		return editFile(tc, deps)
+		return editFile(ctx, tc, deps)
 	case FunctionOutline:
 		return outlineTool(tc, deps)
 	case FunctionGrep:
@@ -1093,7 +1093,7 @@ func fileSkeleton(path string) string {
 
 // --- write_file ---------------------------------------------------------
 
-func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
+func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -1122,7 +1122,16 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if diffable {
 		printFileDiff(deps, before, content)
 	}
-	return resultWithWarning(fmt.Sprintf("wrote %d bytes to %s", len(content), path), largeDeletionWarning(warnBefore, content)), nil
+	result := resultWithWarning(fmt.Sprintf("wrote %d bytes to %s", len(content), path), largeDeletionWarning(warnBefore, content))
+	// Post-edit hook (issue #129): run the project's format/lint on the file
+	// just written. Never fails the write — it only appends a note. The note
+	// goes last: the tool's own observation about the change it applied (the
+	// #141 large-deletion NOTE) comes first, then what the project's commands
+	// said about the result.
+	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps)); note != "" {
+		result += "\n" + note
+	}
+	return result, nil
 }
 
 // deleteWarnBefore reads a file's current content solely for the #141
@@ -1185,7 +1194,7 @@ type editOp struct {
 // whitespace-tolerant (so a model that mis-indents old_string still lands the
 // edit). replace_all relaxes uniqueness for renames; an `edits` array applies
 // several changes atomically — if any fails the file is left untouched.
-func editFile(tc ToolCall, deps ToolDeps) (string, error) {
+func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	var a struct {
 		Path       string   `json:"path"`
 		OldString  string   `json:"old_string"`
@@ -1258,10 +1267,21 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// just as a diff on a terminal a headless run has. Both sides are already
 	// in memory here, so the check costs nothing.
 	warn := largeDeletionWarning(string(data), content)
+	editsNoun := ""
 	if multi {
-		return resultWithWarning(editResultMessage(a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement"), string(data), content), warn), nil
+		editsNoun = countNoun(len(edits), "edit")
 	}
-	return resultWithWarning(editResultMessage(a.Path, "", countNoun(total, "replacement"), string(data), content), warn), nil
+	result := resultWithWarning(editResultMessage(a.Path, editsNoun, countNoun(total, "replacement"), string(data), content), warn)
+	// Post-edit hook (issue #129): run the project's format/lint on the file
+	// just edited. Never fails the edit — it only appends a note. The note
+	// goes last: the tool's own observations about the change it applied
+	// (the #153 line delta and removal WARNING, then the #141 large-deletion
+	// NOTE) come first, then what the project's commands said about the
+	// result.
+	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps)); note != "" {
+		result += "\n" + note
+	}
+	return result, nil
 }
 
 // editResultMessage renders the model-facing result for a landed edit. Beyond

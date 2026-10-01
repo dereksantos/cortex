@@ -15,6 +15,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/loops"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/internal/userhome"
@@ -477,6 +478,14 @@ type Config struct {
 	// authors (docs/configuration.md's `attribution.*` section): a commit
 	// trailer, and a PR-body footer the system prompt asks the agent to add.
 	Attribution AttributionConfig `json:"attribution"`
+
+	// Project holds project-scoped declarations (issue #129). Commands
+	// declares the project's own format/lint/test/build commands and
+	// OVERRIDES discovery from manifest files, field by field — see
+	// internal/projectcmd.Resolve. A `## Commands` section in AGENTS.md
+	// declares the same keys and sits below this one (config beats
+	// AGENTS.md beats discovery).
+	Project ProjectConfig `json:"project"`
 }
 
 // AttributionConfig collects configurable attribution markers for Cortex-authored
@@ -497,6 +506,120 @@ type AttributionConfig struct {
 	// IncludeModel controls "<model>" substitution in the commit trailer.
 	// Nil means true; false strips " (<model>)" from the template.
 	IncludeModel *bool `json:"include_model"`
+}
+
+// ProjectConfig declares project-level command overrides (issue #129).
+// Every key optional: a field that is absent leaves that role to
+// discovery (or to the AGENTS.md declaration below it).
+type ProjectConfig struct {
+	// Commands maps role ("format", "lint", "test", "build") to the
+	// shell command line for that role. A command containing "{file}"
+	// is per-file: the caller substitutes the file it just touched; a
+	// command containing "{dir}" is per-package: the caller substitutes
+	// the file's package directory. Unknown keys are ignored.
+	Commands map[string]string `json:"commands"`
+	// Trusted is the per-workspace trust list (issue #129's trust gate):
+	// workspace root directories the OPERATOR has decided may run
+	// code-executing project commands (cargo clippy, eslint, npm run …) in
+	// the post-edit hook. It is a USER decision — read from the USER-level
+	// config only. mergeConfig ignores the project-level (over) copy, so a
+	// repository can never set trust for itself: the project's own
+	// .cortex/config.json, and anything else the repo ships (AGENTS.md has
+	// no such key), cannot put a workspace on its own trust list. Absent
+	// or empty means no workspace is trusted — the safe default.
+	Trusted []string `json:"trusted"`
+}
+
+// DeclaredProjectCommands projects the config's declared commands onto
+// projectcmd's typed shape: unknown role keys are dropped, blank values
+// ignored, so the declaration semantics live in one place
+// (projectcmd.Declared).
+func (c *Config) DeclaredProjectCommands() projectcmd.Declared {
+	out := projectcmd.Declared{}
+	if c == nil {
+		return out
+	}
+	for key, cmd := range c.Project.Commands {
+		trimmed := strings.TrimSpace(cmd)
+		if trimmed == "" {
+			continue // a blank value is a declaration of nothing
+		}
+		if role := projectcmd.Role(strings.ToLower(strings.TrimSpace(key))); projectcmd.RoleKnown(role) {
+			out[role] = trimmed
+		}
+	}
+	return out
+}
+
+// WorkspaceTrusted reports whether the workspace rooted at root is on the
+// USER's trust list (issue #129's gate for code-executing project
+// commands). The authoritative source is the user-level config file read
+// DIRECTLY (trustFromUserConfig), so the repo-claim vector cannot exist in
+// the first place: a project's own .cortex/config.json is never on the read
+// path, regardless of what the merged config carries — the repo is the
+// untrusted party and cannot mark itself trusted. (The merged config's
+// Project.Trusted is the same user-level list, since mergeProject drops the
+// project-level copy.) Matching is by absolute, slash-normalized
+// path (symlinks resolved when possible, so a home directory reached via a
+// symlink still matches the entry the operator typed), with an exact
+// string compare as the last resort. An empty root or a nil/untrusted config
+// returns false — untrusted is the safe default.
+func (c *Config) WorkspaceTrusted(root string) bool {
+	if c == nil || root == "" {
+		return false
+	}
+	want := normalizeTrustPath(root)
+	for _, e := range c.TrustedList() {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if e == root { // fast path: the entry is already identical
+			return true
+		}
+		if normalizeTrustPath(e) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TrustedList returns the trust list in effect for this config: the
+// USER-level config file's project.trusted (trustFromUserConfig) — the only
+// source authority (the repository is the untrusted party; see
+// WorkspaceTrusted's comment). A merged config that was built from an
+// ABSENT or MALFORMED user config carries the repo's claim in
+// Project.Trusted (loadMergedConfig's fallback), and the direct user read
+// overrides it — which for the absent/malformed user cases is exactly
+// "no entries": untrusted. A nil config, or one that carries no list (a
+// controlled *Config, e.g. in tests), falls back to the direct read too,
+// so the accessor can never be pointed at a stale or repo-written field.
+func (c *Config) TrustedList() []string {
+	if c != nil && len(c.Project.Trusted) > 0 {
+		return trustFromUserConfig(userConfigPath())
+	}
+	return trustFromUserConfig(userConfigPath())
+}
+
+// normalizeTrustPath canonicalizes a workspace path for trust matching:
+// absolute and symlinks resolved (EvalSymlinks — /home/alias and the real
+// directory must compare equal), with a trailing slash removed (an operator
+// may type a root with a trailing slash; the workspace root is stored
+// without one). filepath.Clean is NOT used: it drops the trailing slash,
+// and an exact string compare against the entry is the first compare tried
+// anyway — Clean would make a typed trailing-slash entry never match. A
+// path that cannot be canonicalized (it doesn't exist yet, or an error
+// mid-resolution) falls back to abs + trailing-slash trim: still a fair
+// compare, just without symlink resolution.
+func normalizeTrustPath(p string) string {
+	base := strings.TrimSuffix(p, "/")
+	if abs, err := filepath.Abs(base); err == nil {
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			return real
+		}
+		return strings.TrimSuffix(abs, "/")
+	}
+	return base
 }
 
 // SkillsConfig collects Agent Skills discovery tunables
@@ -913,6 +1036,9 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	return spec
 }
 
+// findUp walks upward from the process CWD looking for rel (a name or a
+// relative path like ".cortex/config.json") and returns the first
+// existing match, or "" when the filesystem root is reached.
 func findUp(rel string) string {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -1063,6 +1189,12 @@ func LoadConfig() *Config {
 	return loadMergedConfig(userConfigPath(), findConfigPath())
 }
 
+// loadMergedConfig layers user config under project config
+// (field-by-field; a missing file is an absent layer). AGENTS.md is NOT
+// read here — the AGENTS.md `## Commands` declaration is parsed at
+// resolution time (session_core.go's resolveProjectCommands, from the
+// workspace root), so there is exactly one parsing path for it (issue
+// #129): config commands beat AGENTS.md commands, which beat discovery.
 func loadMergedConfig(userPath, projectPath string) *Config {
 	user := readConfigFile(userPath)
 	project := readConfigFile(projectPath)
@@ -1074,6 +1206,34 @@ func loadMergedConfig(userPath, projectPath string) *Config {
 	default:
 		return mergeConfig(user, project)
 	}
+}
+
+// trustFromUserConfig reads the trust list straight from the USER-level
+// config — the layer a repository can never write (issue #129's trust
+// gate). It deliberately does NOT go through loadMergedConfig/readConfigFile:
+// those treat a malformed file as "absent" and fall back to the layer below
+// (the project's own config), and loadMergedConfig with no user config at
+// all returns the project config verbatim — either fallback would let a
+// repo shipping a .cortex/config.json with its own root in project.trusted
+// mark itself trusted. A user config that is missing or unreadable yields
+// no entries (the safe default: nothing trusted). A malformed user config
+// yields a warning and no entries: it CANNOT degrade into the repo's list,
+// and the repo list is never read — the operator who broke their user
+// config is not silently untrusted-and-then-retrusted by the repo.
+func trustFromUserConfig(userPath string) []string {
+	if userPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		return nil
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "cortex: %s: ignoring malformed config: %v\n", userPath, err)
+		return nil
+	}
+	return cfg.Project.Trusted
 }
 
 func readConfigFile(path string) *Config {
@@ -1253,7 +1413,34 @@ func mergeConfig(base, over *Config) *Config {
 	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
 	out.Skills = mergeSkills(base.Skills, over.Skills)
 	out.Attribution = mergeAttribution(base.Attribution, over.Attribution)
+	out.Project = mergeProject(base.Project, over.Project)
 	return &out
+}
+
+// mergeProject threads project-level declarations over user-level ones,
+// field-by-field like every other section: a key the project config
+// names wins (a blank value still shadows the user-level key for that
+// role), keys it doesn't name inherit. DeclaredProjectCommands then
+// reads blanks as "not declared".
+//
+// EXCEPT project.trusted: it is a USER decision (issue #129) and the
+// project-level (over) copy is ignored — the repository is the untrusted
+// party and must not be able to mark itself trusted. Only the user-level
+// config's list survives the merge.
+func mergeProject(base, over ProjectConfig) ProjectConfig {
+	out := base
+	if len(over.Commands) > 0 {
+		cmds := map[string]string{}
+		for k, v := range base.Commands {
+			cmds[k] = v
+		}
+		for k, v := range over.Commands {
+			cmds[k] = v
+		}
+		out.Commands = cmds
+	}
+	out.Trusted = base.Trusted
+	return out
 }
 
 // mergeIntField overrides base with over when over is non-zero — the shared

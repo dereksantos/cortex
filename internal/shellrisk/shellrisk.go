@@ -62,6 +62,43 @@ type Verdict struct {
 	Level  Level
 	Reason string
 	Tier   string // "deny-floor" | "safe-path" | "classified" | "fail-closed"
+	// ProjectCommand is the allowlist tier of a Safe project-command
+	// verdict (TierInert / TierCode) — empty (NoTier) for every other
+	// verdict. It is DATA, not implied by the command's name: the post-edit
+	// hook uses it to split auto-run (inert) from trust-gated (code).
+	ProjectCommand ProjectCommandTier
+}
+
+// ProjectCommandTier records whether an allowlisted project command
+// executes repository code — the two-tier split the post-edit hook gates on
+// (issue #129): inert tools may auto-run on an untrusted workspace,
+// code-executing tools only on a trusted one.
+type ProjectCommandTier int
+
+const (
+	// NoTier: the verdict is not a Safe project-command allowlist verdict.
+	NoTier ProjectCommandTier = iota
+	// TierInert: the tool does not execute repository code (gofmt, rustfmt,
+	// ruff, black, plain go vet/fmt) — auto-run is safe on any workspace.
+	TierInert
+	// TierCode: the tool executes repository code by design — it compiles
+	// the crate (cargo clippy: build.rs, proc macros), loads config written
+	// in a programming language (eslint/prettier's JS config), or runs a
+	// script (npm run …, npx eslint/prettier). Runs only on a trusted
+	// workspace.
+	TierCode
+)
+
+// String names the tier for reports and notes.
+func (t ProjectCommandTier) String() string {
+	switch t {
+	case TierInert:
+		return "inert"
+	case TierCode:
+		return "runs repo code"
+	default:
+		return "n/a"
+	}
 }
 
 // ClassifyFn is the tier-3 gray-zone classifier. It returns Safe or Risky

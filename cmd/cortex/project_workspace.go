@@ -54,6 +54,10 @@ func applyProjectByName(cs *CortexSession, reg registry.Registry, name string) e
 	}
 	cs.workspace = ws
 	cs.deleteRoot = ws.Root
+	// Re-resolve the project command set (issue #129) against the new root —
+	// discovery and the AGENTS.md `## Commands` section belong to the project
+	// we're switching to, not the CWD-implicit default.
+	cs.projectCommands = resolveProjectCommands(ws.Root, cs.Config)
 	if len(cs.Request.Messages) > 0 && cs.Request.Messages[0].Role == RoleSystem {
 		path, instructions := ws.Instructions()
 		cs.Request.Messages[0].Content = systemPromptContent(fileLabel(ws.Root, path), instructions)

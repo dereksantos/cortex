@@ -13,11 +13,34 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/testguard"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
+
+// resolveProjectCommands computes a workspace's resolved command set
+// (issue #129): discovery from the root's manifests, with the config's
+// project.commands declarations and the root's AGENTS.md `## Commands`
+// section overriding it field-by-field (config > AGENTS.md > discovery).
+// It is the ONE parsing path for the AGENTS.md `## Commands` declaration:
+// read from the workspace root directly, so the hook works for a
+// CWD-implicit project with no config file. It never fails: an
+// undetectable root or unreadable manifest degrades to an empty set,
+// which the post-edit hook treats as "no hook".
+func resolveProjectCommands(root string, cfg *Config) projectcmd.Commands {
+	discovered, err := projectcmd.Discover(root)
+	if err != nil {
+		return projectcmd.Commands{}
+	}
+	declared := projectcmd.Declared{}
+	if cfg != nil {
+		declared = cfg.DeclaredProjectCommands()
+	}
+	agents := projectcmd.ParseAgentsCommands(readInstructions(filepath.Join(root, "AGENTS.md")))
+	return projectcmd.Resolve(discovered, declared, agents)
+}
 
 type CortexArgs []string
 
@@ -75,15 +98,21 @@ type CortexSession struct {
 	deadModels map[string]modelErrClass
 	// healList is the healing ladder's catalog fetch, injectable for tests;
 	// nil means liveOpenRouterListModels (the production default).
-	healList      listModelsFn
-	Config        *Config
-	workspace     *Workspace
-	deleteRoot    string
-	allowDelete   bool
-	quiet         bool
-	confirmRisky  func(question string) bool
-	classifyShell shellrisk.ClassifyFn
-	turnIntent    string
+	healList  listModelsFn
+	Config    *Config
+	workspace *Workspace
+	// projectCommands is the resolved project command set (issue #129) —
+	// discovery from the workspace's manifests, overridden by the config's
+	// project.commands declarations and the AGENTS.md `## Commands` section.
+	// Computed once at session construction / project targeting; nil-safety
+	// means an empty value (no manifest, no declarations) is a no-op hook.
+	projectCommands projectcmd.Commands
+	deleteRoot      string
+	allowDelete     bool
+	quiet           bool
+	confirmRisky    func(question string) bool
+	classifyShell   shellrisk.ClassifyFn
+	turnIntent      string
 	// onThinking, when set, is invoked with active=true on the first
 	// reasoning delta of a model call and active=false once its answer
 	// content starts (or the call ends without one) — the served-session SSE
@@ -345,16 +374,17 @@ func NewCortexSession() *CortexSession {
 	}
 
 	cs := &CortexSession{
-		Args:         &args,
-		Request:      req,
-		Config:       cfg,
-		workspace:    workspace,
-		Window:       code.Window,
-		Study:        study,
-		Fleet:        fleet,
-		deleteRoot:   deleteRoot,
-		allowDelete:  allowDelete,
-		sessionStart: time.Now(),
+		Args:            &args,
+		Request:         req,
+		Config:          cfg,
+		workspace:       workspace,
+		Window:          code.Window,
+		Study:           study,
+		Fleet:           fleet,
+		deleteRoot:      deleteRoot,
+		allowDelete:     allowDelete,
+		projectCommands: resolveProjectCommands(workspace.Root, cfg),
+		sessionStart:    time.Now(),
 	}
 	cs.ws = cs.newWorkingSet(1)
 	// Strip declarations for every IsToolEnabled-gated tool that config

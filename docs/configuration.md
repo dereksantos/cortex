@@ -3,7 +3,8 @@
 The one page for configuring `cortex`: where config lives, what a minimal
 setup looks like, what the zero-config default does, every `tools.*` gate
 and numeric cap, every `models.<role>`/`subagents`/`limits`/`network`/
-`serve`/`repl`/`discord`/`skills` field, and every environment variable that
+`serve`/`repl`/`discord`/`skills`/`project` field, and every environment
+variable that
 changes behavior. Everything below is verified against `cmd/cortex/config.go` and
 the code that reads each setting — no aspirational fields. Every field on
 this page is optional; a config that never mentions a section behaves
@@ -579,6 +580,83 @@ Loop firings record whether the commit they made carried the trailer, as
 `attributed` on the `loop.run` journal event (omitted when false or when the
 firing made no commit). Commits from `cortex change commit`, Discord
 checkpoints and the `bash` tool are not journaled with an attribution flag.
+
+## `project.commands` — project's own format/lint/test/build commands
+
+```json
+{
+  "project": {
+    "commands": {
+      "format": "custom-fmt -w {file}",
+      "test": "go test -race ./..."
+    }
+  }
+}
+```
+
+Keys are the four command roles `format`, `lint`, `test`, `build`; each
+value is the shell command line for that role. Unknown keys and blank
+values are ignored. A command carrying the `{file}` placeholder is
+per-file: the post-edit hook (below) substitutes the file just written.
+A command carrying `{dir}` is per-package: the hook substitutes the
+file's `"./"`-prefixed package directory, relative to the project root
+(`"./"` for a root-level file) — the correct unit for cross-file tools
+(`go vet` type-checks a whole package, so `go vet {dir}` never reports
+spurious `undefined:` for a symbol defined in a sibling file). Commands
+without either placeholder apply to the whole project and are reported
+but never auto-run per edit.
+
+The same keys can be declared in the project's `AGENTS.md` under a
+`## Commands` section (the cross-harness convention):
+
+```markdown
+## Commands
+
+- format: custom-fmt -w {file}
+- lint: golangci-lint run
+```
+
+Only list items shaped `- <role>: <command>` in the LAST `## Commands`
+section are read (roles case-insensitive, limited to the four roles);
+the rest of the file is untouched. Precedence is field-by-field:
+**config.json beats AGENTS.md, which beats discovery** — the manifests
+(`go.mod` → `gofmt -w {file}` / `go vet {dir}` / `go test ./...` /
+`go build ./...`; `package.json` scripts — reported as their runnable npm
+form, `npm run <script>` (or the bare `npm test` for the test script),
+because a script body like `tsc -p tsconfig.json` only runs inside npm,
+which puts node_modules/.bin on PATH and runs pre/post hooks — or
+prettier/eslint deps; `pyproject.toml`'s `[tool.ruff]`/`[tool.black]` +
+pytest; `Cargo.toml`; make targets named format/lint/test/build). Resolution happens once per
+session in `resolveProjectCommands` (`cmd/cortex/session_core.go`), which
+reads the workspace root's `AGENTS.md` directly — the single parsing
+path for that section. A user-level `project.commands` entry beats a
+project-level AGENTS.md entry for the same role, like every other
+field-by-field merge.
+
+**The post-edit hook.** After `write_file`/`edit_file` lands, the session
+runs the project's format command — and, if declared, its per-file or
+per-package lint — on the file just touched, so an unformatted or
+broken file never reaches review. Only a command that (a) passes the
+format/lint allowlist (`internal/shellrisk`'s
+`AllowlistProjectCommand` — a recognized single-invocation tool, no shell
+control), (b) is per-file or per-package, and (c) applies to the file's
+extension (a manifest-set like gofmt's `.go`; a declaration or script
+with no recognized toolchain applies to all files) is run, and it runs
+as a plain argv — the template is split once and `{file}`/`{dir}` are
+each substituted as a single argument, exec'd directly with no shell,
+so a path is always one inert argument. Each command gets a 10s budget;
+a timeout, a non-zero exit, or a lint finding is folded into the tool
+result as a note, appended after the tool's own observations about the
+change (`edit_file`'s line delta and removal warning, and the
+large-deletion note either tool adds). The hook never fails the edit — the result of the
+write stands regardless.
+
+**Inspecting the resolved set:** `cortex project commands` prints the
+resolved format/lint/test/build commands with their provenance
+(manifest name = discovered; `config.json` / `AGENTS.md` = declared),
+or `--json` for the same data as a JSON document; `--project <name>`
+targets a registered project (from the registry) instead of the
+CWD-derived workspace root — the same pair the hook uses in a session.
 
 ## Validation
 
