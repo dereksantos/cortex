@@ -317,18 +317,6 @@ func TestDefaultPromptEncodesDebugGuidance(t *testing.T) {
 // rewrite that moves the principle into a different section (or a different
 // prompt slot) fails here, even if the wording survives.
 func TestDefaultPromptEncodesDebugWorkingStyle(t *testing.T) {
-	lower := strings.ToLower(SystemPrompt)
-	for _, phrase := range []string{
-		"t.Fatal", // check every error in test/fixture setup
-		"fixture", // confirm the fixture exists first
-		"t.Logf",  // debug with t.Logf in the real package
-		"scratch", // never copy production code into scratch modules
-		"debug",   // never leave DEBUG prints in shipped code
-	} {
-		if !strings.Contains(lower, strings.ToLower(phrase)) {
-			t.Errorf("built-in prompt no longer encodes the debugging working-style principle (missing %q)", phrase)
-		}
-	}
 	// The principle must live in the "# How you work" block (before "# How
 	// you communicate"), matching its position after "Test integrity".
 	if i := strings.Index(SystemPrompt, debugWorkingStylePrinciple); i < 0 {

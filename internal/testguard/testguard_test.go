@@ -377,11 +377,20 @@ func TestIsDebugPrintLine(t *testing.T) {
 		{"js debug marker", "src/auth.js", "  console.log(\"DEBUG: token\", tok)", true},
 		{"go debug_ call", "pkg/xx/repro.go", "\tdebug_dump(state)", true},
 		{"go dbg_ call", "pkg/xx/repro.go", "\tdbg_dump(state)", true},
-		// Go bare print/log calls — a deliberate write in a non-test file.
+		// Go bare debug prints — deliberate writes in a non-test file.
 		{"go fmt.Println", "cmd/cortex/config.go", "\tfmt.Println(\"value:\", x)", true},
-		{"go fmt.Fprintf", "cmd/cortex/config.go", "\tfmt.Fprintf(w, \"x=%d\\n\", x)", true},
-		{"go log.Print", "cmd/cortex/config.go", "\tlog.Print(\"recovered\")", true},
+		{"go fmt.Fprintf os.Stderr", "cmd/cortex/config.go", "\tfmt.Fprintf(os.Stderr, \"x=%d\\n\", x)", true},
+		{"go fmt.Fprintln os.Stdout", "cmd/cortex/config.go", "\tfmt.Fprintln(os.Stdout, x)", true},
 		{"go println", "cmd/cortex/config.go", "\tprintln(\"x\")", true},
+		{"go print", "cmd/cortex/config.go", "\tprint(\"x\")", true},
+		// Routine Go formatting is NOT a debug print (this repo formats into
+		// buffers all the time): the Sprint* family and a bare Fprintf to an
+		// arbitrary writer only match through the explicit marker above.
+		{"go fmt.Fprintf arbitrary writer not flagged", "cmd/cortex/config.go", "\tfmt.Fprintf(w, \"x=%d\\n\", x)", false},
+		{"go fmt.Sprintf not flagged", "cmd/cortex/config.go", "\treturn fmt.Sprintf(\"%d\", x)", false},
+		{"go fmt.Fprintf buffer not flagged", "cmd/cortex/config.go", "\tfmt.Fprintf(&b, \"%d\\n\", x)", false},
+		{"go fmt.Sprintln not flagged", "cmd/cortex/config.go", "\tfmt.Sprintln(a, b)", false},
+		{"go log.Print not flagged", "cmd/cortex/config.go", "\tlog.Print(\"recovered\")", false},
 		// Bare print in non-Go is routine code — only the marker matches.
 		{"py bare print not flagged", "app/parse.py", "    print(value)", false},
 		{"js console.log not flagged", "src/auth.js", "  console.log(tok)", false},
@@ -452,19 +461,30 @@ func projectInstructions() string {
 	}
 }
 
-// TestScanDebugFlagsScratchFile: a turn drops a zz_dbg test file into the
-// workspace. It is scratch-named; the report flags it as Scratch. (It is also
-// test-named, so ScanDebug's non-test gate skips the debug-print signal, but
-// the scratch signal still fires — the caller composes the final message.)
-func TestScanDebugFlagsScratchFile(t *testing.T) {
+// TestScanDebugFlagsScratchTestFile is the #152 cited incident: a turn drops
+// a zz_dbg test file into the package. zz_dbg_test.go is BOTH scratch- and
+// test-named: the non-test gate skips its debug-print signal (a debug print
+// inside a test is legitimate), but the scratch signal fires for every
+// snapshotted path — so ScanDebug reports it as a leftover scratch file.
+func TestScanDebugFlagsScratchTestFile(t *testing.T) {
 	rep := ScanDebug(map[string]FilePair{
 		"cmd/cortex/zz_dbg_test.go": {Before: "", After: "package main\n\nimport \"testing\"\n\nfunc TestDbg(t *testing.T) {}\n"},
 	})
-	// zz_dbg_test.go is test-named, so the non-test gate skips it — no debug
-	// print report. The scratch file is still surfaced by the caller via
-	// IsScratchPath; ScanDebug itself only reports non-test files.
-	if !rep.IsEmpty() {
-		t.Errorf("ScanDebug() = %+v, want empty (zz_dbg_test.go is test-named, skipped by the non-test gate)", rep)
+	if rep.IsEmpty() {
+		t.Fatal("expected a report for a leftover scratch test file, got empty")
+	}
+	if len(rep.Files) != 1 {
+		t.Fatalf("expected 1 file report, got %d", len(rep.Files))
+	}
+	f := rep.Files[0]
+	if f.Path != "cmd/cortex/zz_dbg_test.go" {
+		t.Errorf("path = %q, want cmd/cortex/zz_dbg_test.go", f.Path)
+	}
+	if !f.Scratch {
+		t.Error("Scratch = false, want true (zz_dbg_test.go is a scratch file)")
+	}
+	if f.DebugPrints != 0 {
+		t.Errorf("DebugPrints = %d, want 0 (the non-test gate skips the debug-print signal)", f.DebugPrints)
 	}
 }
 

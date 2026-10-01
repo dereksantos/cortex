@@ -1075,23 +1075,64 @@ func TestTestwatchTurnReceiptLeftoverScratchFile(t *testing.T) {
 	}
 }
 
+// TestTestwatchTurnReceiptLeftoverScratchFileViaWriteFile is the write_file
+// arm of issue #154's scratch-file signal: a turn that CREATES a scratch-named
+// file with write_file — the model's usual way to create files — and never
+// runs bash still gets a "scratch file left behind" receipt. The touch hook
+// records a missing scratch path with an empty before-side (touchFile), so
+// the turn-end ScanDebug sees the created file (Before="", After=content)
+// and flags it. The bash sweep is NOT the arm here — this turn runs no bash.
+func TestTestwatchTurnReceiptLeftoverScratchFileViaWriteFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	cs.workspace = mustWorkspace(t, root)
+	h := &testwatchHarness{cs: cs}
+
+	// A write_file creates a scratch-named file that did not exist before
+	// the turn (the touch hook records it with before="").
+	h.runTurn(t, "add a scratch probe",
+		writeCall("c1", "pkg/zz_dbg.go", "package tools\n\nfunc probe() {}\n"))
+
+	got := lastCaptureResult(t, cs)
+	if !strings.Contains(got, "leftover debug:") {
+		t.Fatalf("capture summary = %q, want a leftover debug: line (scratch file left behind)", got)
+	}
+	if !strings.Contains(got, "pkg/zz_dbg.go") {
+		t.Errorf("capture summary = %q, want the scratch file path", got)
+	}
+	if !strings.Contains(got, "scratch file left behind") {
+		t.Errorf("capture summary = %q, want the scratch-file signal", got)
+	}
+}
+
 // TestSweepScratchFiles pins the issue #154 sweep contract: a bounded walk of
-// the workdir that records the full content of every scratch-named NON-TEST
-// file not already in a snapshot store, into the named-tool budget. It skips
-// test-named files (covered by the bash arm's baseline), already-snapshotted
-// files, and the same .git/.cortex/vendor/node_modules dirs armTestwatch does.
+// the workdir that records the full content of every scratch-named file NEW
+// since the pre-bash baseline (armed by armTestwatch before the first bash
+// call) — test-named or not — into the named-tool budget. It skips
+// pre-existing (baselined) files, already-snapshotted files, and the same
+// .git/.cortex/vendor/node_modules dirs armTestwatch does; with no armed
+// baseline (no bash call yet) it is a no-op — it must never flag scratch
+// files that pre-existed the turn.
 func TestSweepScratchFiles(t *testing.T) {
-	t.Run("records scratch-named non-test files", func(t *testing.T) {
+	t.Run("records scratch-named files created since the baseline", func(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		// Scratch-named non-test files (the sweep's targets).
+		// Scratch-named non-test files created by the bash call (the
+		// sweep's targets). They are NOT in the pre-bash baseline.
 		scratchFiles := []string{
 			"zz_dbg_probe.go",       // scratch prefix, non-test
 			"tmp_repro.py",          // scratch prefix, non-test
 			"main.go.bak",           // scratch extension
 			"pkg/scratch_helper.js", // scratch prefix, nested
 		}
+		// The pre-bash baseline is armed BEFORE the (hypothetical) bash
+		// command (armTestwatch); the scratch files are then CREATED by the
+		// command and the sweep runs after it.
+		cs.armTestwatch()
 		for _, p := range scratchFiles {
 			abs := filepath.Join(root, filepath.FromSlash(p))
 			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -1120,20 +1161,57 @@ func TestSweepScratchFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("skips test-named scratch files (bash arm covers them)", func(t *testing.T) {
+	t.Run("records a NEW test-named scratch file (zz_dbg_test.go incident)", func(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		// A scratch-named file that is ALSO test-named (zz_dbg_test.go is
-		// scratch by prefix AND test by _test suffix): the bash arm's baseline
-		// covers it, so the sweep must skip it (the receipt composes the
-		// stronger signal).
+		// The issue's cited incident: a scratch-named file that is ALSO
+		// test-named, created by bash. The sweep must snapshot it — the
+		// leftover-debug scan's scratch signal fires for test-named paths
+		// too, and only this arm can surface it.
+		// The pre-bash baseline is armed BEFORE the (hypothetical) bash
+		// command; the command then creates the scratch test file.
+		cs.armTestwatch()
 		if err := os.WriteFile(filepath.Join(root, "zz_dbg_test.go"), []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		cs.sweepScratchFiles()
-		if _, ok := cs.testwatch["zz_dbg_test.go"]; ok {
-			t.Errorf("sweepScratchFiles snapshotted a test-named scratch file (the bash arm covers it); keys: %v", sortedKeys(cs.testwatch))
+		snap, ok := cs.testwatch["zz_dbg_test.go"]
+		if !ok {
+			t.Fatalf("sweepScratchFiles did not snapshot the new test-named scratch file; keys: %v", sortedKeys(cs.testwatch))
+		}
+		if snap.before != "x\n" {
+			t.Errorf("before-side = %q, want the post-bash content (the file was just created)", snap.before)
+		}
+	})
+
+	t.Run("skips a scratch file that existed before the bash call", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		// A scratch-named file that EXISTED before the turn's bash call —
+		// e.g. testdata/foo.bak or scripts/tmp_setup.sh in a real repo. It
+		// is in the pre-bash baseline, so the sweep must not snapshot it:
+		// flagging pre-existing scratch files would fire a false "scratch
+		// file left behind" receipt on every turn that runs bash.
+		if err := os.MkdirAll(filepath.Join(root, "testdata"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "testdata", "foo.bak"), []byte("pre-existing\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// The baseline is armed BEFORE the (hypothetical) bash command.
+		cs.armTestwatch()
+		if !cs.testwatchScratchBefore["testdata/foo.bak"] {
+			t.Fatal("armTestwatch did not record the pre-existing scratch file in the baseline")
+		}
+		// The bash call ran and touched nothing scratch-named.
+		cs.sweepScratchFiles()
+		if _, ok := cs.testwatch["testdata/foo.bak"]; ok {
+			t.Errorf("sweepScratchFiles snapshotted a PRE-EXISTING scratch file (baseline says it existed before the bash call); keys: %v", sortedKeys(cs.testwatch))
+		}
+		if len(cs.testwatch) != 0 {
+			t.Errorf("sweepScratchFiles snapshotted %d files, want 0; keys: %v", len(cs.testwatch), sortedKeys(cs.testwatch))
 		}
 	})
 
@@ -1141,16 +1219,24 @@ func TestSweepScratchFiles(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		if err := os.WriteFile(filepath.Join(root, "tmp_loader.py"), []byte("original\n"), 0o644); err != nil {
+		// tmp_loader.py did NOT exist before the turn: touchFile records
+		// the missing scratch path with an empty before-side (the
+		// write_file-creates-a-scratch-file arm), and the turn's bash call
+		// later gives it content.
+		cs.touchFile("tmp_loader.py")
+		if got := cs.testwatch["tmp_loader.py"]; got == nil || got.before != "" {
+			t.Fatalf("touchFile missing scratch file: snapshot = %+v, want before=\"\" (file did not exist yet)", got)
+		}
+		if err := os.WriteFile(filepath.Join(root, "tmp_loader.py"), []byte("created\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		// touchFile snapshots tmp_loader.py first (the write_file case).
-		cs.touchFile("tmp_loader.py")
-		// The sweep must NOT re-snapshot it (the receipt would double-report
-		// it); the before-side must remain the ORIGINAL content.
+		cs.armTestwatch()
 		cs.sweepScratchFiles()
-		if got := cs.testwatch["tmp_loader.py"]; got == nil || got.before != "original\n" {
-			t.Errorf("tmp_loader.py before-side = %q, want the ORIGINAL content (not re-snapshotted by the sweep)", got.before)
+		// The sweep must NOT re-snapshot it (the receipt would double-report
+		// it); the before-side must remain empty (the file was created this
+		// turn — the scan sees Scratch=true, "scratch file left behind").
+		if got := cs.testwatch["tmp_loader.py"]; got == nil || got.before != "" {
+			t.Errorf("tmp_loader.py before-side = %q, want the EMPTY original (not re-snapshotted by the sweep)", got.before)
 		}
 		if len(cs.testwatch) != 1 {
 			t.Errorf("sweepScratchFiles re-snapshotted an already-snapshotted file: %d entries, want 1", len(cs.testwatch))
@@ -1170,6 +1256,9 @@ func TestSweepScratchFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		// The baseline is armed BEFORE the (hypothetical) bash command, which
+		// then creates the scratch file and runs.
+		cs.armTestwatch()
 		if err := os.WriteFile(filepath.Join(root, "tmp_visible.py"), []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -1179,6 +1268,22 @@ func TestSweepScratchFiles(t *testing.T) {
 		}
 		if _, ok := cs.testwatch["tmp_visible.py"]; !ok {
 			t.Errorf("sweepScratchFiles did not snapshot the visible scratch file; keys: %v", sortedKeys(cs.testwatch))
+		}
+	})
+
+	t.Run("no armed baseline (no bash call) is a no-op", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		// A scratch file exists, but no bash call ran this turn, so the
+		// pre-bash baseline was never armed: the sweep must not flag it
+		// (only the dispatcher arms + sweeps around a bash command).
+		if err := os.WriteFile(filepath.Join(root, "tmp_visible.py"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs.sweepScratchFiles()
+		if len(cs.testwatch) != 0 {
+			t.Errorf("sweepScratchFiles snapshotted %d files with no armed baseline, want 0; keys: %v", len(cs.testwatch), sortedKeys(cs.testwatch))
 		}
 	})
 
@@ -1462,12 +1567,13 @@ func TestDebugReceiptReachesTurnResult(t *testing.T) {
 // companion to TestDebugReceiptReachesTurnResult (which pins the
 // debug-print-only path) and TestTestwatchTurnReceiptLeftoverDebug /
 // TestTestwatchTurnReceiptLeftoverScratchFile (which pin the capture-summary
-// path, one artifact at a time). A scratch file named *_test.go (scratch-
-// AND test-named) is deliberately out of scope here: ScanDebug skips
-// test-named files, so such a file is reported through the tests scan, not
-// the leftover-debug scan (see internal/testguard/debug.go's non-test gate
-// and testwatch.go's sweepScratchFiles, which skips test-named files for
-// the same reason).
+// path, one artifact at a time). A scratch file named *_test.go (scratch
+// AND test-named) IS in scope: the leftover-debug scan's scratch signal
+// fires for test-named paths too — only its debug-print signal is
+// non-test-gated — and the bash sweep snapshots NEW test-named scratch
+// files (see internal/testguard/debug.go's non-test gate and testwatch.go's
+// sweepScratchFiles). The "harness: zz_dbg_test.go via bash" subtest pins
+// exactly the issue's cited incident end to end.
 func TestDebugReceiptEndToEnd(t *testing.T) {
 	t.Run("harness: debug print + scratch file → capture summary", func(t *testing.T) {
 		root := t.TempDir()
@@ -1588,6 +1694,41 @@ func TestDebugReceiptEndToEnd(t *testing.T) {
 		// (the scratch file is a NON-test file, and no real test was touched).
 		if res.TestReceipt != "" {
 			t.Errorf("TurnResult.TestReceipt = %q, want empty (no test was touched)", res.TestReceipt)
+		}
+	})
+
+	t.Run("harness: zz_dbg_test.go created via bash → leftover debug (the cited incident)", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+			return shellrisk.Safe, "test stub", nil
+		}
+		h := &testwatchHarness{cs: cs}
+
+		// The issue #154 cited incident: the model drops a zz_dbg test file
+		// into the package via bash. The bash arm baselines the pre-turn
+		// workspace (the file does not exist), the turn ends, and the
+		// leftover-debug scan's scratch signal must flag it — scratch AND
+		// test-named, and only the scratch signal surfaces it (the debug-
+		// print signal is non-test-gated, the tests scan has nothing lost).
+		b := bashCall("c1", "printf 'package tools\\n\\nfunc TestDbg(t *testing.T) {}\\n' > zz_dbg_test.go")
+		h.runTurn(t, "add a debug probe test", Message{Role: "assistant", ToolCalls: []ToolCall{b}})
+
+		got := lastCaptureResult(t, cs)
+		if !strings.Contains(got, "leftover debug:") {
+			t.Fatalf("capture summary = %q, want a leftover debug: line (zz_dbg_test.go left behind)", got)
+		}
+		if !strings.Contains(got, "zz_dbg_test.go") {
+			t.Errorf("capture summary = %q, want the scratch test file path", got)
+		}
+		if !strings.Contains(got, "scratch file left behind") {
+			t.Errorf("capture summary = %q, want the scratch-file signal", got)
+		}
+		// No "tests changed" line: nothing was REMOVED (the tests scan
+		// reports losses, and the file did not exist before the turn).
+		if strings.Contains(got, "tests changed:") {
+			t.Errorf("capture summary = %q, want NO tests changed: line (nothing was removed)", got)
 		}
 	})
 

@@ -87,6 +87,7 @@ func (cs *CortexSession) armTestwatch() {
 	}
 	cs.testwatchBashArmed = true
 	cs.testwatchBash = map[string]testguard.Baseline{}
+	cs.testwatchScratchBefore = map[string]bool{}
 
 	var walk func(dir, rel string)
 	walk = func(dir, rel string) {
@@ -112,6 +113,22 @@ func (cs *CortexSession) armTestwatch() {
 					return
 				}
 				continue
+			}
+			childKey := filepath.ToSlash(filepath.Clean(childRel))
+			// The scratch baseline records EVERY scratch-named path that
+			// exists before the command — test-named or not — so the post-
+			// command sweep can tell a file the bash call CREATED from one
+			// that pre-existed (testdata/foo.bak, scripts/tmp_setup.sh, a
+			// committed scratchpad.go) and never re-flags the latter on
+			// every bash turn.
+			if testguard.IsScratchPath(childKey) {
+				cs.testwatchScratchBefore[childKey] = true
+				if testguard.IsTestPath(childKey) {
+					// A test-named scratch file has no full-content snapshot:
+					// the sweep must not re-arm it (the bash arm covers it), so
+					// the baseline is all the sweep needs.
+					continue
+				}
 			}
 			if !testguard.IsTestPath(childRel) {
 				continue
@@ -234,8 +251,26 @@ func (cs *CortexSession) touchFile(path string) {
 	if len(cs.testwatch) >= testwatchMaxFiles {
 		return
 	}
+	// A MISSING scratch-named path (a write_file/edit_file target the turn is
+	// about to create) is recorded with an EMPTY before-side: the model's
+	// usual way of creating a file is write_file, and the sweep only runs
+	// after bash calls — without this, a turn that does write_file(zz_dbg.go)
+	// and never runs bash would leave the scratch file invisible to the
+	// turn-end ScanDebug (Before="", After=content → Scratch=true, "scratch
+	// file left behind"). A missing NON-scratch path is not recorded: a new
+	// production file is not a leftover, and the debug-print scan on a
+	// created non-scratch file has no meaningful before-side. Any other stat
+	// failure (non-file, unreadable, outside the workdir) degrades to "no
+	// snapshot".
 	info, err := os.Stat(abs)
-	if err != nil || info.IsDir() {
+	if err != nil {
+		if os.IsNotExist(err) && testguard.IsScratchPath(relKey) {
+			cs.testwatch[relKey] = &testwatchSnapshot{display: relKey, abs: abs, before: ""}
+			return
+		}
+		return
+	}
+	if info.IsDir() {
 		return
 	}
 	if cs.testwatchBytes()+int(info.Size()) > testwatchMaxBytes {
@@ -243,6 +278,8 @@ func (cs *CortexSession) touchFile(path string) {
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
+		// (A missing scratch path was already recorded in the os.Stat branch
+		// above; every other read error degrades to "no snapshot".)
 		return
 	}
 	cs.testwatch[relKey] = &testwatchSnapshot{display: relKey, abs: abs, before: string(data)}
@@ -259,41 +296,49 @@ func (cs *CortexSession) testwatchBytes() int {
 }
 
 // sweepScratchFiles arms the leftover-debug scan (issue #154) for scratch-
-// named files a bash call just created in the workspace. bash names no file,
+// named files a bash call just CREATED in the workspace. bash names no file,
 // so the touch hook can't snapshot a bash-created file the way it snapshots
 // a write_file/edit_file path — the bash arm's baseline (armTestwatch) only
-// covers test-named files, so a scratch-named non-test file (zz_dbg_probe.go,
-// tmp_repro.py, foo.bak) would be invisible to the turn-end ScanDebug.
-// sweepScratchFiles does a bounded best-effort walk of the workdir (skipping
-// .git/.cortex/vendor/node_modules, like armTestwatch) and records the full
-// content of every scratch-named NON-TEST file it finds that is not already
-// snapshotted, into the named-tool budget (cs.testwatch) under the
-// file's current (post-bash) content. A scratch file that EXISTED before the
-// bash call (and is thus already in cs.testwatch from a named-tool call, or
-// in cs.testwatchBash from a prior turn's arm) is skipped — the receipt
-// would double-report it. A scratch file the bash call CREATED is not in
-// either store, so it lands here with its post-bash content as the
-// before-side; the turn-end ScanDebug then sees the scratch file as
-// Scratch=true (it exists after the turn) and flags it.
+// covers test-named files, so without this sweep a scratch file left behind
+// would be invisible to the turn-end ScanDebug. The sweep does a bounded
+// best-effort walk of the workdir (skipping .git/.cortex/vendor/node_modules,
+// like armTestwatch) and records the full content of every scratch-named file
+// that is NEW since the pre-bash baseline (cs.testwatchScratchBefore) —
+// test-named or not: zz_dbg_test.go, the issue's cited incident, is scratch-
+// AND test-named, and only this arm can surface it — into the named-tool
+// budget (cs.testwatch) under the file's current (post-bash) content. A
+// scratch file that EXISTED before the bash call is in the baseline, so it
+// is skipped: flagging pre-existing scratch-named files (testdata/foo.bak,
+// scripts/tmp_setup.sh, a committed scratchpad.go) would fire a false
+// "scratch file left behind" receipt on every turn that runs bash. A scratch
+// file the bash call CREATED is not in the baseline, so it lands here with
+// its post-bash content as the before-side (before==after — the file was
+// just created); the turn-end ScanDebug then sees before==after with
+// Scratch=true and flags it as "scratch file left behind".
 //
-// The before-side is the file's POST-bash content, not the pre-bash content
-// (which doesn't exist for a newly-created file — the file was created by
-// the bash call). For a scratch file that pre-existed and was mutated by
-// bash, the before-side is stale (post-bash, not pre-bash), but the
-// leftover-debug scan's Scratch signal only cares that the file EXISTS after
-// the turn, not that its content changed — so a stale before-side still
-// produces the correct Scratch=true report. The byte budget is shared with
-// touchFile's named-tool snapshots (cs.testwatch), so a turn that runs many
-// bash commands creating many scratch files can exhaust the 32-file / 1 MiB
-// budget — the same bounded, best-effort degradation as touchFile.
+// A scratch file that pre-existed and was MUTATED by bash is NOT snapshotted
+// (it is in the baseline): its before-side would be the stale post-bash
+// content, and the leftover-debug scan's Scratch signal only cares that a
+// NEW scratch file EXISTS after the turn — a mutation of an old one is not
+// "left behind". The byte budget is shared with touchFile's named-tool
+// snapshots (cs.testwatch), so a turn that runs many bash commands creating
+// many scratch files can exhaust the 32-file / 1 MiB budget — the same
+// bounded, best-effort degradation as touchFile.
 //
 // Called from coderDispatcher AFTER the bash command runs (the dispatcher
-// already arms the baseline BEFORE the command; the sweep runs after, when
+// already armed the baseline BEFORE the command; the sweep runs after, when
 // the command's mutations are visible on disk). A no-op when there is no
-// workdir or the sweep finds no new scratch files.
+// workdir, no bash call ran yet this turn (no baseline), or the sweep finds
+// no new scratch files.
 func (cs *CortexSession) sweepScratchFiles() {
 	wd := cs.Workdir()
 	if wd == "" {
+		return
+	}
+	// No pre-bash baseline means no bash call ran yet this turn (the
+	// baseline is armed BEFORE the first command), so there is nothing to
+	// sweep against — never flag pre-existing scratch files.
+	if cs.testwatchScratchBefore == nil {
 		return
 	}
 	if cs.testwatch == nil {
@@ -318,22 +363,25 @@ func (cs *CortexSession) sweepScratchFiles() {
 				sweep(filepath.Join(dir, name), childRel)
 				continue
 			}
-			// Only scratch-named files are of interest; the leftover-debug
-			// scan's Scratch signal is what this sweep arms. A test-named
-			// file is covered by the bash arm's baseline (armTestwatch), not
-			// here — a zz_dbg_test.go is BOTH scratch- and test-named, and the
-			// bash arm already baselines it (the receipt composes the
-			// stronger signal).
-			if !testguard.IsScratchPath(childRel) || testguard.IsTestPath(childRel) {
+			// Only scratch-named files are of interest, and only ones NEW
+			// since the pre-bash baseline: a pre-existing scratch file is
+			// already in the baseline (or was snapshotted by a named-tool
+			// call, cs.testwatch) and must not get a false "left behind"
+			// receipt on every bash turn. Test-named scratch files are NO
+			// LONGER skipped — zz_dbg_test.go (the issue's cited incident) is
+			// scratch AND test-named, and only this arm snapshots it: the
+			// bash arm's baseline feeds the TESTS scan (removed definitions),
+			// not the leftover-debug scan.
+			childKey := filepath.ToSlash(filepath.Clean(childRel))
+			if !testguard.IsScratchPath(childKey) {
+				continue
+			}
+			if cs.testwatchScratchBefore[childKey] {
 				continue
 			}
 			// Skip a file already snapshotted by a named-tool call this turn
-			// (cs.testwatch) or baselined by the bash arm (cs.testwatchBash) —
-			// the receipt would double-report it.
-			if _, already := cs.testwatch[childRel]; already {
-				continue
-			}
-			if _, already := cs.testwatchBash[childRel]; already {
+			// (cs.testwatch) — the receipt would double-report it.
+			if _, already := cs.testwatch[childKey]; already {
 				continue
 			}
 			if len(cs.testwatch) >= testwatchMaxFiles {
@@ -624,6 +672,7 @@ func (cs *CortexSession) testwatchDrop() {
 	cs.testwatch = nil
 	cs.testwatchBash = nil
 	cs.testwatchBashArmed = false
+	cs.testwatchScratchBefore = nil
 }
 
 // pluralize renders "1 test definition" / "3 test definitions".

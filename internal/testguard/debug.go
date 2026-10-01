@@ -13,19 +13,22 @@ package testguard
 // Detection is a shape match, not a parse — the same standing as Scan. A
 // debug print is a line the turn added (not present in Before) that carries
 // an explicit debug marker (a "DEBUG" token or a dbg_/debug_ function call)
-// or, in Go, a bare debug-shaped print call (fmt.Println / fmt.Fprintf /
-// log.Print... — any log call is a deliberate write, so flagging it is
-// acceptable). A scratch file is one whose name carries a throwaway
-// convention (IsScratchPath) that exists after the turn (or existed at all).
+// or, in Go, a bare debug-shaped print call (fmt.Print* / fmt.Fprintf or
+// fmt.Fprintln to os.Stderr / os.Stdout / println / print). Routine formatting
+// — fmt.Sprintf / fmt.Sprint*, or fmt.Fprintf(w, …) to an arbitrary writer —
+// is ordinary production code and never matches on its own. A scratch file is
+// one whose name carries a throwaway convention (IsScratchPath) that exists
+// after the turn (or existed at all).
 //
-// Both signals are scoped to NON-TEST files: a debug print inside a test is
-// legitimate (t.Log, t.Logf, a fmt check in a _test.go body), and the
-// scratch-file name check only fires for files that are not themselves
-// test-named — a zz_dbg_test.go is both scratch- and test-named, and the
-// receipt the caller composes reports it through whichever signal is
-// stronger. The caller (cmd/cortex's testwatch) supplies FilePairs for the
-// files it snapshotted before the turn; an empty Before means the file did
-// not exist before the turn.
+// The debug-print signal is scoped to NON-TEST files — a debug print inside
+// a test is legitimate (t.Log, t.Logf, a fmt check in a _test.go body) — but
+// the scratch signal applies to every snapshotted path, test-named or not:
+// the #152 incident's zz_dbg_test.go is BOTH scratch- and test-named, and
+// only the scratch signal surfaces it. ScanDebug applies the non-test gate
+// to the debug-print signal alone, so a test-named scratch file is reported
+// with Scratch=true and zero debug prints. The caller (cmd/cortex's
+// testwatch) supplies FilePairs for the files it snapshotted before the turn;
+// an empty Before means the file did not exist before the turn.
 
 import (
 	"path/filepath"
@@ -92,24 +95,27 @@ func IsScratchPath(path string) bool {
 
 // The shape of a debug print, per file type. A line is a debug print when it
 // carries an explicit debug marker — a "DEBUG" token or a dbg_/debug_
-// function call — in ANY language, or, in Go, when it is a bare print/log
-// call (any fmt.Print... / log.Print... / println is a deliberate write a
-// model leaves behind, so flag it). Python's print() and JS/TS's console.log
-// are routine code, so they only match through the explicit marker — a bare
-// print(x) is not a debug print.
+// function call — in ANY language, or, in Go, when it is a bare debug print:
+// fmt.Print* (deliberate writes to the program's default output), println /
+// print, or fmt.Fprintf / fmt.Fprintln writing to os.Stderr / os.Stdout
+// (the stderr/stdout debug shape). fmt.Sprintf / fmt.Sprint* and a bare
+// fmt.Fprintf(w, …) to an arbitrary writer are routine production code —
+// this repo formats into bytes.Buffer and strings.Builder everywhere — so
+// they only match through the explicit marker.
 var (
 	// Any language: an explicit debug marker — "DEBUG" as a token (the
 	// #152 "DEBUG: ..." shape) or a dbg_/debug_ call (debug_print, dbg(),
 	// _debug()). Anchored to the marker so "debug" inside an identifier
 	// (debugger, debugging) does not match on its own.
 	debugMarkerRe = regexp.MustCompile(`\bDEBUG\b|dbg_[a-z0-9_]*\s*\(|debug[a-z0-9_]*\s*\(`)
-	// Go: a bare print/log call — fmt.Println / fmt.Printf / fmt.Fprintf /
-	// fmt.Fprintln / log.Print... / println. Any of these in a non-test file
-	// is a deliberate write the model left in; the explicit marker above is
-	// a superset, but a plain fmt.Println("x") with no "DEBUG" token is
-	// still a leftover print, so Go matches the bare call too. The ln
-	// variants are listed first so Println is not swallowed by Print.
-	goPrintRe = regexp.MustCompile(`\b(fmt\.(Println|Printf|Print|Fprintln|Fprintf|Fprint|Sprintln|Sprintf|Sprint)|log\.(Println|Printf|Print|Fprintln|Fprintf|Fprint)|println)\s*\(`)
+	// Go: a bare debug print — fmt.Print* (Println / Printf / Print — the ln
+	// variants listed first so Println is not swallowed by Print), the
+	// builtin println / print, or fmt.Fprintf / fmt.Fprintln whose FIRST
+	// argument is os.Stderr or os.Stdout (the stderr/stdout debug shape).
+	// fmt.Sprintf / fmt.Sprint* and a write to any other writer are routine
+	// code: this repo uses fmt.Sprintf and fmt.Fprintf(&b, …) everywhere, so
+	// flagging them would fire on most Go-editing turns.
+	goPrintRe = regexp.MustCompile(`\bfmt\.(Println|Printf|Print)\s*\(|\b(?:Fprintln|Fprintf)\s*\(\s*os\.(Stderr|Stdout)\b|\bprintln\s*\(|\bprint\s*\(`)
 )
 
 // isDebugPrintLine reports whether a single line of code is a leftover debug
@@ -160,18 +166,19 @@ func (r DebugReport) IsEmpty() bool {
 
 // ScanDebug compares each file's before/after content and reports what the
 // turn LEFT behind: added debug prints in non-test production files, and
-// scratch-named files that exist after the turn. Test files are skipped
-// entirely (a debug print inside a test is legitimate; test loss is
-// Scan's job, not this one's). rep.Files is sorted by Path — map iteration
-// is random, but the receipt must be deterministic for a deterministic turn.
+// scratch-named files that exist after the turn. The non-test gate applies
+// to the debug-print signal ONLY — a debug print inside a test is
+// legitimate (and test loss is Scan's job, not this one's) — while the
+// scratch signal fires for EVERY snapshotted path, test-named or not:
+// zz_dbg_test.go is both scratch- and test-named, and only the scratch
+// signal surfaces it. rep.Files is sorted by Path — map iteration is
+// random, but the receipt must be deterministic for a deterministic turn.
 // It never blocks the turn.
 func ScanDebug(files map[string]FilePair) DebugReport {
 	var rep DebugReport
 	for path, pair := range files {
-		if IsTestPath(path) {
-			continue
-		}
-		if frep, ok := scanDebugFile(path, pair.Before, pair.After); ok {
+		frep, ok := scanDebugFile(path, pair.Before, pair.After, !IsTestPath(path))
+		if ok {
 			rep.Files = append(rep.Files, frep)
 		}
 	}
@@ -179,9 +186,10 @@ func ScanDebug(files map[string]FilePair) DebugReport {
 	return rep
 }
 
-// scanDebugFile reports one non-test file. ok=false when the turn added no
-// debug print and the file is not a leftover scratch file.
-func scanDebugFile(path, before, after string) (DebugFileReport, bool) {
+// scanDebugFile reports one file. nonTest gates the debug-print signal
+// (a debug print in a test file is legitimate); the scratch signal is
+// always applied. ok=false when nothing is flagged.
+func scanDebugFile(path, before, after string, nonTest bool) (DebugFileReport, bool) {
 	scratch := IsScratchPath(path) && (after != "" || before != "")
 	if before == after {
 		// Unchanged: only a pre-existing scratch file (present before AND
@@ -192,20 +200,23 @@ func scanDebugFile(path, before, after string) (DebugFileReport, bool) {
 		}
 		return DebugFileReport{}, false
 	}
-	beforeSet := make(map[string]int)
-	for _, l := range splitLines(before) {
-		beforeSet[l]++
-	}
-	// Added lines: present more often in after than in before — the mirror
-	// of removedLines, which a reviewer would eyeball as "what the turn put
-	// in." A line the turn merely moved (present in both) is not added.
 	var added []string
-	for _, l := range splitLines(after) {
-		if beforeSet[l] > 0 {
-			beforeSet[l]--
-			continue
+	if nonTest {
+		beforeSet := make(map[string]int)
+		for _, l := range splitLines(before) {
+			beforeSet[l]++
 		}
-		added = append(added, l)
+		// Added lines: present more often in after than in before — the
+		// mirror of removedLines, which a reviewer would eyeball as "what
+		// the turn put in." A line the turn merely moved (present in both)
+		// is not added.
+		for _, l := range splitLines(after) {
+			if beforeSet[l] > 0 {
+				beforeSet[l]--
+				continue
+			}
+			added = append(added, l)
+		}
 	}
 	prints := 0
 	sample := make([]string, 0, len(added))
