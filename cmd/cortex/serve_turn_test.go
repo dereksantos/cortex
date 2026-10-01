@@ -192,19 +192,31 @@ func TestTurnEndpointResumesSessionNotLiveOnThisManager(t *testing.T) {
 // currently holds the fslock on (rather than one that's simply missing)
 // must not collapse into the same 404 as "no such session" — it's a
 // distinct, retryable 409.
+//
+// The busy state is made DETERMINISTIC by holding the transcript's fslock on
+// a test-owned *CortexSession whose transcript the test keeps open for the
+// duration of the request (issue #124): the old version leaned on a
+// manager-held session, but the kernel's flock is per open-file description
+// and is released whenever that session's *os.File is closed — including by
+// the GC at an unpredictable moment — so under -race scheduling the resume
+// could win the lock, run a turn against the hermetic session's default
+// endpoint, and 500 instead of 409. A transcript the test itself owns and
+// never closes until t.Cleanup makes the busy outcome independent of GC
+// timing or who held the lock first.
 func TestTurnEndpointResumeBusyReturns409(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 
-	holderMgr := NewSessionManager(reg, hermeticSessionFactory())
-	created, err := holderMgr.Create("blog")
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+	cs := hermeticSessionFactory()()
+	if err := applyProjectByName(cs, reg, "blog"); err != nil {
+		t.Fatalf("targeting the session at the project: %v", err)
 	}
-	id := created.ID()
-	// Deliberately do NOT close created.cs.transcript — holderMgr keeps the
-	// fslock held, standing in for a second live `cortex serve`/REPL process
-	// still holding this session open.
+	cs.StartTranscript()
+	if cs.SessionID == "" {
+		t.Fatal("StartTranscript left the session id empty")
+	}
+	id := cs.SessionID
+	t.Cleanup(func() { _ = cs.transcript.Close() })
 
 	freshMgr := NewSessionManager(reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, freshMgr, "", "", testLoopsStore(t), newRunningSet()))
