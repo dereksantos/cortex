@@ -9,31 +9,28 @@
 // a missing toolchain, or a command that takes too long all degrade to a
 // note, never to a refused edit.
 //
-// Injection safety: only allowlisted commands run
-// (shellrisk.AllowlistProjectCommand), and they run as a plain argv — the
-// allowlisted template is split with strings.Fields and the {file}/{dir}
-// tokens are each replaced by a SINGLE argv element
-// (splitProjectCommand), which runHookDirect launches with
-// exec.CommandContext directly: no shell anywhere in the pipeline. A path
-// is model-controlled input, so this is what keeps a file named
-// "x$(touch marker).go" a literal filename — the substituted value can
-// never be re-split, re-globbed, or re-interpreted as shell syntax.
-// shellrisk.SubstitutedArgs re-scans the substituted values before the
-// exec as the belt to that suspenders and pins the argument contract: a
-// shell-shaped "path" is declined (noted for format, silently skipped for
-// lint) rather than handed to the tool.
+// Workspace trust is the ONLY gate. Trust is a persisted, per-workspace,
+// USER-level decision (the ~/.cortex user config's project.trusted list,
+// set by `cortex project trust`); it can never come from the workspace
+// itself — not from the project's .cortex/config.json, not from AGENTS.md —
+// because the repository is the untrusted party. On an UNTRUSTED workspace
+// (the default) the hook runs nothing at all: a trusted repo may use
+// repo-local binaries (./node_modules/.bin/eslint, ./bin/fmt) of ANY
+// language, so a per-tool allowlist would only couple the hook to specific
+// tools and keep producing bypasses. The first write/edit of a session
+// gets a one-line note saying the hook is inactive and how to enable it;
+// later edits stay silent.
 //
-// Workspace trust (issue #129): the allowlist is two TIERS. TierInert
-// commands (gofmt, rustfmt, ruff, black, plain go vet/fmt, cargo fmt) do
-// not execute repository code and run on any workspace. TierCode commands
-// (cargo clippy — compiles the crate, runs build.rs and proc macros;
-// eslint/prettier — load a JS config; npm/npx scripts — run arbitrary node
-// code) run ONLY when the session's workspace is trusted
-// (WorkspaceTrust; absent capability = untrusted, the safe default). On
-// an untrusted workspace a TierCode command is skipped with a note —
-// "skipped: <cmd> runs repository code; trust this workspace to enable" —
-// so opening an untrusted Rust or JS repo never executes that repo's code
-// after an edit.
+// Injection safety on the trusted path: commands run as a plain argv —
+// the template is split into argv BEFORE {file}/{dir} are substituted,
+// each as a SINGLE argv element (splitProjectCommand), and
+// runHookDirect launches the argv with exec.CommandContext directly: no
+// shell anywhere in the pipeline. A template containing shell-control
+// characters (pipe, chain, redirect, command substitution, subshell,
+// newline) can't run without a shell, so it is skipped with a note — its
+// intent is unexpressible, not dangerous. The 10s budget and the 2000-byte
+// output cap apply to every run.
+
 package tools
 
 import (
@@ -48,7 +45,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/dereksantos/cortex/internal/projectcmd"
-	"github.com/dereksantos/cortex/internal/shellrisk"
 )
 
 // ProjectCommands is the OPTIONAL ToolDeps capability that supplies a
@@ -86,9 +82,8 @@ func projectCommandsOf(deps ToolDeps) projectcmd.Commands {
 }
 
 // workspaceTrusted reports whether the session's workspace is trusted.
-// Absent capability → untrusted (false): a code-executing project command
-// (TierCode) is skipped on a workspace that never said it was trusted, so
-// the default is the safe one.
+// Absent capability → untrusted (false): the hook runs nothing on a
+// workspace that never said it was trusted, so the default is the safe one.
 func workspaceTrusted(deps ToolDeps) bool {
 	wt, ok := deps.(WorkspaceTrust)
 	return ok && wt.WorkspaceTrusted()
@@ -104,27 +99,31 @@ var formatBudget = 10 * time.Second
 // string-matching, so a reworded message can't break the timeout note.
 var errHookTimeout = errors.New("project command timed out")
 
-// hookRunner runs an allowlisted project command's argv directly (no shell)
-// under the format budget, returning its combined output plus any error
-// (nil on success, errHookTimeout on deadline, or the exec error
-// otherwise). dir is the command's working directory — the project root
-// for an anchored session ("" = the process CWD, the CWD-implicit case) —
-// which is what makes a "./"-prefixed {dir} substitution resolvable from
-// where the manifest's commands are meant to run. It is a var — not an
-// inline exec.Command call — so a test can install a command that actually
-// HANGS and drive the real timeout path; no allowlisted formatter (gofmt,
-// go vet) ever hangs in practice, so the budget can't be reached
-// end-to-end without this seam. The default is runHookDirect.
+// hookRunner runs a project command's argv directly (no shell) under the
+// format budget, returning its combined output plus any error (nil on
+// success, errHookTimeout on deadline, or the exec error otherwise). dir is
+// the command's working directory — the project root for an anchored
+// session ("" = the process CWD, the CWD-implicit case) — which is what
+// makes a "./"-prefixed {dir} substitution resolvable from where the
+// manifest's commands are meant to run. It is a var — not an inline exec
+// command call — so a test can install a command that actually HANGS and
+// drive the real timeout path; no formatter ever hangs in practice, so the
+// budget can't be reached end-to-end without this seam. The default is
+// runHookDirect.
 var hookRunner = runHookDirect
 
 // runHookDirect is the production hookRunner: exec argv[0] argv[1:]
 // directly — no shell (the injection-safety contract, package comment) —
 // under the format budget, returning combined output plus the run error.
+// A trusted workspace may name repo-local binaries (./node_modules/.bin/…,
+// ./bin/…), so no refusal is applied here: the trust decision already
+// authorized running what this repo configures, and the argv contract
+// (single substitution, no shell) keeps the file path one inert argument.
 func runHookDirect(ctx context.Context, argv []string, dir string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, formatBudget)
 	defer cancel()
-	if ref := hookBinaryRefusal(argv, dir); ref != "" {
-		return "", fmt.Errorf("project command refused: %s", ref)
+	if len(argv) == 0 {
+		return "", errors.New("empty command")
 	}
 	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
@@ -135,82 +134,17 @@ func runHookDirect(ctx context.Context, argv []string, dir string) (string, erro
 	return strings.TrimSpace(string(raw)), runErr
 }
 
-// hookBinaryRefusal refuses to exec argv[0] when PATH resolution would land
-// inside the WORKSPACE itself — returning the refusal note ("" when the
-// binary is fine). This is the argv half of the "no repo-shipped tool"
-// contract: the allowlist (shellrisk.AllowlistProjectCommand) already
-// refuses PATH-QUALIFIED names (./tools/gofmt, /repo/bin/eslint) AND a bare
-// name that would resolve from a repo-controlled PATH entry (the workspace
-// bin dir or node_modules/.bin on PATH — absolute or relative; see
-// shellrisk's workspaceBinaryRefusal). What passes both is an absolute
-// argv[0] whose target is INSIDE the workspace: the allowlist's
-// path-qualified refusal is name-based (it catches the literal
-// "./tools/…" and "/repo/…" forms, and bare names), but a command template
-// built at runtime from an os.Getwd()-derived absolute dir would name the
-// workspace's file with a name that no static prefix check sees — a repo
-// shipping an executable named like an allowlisted tool would get it
-// exec'd with no prompt after every edit. Resolving argv[0] the way exec
-// would (LookPath, dir-relative when relative, otherwise $PATH) and
-// refusing a hit inside the workspace — symlinks followed, so a
-// <workspace>/bin link to /usr/bin/gofmt is still the workspace's file —
-// closes that residual. Only argv[0] is checked: allowlisted argument
-// positions are paths to FORMAT or files to VET, never programs to exec.
-func hookBinaryRefusal(argv []string, dir string) string {
-	if len(argv) == 0 {
-		return "empty command"
-	}
-	root := dir
-	if root == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return "" // no workspace root to test against: nothing to refuse
-		}
-		root = wd
-	}
-	if res, err := exec.LookPath(argv[0]); err == nil {
-		if real, eerr := filepath.EvalSymlinks(res); eerr == nil {
-			res = real
-		}
-		rootReal, rerr := filepath.EvalSymlinks(root)
-		if rerr != nil {
-			rootReal = root
-		}
-		if res == rootReal || strings.HasPrefix(res, rootReal+string(filepath.Separator)) {
-			return fmt.Sprintf("%s resolves inside the workspace (%s) — repo-shipped tools do not run in the post-edit hook", argv[0], root)
-		}
-	}
-	return ""
-}
-
-// HookWouldRun reports whether the post-edit hook would auto-run cmd in
-// role with the given trust state — the hook's own applicability rules
+// HookWouldRun reports whether the post-edit hook would auto-run cmd in role
+// with the given trust state — the hook's own applicability rules
 // (roleApplicable: format needs {file}, lint needs {file}/{dir}, test and
-// build are never hook-run) ANDed with the allowlist verdict (tier +
-// trust gate — the SAME shellrisk.AllowlistProjectCommand call the hook's
-// hookGate runs). The report `cortex project commands` renders uses this
-// so runs_now can never drift from what the hook actually runs: a
-// whole-project format command is never per-edit work, a lint without
-// {file}/{dir} is never per-edit work, and test/build NEVER run — no
-// matter how allowlisted or how trusted. (The hook's argument contract —
-// SubstitutedArgs on the touched path — is per-file, not per-template, so
-// it is not modeled here; the PATH/workspace-binary refusal the hook also
-// applies is environment-dependent and the report shows the command's
-// tier/trust verdict, which is the stable, workspace-meaningful half.)
+// build are never hook-run) ANDed with the trust gate (untrusted → never).
+// The report `cortex project commands` renders uses this so runs_now can
+// never drift from what the hook actually runs: a whole-project format
+// command is never per-edit work, a lint without {file}/{dir} is never
+// per-edit work, test/build NEVER run, and none of that changes on an
+// untrusted workspace — the hook runs nothing there.
 func HookWouldRun(role projectcmd.Role, cmd projectcmd.Command, trusted bool) bool {
-	if !roleApplicable(role, cmd) {
-		return false
-	}
-	v := shellrisk.AllowlistProjectCommand(cmd.Cmd)
-	if v.Level != shellrisk.Safe {
-		return false
-	}
-	// The trust gate: an inert command runs on any workspace, a
-	// code-executing one only on a trusted one (the hook's hookGate does
-	// the same after the argument check). The argument contract is
-	// satisfied by a probe plain path for every real template, so it is
-	// not re-checked here — a template failing it on a plain path would do
-	// so on every file, and "never runs" is the honest answer either way.
-	return v.ProjectCommand == shellrisk.TierInert || trusted
+	return trusted && roleApplicable(role, cmd)
 }
 
 // roleApplicable is the role half of the hook's applicability, mirroring
@@ -218,9 +152,9 @@ func HookWouldRun(role projectcmd.Role, cmd projectcmd.Command, trusted bool) bo
 // command (a whole-project format has no argument to substitute for the
 // one file just touched), and the lint role only a command carrying the
 // {file} or {dir} token (a whole-project lint is not the hook's job —
-// exactly the hook's `lintApplies`-style inline test, without the
-// Extends gate the hook applies per touched file). The test and build
-// roles are never hook-run at all.
+// exactly the hook's `lintApplies`-style inline test, without the Extends
+// gate the hook applies per touched file). The test and build roles are
+// never hook-run at all.
 func roleApplicable(role projectcmd.Role, cmd projectcmd.Command) bool {
 	switch role {
 	case projectcmd.RoleFormat:
@@ -232,31 +166,39 @@ func roleApplicable(role projectcmd.Role, cmd projectcmd.Command) bool {
 	}
 }
 
-// hookGate decides whether an allowlisted command may RUN in this hook:
-// the allowlist (a recognized single-invocation tool) plus the trust gate.
-// It returns (argv, ok, note) — ok=false means the command must not run,
-// and note (possibly "") is the exact refusal text to fold into the tool
-// result. The trust gate (issue #129): a TierCode command — one that
-// executes repository code by design (cargo clippy compiles the crate and
-// runs build.rs and proc macros; eslint/prettier load a JS config; npm
-// scripts run arbitrary node code) — runs ONLY on a trusted workspace; on
-// an untrusted one the hook skips it and says so. TierInert (gofmt,
-// rustfmt, ruff, black, plain go vet/fmt) runs on any workspace: it reads
-// and rewrites source files but never executes repo code. The npx
-// --no-install pin is applied here, on the template, before the argv is
-// built — the allowlist sees the plain template the declaration carries.
+// hookTemplateRejected reports why a trusted template cannot run as a plain
+// argv ("") or a note to fold into the tool result: a template with
+// shell-control characters (pipe, chain, redirect, command substitution,
+// subshell, newline) is unexpressible without a shell — the hook has no
+// shell, so the command is skipped rather than guessed at. The tokens
+// {file}/{dir} are the template's own argument slots and are stripped
+// before the scan, so their braces are not mistaken for shell syntax.
+func hookTemplateRejected(template string) string {
+	checked := strings.ReplaceAll(template, projectcmd.FilePlaceholder, "")
+	checked = strings.ReplaceAll(checked, projectcmd.DirPlaceholder, "")
+	if strings.ContainsAny(checked, "|&;<>`$()\n") {
+		return "the template uses shell syntax (pipe, chain, redirect, or substitution), which the hook cannot run without a shell; run it through bash instead"
+	}
+	return ""
+}
+
+// hookGate decides whether a resolved command may RUN in this hook: role
+// applicability (format needs {file}, lint needs {file}/{dir}), trust, and
+// a template with no shell-control characters. It returns (argv, ok, note)
+// — ok=false means the command must not run, and note (possibly "") is the
+// exact refusal text to fold into the tool result. The template is split
+// into argv BEFORE {file}/{dir} are substituted, each token as ONE argv
+// element (splitProjectCommand): the file path is model-controlled input,
+// and the argv exec passes it as a single opaque argument that no shell
+// ever re-parses.
 func hookGate(template, root, fsPath string, trusted bool) (argv []string, ok bool, note string) {
-	v := shellrisk.AllowlistProjectCommand(template)
-	if v.Level != shellrisk.Safe {
-		return nil, false, v.Reason
+	if !trusted {
+		return nil, false, "the workspace is not trusted"
 	}
-	if v.ProjectCommand == shellrisk.TierCode && !trusted {
-		return nil, false, "runs repository code; trust this workspace to enable"
+	if note := hookTemplateRejected(template); note != "" {
+		return nil, false, note
 	}
-	if argv, ok = splitAndCheckArgs(template, root, fsPath); !ok {
-		return nil, false, "the written path was rejected by the argument check (not a plain file path)"
-	}
-	return argv, true, ""
+	return splitProjectCommand(template, root, fsPath), true, ""
 }
 
 // runProjectCommandHook runs the post-edit format/lint hook for the file at
@@ -268,11 +210,27 @@ func hookGate(template, root, fsPath string, trusted bool) (argv []string, ok bo
 // the tool result is byte-identical to the pre-hook behavior in the common
 // case.
 //
+// On an untrusted workspace it runs NOTHING. The one-line "hook inactive"
+// note is emitted exactly once per SESSION: state is the session's per-run
+// state (nil when the caller has none — such a caller has no session to
+// announce for, so the note is never surfaced; that is also why every
+// command-less or headless edit stays byte-identical to the pre-hook
+// result), and the slot is marked consumed only when the note is actually
+// emitted — a trusted workspace never touches the state.
+//
 // It never returns an error: the hook observes, it doesn't veto. Every
-// failure (allowlist refusal, tier refusal, argument refusal, spawn error,
-// timeout, lint failure) is folded into the note string, because the
-// contract is that the hook never blocks the edit.
-func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool) string {
+// failure (template refusal, spawn error, timeout, lint failure) is folded
+// into the note string, because the contract is that the hook never blocks
+// the edit.
+func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState) string {
+	if !trusted {
+		if state != nil && state.inactiveNoteDue() {
+			state.announceInactive()
+			return "post-edit hook inactive: this workspace isn't trusted (`cortex project trust add <root>` to enable)"
+		}
+		return ""
+	}
+
 	var b strings.Builder
 
 	// --- Format -----------------------------------------------------------
@@ -308,26 +266,10 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 					b.WriteString("note: project format command reported: " + clipNote(s))
 				}
 			}
-		case strings.HasPrefix(refusal, "runs repository code"):
-			// Trust gate: the command is allowlisted but executes the
-			// repository's own code (cargo clippy's build.rs, a JS config,
-			// an npm script) and this workspace is untrusted. The file is
-			// left exactly as written; the refusal names what would unlock
-			// it — the operator's decision, never the repo's.
-			b.WriteString("skipped: " + cmds.Format.Cmd + " " + refusal)
-		case refusal == "the written path was rejected by the argument check (not a plain file path)":
-			// The written path is shell-shaped (SubstitutedArgs): not a
-			// plain file, so the hook declines to run and leaves the file
-			// exactly as written.
-			b.WriteString("note: project format command not run: " + refusal + "; the file was left as written")
 		default:
-			// Refused by the allowlist (step 3): the command is not a
-			// recognized single-invocation formatter free of shell control,
-			// so a declared/malicious format script does not get free
-			// execution here. We do NOT fall through to the shell gate —
-			// that would route an arbitrary script through the classifier
-			// for a free run, exactly the gap the allowlist closes.
-			b.WriteString("note: project format command not allowlisted for auto-run (" + refusal + "); it was NOT run")
+			// The template can't run as a plain argv (shell syntax) — or a
+			// trusted check refused it. The file is left exactly as written.
+			b.WriteString("note: project format command not run: " + refusal)
 		}
 	}
 
@@ -353,20 +295,11 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 				b.WriteString("note: project lint for " + fsPath + ":\n" + clipNote(strings.TrimSpace(out)))
 			}
 			// A clean lint (exit 0, no output) is silent.
-		case strings.HasPrefix(refusal, "runs repository code"):
-			// Trust gate: the lint is allowlisted but executes the
-			// repository's own code (e.g. cargo clippy's build.rs, a JS
-			// eslint config) and this workspace is untrusted — skip it and
-			// say so. A lint finding is advisory (folded into the result),
-			// so a skipped lint costs nothing the operator can't recover by
-			// trusting the workspace or running the command through bash.
-			b.WriteString("skipped: " + cmds.Lint.Cmd + " " + refusal)
+		default:
+			// A skipped lint is advisory (folded into the result), so the
+			// refusal is noted for the same reason the format refusal is.
+			b.WriteString("note: project lint command not run: " + refusal)
 		}
-		// A non-allowlisted lint command, a path rejected by the argument
-		// check, or an untrusted-workspace inert skip is silent for the
-		// lint role: the hook only runs recognized tools on plain paths of
-		// workspaces that consent to repo-code execution, and a skipped
-		// finding is nothing to surface.
 	}
 
 	return b.String()
@@ -404,39 +337,12 @@ func lintApplies(cmd projectcmd.Command, path string) bool {
 		appliesTo(cmd, path)
 }
 
-// splitAndCheckArgs builds the argv for an allowlisted template and re-scans
-// the SUBSTITUTED VALUES (the model-controlled file path and package dir)
-// with shellrisk.SubstitutedArgs. ok=false — the command must not run —
-// when any substituted value carries a shell-control character: such a
-// "path" is model input shaped like a probe of the substitution contract.
-// (Defense in depth: the argv exec would pass it as one inert argument
-// anyway — but the check pins the argument contract the allowlist assumes,
-// and keeps the refusal visible for the format role.) An allowlisted npx
-// template also gets the --no no-install pin inserted right after `npx`,
-// before the tool name (shellrisk.AppendNPXNoInstall) so the hook never
-// turns a declared npx line into a silent registry fetch — a pin placed
-// after the tool name would be forwarded to the tool as their own flag.
-func splitAndCheckArgs(template, root, fsPath string) ([]string, bool) {
-	if strings.HasPrefix(template, "npx ") || template == "npx" {
-		template = shellrisk.AppendNPXNoInstall(template)
-	}
-	args := []string{fsPath}
-	if strings.Contains(template, projectcmd.DirPlaceholder) {
-		args = append(args, packageDirArg(root, fsPath))
-	}
-	if v := shellrisk.SubstitutedArgs(args...); v.Level != shellrisk.Safe {
-		return nil, false
-	}
-	return splitProjectCommand(template, root, fsPath), true
-}
-
-// splitProjectCommand turns an allowlisted template (already vetted by
-// allowlistProjectCommand) into the argv the hook execs directly:
-// strings.Fields on the template, with the {file} token replaced by the
-// touched file's path as ONE argv element and {dir} by its package dir (as
-// one argv element). Substitution happens on the split fields, so a path
-// with spaces or shell metacharacters can never be re-split — it travels to
-// the tool as a single opaque argument.
+// splitProjectCommand turns a template into the argv the hook execs
+// directly: strings.Fields on the template, with the {file} token replaced
+// by the touched file's path as ONE argv element and {dir} by its package
+// dir (as one argv element). Splitting happens BEFORE substitution, so a
+// path with spaces or shell metacharacters can never be re-split — it
+// travels to the tool as a single opaque argument.
 func splitProjectCommand(template, root, fsPath string) []string {
 	dir := packageDirArg(root, fsPath)
 	argv := make([]string, 0, 8)

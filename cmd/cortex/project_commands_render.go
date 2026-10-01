@@ -22,7 +22,6 @@ import (
 
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/registry"
-	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -34,18 +33,15 @@ var ErrProjectCommandsUsage = errors.New("usage: cortex project commands [--json
 // projectcmd's canonical provenance label: a manifest name ("go.mod",
 // "package.json", ...) when discovered, "config.json" or "AGENTS.md" when
 // declared. PerFile reports whether the command carries the {file}
-// placeholder. Tier is the allowlist's project-command tier as a string
-// (shellrisk.ProjectCommandTier.String — "inert" / "runs repo code");
-// issue #129's two-tier split: a command the allowlist does not recognize
-// has tier "". RunsNow says whether the post-edit hook would auto-run it IN
-// THIS WORKSPACE: the allowlist verdict ANDed with the trust gate (an
-// untrusted workspace runs inert commands and skips code-executing ones).
+// placeholder. RunsNow says whether the post-edit hook would auto-run it IN
+// THIS WORKSPACE: the workspace must be trusted AND the role must be
+// per-edit work (format needs {file}, lint needs {file}/{dir}; test and
+// build are never hook-run).
 type ProjectCommandInfo struct {
 	Role    string `json:"role"`
 	Command string `json:"command"`
 	Source  string `json:"source"`
 	PerFile bool   `json:"per_file,omitempty"`
-	Tier    string `json:"tier,omitempty"`
 	RunsNow bool   `json:"runs_now"`
 }
 
@@ -61,26 +57,10 @@ type ProjectCommandsReport struct {
 // commandRolesInOrder is the canonical display order, matching
 // projectcmd.Commands' own role fields (format, lint, test, build).
 var commandRolesInOrder = []projectcmd.Role{
-	projectcmd.RoleFormat, projectcmd.RoleLint, projectcmd.RoleTest, projectcmd.RoleBuild,
-}
-
-// commandTierOf is the report's tier/RunsNow projection of one resolved
-// command: the allowlist verdict (shellrisk.AllowlistProjectCommand — the
-// SAME gate the post-edit hook runs) for the tier, and tools.HookWouldRun
-// — the hook's OWN applicability rules and gate, not just the allowlist —
-// for runs_now. A non-allowlisted command (make targets, a go test script)
-// has tier "" and runs_now=false: trusting the workspace does NOT change
-// that, the hook never runs commands it doesn't recognize. An allowlisted
-// command still only "runs now" when its role applies per edit (format
-// needs {file}, lint needs {file}/{dir}; test and build are never
-// hook-run) AND the trust gate passes (inert on any workspace,
-// code-executing only on a trusted one).
-func commandTierOf(role projectcmd.Role, cmd projectcmd.Command, trusted bool) (tier string, runsNow bool) {
-	v := shellrisk.AllowlistProjectCommand(cmd.Cmd)
-	if v.Level != shellrisk.Safe {
-		return "", false
-	}
-	return v.ProjectCommand.String(), tools.HookWouldRun(role, cmd, trusted)
+	projectcmd.RoleFormat,
+	projectcmd.RoleLint,
+	projectcmd.RoleTest,
+	projectcmd.RoleBuild,
 }
 
 // commandsReportInfo projects a resolved Commands value onto its display/JSON
@@ -88,7 +68,8 @@ func commandTierOf(role projectcmd.Role, cmd projectcmd.Command, trusted bool) (
 // Commands in, a slice out — no filesystem, so it is golden-testable in
 // isolation. trusted is the report's workspace trust state (the CLI passes
 // the user config's verdict for the root it is resolving — the same state
-// the post-edit hook in that workspace would see).
+// the post-edit hook in that workspace would see): on an untrusted
+// workspace runs_now is false for every command.
 func commandsReportInfo(cmds projectcmd.Commands, trusted bool) []ProjectCommandInfo {
 	// A non-nil empty slice, so the JSON always carries "commands":[] (never
 	// null) — the shape a run.sh consumer can rely on when a root resolves to
@@ -99,14 +80,12 @@ func commandsReportInfo(cmds projectcmd.Commands, trusted bool) []ProjectCommand
 		if !ok {
 			continue
 		}
-		tier, runsNow := commandTierOf(role, c, trusted)
 		out = append(out, ProjectCommandInfo{
 			Role:    string(role),
 			Command: c.Cmd,
 			Source:  c.Source,
 			PerFile: c.PerFile,
-			Tier:    tier,
-			RunsNow: runsNow,
+			RunsNow: tools.HookWouldRun(role, c, trusted),
 		})
 	}
 	return out
@@ -126,9 +105,8 @@ func buildProjectCommandsReport(root string, cfg *Config, trusted bool) ProjectC
 }
 
 // renderProjectCommandsText renders the default (non-JSON) `cortex project
-// commands` output — one line per resolved command: its source, its
-// allowlist tier, and the post-edit hook's call for it in THIS workspace
-// (runs now / trusted-workspace required / not run by the post-edit hook).
+// commands` output — one line per resolved command: its source, and the
+// post-edit hook's call for it in THIS workspace (runs now / not run).
 // trusted is the report's workspace trust state (the same value that
 // produced the runs_now fields) — the label logic is pure over
 // (command, trusted). A provenance legend closes the block so discovered
@@ -144,30 +122,25 @@ func renderProjectCommandsText(r ProjectCommandsReport, trusted bool) string {
 		if c.PerFile {
 			perFile = " [per-file]"
 		}
-		tier := c.Tier
-		if tier == "" {
-			tier = "not allowlisted"
-		}
 		// The runs label must match runs_now: "trusted-workspace required"
-		// means trusting the workspace WOULD make the hook run it (an
-		// allowlisted code-tier command whose role applies per edit —
-		// HookWouldRun(cmd, false) false but HookWouldRun(cmd, true) true).
-		// Everything else that doesn't run is "not run by the post-edit
-		// hook" — a test/build role (never hook-run), a non-allowlisted
-		// command, or a whole-project format/lint — and trusting the
-		// workspace changes none of those.
+		// means trusting the workspace WOULD make the hook run it (a
+		// per-edit command in a role the hook runs — HookWouldRun(cmd, false)
+		// false but HookWouldRun(cmd, true) true). Everything else that
+		// doesn't run is "not run by the post-edit hook" — a test/build role
+		// (never hook-run) or a whole-project format/lint — and on an
+		// untrusted workspace nothing runs at all.
 		runs := "not run by the post-edit hook"
 		if c.RunsNow {
 			runs = "runs now"
-		} else if c.Tier != "" && trusted &&
+		} else if trusted &&
 			!tools.HookWouldRun(projectcmd.Role(c.Role), projectcmd.Command{Cmd: c.Command, PerFile: c.PerFile}, false) &&
 			tools.HookWouldRun(projectcmd.Role(c.Role), projectcmd.Command{Cmd: c.Command, PerFile: c.PerFile}, true) {
 			runs = "trusted-workspace required"
 		}
-		fmt.Fprintf(&b, "  %-8s%s (%s)%s — %s: %s\n", c.Role, c.Command, c.Source, perFile, tier, runs)
+		fmt.Fprintf(&b, "  %-8s%s (%s)%s — %s\n", c.Role, c.Command, c.Source, perFile, runs)
 	}
 	b.WriteString("  source: manifest name = discovered; config.json / AGENTS.md = declared\n")
-	b.WriteString("  runs now / trusted-workspace required: the post-edit hook's call for this workspace (cortex project trust); test/build and non-allowlisted commands are never auto-run\n")
+	b.WriteString("  runs now / trusted-workspace required: the post-edit hook's call for this workspace (cortex project trust); the hook runs only in a trusted workspace, and never runs test/build or whole-project commands per edit\n")
 	return b.String()
 }
 

@@ -148,19 +148,35 @@ func (cs *CortexSession) ProjectCommands() projectcmd.Commands {
 }
 
 // WorkspaceTrusted implements tools.WorkspaceTrust (issue #129's trust
-// gate): whether THIS workspace's root is on the operator's USER-level
-// trust list. Code-executing project commands (TierCode: cargo clippy,
-// eslint, npm run …) run in the post-edit hook only when this returns
-// true. The config consulted is cs.Config — the MERGED config, whose
-// Project.Trusted is the user-level list (mergeProject drops the
-// project-level copy), so a repository's own .cortex/config.json can never
-// put its own workspace on the trust list. A session with no resolved
-// workspace or no config is untrusted: the safe default.
+// gate — the ONLY gate for the post-edit hook): whether THIS workspace's
+// root is on the operator's USER-level trust list. On an untrusted
+// workspace the hook runs nothing. The config consulted is cs.Config —
+// the MERGED config, whose Project.Trusted is the user-level list
+// (mergeProject drops the project-level copy), so a repository's own
+// .cortex/config.json can never put its own workspace on the trust list.
+// A session with no resolved workspace or no config is untrusted: the
+// safe default.
 func (cs *CortexSession) WorkspaceTrusted() bool {
 	if cs == nil || cs.workspace == nil || cs.Config == nil {
 		return false
 	}
 	return cs.Config.WorkspaceTrusted(cs.workspace.Root)
+}
+
+// HookState implements tools.HookStateProvider: the session-scoped state
+// of the post-edit hook (the "hook inactive on an untrusted workspace"
+// note fires once per session — see tools.PostEditHookState). The state
+// lives on the session, so "once per session" is exactly that: the REPL's
+// session, a served session, or a loop firing, each with their own. A
+// nil pointer (a session that implements the capability but never
+// allocated state — every hand-built test session) is a no-op: the hook
+// has no per-session slot to announce into, so the untrusted note is not
+// surfaced. Never nil.
+func (cs *CortexSession) HookState() *tools.PostEditHookState {
+	if cs.hookState == nil {
+		return nil
+	}
+	return cs.hookState
 }
 
 // citationRe parses the outline citation coordinate: @session/<id>#m<start>-<end>,

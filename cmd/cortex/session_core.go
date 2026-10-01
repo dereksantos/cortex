@@ -107,12 +107,17 @@ type CortexSession struct {
 	// Computed once at session construction / project targeting; nil-safety
 	// means an empty value (no manifest, no declarations) is a no-op hook.
 	projectCommands projectcmd.Commands
-	deleteRoot      string
-	allowDelete     bool
-	quiet           bool
-	confirmRisky    func(question string) bool
-	classifyShell   shellrisk.ClassifyFn
-	turnIntent      string
+	// hookState is the session-scoped state of the post-edit hook
+	// (issue #129): the "workspace not trusted" note fires once per
+	// session, and the session is the unit that owns that flag
+	// (tools.PostEditHookState).
+	hookState     *tools.PostEditHookState
+	deleteRoot    string
+	allowDelete   bool
+	quiet         bool
+	confirmRisky  func(question string) bool
+	classifyShell shellrisk.ClassifyFn
+	turnIntent    string
 	// onThinking, when set, is invoked with active=true on the first
 	// reasoning delta of a model call and active=false once its answer
 	// content starts (or the call ends without one) — the served-session SSE
@@ -384,6 +389,7 @@ func NewCortexSession() *CortexSession {
 		deleteRoot:      deleteRoot,
 		allowDelete:     allowDelete,
 		projectCommands: resolveProjectCommands(workspace.Root, cfg),
+		hookState:       &tools.PostEditHookState{},
 		sessionStart:    time.Now(),
 	}
 	cs.ws = cs.newWorkingSet(1)

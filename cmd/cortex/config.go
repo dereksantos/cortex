@@ -519,14 +519,16 @@ type ProjectConfig struct {
 	// the file's package directory. Unknown keys are ignored.
 	Commands map[string]string `json:"commands"`
 	// Trusted is the per-workspace trust list (issue #129's trust gate):
-	// workspace root directories the OPERATOR has decided may run
-	// code-executing project commands (cargo clippy, eslint, npm run …) in
-	// the post-edit hook. It is a USER decision — read from the USER-level
-	// config only. mergeConfig ignores the project-level (over) copy, so a
-	// repository can never set trust for itself: the project's own
-	// .cortex/config.json, and anything else the repo ships (AGENTS.md has
-	// no such key), cannot put a workspace on its own trust list. Absent
-	// or empty means no workspace is trusted — the safe default.
+	// workspace root directories the OPERATOR has decided are trusted — the
+	// ONLY gate for the post-edit hook (on an untrusted workspace it runs
+	// nothing). It is a USER decision — read from the USER-level config
+	// only: this field is INERT on the merged config's read path (the
+	// accessor TrustedList always reads the user file directly), and
+	// mergeConfig ignores the project-level (over) copy, so a repository
+	// can never set trust for itself: the project's own .cortex/config.json,
+	// and anything else the repo ships (AGENTS.md has no such key), cannot
+	// put a workspace on its own trust list. Absent or empty means no
+	// workspace is trusted — the safe default.
 	Trusted []string `json:"trusted"`
 }
 
@@ -552,8 +554,8 @@ func (c *Config) DeclaredProjectCommands() projectcmd.Declared {
 }
 
 // WorkspaceTrusted reports whether the workspace rooted at root is on the
-// USER's trust list (issue #129's gate for code-executing project
-// commands). The authoritative source is the user-level config file read
+// USER's trust list (issue #129's gate for the post-edit hook: on an
+// untrusted workspace the hook runs nothing). The authoritative source is the user-level config file read
 // DIRECTLY (trustFromUserConfig), so the repo-claim vector cannot exist in
 // the first place: a project's own .cortex/config.json is never on the read
 // path, regardless of what the merged config carries — the repo is the
@@ -584,20 +586,16 @@ func (c *Config) WorkspaceTrusted(root string) bool {
 	return false
 }
 
-// TrustedList returns the trust list in effect for this config: the
-// USER-level config file's project.trusted (trustFromUserConfig) — the only
-// source authority (the repository is the untrusted party; see
-// WorkspaceTrusted's comment). A merged config that was built from an
-// ABSENT or MALFORMED user config carries the repo's claim in
-// Project.Trusted (loadMergedConfig's fallback), and the direct user read
-// overrides it — which for the absent/malformed user cases is exactly
-// "no entries": untrusted. A nil config, or one that carries no list (a
-// controlled *Config, e.g. in tests), falls back to the direct read too,
-// so the accessor can never be pointed at a stale or repo-written field.
+// TrustedList returns the trust list in effect for this config: ALWAYS the
+// USER-level config file's project.trusted, read DIRECTLY
+// (trustFromUserConfig). This accessor never reads the in-memory
+// Project.Trusted field: it is authoritative for nothing, because a
+// merged config that was built from an ABSENT or MALFORMED user config
+// carries the repo's claim in that field (loadMergedConfig's fallback) —
+// and the repository is the untrusted party, so the direct user read is
+// the only source (for the absent/malformed user cases it is exactly
+// "no entries": untrusted).
 func (c *Config) TrustedList() []string {
-	if c != nil && len(c.Project.Trusted) > 0 {
-		return trustFromUserConfig(userConfigPath())
-	}
 	return trustFromUserConfig(userConfigPath())
 }
 

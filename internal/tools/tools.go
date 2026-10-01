@@ -256,6 +256,61 @@ func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 }
 func (headlessDeps) AttributionCommit() string { return "" }
 
+// PostEditHookState is the session-scoped state of the post-edit hook
+// (issue #129): whether the one-line "hook inactive: workspace not
+// trusted" note has already been announced. A session (a *CortexSession in
+// cmd/cortex) is the unit of "once per session" — the note fires on the
+// first write/edit of a session on an untrusted workspace and stays quiet
+// afterwards. The flag is marked consumed only when the note is actually
+// emitted, so a session that gets trusted mid-session announces nothing
+// after the flip. It is a POINTER behind the HookState capability so the
+// state mutates in place on the session that owns it — and so a test's
+// value-passed deps copies all share the same session state.
+type PostEditHookState struct {
+	inactiveAnnounced bool
+}
+
+// inactiveNoteDue reports whether the "hook inactive" note may still be
+// announced for this session (the once-per-session flag: false once it has
+// been). It is non-consuming and never announces anything itself — the
+// caller marks it consumed only when the note is actually emitted, so a
+// trusted workspace (which never emits the note) and a command-less edit
+// (which never reaches the note) do not burn the session's one slot. It
+// is the ONLY cross-call state the hook keeps: the rest of the hook is
+// stateless per edit.
+func (s *PostEditHookState) inactiveNoteDue() bool {
+	return !s.inactiveAnnounced
+}
+
+// announceInactive marks the one-time note as announced. Called only from
+// the untrusted branch of runProjectCommandHook, after the note has been
+// produced and is about to be appended to the tool result.
+func (s *PostEditHookState) announceInactive() {
+	s.inactiveAnnounced = true
+}
+
+// hookStateOf extracts the session's post-edit hook state from deps, or
+// nil when the capability is absent (every existing implementor that
+// hasn't adopted it): such a caller has no session to announce the
+// untrusted note for, so the note is not surfaced.
+func hookStateOf(deps ToolDeps) *PostEditHookState {
+	state, ok := deps.(HookStateProvider)
+	if !ok {
+		return nil
+	}
+	return state.HookState()
+}
+
+// HookStateProvider is the OPTIONAL ToolDeps capability that exposes the
+// session's post-edit hook state (see PostEditHookState). It is asserted
+// dynamically by hookStateOf, so every existing ToolDeps implementor is
+// untouched; a session that doesn't implement it has no per-session
+// announcement (the hook's untrusted note is a per-session observation,
+// and a stateless caller has no session to announce it for).
+type HookStateProvider interface {
+	HookState() *PostEditHookState
+}
+
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
 	FunctionReadFile     = "read_file"
@@ -1127,8 +1182,9 @@ func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) 
 	// just written. Never fails the write — it only appends a note. The note
 	// goes last: the tool's own observation about the change it applied (the
 	// #141 large-deletion NOTE) comes first, then what the project's commands
-	// said about the result.
-	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps)); note != "" {
+	// said about the result. Trust is the only gate: on an untrusted
+	// workspace the hook runs nothing and (once per session) says so.
+	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookStateOf(deps)); note != "" {
 		result += "\n" + note
 	}
 	return result, nil
@@ -1277,8 +1333,9 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// goes last: the tool's own observations about the change it applied
 	// (the #153 line delta and removal WARNING, then the #141 large-deletion
 	// NOTE) come first, then what the project's commands said about the
-	// result.
-	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps)); note != "" {
+	// result. Trust is the only gate: on an untrusted workspace the hook
+	// runs nothing and (once per session) says so.
+	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookStateOf(deps)); note != "" {
 		result += "\n" + note
 	}
 	return result, nil
