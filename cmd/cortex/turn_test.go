@@ -335,9 +335,10 @@ func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
 }
 
 // TestTurnEmptyUnsalvageableReturnsEmptyNotStale: round 1 carries tool_calls
-// plus throwaway prose; every later round (the natural finish AND the salvage
-// re-ask) comes back empty. The reply must be empty — not round 1's stale
-// pre-tool prose — and the stop reason must say the turn ended empty.
+// plus throwaway prose; every later round (the natural finish, the one
+// reasoning-off retry of issue #149, and the salvage re-ask) comes back
+// empty. The reply must be empty — not round 1's stale pre-tool prose — and
+// the stop reason must say the turn ended empty.
 func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
@@ -372,8 +373,176 @@ func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	if res.StopReason != "empty-finalize" {
 		t.Errorf("StopReason = %q, want empty-finalize", res.StopReason)
 	}
+	if calls != 4 {
+		t.Errorf("model calls = %d, want 4 (tool round, empty finish, one reasoning-off retry, one salvage)", calls)
+	}
+}
+
+// TestTurnReasoningFallbackWritesReceipt: the issue #149 end-to-end receipt —
+// the natural finish comes back empty (the model's reasoning consumed the
+// whole completion), the one-shot reasoning-off retry recovers an answer, and
+// the turn persists a recovery.reasoning_fallback entry under
+// .cortex/journal/recovery/. The fake backend answers the effort-off send
+// with a non-empty reply and nothing else.
+func TestTurnReasoningFallbackWritesReceipt(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			// Natural finish: no tool_calls, empty content, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		// The reasoning-off retry: the answer.
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "recovered answer" {
+		t.Errorf("Reply = %q, want recovered answer", res.Reply)
+	}
+	if calls != 2 {
+		t.Errorf("model calls = %d, want 2 (empty finish, one reasoning-off retry)", calls)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "recovery"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var p *journal.ReasoningFallbackPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p2, perr := journal.ParseReasoningFallback(e); perr == nil {
+			if p != nil {
+				t.Fatalf("more than one recovery.reasoning_fallback entry")
+			}
+			p = p2
+		}
+	}
+	if p == nil {
+		t.Fatal("no recovery.reasoning_fallback entry under .cortex/journal/recovery/")
+	}
+	if p.Model != "m" || p.Role != "code" || p.Path != "natural" {
+		t.Errorf("receipt = %+v, want model=m role=code path=natural", p)
+	}
+}
+
+// TestTurnReasoningFallbackToolRoundReceipt: the issue #149 receipt's
+// tool-calls variant. The empty natural finish is recovered by the
+// reasoning-off retry's tool call (dispatched like an ordinary round; the
+// following round answers), so the turn persists exactly ONE
+// recovery.reasoning_fallback entry — attributed "tool-round" (the receipt's
+// own stop-reason attribution, distinct from the run's final stop reason),
+// outcome "tool_calls". This is the case the loop-level unit test pins at
+// engine level and the doc-comment in internal/journal/recovery.go names.
+func TestTurnReasoningFallbackToolRoundReceipt(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Natural finish: empty content, no tool_calls, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		case 2:
+			// The reasoning-off retry: a tool call, not prose.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		default:
+			// The round after the tool result: the answer.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"final answer"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	res, err := cs.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "final answer" {
+		t.Errorf("Reply = %q, want final answer (the loop continued after the retry's tool round)", res.Reply)
+	}
 	if calls != 3 {
-		t.Errorf("model calls = %d, want 3 (tool round, empty finish, one salvage)", calls)
+		t.Errorf("model calls = %d, want 3 (empty finish, off-retry with a tool call, final round)", calls)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "recovery"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var p *journal.ReasoningFallbackPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p2, perr := journal.ParseReasoningFallback(e); perr == nil {
+			if p != nil {
+				t.Fatalf("more than one recovery.reasoning_fallback entry")
+			}
+			p = p2
+		}
+	}
+	if p == nil {
+		t.Fatal("no recovery.reasoning_fallback entry under .cortex/journal/recovery/")
+	}
+	if p.Model != "m" || p.Role != "code" || p.Path != "natural" {
+		t.Errorf("receipt = %+v, want model=m role=code path=natural", p)
+	}
+	if p.Outcome != journal.OutcomeToolCalls {
+		t.Errorf("receipt outcome = %q, want %q (the retry recovered the round with a tool call)",
+			p.Outcome, journal.OutcomeToolCalls)
+	}
+	if p.StopReason != "tool-round" {
+		t.Errorf("receipt stop_reason = %q, want tool-round (the receipt's own attribution; the run ended clean-finalize)",
+			p.StopReason)
 	}
 }
 
@@ -729,5 +898,174 @@ func TestTurnPhaseIdleAfterCompletion(t *testing.T) {
 	}
 	if cs.phase != phaseIdle {
 		t.Errorf("phase after Turn() = %v, want phaseIdle", cs.phase)
+	}
+}
+
+// fallbackTranscriptEntries re-reads the session JSONL on disk and returns the
+// raw entries whose kind matches want ("" for the default message entries).
+func fallbackTranscriptEntries(t *testing.T, cs *CortexSession, want string) []sessionEntry {
+	t.Helper()
+	path := filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading transcript: %v", err)
+	}
+	var out []sessionEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad transcript line %q: %v", line, err)
+		}
+		if e.Kind == want {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestTurnReasoningFallbackKeepsTranscriptConsistent: the issue #149
+// off-retry recovers an empty finish with a tool call. The dropped empty
+// assistant message must NOT outlive the retry in the resumable session
+// log: reload with loadSession and assert there is no "assistant, then
+// assistant" shape (and no mid-conversation system note) — the transcript is
+// consistent with the wire conversation (assistant(tool_calls) → tool →
+// assistant).
+func TestTurnReasoningFallbackKeepsTranscriptConsistent(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Natural finish: empty, no tool calls (reasoning consumed the turn).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		case 2:
+			// The reasoning-off retry: a tool call (the work the deliberation hid).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		default:
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	if _, err := cs.Turn(context.Background(), "fix the build"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// Reload the resumable log exactly as `cortex resume` does.
+	msgs, _, _, err := loadSession(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	// No mid-conversation system message (the transcript note is kindNote,
+	// which loadSession skips).
+	for i, m := range msgs {
+		if m.Role == RoleSystem && i != 0 {
+			t.Errorf("loaded message %d is a non-leading system message: %+v (the note must not be resumable)", i, m)
+		}
+	}
+	// No "assistant followed by assistant" shape, and no empty assistant at
+	// all — the dropped empty finish did not survive in the log.
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 {
+			t.Errorf("loaded message %d is an empty assistant with no tool calls: the dropped empty finish survived in the log", i)
+		}
+		if i > 0 && msgs[i-1].Role == "assistant" {
+			t.Errorf("loaded message %d is an assistant message directly after another assistant: the transcript is not consistent with the wire conversation", i)
+		}
+	}
+}
+
+// TestTurnReasoningFallbackNoteIsNotResumable: the issue #149 transcript note
+// must be written under a distinct kindNote entry so `cortex resume`
+// (loadSession) never loads it back as a message. It is visible in the JSONL
+// (human-readable) but absent from the resumed wire conversation.
+func TestTurnReasoningFallbackNoteIsNotResumable(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	if _, err := cs.Turn(context.Background(), "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// The note is present in the JSONL under kindNote (human-readable).
+	notes := fallbackTranscriptEntries(t, cs, kindNote)
+	if len(notes) != 1 {
+		t.Fatalf("got %d kindNote entries, want 1 (the fallback transcript note)", len(notes))
+	}
+	if !strings.Contains(notes[0].Content, "re-sent once with reasoning disabled") {
+		t.Errorf("kindNote content = %q, want the reasoning-fallback note", notes[0].Content)
+	}
+
+	// And it is NOT loaded back as a message on resume.
+	msgs, _, _, err := loadSession(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "re-sent once with reasoning disabled") {
+			t.Errorf("loadSession returned the transcript note as a message: %+v", m)
+		}
 	}
 }

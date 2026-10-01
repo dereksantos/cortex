@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -161,6 +162,13 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 			withColor(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), green))
 	}
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
+	// Issue #149 receipt: same hook as the coder turn (turn.go) — the subagent's
+	// own request is the model that needed the fallback; the role is the
+	// subagent's ("study").
+	ts.OnReasoningFallback = func(stats loopStats) {
+		cs.appendReasoningFallback(sa.Role, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.ReasoningFallbackOutcome, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.transcriptNote(reasoningFallbackNote())
+	}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	bounds := sa.Bounds
 	bounds.EscalateEffort = cs.Config.effortEscalationEnabled()

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/journal"
 )
 
 func (cs *CortexSession) startActivity(label string) {
@@ -194,6 +195,14 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		}
 	}
 	ts.AfterToolResult = onAfterToolResult
+	// Issue #149 receipt: when the engine's natural-finish off-retry recovers an
+	// empty reply, persist the fallback (model + this role) to the project-scope
+	// recovery journal — the role code is fixed here (the coder turn), so the
+	// closure is the composition root's, not the engine's.
+	ts.OnReasoningFallback = func(stats loopStats) {
+		cs.appendReasoningFallback(roleCode, journal.ReasoningFallbackPathNatural, cs.Request.Model, stats.StopReason, stats.ReasoningFallbackOutcome, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.transcriptNote(reasoningFallbackNote())
+	}
 
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""

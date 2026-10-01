@@ -16,6 +16,7 @@ import (
 
 const (
 	kindMessage    = "message"
+	kindNote       = "note"
 	kindCompaction = "compaction"
 	kindState      = "state"
 	kindContext    = "context"

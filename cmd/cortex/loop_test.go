@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -49,6 +50,18 @@ func TestAccountUsageReasoningTokens(t *testing.T) {
 func readCall(id, path string) ToolCall {
 	args, _ := json.Marshal(map[string]any{"path": path})
 	return ToolCall{ID: id, Type: "function", Function: FunctionCall{Name: tools.FunctionReadFile, Arguments: string(args)}}
+}
+
+// rolesOf renders a message slice's role sequence for failure diagnostics.
+func rolesOf(msgs []Message) string {
+	var b strings.Builder
+	for i, m := range msgs {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(m.Role)
+	}
+	return "[" + b.String() + "]"
 }
 
 // TestCoderLoopCharacterization locks the coder loop's behavior — the message
@@ -294,6 +307,11 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	t.Run("empty clamped finalize is salvaged", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		// Effort pinned off so the issue #149 natural-finish off-retry is
+		// skipped and this subtest exercises exactly what it was named for:
+		// the forced finalize empty at the clamp, recovered by ONE salvage
+		// re-ask (finalizes == 2).
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		var finalizes int
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
@@ -322,6 +340,9 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		if finalizes != 2 {
 			t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
 		}
+		if stats.ReasoningFallback {
+			t.Errorf("ReasoningFallback = true, want false (effort off: no off-retry fired)")
+		}
 		if stats.SalvagedUnclamped {
 			t.Errorf("SalvagedUnclamped = true, want false (this recovery was clamped)")
 		}
@@ -331,6 +352,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		// because it spiraled to the token clamp on a normal turn (out == MaxTokens).
 		// The natural-finish path must salvage it, not return "".
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
 			if r.Tools == nil { // the salvage re-ask
@@ -349,8 +371,47 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 			t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
 		}
 	})
+	t.Run("natural empty clamped finish is recovered by the reasoning-off retry", func(t *testing.T) {
+		// The issue #149 path: the role runs with reasoning ON (the code role's
+		// default), so an empty natural finish triggers the one-shot
+		// reasoning-off retry before any prompt-based salvage. Here the retry
+		// answers, clamped.
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Effort.Level == llm.EffortOff {
+				return fakeResp("salvaged answer", nil, 1, 100), false, nil // the off-retry answers, clamped (out == MaxTokens)
+			}
+			return fakeResp("", nil, 1, 100), false, nil // empty + clamped (out == MaxTokens), no tool calls → the off-retry fires
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
+			t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
+		}
+		if !stats.ReasoningFallback {
+			t.Errorf("ReasoningFallback = false, want true (recovered by the off-retry)")
+		}
+		if stats.SalvagedUnclamped {
+			t.Errorf("SalvagedUnclamped = true, want false (the off-retry's answer was clamped)")
+		}
+	})
 	t.Run("empty clamped finish can salvage from explicit tool candidate", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		// The role runs with reasoning OFF so step 1's natural-finish off-retry
+		// is skipped: the empty natural finish falls straight through to the
+		// prompt-based salvage chain (salvageEmptyFinalize fails empty at
+		// clamp, then salvageObservationFinalize recovers from the tool
+		// candidate). Without this gate the off-retry would fire first and
+		// answer "salvaged answer" before the observation candidate is ever
+		// consulted.
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
 			if r.Tools == nil { // both finalize and salvage re-ask fail empty at clamp
@@ -521,6 +582,357 @@ func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	}
 	if finalizes != 2 {
 		t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
+	}
+}
+
+// salvageReasoningRetryScripted is the base Sender for the reasoning-fallback
+// tests (issue #149): the first send returns an EMPTY answer with no tool
+// calls (the live failure mode, unclamped), the second — the reasoning-off
+// retry — answers "recovered answer" and records the wire fields it was sent
+// with, and the third (reached only when the retry is skipped or fails) is the
+// prompt-based salvage re-ask (tools withheld) answering "salvaged answer".
+func salvageReasoningRetryScripted(retrySawOff, retryCarriedTools *bool, sendCount *int) Sender {
+	return SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		*sendCount++
+		switch *sendCount {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // empty, no tool calls, no clamp
+		case 2:
+			// In the recovery subtests this is the reasoning-off retry (tools
+			// carried); in the off-role subtest the retry is skipped, so this
+			// send is the prompt-based salvage re-ask (tools withheld). Report
+			// the wire fields only when tools are actually carried.
+			if r.Tools != nil {
+				*retrySawOff = r.Effort.Level == llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == false
+				*retryCarriedTools = true
+			}
+			if r.Tools != nil {
+				return fakeResp("recovered answer", nil, 1, 8), false, nil
+			}
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		default:
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		}
+	})
+}
+
+// TestRunLoopSalvagesEmptyFinishWithReasoningOffRetry covers issue #149:
+// an empty finish (no content, no tool calls) from a role whose reasoning is
+// ON is recovered by re-sending the SAME request once with reasoning pinned
+// off, before the prompt-based salvage chain is consulted; the retry's result
+// is used as the answer. Table-driven over the role's effort: any non-off
+// level triggers exactly one retry, and an explicitly off role never does —
+// it falls through to the existing salvage chain untouched.
+func TestRunLoopSalvagesEmptyFinishWithReasoningOffRetry(t *testing.T) {
+	tests := []struct {
+		name         string
+		effort       llm.EffortLevel
+		wantRecovery bool
+	}{
+		{name: "reasoning on", effort: llm.EffortOn, wantRecovery: true},
+		{name: "reasoning high", effort: llm.EffortHigh, wantRecovery: true},
+		{name: "unset (model default)", effort: llm.EffortUnset, wantRecovery: true},
+		{name: "reasoning off", effort: llm.EffortOff, wantRecovery: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+			applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: tt.effort})
+			appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+			sends := 0
+			var retrySawOff, retryCarriedTools bool
+			send := salvageReasoningRetryScripted(&retrySawOff, &retryCarriedTools, &sends)
+			disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+			content, stats, err := runLoop(context.Background(), send, req,
+				Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+				Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+			if err != nil {
+				t.Fatalf("runLoop: %v", err)
+			}
+			// The one-shot mutation must restore the role's configured effort.
+			if req.Effort.Level != tt.effort {
+				t.Errorf("req.Effort after runLoop = %+v, want restored to %q", req.Effort, tt.effort)
+			}
+			if !tt.wantRecovery {
+				if stats.ReasoningFallback {
+					t.Errorf("ReasoningFallback = true, want false (reasoning-off role never retries)")
+				}
+				// Empty finish, no retry: the existing prompt-based salvage
+				// chain runs (empty → salvage re-ask, which answers).
+				if content != "salvaged answer" {
+					t.Errorf("content = %q, want salvaged answer (existing salvage chain, no retry)", content)
+				}
+				if sends != 2 {
+					t.Errorf("sends = %d, want 2 (empty finish + salvage re-ask)", sends)
+				}
+				return
+			}
+			if content != "recovered answer" {
+				t.Errorf("content = %q, want recovered answer (the retry's result is used)", content)
+			}
+			if sends != 2 {
+				t.Errorf("sends = %d, want 2 (exactly one reasoning-off retry)", sends)
+			}
+			if !retryCarriedTools {
+				t.Error("the retry send did not carry the role's tools (same request re-sent, not a finalize)")
+			}
+			if !retrySawOff {
+				t.Error("the retry send did not go out with reasoning pinned off")
+			}
+			if stats.StopReason != "salvaged-finalize" || !stats.Salvaged || !stats.ReasoningFallback {
+				t.Errorf("stop=%q salvaged=%v reasoningFallback=%v, want salvaged-finalize/true/true",
+					stats.StopReason, stats.Salvaged, stats.ReasoningFallback)
+			}
+			if stats.ReasoningFallbackOutcome != journal.OutcomeAnswer {
+				t.Errorf("ReasoningFallbackOutcome = %q, want %q (the retry answered with prose)",
+					stats.ReasoningFallbackOutcome, journal.OutcomeAnswer)
+			}
+			if !stats.SalvagedUnclamped {
+				t.Errorf("SalvagedUnclamped = false, want true (the empty finish was not clamped)")
+			}
+		})
+	}
+}
+
+// TestRunLoopReasoningOffRetryFallsThroughWhenRetryIsEmpty: if the
+// reasoning-off retry ALSO comes back empty (or errors), the existing salvage
+// chain (salvageEmptyFinalize) still runs — the retry is one attempt, not a
+// retry storm, and it never masks a later successful salvage.
+func TestRunLoopReasoningOffRetryFallsThroughWhenRetryIsEmpty(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	sends := 0
+	var retrySawOff bool
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // empty finish, reasoning on
+		case 2:
+			retrySawOff = r.Effort.Level == llm.EffortOff
+			return fakeResp("", nil, 1, 5), false, nil // retry also empty
+		case 3:
+			// The salvage re-ask (tools withheld) finally answers.
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if sends != 3 {
+		t.Errorf("sends = %d, want 3 (empty + one failed retry + salvage re-ask)", sends)
+	}
+	if !retrySawOff {
+		t.Error("the retry send did not go out with reasoning pinned off")
+	}
+	if content != "salvaged answer" {
+		t.Errorf("content = %q, want salvaged answer (fall-through to existing salvage)", content)
+	}
+	if stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = true, want false (the retry recovered nothing)")
+	}
+	if stats.StopReason != "salvaged-finalize" || !stats.Salvaged {
+		t.Errorf("stop=%q salvaged=%v, want salvaged-finalize/true", stats.StopReason, stats.Salvaged)
+	}
+	if req.Effort.Level != llm.EffortOn {
+		t.Errorf("req.Effort after runLoop = %+v, want restored to on", req.Effort)
+	}
+}
+
+// TestRunLoopReasoningOffRetryToolCallsDispatch: the issue #149 off-retry
+// re-sends the SAME request — tools still advertised. When the retry returns
+// tool calls (the model had work to do once the deliberation channel closed),
+// the loop must treat it like a normal tool round: dispatch the calls and
+// append their results, then let the next round answer — not append a bare
+// assistant(tool_calls) message and ignore it.
+func TestRunLoopReasoningOffRetryToolCallsDispatch(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	sends := 0
+	var retrySawOff, retryCarriedTools bool
+	var dispatched []string
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // empty finish, reasoning on
+		case 2:
+			// The off-retry: tools must be carried (the same request), and it
+			// answers with a tool call — the work the deliberation hid.
+			retrySawOff = r.Effort.Level == llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == false
+			retryCarriedTools = r.Tools != nil
+			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 8), false, nil
+		case 3:
+			return fakeResp("recovered answer", nil, 1, 8), false, nil // normal round after the tool result
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
+		dispatched = append(dispatched, call.Function.Name)
+		return "OBS:" + call.Function.Name
+	})
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if sends != 3 {
+		t.Fatalf("sends = %d, want 3 (empty finish, off-retry with tool calls, final round)", sends)
+	}
+	if !retrySawOff {
+		t.Error("the retry send did not go out with reasoning pinned off")
+	}
+	if !retryCarriedTools {
+		t.Error("the retry send did not carry the role's tools (the retry must be the same request)")
+	}
+	if len(dispatched) != 1 || dispatched[0] != tools.FunctionReadFile {
+		t.Errorf("dispatched = %v, want [read_file] (the retry's tool call must be dispatched like a normal round)", dispatched)
+	}
+	if content != "recovered answer" {
+		t.Errorf("content = %q, want recovered answer (the loop continued after dispatching the retry's calls)", content)
+	}
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize (the loop continued; the retry was a tool round, not an answer)", stats.StopReason)
+	}
+	// The fallback DID fire and recover the turn (with tool calls), so it is
+	// recorded for telemetry even though the loop continued rather than
+	// returning an answer: flag set, outcome = tool_calls.
+	if !stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = false, want true (the off-retry recovered the round with tool calls)")
+	}
+	if stats.ReasoningFallbackOutcome != journal.OutcomeToolCalls {
+		t.Errorf("ReasoningFallbackOutcome = %q, want %q", stats.ReasoningFallbackOutcome, journal.OutcomeToolCalls)
+	}
+}
+
+// TestRunLoopReasoningOffRetryRecoversXMLToolCalls: a Qwen-style model (the
+// exact target of #149) can answer the reasoning-off retry with native XML
+// tool-call markup in its content instead of structured tool_calls. The
+// recovery must run the SAME XML recovery the main round applies — parse the
+// calls out of the content, dispatch them, and NOT return the raw markup as
+// the turn's final prose.
+func TestRunLoopReasoningOffRetryRecoversXMLToolCalls(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	sends := 0
+	var retrySawOff bool
+	var dispatched []string
+	xml := "<tool_call>\n<function=read_file>\n<parameter=path>\ngo.mod\n</parameter>\n</function>\n</tool_call>"
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // empty finish, reasoning on
+		case 2:
+			// The off-retry: the Qwen model answers with native XML tool-call
+			// markup in its content, NOT structured tool_calls.
+			retrySawOff = r.Effort.Level == llm.EffortOff
+			return fakeResp(xml, nil, 1, 8), false, nil
+		case 3:
+			return fakeResp("recovered answer", nil, 1, 8), false, nil // normal round after the tool result
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
+		dispatched = append(dispatched, call.Function.Name)
+		return "OBS:" + call.Function.Name
+	})
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if !retrySawOff {
+		t.Error("the retry send did not go out with reasoning pinned off")
+	}
+	if len(dispatched) != 1 || dispatched[0] != tools.FunctionReadFile {
+		t.Errorf("dispatched = %v, want [read_file] (the retry's XML tool call must be dispatched, not returned as prose)", dispatched)
+	}
+	if content != "recovered answer" {
+		t.Errorf("content = %q, want recovered answer — NOT the raw <tool_call> markup", content)
+	}
+	if strings.Contains(content, "function=read_file") || strings.Contains(content, "tool_call") {
+		t.Errorf("content leaked raw tool-call markup: %q", content)
+	}
+	// system, assistant(tool_calls), tool(result), assistant — no doubled or
+	// leftover empty assistant (the dropped empty finish did not survive).
+	if len(req.Messages) != 4 {
+		t.Fatalf("len(req.Messages) = %d, want 4 (system, assistant(tool_calls), tool, assistant): %v", len(req.Messages), rolesOf(req.Messages))
+	}
+	// The retry's assistant message carries the parsed call (not the raw markup).
+	assistant := req.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 ||
+		assistant.ToolCalls[0].Function.Name != tools.FunctionReadFile {
+		t.Errorf("assistant message = %+v, want one parsed read_file tool call", assistant)
+	}
+	if strings.Contains(assistant.Content, "function=read_file") {
+		t.Errorf("assistant content still carries raw markup: %q", assistant.Content)
+	}
+	if toolMsg := req.Messages[2]; toolMsg.Role != RoleTool {
+		t.Errorf("message 2 role = %q, want a tool result following the assistant(tool_calls)", toolMsg.Role)
+	}
+	if finalMsg := req.Messages[3]; finalMsg.Role != "assistant" || finalMsg.Content != "recovered answer" {
+		t.Errorf("final message = %+v, want the assistant's recovered answer", finalMsg)
+	}
+	// The fallback fired and recovered the round with tool calls, so the engine
+	// records it (flag + outcome) for telemetry, exactly as TestRunLoopReasoningOffRetryToolCallsDispatch pins.
+	if !stats.ReasoningFallback || stats.ReasoningFallbackOutcome != journal.OutcomeToolCalls {
+		t.Errorf("ReasoningFallback=%v outcome=%q, want true/%q (the off-retry recovered the round with tool calls)",
+			stats.ReasoningFallback, stats.ReasoningFallbackOutcome, journal.OutcomeToolCalls)
+	}
+}
+
+// TestRunLoopNonEmptyFinishDoesNotRetryWithReasoningOff: a non-empty answer
+// from a reasoning-on role triggers no retry at all — the recovery is gated
+// on the empty branch of the loop.
+func TestRunLoopNonEmptyFinishDoesNotRetryWithReasoningOff(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	sends := 0
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		return fakeResp("a normal answer", nil, 1, 5), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "a normal answer" {
+		t.Errorf("content = %q, want a normal answer", content)
+	}
+	if sends != 1 {
+		t.Errorf("sends = %d, want 1 (no retry for a non-empty reply)", sends)
+	}
+	if stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = true, want false")
+	}
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize", stats.StopReason)
 	}
 }
 
@@ -1099,4 +1511,117 @@ func TestStuckGuardEscalatesEffortOnce(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRunLoopRestoresToolsAfterFailedClampedSalvage: a natural NON-empty
+// finish whose completion hit the clamp (out == MaxTokens) runs
+// salvageClampedFinalize, which withholds the tools for its re-send. When
+// that re-send comes back empty (or errors), runLoop must still hand the
+// caller's long-lived request back with its tools, or the coder's next turn
+// runs with none — the regression the #149 restructure introduced when it
+// dropped the pre-clean-finalize restore.
+func TestRunLoopRestoresToolsAfterFailedClampedSalvage(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // the clamped-finalize re-ask: comes back empty
+			return fakeResp("", nil, 1, 5), false, nil
+		}
+		// Natural NON-empty finish, clamped: out == MaxTokens, no tool calls.
+		return fakeResp("a long answer that ran into the cap", nil, 1, 100), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	ts := Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp}
+	content, stats, err := runLoop(context.Background(), send, req, ts,
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "a long answer that ran into the cap" {
+		t.Errorf("content = %q, want the clamped answer (the failed salvage falls through to clean-finalize)", content)
+	}
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize", stats.StopReason)
+	}
+	if req.Tools == nil || len(req.Tools) != len(ts.Tools) {
+		t.Errorf("req.Tools after failed clamped salvage = %v, want the toolset restored (%d tools) for the caller's next turn",
+			req.Tools, len(ts.Tools))
+	}
+}
+
+// TestRunLoopReasoningFallbackReceiptFiresOncePerGenuineRecovery: the
+// issue #149 receipt is round-local. Round 1's empty finish is recovered by
+// the reasoning-off retry's tool calls (one genuine recovery → one receipt).
+// A LATER round (3) comes back empty again and its retry errors (send
+// failure → nil): the receipt must NOT fire a second time (it recovered
+// nothing, and the run-level flag must not be read as a per-round gate),
+// and the run's stats must keep recording the earlier genuine recovery.
+// With the old flag-gated receipt, this scenario wrote a second, false
+// receipt.
+func TestRunLoopReasoningFallbackReceiptFiresOncePerGenuineRecovery(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var receipts int
+	var receiptOutcomes []string
+	sends := 0
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // round 1: empty finish, reasoning on
+		case 2:
+			// Round 1's off-retry: recovers with a tool call (genuine recovery #1).
+			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 8), false, nil
+		case 3:
+			// After the tool result, round 3 comes back empty again.
+			return fakeResp("", nil, 1, 5), false, nil
+		case 4:
+			// Round 3's off-retry ERRORS: the retry recovered nothing.
+			return nil, false, errors.New("backend down")
+		case 5:
+			// Fall-through salvage re-ask (tools withheld): recovers the turn.
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	ts := Toolset{
+		Tools:    []Tool{tools.ReadFile},
+		Dispatch: disp,
+		OnReasoningFallback: func(stats loopStats) {
+			receipts++
+			receiptOutcomes = append(receiptOutcomes, stats.ReasoningFallbackOutcome)
+		},
+	}
+	content, stats, err := runLoop(context.Background(), send, req, ts,
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "salvaged answer" {
+		t.Errorf("content = %q, want salvaged answer (round 3's fall-through salvage)", content)
+	}
+	if receipts != 1 {
+		t.Errorf("OnReasoningFallback fired %d times, want exactly 1 (round 1's genuine recovery; round 3's failed retry must not write a second receipt)",
+			receipts)
+	}
+	if len(receiptOutcomes) == 1 && receiptOutcomes[0] != journal.OutcomeToolCalls {
+		t.Errorf("receipt outcome = %q, want %q (the single genuine recovery was the tool-call one)",
+			receiptOutcomes[0], journal.OutcomeToolCalls)
+	}
+	// The run-level flag keeps the earlier genuine recovery: a failed retry
+	// in a later round must not clear it.
+	if !stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = false, want true (round 1's recovery stands for the run's stats)")
+	}
+	if stats.ReasoningFallbackOutcome != journal.OutcomeToolCalls {
+		t.Errorf("ReasoningFallbackOutcome = %q, want %q (never overwritten by the later failed retry)",
+			stats.ReasoningFallbackOutcome, journal.OutcomeToolCalls)
+	}
+	if stats.StopReason != "salvaged-finalize" {
+		t.Errorf("stop = %q, want salvaged-finalize (round 3's prompt-based salvage)", stats.StopReason)
+	}
 }
