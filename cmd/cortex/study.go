@@ -194,7 +194,13 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	//     — settled HERE from the send-scoped receipt, the healing ladder no
 	//     longer journals it on the fly (heal.go no longer writes it directly).
 	if stats.StopReason == "error-recovered" && stats.LastError != nil {
-		cs.reportRecoverableError(sa.Role, stats.LastError)
+		// req.Model is the model the subagent's own request ran on — NOT
+		// cs.Request.Model (the CODER's model, which a subagent call never
+		// touches — the old code's misattribution). reportRecoverableError
+		// refines it to the model whose send FIRST failed via the send-scoped
+		// receipt when one is present (a failed ladder walk leaves req.Model
+		// at the last candidate tried).
+		cs.reportRecoverableError(sa.Role, req.Model, stats.LastError)
 	}
 	if err != nil {
 		if pf := pendingFailureOf(err); pf != nil {

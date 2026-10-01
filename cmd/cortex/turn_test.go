@@ -657,8 +657,12 @@ func TestTurnRecoverableErrorJournalsAndRedacts(t *testing.T) {
 	if p.Status != http.StatusServiceUnavailable {
 		t.Errorf("entry status = %d, want 503 (the recovered send's HTTP status)", p.Status)
 	}
+	// The Model is the one whose send FIRST failed ("m" — the ladder's
+	// send-scoped receipt names it). The ladder rebound the request to its
+	// last tried candidate before giving up, so a record written from the
+	// rebound request model would read "b/coder:free", not "m".
 	if p.Role != roleCode || p.Model != "m" {
-		t.Errorf("entry role/model = %q/%q, want %s/m", p.Role, p.Model, roleCode)
+		t.Errorf("entry role/model = %q/%q, want %s/m (the model whose send first failed, per the ladder receipt)", p.Role, p.Model, roleCode)
 	}
 	if !strings.Contains(p.Detail, "boom") {
 		t.Errorf("entry detail %q does not carry the 500 body's message", p.Detail)
@@ -845,19 +849,21 @@ func TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery(t *testing.T) {
 	// study role — both ensure no internal retries):
 	//   1: coder round 1 → 200, study tool call
 	//   2: study subagent send → 503 (study's own failure)
-	//   3-4: study ladder candidates (s/coder:free, a/coder:free) → 503 each
-	//        (the study's ladder walks healMaxCandidates=3 but the study
-	//        errors after its candidates exhaust; marked session-dead)
-	//   5: study ladder candidate (t/coder:free) → 503 (study errors)
-	//   6: coder round 2 mid-turn send → 503 (the coder's own failure;
-	//      its ladder finds s/a/t session-dead, tries b/coder:free)
-	//   7: coder ladder candidate b/coder:free → 503 (ladder reports failure
+	//   3: study ladder candidate (s/coder:free) → 503 (session-dead)
+	//   4: study ladder candidate (a/coder:free) → 503 (session-dead)
+	//   5: study ladder candidate (t/coder:free) → 503 (session-dead; the
+	//      study's ladder walks healMaxCandidates=3, then errors)
+	//   6: coder round 2 mid-turn send → 503 (the coder's own failure; its
+	//      ladder skips the three session-dead picks)
+	//   7: coder ladder candidate (b/coder:free) → 503 (ladder reports failure
 	//      to the loop)
 	//   8: tools-withheld finalize → 200 (the recovery)
-	// The study and coder ladders interleave because they share the session
-	// deadModels map (a study candidate that fails is dead for the coder
-	// too) — the distinct model names (study-m vs m) only prevent the study's
-	// rebind from clobbering the coder's Request.Model.
+	// The ladders share the session deadModels map: the study's walk
+	// (s, a, t) poisons s/a/t, so the coder's walk takes only b/coder:free —
+	// nextHealCandidate's discovery heuristic (coder-named :free, then largest
+	// context) over the alive candidates. The distinct model names (study-m
+	// vs m) only prevent the study's rebind from clobbering the coder's
+	// Request.Model.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
 		w.Header().Set("Content-Type", "application/json")
@@ -883,10 +889,12 @@ func TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery(t *testing.T) {
 			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet},
 		Study: ModelSpec{Model: "study-m", Endpoint: srv.URL, MaxSendAttempts: 1}}
 	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
-		// The study ladder walks s/coder:free and t/coder:free (distinct from
-		// the coder's a/b candidates, so the coder's candidates are NOT marked
-		// session-dead by the study's walk — the coder's own ladder can still
-		// walk them). The coder's ladder walks a/coder:free and b/coder:free.
+		// All four ids are :free with "coder" in the name, so the curated
+		// ladder never matches and nextHealCandidate always falls through to
+		// the discovery heuristic: coder-named :free, then largest context —
+		// s (32768) beats a (32768, later in the sort) and both beat t
+		// (16384), leaving b (16384) last. The study's walk consumes s, a, t
+		// (they become session-dead), so the coder's walk finds only b left.
 		return []llm.OpenRouterModel{
 			{ID: "s/coder:free", ContextLength: 32768},
 			{ID: "t/coder:free", ContextLength: 16384},
@@ -926,6 +934,140 @@ func TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery(t *testing.T) {
 	}
 	if !foundCode {
 		t.Errorf("no model.recovered_error entry with role=%s — the coder's own recovered error is missing: %+v", roleCode, recovered)
+	}
+	// The coder's entry must carry the model whose send FIRST failed ("m",
+	// per the ladder's send-scoped receipt) — not "m" rebound to the last
+	// candidate tried (b/coder:free), which the request model would show.
+	for _, p := range recovered {
+		if p.Role == roleCode && p.Model != "m" {
+			t.Errorf("coder model.recovered_error entry model = %q, want m (the model whose send first failed): %+v", p.Model, p)
+		}
+	}
+}
+
+// TestTurnHealedExhaustionJournalsUnrecoveredFailure is the issue #117 review
+// round pin for the UNRECOVERED side of the one-record-per-failed-send rule
+// (the half that moved from heal.go into turn.go when the ladder stopped
+// journaling model.failure on the fly): a FIRST-round send failure (no
+// progress yet) with the self-heal ladder exhausted makes runLoop return the
+// error — and exactly ONE journal record must come out of it: one
+// model.failure, zero model.recovered_error. The send-scoped receipt on the
+// error (healJournaledError) is what settles that record here; with nothing
+// recovered, the recovery record would be the wrong kind (and a double
+// record would be the old session-wide-flag bug resurfacing).
+func TestTurnHealedExhaustionJournalsUnrecoveredFailure(t *testing.T) {
+	quickRetries(t)
+	// Force the blocking send path (same reason as
+	// TestTurnHealedRecoveryJournalsRecoveredError): a streamed partial skips
+	// the ladder, so the 503 must reach it via the blocking path.
+	t.Setenv("CORTEX_LOOP_STREAM", "0")
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	var calls int
+	// Every request 503s starting with the first coder send: no progress is
+	// ever made, so the loop cannot finalize from what it has — the first-
+	// round failure path returns the error straight to the caller.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"message":"backend down"}}`)
+	}))
+	defer srv.Close()
+
+	selfHeal := true
+	cfg := &Config{Backend: Backend{Type: "openrouter"}, Network: NetworkConfig{SelfHeal: &selfHeal}}
+	cs := &CortexSession{workspace: ws, Config: cfg,
+		Request: &AgentRequest{Model: "m", BaseURL: srv.URL, MaxAttempts: 1,
+			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
+		return []llm.OpenRouterModel{{ID: "a/coder:free", ContextLength: 32768}, {ID: "b/coder:free", ContextLength: 16384}}, nil
+	}
+
+	// First-round send: 503; the ladder walks a then b (both 503, both
+	// session-dead); runLoop returns the unrecovered error.
+	_, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr == nil {
+		t.Fatalf("turn should FAIL (unrecovered: first-round 503 with the ladder exhausted)")
+	}
+
+	// The model journal records are: one model.substitution per candidate the
+	// ladder switched to (production behavior), and exactly ONE
+	// model.failure — settled here in turn from the send-scoped receipt.
+	// Zero model.recovered_error: nothing recovered.
+	all := modelJournalTypes(t, cs)
+	var subCount, recoveredCount, failureCount int
+	for _, typ := range all {
+		switch typ {
+		case journal.TypeModelSubstitution:
+			subCount++
+		case journal.TypeModelRecoveredError:
+			recoveredCount++
+		case journal.TypeModelFailure:
+			failureCount++
+		}
+	}
+	if subCount != 2 {
+		t.Errorf("got %d model.substitution records, want 2 (one per ladder candidate): %v", subCount, all)
+	}
+	if recoveredCount != 0 {
+		t.Errorf("got %d model.recovered_error records, want 0 (nothing recovered): %v", recoveredCount, all)
+	}
+	if failureCount != 1 {
+		t.Errorf("got %d model.failure records, want exactly 1 (the unrecovered first-round send): %v", failureCount, all)
+	}
+}
+
+// TestErrorTurnStillAdvancesTurnCounter pins the turn bookkeeping against a
+// regression (issue #117 review): the #117 change once moved cs.turns++ and
+// the token/cost accounting BELOW the err-return, so an errored turn (a
+// cancelled ctx, an unrecovered 503) would not advance the turn counter —
+// its messages are already stamped cs.turns+1 and added to cs.ws as their own
+// span, so the NEXT turn would reuse the same stamp and replayWorkingSet would
+// merge the two turns on resume (snapshot restore failing), and the tokens
+// and cost the provider actually billed for the failed turn would be dropped
+// from the session totals. The counter and totals must settle for EVERY turn,
+// errored or not.
+func TestErrorTurnStillAdvancesTurnCounter(t *testing.T) {
+	t.Chdir(t.TempDir())
+	backend := newContextEvalBackend(t) // usage: 10 prompt / 3 completion per reply
+	cs := newContextEvalSession(t, backend, 4000)
+
+	// The first turn's send is canceled (ctx canceled) — the interrupted
+	// path: runLoop returns the error without progress. The second turn
+	// succeeds.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // turn 1's send is canceled before it happens
+	if _, err := cs.Turn(ctx, "one"); err == nil {
+		t.Fatalf("turn 1 should fail (canceled ctx)")
+	}
+
+	if _, err := cs.Turn(context.Background(), "two"); err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+
+	if cs.turns != 2 {
+		t.Fatalf("cs.turns = %d, want 2 (an errored turn still advances the counter — its messages are stamped cs.turns+1 and spanned in cs.ws, so a collision on the next turn would merge the two on resume)", cs.turns)
+	}
+	if cs.tokensIn != 10 {
+		t.Errorf("cs.tokensIn = %d, want 10 (turn 2's billed usage — an errored turn that bills tokens must count them here too)", cs.tokensIn)
+	}
+	if cs.tokensOut != 3 {
+		t.Errorf("cs.tokensOut = %d, want 3", cs.tokensOut)
+	}
+	// The session state snapshot (resume) must agree with the live session:
+	// the replayed working set has one span per turn, so 2 turns — including
+	// the canceled one's span — and the turn counter matches it.
+	if cs.ws == nil {
+		t.Fatalf("cs.ws is nil")
+	}
+	if got := cs.ws.TotalTurns(); got != 2 {
+		t.Errorf("cs.ws.TotalTurns() = %d, want 2 (the canceled turn's span is in the working set, so the counter must agree)", got)
 	}
 }
 

@@ -280,9 +280,31 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// (heal.go's reportHeal); `cortex model`'s recent-events view reads one
 	// place for all of them, and the distinct types keep a recovered turn
 	// from being reported as "FAILED unrecovered".
+	//
+	// The model recorded is the one whose SEND first failed — the ladder's
+	// receipt (pendingFailureOf) carries it, and after a failed walk the
+	// request's Model is the last candidate tried, not that one. For a coder
+	// turn the receipt is always present on this path (the healing sender
+	// wrapped the error); the request model is the belt-and-braces fallback.
 	if stats.StopReason == "error-recovered" && stats.LastError != nil {
-		cs.reportRecoverableError(roleCode, stats.LastError)
+		cs.reportRecoverableError(roleCode, cs.Request.Model, stats.LastError)
 	}
+
+	// Turn counter, tokens, and cost settle for EVERY turn, including the
+	// error and interrupt paths below: the turn's messages are already
+	// stamped cs.turnNo (= cs.turns+1) and added to cs.ws as their own span,
+	// so the counter must advance with them — a turn that errored or was
+	// Ctrl-C'd advances too, else the next turn reuses the same stamp and
+	// replayWorkingSet merges the two turns on resume (snapshot restore
+	// fails), and the tokens/cost the provider actually billed for this
+	// turn would be dropped from the session totals.
+	cs.turns++
+	cs.tokensIn += stats.InputTokens
+	cs.tokensOut += stats.OutputTokens
+	cs.reasoningTokens += stats.ReasoningTokens
+	cs.costUSD += stats.Cost
+	cs.LastPromptTokens = stats.LastPromptTokens
+	cs.LastCachedTokens = stats.LastCachedTokens
 	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
 	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
 	// self-dev driver — can print it to a human. Compute it here, after
@@ -300,14 +322,6 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		}
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
 	}
-
-	cs.turns++
-	cs.tokensIn += stats.InputTokens
-	cs.tokensOut += stats.OutputTokens
-	cs.reasoningTokens += stats.ReasoningTokens
-	cs.costUSD += stats.Cost
-	cs.LastPromptTokens = stats.LastPromptTokens
-	cs.LastCachedTokens = stats.LastCachedTokens
 
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
@@ -334,17 +348,27 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 //
 // Best-effort: a failed write (no workspace, disk error) is swallowed — the
 // recovery already ran, the record is a post-hoc receipt, and a write failure
-// is not an engine error the caller should surface. The role is the role
-// binding that was running (the coder turn, roleCode); the model is the one
-// whose call failed (cs.Request.Model, which the healing sender may have
-// rebound — that's the model that actually errored, the right attribution).
+// is not an engine error the caller should surface. role is the role binding
+// that was running (the coder turn, roleCode; a subagent, its profile name);
+// model is the model the request actually ran on at settle time (cs.Request
+// .Model for the coder, the subagent's own req.Model for a subagent — never
+// the other role's binding). When the error carries the healing ladder's
+// send-scoped receipt (pendingFailureOf), the recorded model is refined to
+// the one whose send FIRST failed — after a failed walk the request's Model
+// is the last candidate tried, not the model that errored.
 //
 // The message is redacted (redactSecrets) before it touches either surface:
 // a 400 rejecting the request can echo the Authorization header, and a key
 // in the journal or log would be a real leak.
-func (cs *CortexSession) reportRecoverableError(role string, cause error) {
+func (cs *CortexSession) reportRecoverableError(role, model string, cause error) {
 	if role == "" || cause == nil {
 		return
+	}
+	// The ladder's receipt names the model whose send FIRST failed (the one it
+	// marked dead) — after a failed walk, the caller's own request model is
+	// the last candidate tried, not that one — so prefer it when present.
+	if pf := pendingFailureOf(cause); pf != nil && pf.model != "" {
+		model = pf.model
 	}
 	msg := redactSecrets(cause.Error())
 
@@ -371,7 +395,7 @@ func (cs *CortexSession) reportRecoverableError(role string, cause error) {
 	}
 	entry, err := journal.NewModelRecoveredErrorEntry(journal.ModelRecoveredErrorPayload{
 		Role:   role,
-		Model:  cs.Request.Model,
+		Model:  model,
 		Class:  string(classifyModelError(cause)),
 		Status: errStatus(cause),
 		Detail: detail,
