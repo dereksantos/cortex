@@ -994,17 +994,24 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		// mutate any file in the workspace, so it arms the whole
 		// workspace's test-named files instead (armTestwatch). A no-op
 		// for every other tool and for a missing file.
-		switch call.Function.Name {
-		case tools.FunctionBash:
+		isBash := call.Function.Name == tools.FunctionBash
+		if isBash {
 			cs.armTestwatch()
-		default:
-			if p := testwatchTouchedPath(call); p != "" {
-				cs.touchFile(p)
-			}
+		} else if p := testwatchTouchedPath(call); p != "" {
+			cs.touchFile(p)
 		}
 		cs.startActivity(call.ActivityLabel())
 		out, err := tools.Execute(ctx, call, cs)
 		cs.stopActivity()
+		// Issue #154: after a bash command, sweep the workspace for
+		// scratch-named non-test files the command created — the touch hook
+		// can't snapshot a bash-created file (bash names no file), and the
+		// bash arm's baseline only covers test-named files, so without this
+		// sweep a scratch file left behind would be invisible to the
+		// leftover-debug scan. Best-effort: a no-op when there is no workdir.
+		if isBash {
+			cs.sweepScratchFiles()
+		}
 		if err != nil {
 			return "Error: " + err.Error()
 		}

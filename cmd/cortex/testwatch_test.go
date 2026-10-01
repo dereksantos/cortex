@@ -995,6 +995,289 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 	})
 }
 
+// TestTestwatchTurnReceiptLeftoverDebug is the issue #154 headline, driven
+// end to end through the real dispatcher: a turn that adds a
+// fmt.Fprintf(os.Stderr, "DEBUG: …") print to a NON-test production file and
+// leaves a scratch-named non-test file in the workspace gets a
+// "leftover debug: …" line in its capture summary (next to no "tests
+// changed" line — no test file was touched). This is the #152 incident's
+// shape: the debug print went into shipped code and a scratch file was
+// dropped into the package; previously nothing reported either.
+func TestTestwatchTurnReceiptLeftoverDebug(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A production (non-test) file the turn will add a debug print to.
+	prodBefore := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	h := &testwatchHarness{cs: cs}
+
+	// The turn adds a DEBUG print to the production file via write_file. The
+	// production file is now snapshotted by the named-tool arm (issue #154
+	// arms touchFile for ALL mutating paths, not just tests).
+	prodAfter := "package tools\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc Build() string {\n\tfmt.Fprintf(os.Stderr, \"DEBUG: built\\n\")\n\treturn \"ok\"\n}\n"
+	h.runTurn(t, "add a quick debug print",
+		writeCall("c1", "pkg/builder.go", prodAfter))
+
+	got := lastCaptureResult(t, cs)
+	if !strings.Contains(got, "leftover debug:") {
+		t.Fatalf("capture summary = %q, want a leftover debug: line", got)
+	}
+	if strings.Contains(got, "tests changed:") {
+		t.Errorf("capture summary = %q, want NO tests changed: line (no test file was touched)", got)
+	}
+	// The debug print added to the production file is flagged with its sample.
+	if !strings.Contains(got, "pkg/builder.go") {
+		t.Errorf("capture summary = %q, want the production file path", got)
+	}
+	if !strings.Contains(got, "DEBUG") {
+		t.Errorf("capture summary = %q, want a sample of the added debug print", got)
+	}
+}
+
+// TestTestwatchTurnReceiptLeftoverScratchFile is issue #154's scratch-file
+// signal: a turn that leaves a scratch-named NON-TEST file in the workspace
+// gets a "leftover debug: … — scratch file left behind" entry for it. The
+// file is created by a bash call (bash names no file, so the touch hook
+// can't snapshot it — the bash arm's baseline covers the workspace).
+func TestTestwatchTurnReceiptLeftoverScratchFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	cs.workspace = mustWorkspace(t, root)
+	cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		return shellrisk.Safe, "test stub", nil
+	}
+	h := &testwatchHarness{cs: cs}
+
+	// A bash command creates a scratch-named non-test file in the workspace.
+	// The bash call arms the baseline (armTestwatch) BEFORE the command runs,
+	// so the turn-end scan has the pre-turn workspace state to diff against.
+	bc := bashCall("c1", "printf 'package tools\n' > pkg/zz_dbg_probe.go")
+	h.runTurn(t, "add a scratch probe",
+		Message{Role: "assistant", ToolCalls: []ToolCall{bc}})
+
+	got := lastCaptureResult(t, cs)
+	if !strings.Contains(got, "leftover debug:") {
+		t.Fatalf("capture summary = %q, want a leftover debug: line (scratch file left behind)", got)
+	}
+	if !strings.Contains(got, "zz_dbg_probe.go") {
+		t.Errorf("capture summary = %q, want the scratch file path", got)
+	}
+	if !strings.Contains(got, "scratch file left behind") {
+		t.Errorf("capture summary = %q, want the scratch-file signal", got)
+	}
+}
+
+// TestSweepScratchFiles pins the issue #154 sweep contract: a bounded walk of
+// the workdir that records the full content of every scratch-named NON-TEST
+// file not already in a snapshot store, into the named-tool budget. It skips
+// test-named files (covered by the bash arm's baseline), already-snapshotted
+// files, and the same .git/.cortex/vendor/node_modules dirs armTestwatch does.
+func TestSweepScratchFiles(t *testing.T) {
+	t.Run("records scratch-named non-test files", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		// Scratch-named non-test files (the sweep's targets).
+		scratchFiles := []string{
+			"zz_dbg_probe.go",       // scratch prefix, non-test
+			"tmp_repro.py",          // scratch prefix, non-test
+			"main.go.bak",           // scratch extension
+			"pkg/scratch_helper.js", // scratch prefix, nested
+		}
+		for _, p := range scratchFiles {
+			abs := filepath.Join(root, filepath.FromSlash(p))
+			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(abs, []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cs.sweepScratchFiles()
+		want := map[string]bool{}
+		for _, p := range scratchFiles {
+			want[p] = true
+		}
+		got := map[string]bool{}
+		for k := range cs.testwatch {
+			got[k] = true
+		}
+		if len(got) != len(want) {
+			t.Fatalf("sweepScratchFiles snapshotted %d files, want %d; got %v", len(got), len(want), sortedKeys(got))
+		}
+		for k := range want {
+			if !got[k] {
+				t.Errorf("sweepScratchFiles did not snapshot the scratch file %q; keys: %v", k, sortedKeys(got))
+			}
+		}
+	})
+
+	t.Run("skips test-named scratch files (bash arm covers them)", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		// A scratch-named file that is ALSO test-named (zz_dbg_test.go is
+		// scratch by prefix AND test by _test suffix): the bash arm's baseline
+		// covers it, so the sweep must skip it (the receipt composes the
+		// stronger signal).
+		if err := os.WriteFile(filepath.Join(root, "zz_dbg_test.go"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs.sweepScratchFiles()
+		if _, ok := cs.testwatch["zz_dbg_test.go"]; ok {
+			t.Errorf("sweepScratchFiles snapshotted a test-named scratch file (the bash arm covers it); keys: %v", sortedKeys(cs.testwatch))
+		}
+	})
+
+	t.Run("skips files already snapshotted by touchFile", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		if err := os.WriteFile(filepath.Join(root, "tmp_loader.py"), []byte("original\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// touchFile snapshots tmp_loader.py first (the write_file case).
+		cs.touchFile("tmp_loader.py")
+		// The sweep must NOT re-snapshot it (the receipt would double-report
+		// it); the before-side must remain the ORIGINAL content.
+		cs.sweepScratchFiles()
+		if got := cs.testwatch["tmp_loader.py"]; got == nil || got.before != "original\n" {
+			t.Errorf("tmp_loader.py before-side = %q, want the ORIGINAL content (not re-snapshotted by the sweep)", got.before)
+		}
+		if len(cs.testwatch) != 1 {
+			t.Errorf("sweepScratchFiles re-snapshotted an already-snapshotted file: %d entries, want 1", len(cs.testwatch))
+		}
+	})
+
+	t.Run("skips .git, .cortex, vendor, node_modules", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		for _, d := range []string{".git", ".cortex", "vendor", "node_modules"} {
+			abs := filepath.Join(root, d)
+			if err := os.MkdirAll(abs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(abs, "tmp_hidden.py"), []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, "tmp_visible.py"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs.sweepScratchFiles()
+		if len(cs.testwatch) != 1 {
+			t.Errorf("sweepScratchFiles snapshotted %d files, want 1 (tmp_visible.py only); got %v", len(cs.testwatch), sortedKeys(cs.testwatch))
+		}
+		if _, ok := cs.testwatch["tmp_visible.py"]; !ok {
+			t.Errorf("sweepScratchFiles did not snapshot the visible scratch file; keys: %v", sortedKeys(cs.testwatch))
+		}
+	})
+
+	t.Run("no workdir is a no-op", func(t *testing.T) {
+		cs := newTestwatchSession(t, t.TempDir())
+		// No explicit workspace set: Workdir() returns "".
+		cs.sweepScratchFiles()
+		if len(cs.testwatch) != 0 {
+			t.Errorf("sweepScratchFiles snapshotted %d files with no workdir, want 0", len(cs.testwatch))
+		}
+	})
+}
+
+// TestTestwatchTurnReceiptDebugOnlyIsSilentOnTests proves the two receipts are
+// independent: a turn that only adds a debug print to a production file (no
+// test touched) emits the "leftover debug" line and NOT "tests changed", and a
+// turn that only removes a test (no debug added) emits "tests changed" and NOT
+// "leftover debug".
+func TestTestwatchTurnReceiptDebugOnlyIsSilentOnTests(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prodBefore := "package tools\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	h := &testwatchHarness{cs: cs}
+	// Turn: add a debug print to the production file only.
+	prodAfter := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\tfmt.Println(\"value\")\n\treturn \"ok\"\n}\n"
+	h.runTurn(t, "add a print",
+		writeCall("c1", "pkg/builder.go", prodAfter))
+	got := lastCaptureResult(t, cs)
+	if !strings.Contains(got, "leftover debug:") {
+		t.Errorf("capture summary = %q, want a leftover debug: line", got)
+	}
+	if strings.Contains(got, "tests changed:") {
+		t.Errorf("capture summary = %q, want no tests changed: line (no test touched)", got)
+	}
+}
+
+// TestTestwatchSilentWhenNoLeftoverDebug proves the leftover-debug receipt
+// degrades to silence for a turn that adds ordinary (non-print) code to a
+// production file and leaves no scratch file: the named-tool arm now
+// snapshots the production file too, but the scan finds no added debug print
+// and no scratch file, so the receipt is empty. This is the regression the
+// #154 change must NOT introduce — a routine production edit must not emit a
+// leftover-debug line.
+func TestTestwatchSilentWhenNoLeftoverDebug(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prodBefore := "package tools\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	h := &testwatchHarness{cs: cs}
+	// The turn adds an ordinary helper function (no print, no debug marker)
+	// to the production file and rewrites README — nothing debug-shaped.
+	prodAfter := "package tools\n\nfunc Build() string {\n\treturn helper()\n}\n\nfunc helper() string {\n\treturn \"ok\"\n}\n"
+	h.runTurn(t, "refactor the builder",
+		writeCall("c1", "pkg/builder.go", prodAfter),
+		writeCall("c2", "README.md", "# x\n"))
+	got := lastCaptureResult(t, cs)
+	if strings.Contains(got, "leftover debug:") {
+		t.Errorf("capture summary = %q, want no leftover debug: line (no debug print added, no scratch file)", got)
+	}
+	if strings.Contains(got, "tests changed:") {
+		t.Errorf("capture summary = %q, want no tests changed: line", got)
+	}
+}
+
+// TestTestwatchTouchFileSnapshotsProductionFiles pins issue #154's arm change
+// directly: a named mutating call on a NON-test file snapshots it (the
+// leftover-debug scan needs the production before-side), while a read-only
+// call snapshots nothing. The named-tool arm is no longer test-file-only.
+func TestTestwatchTouchFileSnapshotsProductionFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte("package tools\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	// A write_file on a production file snapshots it.
+	cs.touchFile("pkg/builder.go")
+	if _, ok := cs.testwatch["pkg/builder.go"]; !ok {
+		keys := make([]string, 0, len(cs.testwatch))
+		for k := range cs.testwatch {
+			keys = append(keys, k)
+		}
+		t.Errorf("touchFile did not snapshot the production file; keys: %v", keys)
+	}
+}
+
 // editCall builds the assistant message carrying one edit_file call.
 func editCall(id, path, oldS, newS string) Message {
 	args, _ := json.Marshal(map[string]any{"path": path, "old_string": oldS, "new_string": newS})
@@ -1066,6 +1349,392 @@ func TestTestwatchTouchFileNames(t *testing.T) {
 		cs.armTestwatch()
 		if _, rebaselined := cs.testwatchBash["dot_prefixed_test.go"]; rebaselined {
 			t.Errorf("armTestwatch re-baselined a file touchFile snapshotted under a './' spelling")
+		}
+	})
+}
+
+// TestDebugReceiptReachesTurnResult is the issue #154 visible-surface
+// contract, driven end to end through cs.Turn against a scripted model:
+// a turn that adds a fmt.Fprintf(os.Stderr, "DEBUG: …") print to a
+// NON-test production file gets TurnResult.DebugReceipt filled (the durable,
+// always-present surface a headless driver prints) AND the harness hands the
+// model the leftover-debug facts at finalize (the wire for the finalize round
+// carried the note with the "leftover debug" receipt). The receipt is the
+// same fact the journal carries (TestTestwatchTurnReceiptLeftoverDebug
+// already pins the journal path), so the model, the human, and the journal
+// all agree.
+func TestDebugReceiptReachesTurnResult(t *testing.T) {
+	const summary = "Added a quick debug print to the builder."
+	const ack = "I added a DEBUG print to pkg/builder.go for local testing; I will remove it before shipping."
+	srv, st := scriptedModelServer(t, []string{
+		// round 0: the model adds a DEBUG print to the production file via
+		// write_file — the scripted tool call.
+		`{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"pkg/builder.go\",\"content\":\"package tools\\n\\nimport \\\"fmt\\\"\\n\\nfunc Build() string {\\n\\tfmt.Println(\\\"value\\\")\\n\\treturn \\\"ok\\\"\\n}\\n\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}`,
+		// round 1: the model's real final answer (the work summary).
+		`{"choices":[{"index":0,"message":{"role":"assistant","content":"` + summary + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}`,
+		// round 2: the model's reply to the harness's finalize note — it
+		// answers the note narrowly (a small model's shape), which the engine
+		// APPENDS to the summary rather than replacing it with.
+		`{"choices":[{"index":0,"message":{"role":"assistant","content":"` + ack + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6}}`,
+	})
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A production (non-test) file the turn will add a debug print to.
+	prodBefore := "package tools\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs := testwatchTurnSession(t, root, srv.URL)
+	cs.workspace = mustWorkspace(t, root)
+
+	res, err := cs.Turn(context.Background(), "add a quick debug print")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if res.StopReason != "clean-finalize" {
+		t.Fatalf("stop reason = %q, want clean-finalize", res.StopReason)
+	}
+	if st.n != 3 {
+		t.Fatalf("model round-trips = %d, want 3 (write_file round, summary round, finalize-note round)", st.n)
+	}
+
+	// (1) The harness handed the model the leftover-debug facts at finalize:
+	// the wire for the last round carried the note with the "leftover debug"
+	// receipt and the file path.
+	if len(st.wires) != 3 {
+		t.Fatalf("wires recorded = %d, want 3", len(st.wires))
+	}
+	wire := st.wires[2]
+	if !strings.Contains(wire, "Before you finish") {
+		t.Fatalf("the finalize round's wire did not carry the harness's note — the model was never told about the leftover debug")
+	}
+	if !strings.Contains(wire, "leftover debug:") || !strings.Contains(wire, "pkg/builder.go") {
+		t.Errorf("finalize note on the wire = %q, want the 'leftover debug' receipt with the file path", wire)
+	}
+	// The note must NOT carry a "tests changed" framing (no test was touched).
+	if strings.Contains(wire, "tests changed:") {
+		t.Errorf("finalize note on the wire = %q, want NO tests-changed framing (no test touched)", wire)
+	}
+
+	// (2) The receipt rides TurnResult.DebugReceipt — the durable surface a
+	// human-facing caller prints.
+	if !strings.Contains(res.DebugReceipt, "leftover debug:") || !strings.Contains(res.DebugReceipt, "pkg/builder.go") {
+		t.Errorf("TurnResult.DebugReceipt = %q, want a leftover debug: line with the file path", res.DebugReceipt)
+	}
+	if strings.Contains(res.DebugReceipt, "tests changed:") {
+		t.Errorf("TurnResult.DebugReceipt = %q, want NO tests-changed content", res.DebugReceipt)
+	}
+	// TurnResult.TestReceipt must be EMPTY (no test was touched) — the two
+	// receipts are independent fields.
+	if res.TestReceipt != "" {
+		t.Errorf("TurnResult.TestReceipt = %q, want empty (no test touched)", res.TestReceipt)
+	}
+
+	// (3) The returned reply still contains the work summary and the model's
+	// note answer (the engine appends, not replaces).
+	if !strings.Contains(res.Reply, summary) {
+		t.Errorf("TurnResult.Reply = %q, want it to still contain the pre-note work summary %q", res.Reply, summary)
+	}
+	if !strings.Contains(res.Reply, ack) {
+		t.Errorf("TurnResult.Reply = %q, want it to include the model's reply to the finalize note", res.Reply)
+	}
+}
+
+// TestDebugReceiptEndToEnd is the issue #154 end-to-end contract, driven the
+// two ways a real session runs:
+//
+//  1. testwatchHarness (model-free, like every other receipt test in this
+//     file): one turn that (a) adds a DEBUG print to a NON-test production
+//     file and (b) leaves a scratch-named NON-test file (zz_dbg_probe.go)
+//     behind gets a "leftover debug: …" line on the capture summary (the
+//     journal path) — both artifacts named.
+//  2. a REAL cs.Turn against a scripted model (the headless `cortex turn`
+//     path): the same two artifacts ride TurnResult.DebugReceipt — the
+//     durable surface a human-facing caller prints — while TestReceipt stays
+//     empty (no test file was touched; the scratch file is a NON-test file,
+//     so the tests scan sees nothing to report).
+//
+// A clean turn (no debug, no scratch) stays silent: both the capture
+// summary and TurnResult.DebugReceipt are empty. This is the end-to-end
+// companion to TestDebugReceiptReachesTurnResult (which pins the
+// debug-print-only path) and TestTestwatchTurnReceiptLeftoverDebug /
+// TestTestwatchTurnReceiptLeftoverScratchFile (which pin the capture-summary
+// path, one artifact at a time). A scratch file named *_test.go (scratch-
+// AND test-named) is deliberately out of scope here: ScanDebug skips
+// test-named files, so such a file is reported through the tests scan, not
+// the leftover-debug scan (see internal/testguard/debug.go's non-test gate
+// and testwatch.go's sweepScratchFiles, which skips test-named files for
+// the same reason).
+func TestDebugReceiptEndToEnd(t *testing.T) {
+	t.Run("harness: debug print + scratch file → capture summary", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		prodBefore := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+			return shellrisk.Safe, "test stub", nil
+		}
+		h := &testwatchHarness{cs: cs}
+
+		// Two tool calls in one turn:
+		//  (a) write_file adds a DEBUG print to the production file (the
+		//      named-tool arm snapshots builder.go's before-side).
+		//  (b) bash leaves a scratch-named NON-test file in the workspace
+		//      (the bash arm's baseline snapshots the pre-turn workspace;
+		//      the sweep picks up the new scratch file; the file is new, so
+		//      it's a "scratch file left behind").
+		prodAfter := "package tools\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc Build() string {\n\tfmt.Fprintf(os.Stderr, \"DEBUG: built\\n\")\n\treturn \"ok\"\n}\n"
+		w := writeCall("c1", "pkg/builder.go", prodAfter)
+		b := bashCall("c2", "printf 'package tools\\n\\nfunc probe() {}\\n' > pkg/zz_dbg_probe.go")
+		h.runTurn(t, "add a debug print and a scratch probe", w,
+			Message{Role: "assistant", ToolCalls: []ToolCall{b}})
+
+		got := lastCaptureResult(t, cs)
+		// Both artifacts on the leftover-debug line, one receipt.
+		if !strings.Contains(got, "leftover debug:") {
+			t.Fatalf("capture summary = %q, want a leftover debug: line", got)
+		}
+		if !strings.Contains(got, "pkg/builder.go") || !strings.Contains(got, "DEBUG") {
+			t.Errorf("capture summary = %q, want the production file path and the DEBUG sample", got)
+		}
+		if !strings.Contains(got, "zz_dbg_probe.go") || !strings.Contains(got, "scratch file left behind") {
+			t.Errorf("capture summary = %q, want the scratch file path and the scratch-file signal", got)
+		}
+		// No "tests changed" line: no test file was removed or shrank (the
+		// scratch file is a NON-test file, and no real test was touched).
+		if strings.Contains(got, "tests changed:") {
+			t.Errorf("capture summary = %q, want NO tests changed: line (no test was touched)", got)
+		}
+	})
+
+	t.Run("real turn: debug print + scratch file → TurnResult.DebugReceipt", func(t *testing.T) {
+		const summary = "Added a debug print to the builder and dropped a scratch probe."
+		const ack = "I left a DEBUG print in pkg/builder.go and a zz_dbg_probe.go scratch file; I will remove both before shipping."
+		srv, st := scriptedModelServer(t, []string{
+			// round 0: the model adds the DEBUG print to the production file
+			// via write_file (the named-tool arm snapshots builder.go).
+			`{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"pkg/builder.go\",\"content\":\"package tools\\n\\nimport (\\n\\t\\\"fmt\\\"\\n\\t\\\"os\\\"\\n)\\n\\nfunc Build() string {\\n\\tfmt.Fprintf(os.Stderr, \\\"DEBUG: built\\\\n\\\")\\n\\treturn \\\"ok\\\"\\n}\\n\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}`,
+			// round 1: the model leaves the scratch NON-test file via bash
+			// (the bash arm's baseline snapshots the pre-turn workspace;
+			// the sweep picks up the new scratch file).
+			`{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"c2","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf 'package tools\\\\n\\\\nfunc probe() {}\\\\n' > pkg/zz_dbg_probe.go\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}`,
+			// round 2: the model's real final answer (the work summary).
+			`{"choices":[{"index":0,"message":{"role":"assistant","content":"` + summary + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":5}}`,
+			// round 3: the model's reply to the harness's finalize note —
+			// it answers the note narrowly (a small model's shape), which the
+			// engine APPENDS to the summary rather than replacing it with.
+			`{"choices":[{"index":0,"message":{"role":"assistant","content":"` + ack + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6}}`,
+		})
+
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		prodBefore := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs := testwatchTurnSession(t, root, srv.URL)
+		cs.workspace = mustWorkspace(t, root)
+		// The bash call's shell command would otherwise be risk-classified
+		// through the real study-model classifier (a scripted stub keeps the
+		// test hermetic — the command is a trivial printf redirect, Safe).
+		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+			return shellrisk.Safe, "test stub", nil
+		}
+
+		res, err := cs.Turn(context.Background(), "add a debug print and a scratch probe")
+		if err != nil {
+			t.Fatalf("Turn: %v", err)
+		}
+		if res.StopReason != "clean-finalize" {
+			t.Fatalf("stop reason = %q, want clean-finalize", res.StopReason)
+		}
+		if st.n != 4 {
+			t.Fatalf("model round-trips = %d, want 4 (write_file round, bash round, summary round, finalize-note round)", st.n)
+		}
+
+		// (1) The receipt rides TurnResult.DebugReceipt with BOTH artifacts.
+		if !strings.Contains(res.DebugReceipt, "leftover debug:") {
+			t.Fatalf("TurnResult.DebugReceipt = %q, want a leftover debug: line", res.DebugReceipt)
+		}
+		if !strings.Contains(res.DebugReceipt, "pkg/builder.go") || !strings.Contains(res.DebugReceipt, "DEBUG") {
+			t.Errorf("TurnResult.DebugReceipt = %q, want the production file path and the DEBUG sample", res.DebugReceipt)
+		}
+		if !strings.Contains(res.DebugReceipt, "zz_dbg_probe.go") || !strings.Contains(res.DebugReceipt, "scratch file left behind") {
+			t.Errorf("TurnResult.DebugReceipt = %q, want the scratch file path and the scratch-file signal", res.DebugReceipt)
+		}
+		// (2) The harness handed the model the same facts at finalize.
+		if len(st.wires) != 4 {
+			t.Fatalf("wires recorded = %d, want 4", len(st.wires))
+		}
+		wire := st.wires[3]
+		if !strings.Contains(wire, "Before you finish") {
+			t.Fatalf("the finalize round's wire did not carry the harness's note")
+		}
+		if !strings.Contains(wire, "leftover debug:") || !strings.Contains(wire, "pkg/builder.go") {
+			t.Errorf("finalize note on the wire = %q, want the leftover debug receipt with the file path", wire)
+		}
+		// (3) TestReceipt must be EMPTY: no test file was removed or shrank
+		// (the scratch file is a NON-test file, and no real test was touched).
+		if res.TestReceipt != "" {
+			t.Errorf("TurnResult.TestReceipt = %q, want empty (no test was touched)", res.TestReceipt)
+		}
+	})
+
+	t.Run("clean turn stays silent", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		prodBefore := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+
+		// A clean turn: edit the production file to add a plain import
+		// (no DEBUG string, no scratch file). Nothing the leftover-debug
+		// scan would flag.
+		prodAfter := "package tools\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc Build() string {\n\t_ = os.Stderr\n\t_ = fmt.Sprintf\n\treturn \"ok\"\n}\n"
+		w := writeCall("c1", "pkg/builder.go", prodAfter)
+		h := &testwatchHarness{cs: cs}
+		h.runTurn(t, "tweak the builder import", w)
+
+		got := lastCaptureResult(t, cs)
+		if strings.Contains(got, "leftover debug:") {
+			t.Errorf("capture summary = %q, want NO leftover debug: line (clean turn)", got)
+		}
+		if strings.Contains(got, "tests changed:") {
+			t.Errorf("capture summary = %q, want NO tests changed: line (clean turn)", got)
+		}
+		// The TurnResult surface would be empty too — the receipt is empty
+		// when there is nothing to report.
+		if r := cs.testwatchDebugReceipt(); r != "" {
+			t.Errorf("testwatchDebugReceipt = %q, want empty (clean turn)", r)
+		}
+	})
+}
+
+// TestTestwatchFinalizeNoteCombined pins the issue #154 combined finalize
+// note: when the turn removed a test AND left a debug print, the note covers
+// BOTH facts (the framing names both, the receipt carries both lines, and the
+// ask asks the model to account for both). When only one fact is present, the
+// note frames only that fact. When nothing is flagged, the note is empty.
+func TestTestwatchFinalizeNoteCombined(t *testing.T) {
+	t.Run("tests only", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "pkg", "gone_test.go"), []byte(fixtureGoTest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs := newTestwatchSession(t, root)
+		cs.touchFile("pkg/gone_test.go")
+		if err := os.WriteFile(filepath.Join(root, "pkg", "gone_test.go"), []byte(""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		note := cs.testwatchFinalizeNote()
+		if note == "" {
+			t.Fatal("expected a finalize note for a removed test")
+		}
+		if !strings.Contains(note, "tests changed:") || !strings.Contains(note, "pkg/gone_test.go") {
+			t.Errorf("note = %q, want the tests changed receipt", note)
+		}
+		if !strings.Contains(note, "removed or substantially shrank") {
+			t.Errorf("note = %q, want the test-loss framing", note)
+		}
+		if strings.Contains(note, "leftover debug:") {
+			t.Errorf("note = %q, want NO leftover-debug content (no debug added)", note)
+		}
+	})
+
+	t.Run("leftover debug only", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		prodBefore := "package tools\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs := newTestwatchSession(t, root)
+		cs.touchFile("pkg/builder.go")
+		// Add a debug print to the production file (the leftover-debug case).
+		prodAfter := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\tfmt.Println(\"value\")\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodAfter), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		note := cs.testwatchFinalizeNote()
+		if note == "" {
+			t.Fatal("expected a finalize note for a leftover debug print")
+		}
+		if !strings.Contains(note, "leftover debug:") || !strings.Contains(note, "pkg/builder.go") {
+			t.Errorf("note = %q, want the leftover debug receipt", note)
+		}
+		if strings.Contains(note, "tests changed:") {
+			t.Errorf("note = %q, want NO tests-changed content (no test touched)", note)
+		}
+	})
+
+	t.Run("both facts", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// A test file the turn will remove, and a production file the turn
+		// will add a debug print to.
+		if err := os.WriteFile(filepath.Join(root, "pkg", "gone_test.go"), []byte(fixtureGoTest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prodBefore := "package tools\n\nfunc Build() string {\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodBefore), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs := newTestwatchSession(t, root)
+		cs.touchFile("pkg/gone_test.go")
+		cs.touchFile("pkg/builder.go")
+		// Remove the test file and add a debug print to the production file.
+		if err := os.WriteFile(filepath.Join(root, "pkg", "gone_test.go"), []byte(""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prodAfter := "package tools\n\nimport \"fmt\"\n\nfunc Build() string {\n\tfmt.Println(\"value\")\n\treturn \"ok\"\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "pkg", "builder.go"), []byte(prodAfter), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		note := cs.testwatchFinalizeNote()
+		if note == "" {
+			t.Fatal("expected a finalize note for both facts")
+		}
+		if !strings.Contains(note, "tests changed:") || !strings.Contains(note, "pkg/gone_test.go") {
+			t.Errorf("note = %q, want the tests changed receipt", note)
+		}
+		if !strings.Contains(note, "leftover debug:") || !strings.Contains(note, "pkg/builder.go") {
+			t.Errorf("note = %q, want the leftover debug receipt", note)
+		}
+		// The framing must name BOTH facts.
+		if !strings.Contains(note, "AND") {
+			t.Errorf("note = %q, want the combined framing to name both facts", note)
+		}
+	})
+
+	t.Run("nothing flagged", func(t *testing.T) {
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		// No snapshot at all: the note must be empty.
+		if note := cs.testwatchFinalizeNote(); note != "" {
+			t.Errorf("note = %q, want empty (no snapshot)", note)
 		}
 	})
 }

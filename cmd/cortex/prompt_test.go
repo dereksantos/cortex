@@ -282,3 +282,75 @@ func TestDefaultPromptEncodesTestIntegrity(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultPromptEncodesDebugGuidance pins issue #154's debugging guidance
+// in the built-in SystemPrompt: the prompt must tell the model to check every
+// error in test/fixture setup with t.Fatal, confirm the fixture exists before
+// suspecting the code under test, and debug with a focused test + t.Logf in
+// the real package — never by copying production code into scratch modules or
+// leaving DEBUG prints in shipped code. The check is on loose keywords (the
+// principle, not the exact wording), so a future rewrite can rephrase without
+// breaking this test as long as the idea survives — the same loose style as
+// TestDefaultPromptEncodesTestIntegrity.
+func TestDefaultPromptEncodesDebugGuidance(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, keyword := range []string{
+		"t.Fatal", // check every error in test/fixture setup
+		"fixture", // confirm the fixture exists first
+		"t.Logf",  // debug with t.Logf in the real package
+		"scratch", // never copy production code into scratch modules
+		"debug",   // never leave DEBUG prints in shipped code
+	} {
+		if !strings.Contains(lower, strings.ToLower(keyword)) {
+			t.Errorf("built-in prompt no longer encodes the debugging guidance (missing %q)", keyword)
+		}
+	}
+}
+
+// TestDefaultPromptEncodesDebugWorkingStyle pins the issue #154 principle's
+// POSITION in the built-in prompt: the debugging working-style principle
+// (debugWorkingStylePrinciple, spliced into SystemPrompt after "Test
+// integrity") must sit in the "# How you work" block, before "# How you
+// communicate". This is a position check, not a content check — the content
+// is pinned by TestDefaultPromptEncodesDebugGuidance (loose keywords) and
+// TestDebugPrincipleMirroredInClaudeMD (verbatim mirror in CLAUDE.md). A
+// rewrite that moves the principle into a different section (or a different
+// prompt slot) fails here, even if the wording survives.
+func TestDefaultPromptEncodesDebugWorkingStyle(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, phrase := range []string{
+		"t.Fatal", // check every error in test/fixture setup
+		"fixture", // confirm the fixture exists first
+		"t.Logf",  // debug with t.Logf in the real package
+		"scratch", // never copy production code into scratch modules
+		"debug",   // never leave DEBUG prints in shipped code
+	} {
+		if !strings.Contains(lower, strings.ToLower(phrase)) {
+			t.Errorf("built-in prompt no longer encodes the debugging working-style principle (missing %q)", phrase)
+		}
+	}
+	// The principle must live in the "# How you work" block (before "# How
+	// you communicate"), matching its position after "Test integrity".
+	if i := strings.Index(SystemPrompt, debugWorkingStylePrinciple); i < 0 {
+		t.Fatal("the debugging working-style principle is not in the built-in prompt")
+	} else if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the debugging working-style principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+}
+
+// TestDebugPrincipleMirroredInClaudeMD is the issue #154 consistency tripwire:
+// CLAUDE.md's "Constraints → Testing" section must mirror the EXACT same
+// debugging guidance the model actually receives in the built-in prompt
+// (debugWorkingStylePrinciple) — the docs describe the guidance, so the two
+// can't drift apart. It reads the file from the module root (the test's
+// working directory is the package dir, cmd/cortex), so it passes wherever
+// the checkout lives.
+func TestDebugPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	if !strings.Contains(string(data), debugWorkingStylePrinciple) {
+		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's debugging working-style principle verbatim (debugWorkingStylePrinciple) — the docs and the prompt have drifted apart")
+	}
+}
