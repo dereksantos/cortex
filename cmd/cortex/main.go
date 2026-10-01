@@ -652,6 +652,10 @@ func main() {
 			if plan.Reply != "" {
 				fmt.Println(plan.Reply)
 			}
+			// Issue #141: each step is its own turn with its own "tests
+			// changed" receipt; the plan run carries them (TurnWithPlan) so
+			// a /plan run reports test loss exactly like a single turn.
+			printTestReceipt(plan.TestReceipt)
 			afterTurn(session, planErr)
 			continue
 		}
@@ -719,19 +723,33 @@ func main() {
 		//   - capture: ESC/Ctrl-C cancel and mid-turn keystrokes are captured
 		//     silently to seed the next prompt (interactive, raw streaming);
 		//   - signal: piped input falls back to SIGINT for cancel.
-		var err error
+		// The reply itself is printed by the coder sender (printCoderProse /
+		// the live stream), not here — the REPL owns only the turn-boundary
+		// receipt, display, and compaction.
+		var (
+			err error
+			res TurnResult
+		)
 		switch {
 		case editor != nil && anchoredInput():
-			typeAhead, err = runAnchoredTurn(session, editor, input, typeAhead)
+			// runAnchoredTurn runs its own Turn and returns its result, so the
+			// turn-boundary receipt below surfaces in this mode too.
+			typeAhead, res, err = runAnchoredTurn(session, editor, input, typeAhead)
 		case editor != nil:
 			ctx, stop := editor.Interruptible(context.Background())
-			_, err = session.Turn(ctx, input)
+			res, err = session.Turn(ctx, input)
 			typeAhead = stop()
 		default:
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-			_, err = session.Turn(ctx, input)
+			res, err = session.Turn(ctx, input)
 			cancel()
 		}
+		// Issue #141: surface the "tests changed" receipt to the user before
+		// the shared post-turn safety net (afterTurn). The model has already
+		// been told (via the finalize hook) and the journal carries it; the
+		// human gets it here, in the terminal, on the turn that produced it —
+		// the loss is reported where a reviewer would look.
+		printTestReceipt(res.TestReceipt)
 		afterTurn(session, err)
 	}
 

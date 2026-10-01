@@ -203,6 +203,21 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		return
 	}
 	outcome, answer := turnArtifacts(turnMsgs)
+	// Issue #141: a "tests changed: …" line — the harness's own view of
+	// what this turn did to the project's test files (testwatch.go). It
+	// rides the capture summary so the turn's journal record shows it. The
+	// SAME receipt is surfaced on TurnResult (turn.go) so the caller prints
+	// it to a human, and handed to the model at finalize (loop.go's
+	// FinalizeHook) so its final answer accounts for it — three surfaces,
+	// one fact. Best-effort: an empty snapshot (no mutating calls, or
+	// nothing test-relevant) adds nothing.
+	if receipt := cs.testwatchReceipt(); receipt != "" {
+		if outcome == "" {
+			outcome = receipt
+		} else {
+			outcome += " | " + receipt
+		}
+	}
 	summary := userMsg
 	if outcome != "" {
 		summary += "\n[" + outcome + "]"

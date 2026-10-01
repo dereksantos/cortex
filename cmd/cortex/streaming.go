@@ -533,12 +533,19 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 
 // runAnchoredTurn runs one turn with the prompt pinned to the bottom row and
 // every byte of turn output funneled above it — the single-turn case of
-// runUnderAnchor.
-func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
-	return runUnderAnchor(session, editor, seed, func(ctx context.Context) error {
-		_, err := session.Turn(ctx, input)
-		return err
+// runUnderAnchor. The turn's TurnResult is returned (from the pipe-failure
+// fallback too, since fn runs on both paths) so the caller can surface the
+// turn-boundary receipt (issue #141's "tests changed:" line) — printed AFTER
+// the anchor is stopped and stdout restored, so it lands in the terminal's
+// scrollback like every other turn-boundary line.
+func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, TurnResult, error) {
+	var res TurnResult
+	seedOut, err := runUnderAnchor(session, editor, seed, func(ctx context.Context) error {
+		var turnErr error
+		res, turnErr = session.Turn(ctx, input)
+		return turnErr
 	})
+	return seedOut, res, err
 }
 
 // runUnderAnchor runs fn inside a pinned anchor (interactive + render): the
@@ -586,6 +593,17 @@ func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed stri
 	<-drained
 	r.Close()
 	return anchor.Stop(), turnErr
+}
+
+// printTestReceipt prints a turn's (or plan run's) "tests changed" receipt
+// (issue #141) to the REPL at the turn boundary — after the anchor is stopped
+// and stdout restored — so a removed or shrunk test is reported where the
+// person reviewing the turn looks. A no-op for the empty receipt (no test
+// file lost anything).
+func printTestReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(withColor(receipt, yellow))
+	}
 }
 
 // afterTurn is the REPL's post-turn safety net, shared by the normal single

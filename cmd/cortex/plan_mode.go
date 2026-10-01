@@ -153,6 +153,23 @@ type PlanRunResult struct {
 	Planned bool // true when a real plan was produced; false for the single-turn fallback
 	Steps   []StepResult
 	Reply   string // the final per-step report (or the fallback turn's reply)
+	// TestReceipt carries every executed turn's "tests changed" receipt
+	// (issue #141's TurnResult.TestReceipt), one per line in run order, so
+	// a plan run surfaces test loss to the REPL and `cortex turn --plan`
+	// exactly as a single turn does. Empty when no turn lost a test.
+	TestReceipt string
+}
+
+// addReceipt appends one turn's "tests changed" receipt (issue #141) to the
+// plan run's, one receipt per line; an empty receipt adds nothing.
+func (r *PlanRunResult) addReceipt(receipt string) {
+	if receipt == "" {
+		return
+	}
+	if r.TestReceipt != "" {
+		r.TestReceipt += "\n"
+	}
+	r.TestReceipt += receipt
 }
 
 // TurnWithPlan runs the plan-then-execute path for a multi-part task:
@@ -169,7 +186,20 @@ type PlanRunResult struct {
 //
 // Running each step as a separate turn — not one long tool loop — is what
 // lets context demotion (#131) act at every boundary.
-func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRunResult, error) {
+func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out PlanRunResult, err error) {
+	// Issue #141: every turn this run executes (planning, fallback, each
+	// step — failed or interrupted ones included, since Turn returns the
+	// receipt on its error path too) contributes its "tests changed"
+	// receipt; the deferred stamp puts them on whichever result the run
+	// returns, so no return path can drop one.
+	var receipts PlanRunResult
+	turn := func(input string) (TurnResult, error) {
+		res, turnErr := cs.Turn(ctx, input)
+		receipts.addReceipt(res.TestReceipt)
+		return res, turnErr
+	}
+	defer func() { out.TestReceipt = receipts.TestReceipt }()
+
 	// --- 1. Planning turn -----------------------------------------------
 	// Withhold the session's tools for exactly the planning round-trip so
 	// the model can only produce the list (it has nothing to call).
@@ -187,7 +217,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 	// because the saved list is the FILTERED one, not the full registry.)
 	savedTools := cs.Request.Tools
 	cs.Request.Tools = nil
-	planRes, planErr := cs.Turn(ctx, planModeInstruction+"\n\nTask: "+task)
+	planRes, planErr := turn(planModeInstruction + "\n\nTask: " + task)
 	// Restore the session's own filtered tool list NOW — before any step or
 	// fallback turn runs — because runLoop left cs.Request.Tools nil (it
 	// stamps req.Tools = ts.Tools = nil on the tool-less planning turn).
@@ -208,7 +238,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 		// The model's reply was not a parseable ordered list (prose, a
 		// single "step", or tool-call markup). Fall back to doing the whole
 		// task in one plain turn — the pre-step-mode behavior (#150).
-		res, err := cs.Turn(ctx, task)
+		res, err := turn(task)
 		if err != nil {
 			return PlanRunResult{Planned: false}, fmt.Errorf("planning reply was not a step list; the fallback single turn failed: %w", err)
 		}
@@ -259,7 +289,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (PlanRun
 		// turn — the only place the full task text lived — into the outline,
 		// and a later step must not run blind to the overall goal or the
 		// requirements the step text didn't restate (#94's failure mode).
-		_, err := cs.Turn(ctx, fmt.Sprintf("Overall task: %s\n\nPlan step %d of %d: %s", task, i+1, len(steps), step))
+		_, err := turn(fmt.Sprintf("Overall task: %s\n\nPlan step %d of %d: %s", task, i+1, len(steps), step))
 		if err != nil {
 			// A cancelled context (Ctrl-C / ESC mid-step) is an INTERRUPT, not
 			// a step failure: record the step and every later step, return the

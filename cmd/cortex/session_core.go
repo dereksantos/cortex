@@ -14,6 +14,7 @@ import (
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/testguard"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -117,6 +118,26 @@ type CortexSession struct {
 	ws            *cache.WorkingSet
 	outline       []cache.OutlineEntry
 	outlineFolded string // digest of previously folded outline entries (P4); rides the front of the outline zone
+	// testwatch is this turn's before-snapshot of the files its
+	// write_file/edit_file/remove_path calls will touch (testwatch.go, issue
+	// #141). Armed by touchFile before each mutating call (coderDispatcher);
+	// drained into the "tests changed:" receipt (testwatchReceipt) at the
+	// clean-finalize point and at turn end (captureTurn), and cleared at the
+	// START of every turn (turn.go's testwatchDrop) so a turn that errors or
+	// is interrupted before captureTurn can't leak a stale before-side into
+	// the next one. Nil outside a turn.
+	testwatch map[string]*testwatchSnapshot
+
+	// testwatchBash / testwatchBashArmed are the BASH arm of the turn's
+	// testwatch receipt (issue #141): a separate budget of compact
+	// per-file baselines (testguard.Baseline) for the workspace's
+	// test-named files, armed ONCE per turn by the first bash call
+	// (armTestwatch). A separate store so the bash arm can't starve the
+	// named-tool arm's 32-file / 1 MiB content budget — a turn that runs
+	// `go test` before a write_file on a test file must still get a
+	// receipt for the write_file. Nil / false outside a turn.
+	testwatchBash      map[string]testguard.Baseline
+	testwatchBashArmed bool
 
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to

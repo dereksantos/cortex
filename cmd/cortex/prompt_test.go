@@ -261,3 +261,24 @@ func TestDefaultPromptEncodesWorkingStyle(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultPromptEncodesTestIntegrity pins issue #141's principle: the
+// built-in prompt must tell the model that removing or changing an existing
+// test to make a build pass is a decision that has to be stated in the
+// summary, not an implementation detail. The check is on the principle,
+// not the exact wording, so a future rewrite can rephrase without breaking
+// this test as long as the idea survives.
+func TestDefaultPromptEncodesTestIntegrity(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, keyword := range []string{
+		"test",    // the subject: tests
+		"remov",   // the act: removing (covers "removing")
+		"chang",   // the act: changing (covers "changing")
+		"summary", // where it must be stated
+		"state",   // the obligation: must be stated
+	} {
+		if !strings.Contains(lower, keyword) {
+			t.Errorf("built-in prompt no longer encodes test-integrity principle (missing %q)", keyword)
+		}
+	}
+}

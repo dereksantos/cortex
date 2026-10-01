@@ -42,6 +42,16 @@ type TurnResult struct {
 	// per-run bounds (RunLoopFiring, M6.4) can tell a bound-forced stop from
 	// a clean answer without re-deriving it.
 	StopReason string
+	// TestReceipt is the harness's own "tests changed: …" line for this turn
+	// (issue #141, testwatch.go): non-empty when the turn removed or
+	// substantially shrank one of the project's test files. It rides the
+	// result so the CALLER of Turn surfaces it to a human (and a headless
+	// driver) — the journal capture alone records it but reaches no one
+	// reading the turn, which is exactly the unreported-loss gap #141 names.
+	// Callers that want to also push it into the model must inject it into
+	// the request before the final answer (see turn's finalize hook); this
+	// field is the durable, always-present half of that.
+	TestReceipt string
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -82,6 +92,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	defer cs.setPhase(phaseIdle)
 
 	turnStart := len(cs.Request.Messages)
+	// Issue #141: clear any stale test-file before-snapshot carried over from
+	// an earlier turn that never reached captureTurn (error or interrupt
+	// paths return before it — turn.go's early returns). Dropping it here, at
+	// the START of every turn, guarantees a turn's receipt only ever diffs
+	// against that turn's own before-side; the 32-file cap can't fill up
+	// across turns either.
+	cs.testwatchDrop()
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
 	// the working set engages wherever turn content happens to start.
 	if cs.ws == nil {
@@ -163,6 +180,15 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		maxIter = maxIterOverride
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
+	// Issue #141: the model must account for test removals it made. The
+	// receipt is computed at the clean-finalize point (runLoop calls
+	// ts.FinalizeHook exactly when the model answers with no tool calls,
+	// after every tool call has run) — at that moment the test-file
+	// before-side is already settled, so the note names precisely what the
+	// turn removed and the model's final answer addresses it. An empty
+	// receipt (no test file touched, or nothing test-relevant lost) returns
+	// "" and the answer is left untouched.
+	ts.FinalizeHook = cs.testwatchFinalizeNote
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
@@ -214,12 +240,19 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.LastPromptTokens = stats.LastPromptTokens
 	cs.LastCachedTokens = stats.LastCachedTokens
 
+	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
+	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
+	// self-dev driver — can print it to a human. Compute it here, after
+	// runLoop has settled every tool call, so the before/after is final;
+	// captureTurn re-derives it (cheap, idempotent) for the journal record.
+	testReceipt := cs.testwatchReceipt()
+
 	if err != nil {
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt}, err
 	}
 
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt}, nil
 }
