@@ -1625,3 +1625,134 @@ func TestRunLoopReasoningFallbackReceiptFiresOncePerGenuineRecovery(t *testing.T
 		t.Errorf("stop = %q, want salvaged-finalize (round 3's prompt-based salvage)", stats.StopReason)
 	}
 }
+
+// TestRunLoopFinalizeHookRoundAcrossFinishes pins how issue #141's
+// FinalizeHook round (finalizeHookRound) composes with every way runLoop can
+// finish naturally after the #149 reasoning-off retry landed beside it:
+//
+//   - a clean finish gets one extra tools-withheld round whose reply is
+//     APPENDED to the real answer (#145 round 4), never substituted;
+//   - an empty finish recovered by the #149 off-retry gets the SAME round
+//     after the retry — the recovered prose is the model's natural answer,
+//     so a reasoning-on model must still be told what its turn did to the
+//     tests — and the #149 receipt still fires exactly once;
+//   - an empty finish nothing could salvage still gets the round (the
+//     position #145 gave the hook), so the note's answer is the turn's answer;
+//   - an empty note costs no send at all.
+//
+// In every case the role's tools are restored on req for the caller's next
+// turn, and the note round itself carries no tools.
+func TestRunLoopFinalizeHookRoundAcrossFinishes(t *testing.T) {
+	const note = "Harness note: tests changed: foo_test.go lost TestFoo"
+	tests := []struct {
+		name         string
+		effort       llm.EffortLevel
+		replies      []string // scripted assistant contents, one per send
+		hookNote     string
+		wantAnswer   string
+		wantSends    int
+		wantStop     string
+		wantFallback int  // OnReasoningFallback calls
+		wantNoteSent bool // the note reached the model as the last message of a tools-withheld send
+	}{
+		{
+			name:         "clean finish appends the note round's reply",
+			effort:       llm.EffortOff,
+			replies:      []string{"summary of the work", "I removed TestFoo because it was obsolete."},
+			hookNote:     note,
+			wantAnswer:   "summary of the work\n\nI removed TestFoo because it was obsolete.",
+			wantSends:    2,
+			wantStop:     "clean-finalize",
+			wantNoteSent: true,
+		},
+		{
+			name:         "reasoning-off retry recovery also gets the note round",
+			effort:       llm.EffortOn,
+			replies:      []string{"", "recovered answer", "I removed TestFoo because it was obsolete."},
+			hookNote:     note,
+			wantAnswer:   "recovered answer\n\nI removed TestFoo because it was obsolete.",
+			wantSends:    3,
+			wantStop:     "salvaged-finalize",
+			wantFallback: 1,
+			wantNoteSent: true,
+		},
+		{
+			name:         "unsalvageable empty finish still gets the note round",
+			effort:       llm.EffortOff,
+			replies:      []string{"", "", "I removed TestFoo because it was obsolete."},
+			hookNote:     note,
+			wantAnswer:   "I removed TestFoo because it was obsolete.",
+			wantSends:    3,
+			wantStop:     "clean-finalize",
+			wantNoteSent: true,
+		},
+		{
+			name:       "empty note costs no extra send",
+			effort:     llm.EffortOff,
+			replies:    []string{"summary of the work"},
+			hookNote:   "",
+			wantAnswer: "summary of the work",
+			wantSends:  1,
+			wantStop:   "clean-finalize",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+			applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: tt.effort})
+			appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+			sends := 0
+			noteSent := false
+			send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+				sends++
+				if sends > len(tt.replies) {
+					t.Fatalf("send %d: unexpected extra send", sends)
+				}
+				if last := r.Messages[len(r.Messages)-1]; last.Role == RoleUser && last.Content == tt.hookNote && tt.hookNote != "" {
+					if r.Tools != nil {
+						t.Errorf("send %d: the note round carried tools, want them withheld", sends)
+					}
+					noteSent = true
+				}
+				return fakeResp(tt.replies[sends-1], nil, 1, 5), false, nil
+			})
+			hookCalls, fallbacks := 0, 0
+			ts := Toolset{
+				Tools:               []Tool{tools.ReadFile},
+				Dispatch:            DispatchFunc(func(context.Context, ToolCall) string { return "obs" }),
+				FinalizeHook:        func() string { hookCalls++; return tt.hookNote },
+				OnReasoningFallback: func(loopStats) { fallbacks++ },
+			}
+			content, stats, err := runLoop(context.Background(), send, req, ts,
+				Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+			if err != nil {
+				t.Fatalf("runLoop: %v", err)
+			}
+			if content != tt.wantAnswer {
+				t.Errorf("content = %q, want %q", content, tt.wantAnswer)
+			}
+			if sends != tt.wantSends {
+				t.Errorf("sends = %d, want %d", sends, tt.wantSends)
+			}
+			if stats.StopReason != tt.wantStop {
+				t.Errorf("stop = %q, want %q", stats.StopReason, tt.wantStop)
+			}
+			if hookCalls != 1 {
+				t.Errorf("FinalizeHook consulted %d times, want exactly 1", hookCalls)
+			}
+			if fallbacks != tt.wantFallback {
+				t.Errorf("OnReasoningFallback fired %d times, want %d", fallbacks, tt.wantFallback)
+			}
+			if noteSent != tt.wantNoteSent {
+				t.Errorf("note sent = %v, want %v", noteSent, tt.wantNoteSent)
+			}
+			if len(req.Tools) != len(ts.Tools) {
+				t.Errorf("req.Tools after runLoop = %v, want the toolset restored (%d tools)", req.Tools, len(ts.Tools))
+			}
+			if req.Effort.Level != tt.effort {
+				t.Errorf("req.Effort after runLoop = %+v, want restored to %q", req.Effort, tt.effort)
+			}
+		})
+	}
+}

@@ -1107,13 +1107,39 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// new file, the honest form for a create. Best-effort: an unreadable
 	// existing file just yields a whole-content diff, never a failed write.
 	before, diffable := priorContent(deps, fsPath)
+	// The #141 large-deletion warning's before-side, read independently of the
+	// diff-gating above so it survives quiet/headless sessions — where a
+	// terminal diff never shows but the model still needs to hear the loss.
+	// Read BEFORE the write, alongside the diff's before-side.
+	warnBefore := deleteWarnBefore(fsPath)
 	if err := os.WriteFile(fsPath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	if diffable {
 		printFileDiff(deps, before, content)
 	}
-	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+	return resultWithWarning(fmt.Sprintf("wrote %d bytes to %s", len(content), path), largeDeletionWarning(warnBefore, content)), nil
+}
+
+// deleteWarnBefore reads a file's current content solely for the #141
+// large-deletion warning. Unlike priorContent it is NOT gated on Quiet or
+// richRenderDisabled — the warning is meant to reach the model in headless
+// runs, where no terminal diff is printed — so it reads the file whenever it
+// exists and is small enough to matter. "" (treated as a create, no warning)
+// when the file is missing, unreadable, or oversized.
+func deleteWarnBefore(fsPath string) string {
+	info, err := os.Stat(fsPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil || info.Size() > diffMaxInputBytes {
+		return ""
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // priorContent reads a file's current contents for the diff's before-side.
@@ -1215,10 +1241,64 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// already holds both sides in memory (data was read above, content is the
 	// applied result), so the diff costs nothing but the rendering.
 	printFileDiff(deps, string(data), content)
+	// Issue #141: a large deletion is the shape of the #127 incident (a test
+	// file sed'd away); the model sees it named in its own observation, not
+	// just as a diff on a terminal a headless run has. Both sides are already
+	// in memory here, so the check costs nothing.
+	warn := largeDeletionWarning(string(data), content)
 	if multi {
-		return fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), nil
+		return resultWithWarning(fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), warn), nil
 	}
-	return fmt.Sprintf("edited %s (%s)", a.Path, countNoun(total, "replacement")), nil
+	return resultWithWarning(fmt.Sprintf("edited %s (%s)", a.Path, countNoun(total, "replacement")), warn), nil
+}
+
+// largeDeletionWarning is the #141 receipt for the tool itself: when a
+// write_file or edit_file call removes most of an existing file's content,
+// the observation carries a named note so the model confirms the deletion
+// was intentional and mentions it in its summary. The turn-level testguard
+// receipt (internal/testguard) is the harness-side complement — it says WHICH
+// tests the turn removed, so the two surfaces together let a reviewer judge
+// the loss rather than discover it in the diff.
+//
+// The threshold is 50% kept: a change that removes MORE than half the file's
+// lines warns ("most of a file", the shape the issue names). A half-file cut
+// or less is silent — a routine refactor should not be flagged as a loss.
+// The floor (largeDeletionFloorLines) keeps small files out of the check
+// entirely, where a proportion is too coarse to mean anything.
+func largeDeletionWarning(before, after string) string {
+	b, a := splitLines(before), splitLines(after)
+	if len(b) < largeDeletionFloorLines {
+		return ""
+	}
+	// kept < 50% of the original — i.e. more than half removed.
+	if len(a)*100 >= len(b)*largeDeletionKeptPercent {
+		return ""
+	}
+	return fmt.Sprintf("\nNOTE: this change removed most of the file's content (%d → %d lines, %d%% kept). "+
+		"Confirm the deletion was intended and mention it in your summary so a reviewer can judge the loss.",
+		len(b), len(a), len(a)*100/len(b))
+}
+
+// largeDeletionFloorLines is the smallest before-side the #141 large-deletion
+// warning considers: below it a file is too small for a line proportion to
+// mean anything (emptying a 3-line stub is a normal edit).
+const largeDeletionFloorLines = 20
+
+// largeDeletionKeptPercent is the share of a file's lines that must survive to
+// avoid the #141 warning: a change that keeps less than this (removes more
+// than 100−this) warns. 50% kept means the bar sits at the "most of a file"
+// line the issue names — a half-file cut (50% kept) is silent, a 49%-kept
+// change warns, and emptying the file always does.
+const largeDeletionKeptPercent = 50
+
+// resultWithWarning appends w to s when w is non-empty, separated by a
+// newline — keeping the tools' single-line results single-line in the
+// normal case.
+func resultWithWarning(s, w string) string {
+	if w == "" {
+		return s
+	}
+	return s + w
 }
 
 // countNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the

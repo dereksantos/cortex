@@ -136,7 +136,9 @@ func runTurnCLI(args []string) {
 		var turnErr error
 		if a.plan {
 			plan, planErr := session.TurnWithPlan(ctx, a.input)
-			res = TurnResult{Reply: plan.Reply, Interrupted: errors.Is(planErr, context.Canceled)}
+			// TestReceipt (issue #141): the plan's steps' receipts, so the
+			// stderr / --json "tests_changed" surfaces below cover --plan too.
+			res = TurnResult{Reply: plan.Reply, Interrupted: errors.Is(planErr, context.Canceled), TestReceipt: plan.TestReceipt}
 			turnErr = planErr
 		} else {
 			res, turnErr = session.Turn(ctx, a.input)
@@ -148,6 +150,9 @@ func runTurnCLI(args []string) {
 
 		if a.asJSON {
 			out := map[string]any{"session": session.SessionID, "reply": res.Reply}
+			if res.TestReceipt != "" {
+				out["tests_changed"] = res.TestReceipt
+			}
 			if turnErr != nil {
 				out["error"] = turnErr.Error()
 				out["interrupted"] = res.Interrupted
@@ -163,6 +168,14 @@ func runTurnCLI(args []string) {
 			}
 			if res.Reply != "" {
 				fmt.Println(res.Reply)
+			}
+			// Issue #141: a turn that removed or shrank tests reports it on
+			// stderr — the reply is the model's prose, and the receipt is a
+			// harness-level fact the caller (a human, or a self-dev driver
+			// parsing stderr) must see. The --json path carries the same fact
+			// under "tests_changed" above.
+			if res.TestReceipt != "" {
+				fmt.Fprintln(os.Stderr, res.TestReceipt)
 			}
 			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
 		}

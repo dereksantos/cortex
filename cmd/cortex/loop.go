@@ -78,6 +78,16 @@ type Toolset struct {
 	// issue #149 natural-finish off-retry recovers an empty reply; nil
 	// skips the receipt (see the type doc).
 	OnReasoningFallback func(stats loopStats)
+	// FinalizeHook, when non-nil, is consulted exactly once — at the moment
+	// the model answers with NO tool calls (the clean-finalize point, or the
+	// issue #149 off-retry recovering that answer as prose), after every tool
+	// call this turn has already run. It returns a harness note to hand the
+	// model in one more, tools-withheld finalize round so the model's FINAL
+	// answer addresses it (issue #141's "tests changed" receipt, via
+	// turn.go; see finalizeHookRound). An empty return (or a nil hook) leaves
+	// the answer untouched. Only the coder turn wires it; subagents and tests
+	// leave it nil.
+	FinalizeHook func() string
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
@@ -454,6 +464,15 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 					if ts.OnReasoningFallback != nil {
 						ts.OnReasoningFallback(stats)
 					}
+					// Issue #141: the recovered prose IS the model's natural
+					// answer (just produced with reasoning off), so it reaches
+					// the same "tests changed" finalize round a clean finish
+					// does — otherwise a reasoning-on model that needed the
+					// #149 retry would never be told what its turn did to the
+					// tests. Run AFTER the fallback receipt so that receipt's
+					// stats describe the recovery alone. The round's reply is
+					// appended to a2, never substituted for it.
+					a2 = finalizeHookRound(ctx, send, req, ts, &stats, appendMsg, a2)
 					req.Tools = ts.Tools
 					return a2, stats, nil
 				}
@@ -480,6 +499,17 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 						req.Tools = ts.Tools
 						return a2, stats, nil
 					}
+				}
+				// Issue #141: hand the model the turn's "tests changed" receipt
+				// in one more tools-withheld finalize round (finalizeHookRound);
+				// its reply is APPENDED to the answer, never substituted. It
+				// sits after the empty-finish salvages (which return their own
+				// terse answers) and before the clamped salvage — the position
+				// #145 gave it — so, as there, an empty answer nothing could
+				// salvage still gets the receipt round, and only a turn whose
+				// receipt round ALSO yields nothing ends as empty-finalize.
+				answer = finalizeHookRound(ctx, send, req, ts, &stats, appendMsg, answer)
+				if answer == "" {
 					// Nothing salvageable: say so rather than passing an empty turn
 					// off as a clean finish.
 					stats.StopReason = "empty-finalize"
@@ -685,6 +715,56 @@ func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequ
 	msg := res.Choices[0].Message
 	recoverXMLToolCalls(&msg)
 	return &msg
+}
+
+// finalizeHookRound is issue #141's finalize round: if the turn mutated a
+// test file and the harness has a "tests changed" receipt, hand the model
+// that fact in one more finalize round so its FINAL answer accounts for the
+// loss — the complaint behind #141 is that the loss goes unreported, and a
+// receipt that only lands in the journal reaches neither the model nor a
+// human. The caller's FinalizeHook (turn.go) supplies the note; runLoop calls
+// this ONLY at the point the model has answered with no tool calls — after
+// every tool call has run — so the test-file before-side is already settled.
+// A nil hook (every subagent, every test) or an empty note means "nothing to
+// report" and returns answer untouched without a send. The note is a real
+// transcript message (the model's answer to it is the turn's record) and this
+// round WITHHOLDS tools (finalize-style): the ask is to address what was
+// already done, not to do more work. req.Tools is restored before return.
+//
+// APPEND, never replace: a small model answers the note narrowly (just what
+// happened to the tests), so replacing the turn's real answer with that reply
+// would drop the actual work summary from TurnResult.Reply (and the headless
+// `cortex turn` driver with it). The note's ask is to restate the FULL answer
+// — summary first, then the test-loss accounting — so appending yields a
+// complete record in either model behavior: a model that does restate the
+// summary reads naturally (summary → its test note), and one that doesn't
+// still keeps the original summary plus the note's answer. Empty replies and
+// send failures keep the original answer untouched.
+func finalizeHookRound(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, stats *loopStats, appendMsg func(Message), answer string) string {
+	if ts.FinalizeHook == nil {
+		return answer
+	}
+	note := ts.FinalizeHook()
+	if note == "" {
+		return answer
+	}
+	savedTools := req.Tools
+	req.Tools = nil
+	defer func() { req.Tools = savedTools }()
+	appendMsg(Message{Role: RoleUser, Content: note})
+	r2, _, err := send.Send(ctx, req)
+	if err != nil || r2 == nil || len(r2.Choices) == 0 {
+		return answer
+	}
+	appendMsg(r2.Choices[0].Message)
+	accountUsage(stats, r2, req.MaxTokens)
+	if a2 := strings.TrimSpace(r2.Choices[0].Message.Content); a2 != "" {
+		if answer != "" {
+			answer += "\n\n"
+		}
+		answer += a2
+	}
+	return answer
 }
 
 // recoverXMLToolCalls recovers Qwen-native XML tool calls the proxy didn't
@@ -905,6 +985,22 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 	return DispatchFunc(func(ctx context.Context, call ToolCall) string {
 		if ctx.Err() != nil {
 			return "Error: interrupted by user before this tool ran"
+		}
+		// Issue #141: snapshot the before-side of what this call can
+		// mutate, BEFORE the tool runs — the turn-end testguard scan
+		// (testwatch.go) needs the pre-turn content to see what the turn
+		// removed. Named paths (write_file / edit_file / remove_path)
+		// snapshot exactly that file; a bash call names no file but can
+		// mutate any file in the workspace, so it arms the whole
+		// workspace's test-named files instead (armTestwatch). A no-op
+		// for every other tool and for a missing file.
+		switch call.Function.Name {
+		case tools.FunctionBash:
+			cs.armTestwatch()
+		default:
+			if p := testwatchTouchedPath(call); p != "" {
+				cs.touchFile(p)
+			}
 		}
 		cs.startActivity(call.ActivityLabel())
 		out, err := tools.Execute(ctx, call, cs)
