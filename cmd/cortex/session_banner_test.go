@@ -171,56 +171,10 @@ func TestLoadedContextBanner(t *testing.T) {
 	}
 }
 
-// TestLoadedContextBannerNoColor pins the NO_COLOR degradation path (the
-// issue #118 "non-TTY shouldn't get color" requirement) for the HEADLESS
-// surface: `cortex turn --session`'s banner must never carry ANSI escapes,
-// regardless of NO_COLOR or TTY state. tools.colorDisabled is read ONCE at
-// package init (internal/tools/ui.go), so we can't re-toggle it inside a
-// single test — but the headless path doesn't need to: the plain form is
-// the always-plain surface, and this test asserts it carries no escapes
-// AND matches what the NO_COLOR colored form would be (i.e. stripping
-// every SGR code from the colored form). That's the exact invariant a
-// piped driver sees.
-func TestLoadedContextBannerNoColor(t *testing.T) {
-	cs := bannerTestSession(t, func(t *testing.T, cs *CortexSession) {
-		cs.ws = cs.newWorkingSet(1)
-		cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: 5, Tokens: 30})
-		cs.ws.AddTurn(cache.TurnSpan{Start: 5, End: 9, Tokens: 40})
-		if err := cs.ws.RestoreState(1, 1000, 500); err != nil {
-			t.Fatalf("RestoreState: %v", err)
-		}
-	})
-	// The headless surface is the plain form — this is what `cortex turn
-	// --session` actually prints, and it must be ANSI-free unconditionally.
-	p := cs.loadedContextBanner("abc123", false)
-	if strings.Contains(p, "\x1b[") {
-		t.Errorf("headless (NO_COLOR-equivalent) banner must be plain, got %q", p)
-	}
-	// Content is unchanged — only the escapes go.
-	for _, sub := range []string{
-		"context:  2 turns (1 demoted, 1 hydrated tail)",
-		"messages:  2 messages",
-		"session:  abc123",
-	} {
-		if !strings.Contains(p, sub) {
-			t.Errorf("headless banner missing %q (got %q)", sub, p)
-		}
-	}
-	// Stripping every SGR code from the colored form must yield the plain
-	// form — the NO_COLOR colored path and the headless plain path are
-	// the same text, so a piped driver and a NO_COLOR terminal agree.
-	c := cs.loadedContextBanner("abc123", true)
-	stripped := strings.ReplaceAll(strings.ReplaceAll(c, "\x1b[0m", ""), "\x1b[90m", "")
-	stripped = strings.ReplaceAll(strings.ReplaceAll(stripped, "\x1b[32m", ""), "\x1b[36m", "")
-	if stripped != p {
-		t.Errorf("NO_COLOR-stripped colored form %q differs from the headless plain form %q", stripped, p)
-	}
-}
-
-// TestLoadedContextBannerPlainForm pins issue #118's other half: the headless
-// `cortex turn --session` banner is ALWAYS plain — no ANSI escapes even when
-// NO_COLOR is unset and no TTY gate applies — so a piped driver never sees
-// color, and the same text lands whether or not a terminal is attached.
+// TestLoadedContextBannerPlainForm pins what the plain (never-colored) form
+// actually is: no ANSI escapes, the expected content lines, and exactly the
+// colored form with every SGR code stripped — so a piped driver and a
+// NO_COLOR terminal see the same text.
 func TestLoadedContextBannerPlainForm(t *testing.T) {
 	cs := bannerTestSession(t, func(t *testing.T, cs *CortexSession) {
 		cs.ws = cs.newWorkingSet(1)
@@ -267,9 +221,8 @@ func TestHeadlessLoadedContextBannerGoesToStderrPlain(t *testing.T) {
 	})
 	want := cs.loadedContextBanner("abc123", false)
 
-	// Temp files, not pipes: a small write can outlive the writer's close in
-	// the kernel pipe buffer, which made a naive os.Pipe stderr capture come
-	// back empty (see TestShowLoadedContextGoesToStderr's note).
+	// Swap os.Stdout/os.Stderr for temp files and read them back, so the
+	// test asserts exactly where each byte of the banner lands.
 	stdoutF, err := os.CreateTemp(t.TempDir(), "stdout-*")
 	if err != nil {
 		t.Fatalf("CreateTemp (stdout): %v", err)
@@ -310,14 +263,8 @@ func TestHeadlessLoadedContextBannerGoesToStderrPlain(t *testing.T) {
 
 // TestShowLoadedContextGoesToStderr pins issue #118: the banner lands on
 // stderr, byte-for-byte identical to loadedContextBanner's output, and
-// nothing goes to stdout.
-//
-// os.Stderr is swapped for a temp file (not a pipe): a pipe would race its
-// own writer — a small write can leave the kernel pipe buffer after the
-// writer's close, which is exactly why a naive os.Pipe capture of stderr
-// comes back empty here and in the scratch repro. A file has no such
-// race; the swap-to-a-real-*os.File is itself the assertion that the
-// banner's writer is the process's stderr (not some other buffered sink).
+// nothing goes to stdout. It swaps os.Stdout/os.Stderr for temp files and
+// reads them back.
 func TestShowLoadedContextGoesToStderr(t *testing.T) {
 	cs := bannerTestSession(t, func(t *testing.T, cs *CortexSession) {
 		cs.ws = cs.newWorkingSet(1)

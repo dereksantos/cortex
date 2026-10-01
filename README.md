@@ -380,6 +380,7 @@ per-call `model` argument pins another. See
 cortex                            interactive REPL
 cortex --version | cortex version   print the version and exit
 cortex resume [id]                  resume a session; defaults to latest
+                                  (its resume banner goes to stderr)
 cortex turn [--session id] [--plan] [--json] <input...>
                                   run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn);
                                   --session's resume banner and the session id go to stderr — stdout is the answer only
