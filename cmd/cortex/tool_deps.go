@@ -167,15 +167,12 @@ func (cs *CortexSession) WorkspaceTrusted() bool {
 // of the post-edit hook (the "hook inactive on an untrusted workspace"
 // note fires once per session — see tools.PostEditHookState). The state
 // lives on the session, so "once per session" is exactly that: the REPL's
-// session, a served session, or a loop firing, each with their own. A
-// nil pointer (a session that implements the capability but never
-// allocated state — every hand-built test session) is a no-op: the hook
-// has no per-session slot to announce into, so the untrusted note is not
-// surfaced. Never nil.
+// session, a served session, or a loop firing, each with their own. A nil
+// state (a session that implements the capability but never allocated
+// state — every hand-built test session) is a no-op: the hook has no
+// per-session slot to announce into, so the untrusted note is not
+// surfaced.
 func (cs *CortexSession) HookState() *tools.PostEditHookState {
-	if cs.hookState == nil {
-		return nil
-	}
 	return cs.hookState
 }
 

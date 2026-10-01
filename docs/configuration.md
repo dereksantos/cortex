@@ -589,14 +589,18 @@ checkpoints and the `bash` tool are not journaled with an attribution flag.
     "commands": {
       "format": "custom-fmt -w {file}",
       "test": "go test -race ./..."
-    }
+    },
+    "trusted": ["/home/u/real-repo"]
   }
 }
 ```
 
-Keys are the four command roles `format`, `lint`, `test`, `build`; each
-value is the shell command line for that role. Unknown keys and blank
-values are ignored. A command carrying the `{file}` placeholder is
+`commands`: keys are the four command roles `format`, `lint`, `test`,
+`build`; each value is the shell command line for that role. Unknown
+keys and blank values are ignored.
+
+`trusted`: the workspace trust list (documented with the post-edit hook
+below) — USER config only, managed with `cortex project trust`. A command carrying the `{file}` placeholder is
 per-file: the post-edit hook (below) substitutes the file just written.
 A command carrying `{dir}` is per-package: the hook substitutes the
 file's `"./"`-prefixed package directory, relative to the project root
@@ -636,20 +640,55 @@ field-by-field merge.
 **The post-edit hook.** After `write_file`/`edit_file` lands, the session
 runs the project's format command — and, if declared, its per-file or
 per-package lint — on the file just touched, so an unformatted or
-broken file never reaches review. Only a command that (a) passes the
-format/lint allowlist (`internal/shellrisk`'s
-`AllowlistProjectCommand` — a recognized single-invocation tool, no shell
-control), (b) is per-file or per-package, and (c) applies to the file's
-extension (a manifest-set like gofmt's `.go`; a declaration or script
-with no recognized toolchain applies to all files) is run, and it runs
-as a plain argv — the template is split once and `{file}`/`{dir}` are
-each substituted as a single argument, exec'd directly with no shell,
-so a path is always one inert argument. Each command gets a 10s budget;
-a timeout, a non-zero exit, or a lint finding is folded into the tool
-result as a note, appended after the tool's own observations about the
-change (`edit_file`'s line delta and removal warning, and the
-large-deletion note either tool adds). The hook never fails the edit — the result of the
-write stands regardless.
+broken file never reaches review.
+
+**Workspace trust is the ONLY gate.** Trust is a persisted,
+per-workspace, USER-level decision: the user config's `project.trusted`
+list (below), set with `cortex project trust`. It is read ONLY from the
+user-level config — the repository's own `.cortex/config.json` is never
+on the read path, so a repo can never mark itself trusted (the merge
+drops the project-level `project.trusted` copy; `mergeProject`).
+Default: no entry, untrusted. On an UNTRUSTED workspace the hook runs
+NOTHING: a trusted repo may use repo-local binaries
+(`./node_modules/.bin/eslint`, `./bin/fmt`) of any language, so there is
+no per-tool allowlist to run — the trust decision authorizes running
+what the repo configures. The first edit of a session on an untrusted
+workspace gets a one-line "post-edit hook inactive" note (later edits
+stay silent); a trusted workspace gets no note.
+
+On a TRUSTED workspace, any applicable command runs: the command must be
+per-file or per-package (a whole-project command has no argument to
+substitute per edit) and applicable to the file's extension (a
+manifest-set like gofmt's `.go`; a declaration or script with no
+recognized toolchain applies to all files). It runs as a plain argv —
+the template is split once and `{file}`/`{dir}` are each substituted as
+a single argument AFTER the split, exec'd directly with no shell, so a
+path is always one inert argument. A template containing shell syntax
+(pipe, chain, redirect, command substitution, subshell, or newline)
+cannot run without a shell and is skipped with a note — its intent is
+unexpressible, not dangerous. Each command gets a 10s budget; a timeout,
+a non-zero exit, or a lint finding is folded into the tool result as a
+note (capped at 2000 bytes of output), appended after the tool's own
+observations about the change (`edit_file`'s line delta and removal
+warning, and the large-deletion note either tool adds). The hook never
+fails the edit — the result of the write stands regardless.
+
+**`project.trusted` — the workspace trust list.** A list of workspace
+root directories the operator has decided are trusted — the only gate
+for the post-edit hook (above). Lives in the USER config only; managed
+with:
+
+```
+cortex project trust add <root>     # trust a workspace root (idempotent)
+cortex project trust remove <root>  # untrust it (errors if not listed)
+cortex project trust list           # show the trusted roots
+```
+
+Editing round-trips the whole user config, so a trust edit never
+clobbers other settings (unknown top-level keys are preserved). Absent
+or empty means no workspace is trusted — the safe default.
+
+**Inspecting the resolved set:** `cortex project commands` prints the
 
 **Inspecting the resolved set:** `cortex project commands` prints the
 resolved format/lint/test/build commands with their provenance

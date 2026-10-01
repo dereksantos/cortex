@@ -278,6 +278,7 @@ var usageLines = []string{
 	"cortex serve [--port <n>]                 local HTTP/SSE adapter for the web UI",
 	"cortex scan [--json] [--root <path>]      scan configured roots for projects",
 	"cortex project <add|list|remove>          manage the project registry",
+	"cortex project trust <add|remove|list>    manage the per-workspace trust list (the post-edit hook's only gate)",
 	"cortex discord                            Discord adapter (DISCORD_BOT_TOKEN)",
 	"cortex model [--json]                     show model role bindings and what's served",
 	"cortex study-eval                         study acceptance test",

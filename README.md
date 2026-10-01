@@ -389,6 +389,9 @@ cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopb
 cortex scan [--json] [--root <path>] [--register]
                                   scan configured roots and list discovered projects
 cortex project <add|list|remove>    manage the project registry
+cortex project trust <add|remove|list>
+                                  manage the per-workspace trust list (the
+                                  post-edit hook's only gate; user config only)
 cortex project commands [--json] [--project <name>]
                                   show the resolved format/lint/test/build
                                   commands (discovery + declarations)

@@ -293,43 +293,25 @@ func TestPostEditHookFileWithSpacesIsOneArgument(t *testing.T) {
 	}
 }
 
-// TestPostEditHookTrustedIsUserConfigOnly is the end-to-end proof that
-// trust is a USER-level decision: a repo whose OWN .cortex/config.json
-// claims its root is trusted is still untrusted, because the session's
-// trust resolution (cmd/cortex's CortexSession.WorkspaceTrusted →
-// Config.WorkspaceTrusted) reads the USER-level config file DIRECTLY
-// (trustFromUserConfig) and never the merged config's repo-written field.
-// The end-to-end coverage that drives the REAL production resolution
-// (loadMergedConfig + Config.WorkspaceTrusted) against a repo-claiming
-// fixture with no user config lives in cmd/cortex's
-// TestWorkspaceTrustedEndToEndFromConfigs (project_trust_test.go) — this
-// package can't import cmd/cortex (cycle), so here the hook is fed the
-// trust state that the real resolution produced for the fixture (false:
-// user layer absent → nothing trusted, whatever the repo claims) and the
-// full path (hook runs nothing + one-line note) is verified.
-func TestPostEditHookTrustedIsUserConfigOnly(t *testing.T) {
+// TestPostEditHookUntrustedNoteOnWrite is the hook-side proof of the
+// untrusted path: with the session reporting its workspace as untrusted —
+// the state cmd/cortex's trust resolution (CortexSession.WorkspaceTrusted)
+// produces for ANY workspace not on the user-level trust list, including a
+// repo whose own .cortex/config.json claims trust — the hook runs nothing
+// and the first write of a session gets the one-line inactive note. The
+// end-to-end coverage that the repo-claiming fixture really resolves to
+// untrusted (loadMergedConfig + Config.WorkspaceTrusted) lives in
+// cmd/cortex's TestWorkspaceTrustedEndToEndFromConfigs
+// (project_trust_test.go); this package can't import cmd/cortex (cycle), so
+// here the hook is fed the trust state that resolution produces and the
+// full untrusted path (nothing run + one-line note) is verified.
+func TestPostEditHookUntrustedNoteOnWrite(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
-	// The repo CLAIMS trust for its own root in its own config.
-	if err := os.MkdirAll(filepath.Join(root, ".cortex"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".cortex", "config.json"),
-		[]byte(`{"project": {"trusted": ["`+root+`"]}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Redirect the USER-level config to an EMPTY temp dir: the user read
-	// finds no config → nothing trusted, whatever the repo claims.
-	userHome := t.TempDir()
-	t.Setenv("CORTEX_HOME", userHome)
-
 	cmds := projectcmd.Commands{
 		Format: projectcmd.Command{Cmd: "custom-fmt -w {file}", PerFile: true, Source: "config.json"},
 	}
-	// The real resolution for this fixture: user layer absent → the merged
-	// config carries the repo's claim in Project.Trusted, but
-	// Config.WorkspaceTrusted reads the user file directly → untrusted.
 	// One session (an explicit shared state) drives the full untrusted
 	// path: note on the first write, nothing run.
 	deps := hookDeps{cmds: cmds, trusted: false, state: &PostEditHookState{}}
@@ -339,10 +321,10 @@ func TestPostEditHookTrustedIsUserConfigOnly(t *testing.T) {
 		t.Fatalf("write_file: %v", err)
 	}
 	if !strings.Contains(out, "post-edit hook inactive: this workspace isn't trusted") {
-		t.Errorf("repo-claimed trust must still be untrusted (the inactive note must appear), got %q", out)
+		t.Errorf("the inactive note must appear on an untrusted workspace, got %q", out)
 	}
 	if strings.Contains(out, "formatted") {
-		t.Errorf("the repo-claimed trust must not have run the command, got %q", out)
+		t.Errorf("the command must not have run on an untrusted workspace, got %q", out)
 	}
 }
 

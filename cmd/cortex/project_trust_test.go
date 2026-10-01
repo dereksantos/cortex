@@ -55,6 +55,11 @@ func TestMergeProjectTrustIsUserLevelOnly(t *testing.T) {
 // (trustFromUserConfig), so the assertion is the end-to-end one: the list
 // the operator persists is the list that decides.
 func TestWorkspaceTrustedMatching(t *testing.T) {
+	// Redirect CORTEX_HOME FIRST: this test writes the user config, and
+	// TestMain's redirect applies only when CORTEX_HOME is unset — a
+	// developer or CI job that sets it would otherwise lose their real
+	// user config (t.TempDir cleanup is enough for the temp dir).
+	t.Setenv("CORTEX_HOME", t.TempDir())
 	root := t.TempDir()
 	cfg := &Config{Project: ProjectConfig{Trusted: []string{root}}}
 	cfgPath := userConfigPath()
@@ -67,7 +72,6 @@ func TestWorkspaceTrustedMatching(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`{"project": {"trusted": ["`+root+`"]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Remove(cfgPath) })
 
 	if !cfg.WorkspaceTrusted(root) {
 		t.Errorf("the listed root must be trusted")
