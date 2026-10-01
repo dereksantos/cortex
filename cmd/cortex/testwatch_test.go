@@ -1052,23 +1052,37 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 		// so it saw the file as NEW and the receipt flagged "scratch file
 		// left behind" on every bash turn. The walk now stops only the
 		// MakeBaseline READS and keeps recording scratch names.
+		//
+		// The fixture must hit the cap PARTWAY through the root's entries,
+		// not at the end: os.ReadDir returns them name-sorted (fNNN_test.go
+		// < zz_tmp.go < zzlate), so with exactly testwatchMaxBashBaselines
+		// test files the cap lands on the LAST test file and no later sibling
+		// is ever visited — the partway-break bug would stay invisible.
+		// testwatchMaxBashBaselines+1 files makes f512 the file at which the
+		// cap is reached, leaving zz_tmp.go and zzlate/ still to come in the
+		// same loop.
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
 		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
-		// Fill the baseline budget: a flat directory of
-		// testwatchMaxBashBaselines test files (all at the workspace root,
-		// read before the walk descends into "zzlate").
-		for i := 0; i < testwatchMaxBashBaselines; i++ {
+		// Fill the baseline budget PLUS one: the (testwatchMaxBashBaselines +
+		// 1)-th test file reaches the cap while the loop still has later
+		// siblings to visit (a break there skipped them; a continue walks on).
+		for i := 0; i <= testwatchMaxBashBaselines; i++ {
 			p := fmt.Sprintf("f%03d_test.go", i)
 			if err := os.WriteFile(filepath.Join(root, p), []byte("package p\n\nfunc TestA(t *testing.T) {}\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}
-		// A pre-existing scratch file in a directory that the old walk
-		// never reached (it returned at the cap at the root level).
+		// A pre-existing scratch file at the SAME level that sorts AFTER the
+		// test files: the sibling a partway-break skips first.
+		if err := os.WriteFile(filepath.Join(root, "zz_tmp.go"), []byte("package tools\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// A pre-existing scratch file in a subdirectory visited after the
+		// cap, where the old walk never even recursed.
 		if err := os.MkdirAll(filepath.Join(root, "zzlate"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1077,22 +1091,39 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 		}
 		h := &testwatchHarness{cs: cs}
 		// A harmless bash call: arms the baseline (the walk must record the
-		// scratch name past the cap) and changes nothing.
+		// scratch names past the cap) and changes nothing.
 		bc := bashCall("c1", "true")
 		h.runTurn(t, "run a probe",
 			Message{Role: "assistant", ToolCalls: []ToolCall{bc}})
-		// The arm DID record the past-the-cap scratch file...
-		if !cs.testwatchScratchBefore["zzlate/zz_dbg_probe.go"] {
-			t.Fatal("armTestwatch did not record the past-the-cap scratch file in the scratch baseline")
+		// The cap is still enforced: exactly testwatchMaxBashBaselines files
+		// got baselines, and the cap landed PARTWAY through the root (f512
+		// is the file at which the cap is reached — it and zz_tmp.go and
+		// zzlate still had to be visited after it).
+		if got := len(cs.testwatchBash); got != testwatchMaxBashBaselines {
+			t.Fatalf("armTestwatch baselined %d files, want exactly %d (cap enforced)", got, testwatchMaxBashBaselines)
 		}
-		// ...so the sweep must NOT snapshot it as new (no double-report)...
-		if _, ok := cs.testwatch["zzlate/zz_dbg_probe.go"]; ok {
-			t.Errorf("sweepScratchFiles snapshotted a PRE-EXISTING past-the-cap scratch file; keys: %v", sortedKeys(cs.testwatch))
+		if _, ok := cs.testwatchBash["f511_test.go"]; !ok {
+			t.Error("armTestwatch did not baseline f511_test.go, which sorts before the cap")
+		}
+		// The arm DID record BOTH past-the-cap scratch files (the later
+		// sibling at the same level, and the later subdirectory's file)...
+		if !cs.testwatchScratchBefore["zz_tmp.go"] {
+			t.Errorf("armTestwatch did not record the same-level scratch file past the cap in the scratch baseline; keys: %v", sortedKeys(cs.testwatchScratchBefore))
+		}
+		if !cs.testwatchScratchBefore["zzlate/zz_dbg_probe.go"] {
+			t.Errorf("armTestwatch did not record the past-the-cap subdirectory's scratch file in the scratch baseline; keys: %v", sortedKeys(cs.testwatchScratchBefore))
+		}
+		// ...so the sweep must NOT snapshot either as new (no double-
+		// report)...
+		for _, key := range []string{"zz_tmp.go", "zzlate/zz_dbg_probe.go"} {
+			if _, ok := cs.testwatch[key]; ok {
+				t.Errorf("sweepScratchFiles snapshotted a PRE-EXISTING past-the-cap scratch file %q; keys: %v", key, sortedKeys(cs.testwatch))
+			}
 		}
 		// ...and the receipt must stay silent.
 		got := lastCaptureResult(t, cs)
 		if strings.Contains(got, "leftover debug:") {
-			t.Errorf("capture summary = %q, want NO leftover debug: line (pre-existing scratch file past the cap)", got)
+			t.Errorf("capture summary = %q, want NO leftover debug: line (pre-existing scratch files past the cap)", got)
 		}
 	})
 }

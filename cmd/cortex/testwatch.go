@@ -151,9 +151,15 @@ func (cs *CortexSession) armTestwatch() {
 			}
 			// The cap is enforced PER-FILE, not just at recursion entry:
 			// a flat directory with more test files than the cap must
-			// stop at the cap, not keep reading past it.
+			// stop READING at the cap, not keep reading past it. continue
+			// (not break) so the loop still records scratch names and
+			// still recurses into LATER siblings (ents is name-sorted, so
+			// a break here would silently skip every entry after the
+			// capping file — pre-existing scratch files in later subdirs
+			// would never hit testwatchScratchBefore and the uncapped
+			// sweep would flag them as new on every bash turn).
 			if len(cs.testwatchBash) >= testwatchMaxBashBaselines {
-				break
+				continue
 			}
 			data, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
