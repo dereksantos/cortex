@@ -153,6 +153,14 @@ func runTurnCLI(args []string) {
 			if res.TestReceipt != "" {
 				out["tests_changed"] = res.TestReceipt
 			}
+			// Issue #117: a turn that recovered from a mid-turn provider
+			// failure succeeded, so err is nil and the failure was otherwise
+			// lost behind the finalize answer — carry it under "backend_error"
+			// so a driver parsing --json sees what the backend said (sibling
+			// of tests_changed above).
+			if res.LastError != nil {
+				out["backend_error"] = backendErrorLine(res.LastError)
+			}
 			if turnErr != nil {
 				out["error"] = turnErr.Error()
 				out["interrupted"] = res.Interrupted
@@ -177,6 +185,13 @@ func runTurnCLI(args []string) {
 			if res.TestReceipt != "" {
 				fmt.Fprintln(os.Stderr, res.TestReceipt)
 			}
+			// Issue #117: a turn that recovered from a mid-turn provider
+			// failure SUCCEEDED (turnErr is nil), so without this the backend's
+			// status/body would vanish behind the reply — one line on stderr,
+			// secrets redacted, exactly like the REPL's dim notice.
+			if res.LastError != nil {
+				fmt.Fprintln(os.Stderr, backendErrorLine(res.LastError))
+			}
 			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
 		}
 		if turnErr != nil {
@@ -187,4 +202,25 @@ func runTurnCLI(args []string) {
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
+}
+
+// backendErrorLine is the one-line, secrets-redacted human-facing notice for a
+// provider error a turn recovered from (issue #117). Shared by the two human
+// surfaces so the CLI's stderr line and the REPL's dim notice stay word-for-
+// word identical: the same "backend error: <status> <message>" text. The
+// status is errStatus's extraction (the typed blocking path or the streaming
+// path's message-baked "stream (503)"); the message is redactSecrets'd so a
+// 400 rejection that echoed the Authorization header can't leak the key.
+//
+// When errStatus returns 0 (a transport-level failure with no HTTP status),
+// the line is just the message — no redundant "0" prefix.
+func backendErrorLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := redactSecrets(err.Error())
+	if s := errStatus(err); s > 0 {
+		return fmt.Sprintf("backend error: %d %s", s, msg)
+	}
+	return "backend error: " + msg
 }

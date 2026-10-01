@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
@@ -62,6 +63,18 @@ type TurnResult struct {
 	// TestReceipt (turn's finalize hook), so the model's final answer
 	// accounts for the leftover debug too.
 	DebugReceipt string
+	// LastError is the provider error this turn recovered from (issue #117):
+	// non-nil exactly when StopReason == "error-recovered" (a mid-turn send
+	// failed after progress, and the turn finalized from what it had — so
+	// the turn SUCCEEDED and err is nil, but the backend's status and body
+	// were lost behind the finalize answer). Nil on every other outcome,
+	// including an unrecovered send failure, which surfaces as err instead.
+	// turn() already journals it (a model.recovered_error entry) and, in the
+	// interactive REPL, logs it to .cortex/cortex.log; this field is the
+	// human-facing half — `cortex turn` prints it to stderr and the REPL
+	// prints it dim, both via the shared backendErrorLine (status from
+	// errStatus, message redacted).
+	LastError error
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -242,6 +255,52 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
+	// Issue #117: settle exactly ONE journal record per failed send — the
+	// receipt rides the send-scoped marker on the error (heal.go's
+	// pendingFailure, via healJournaledError) rather than a session-wide
+	// flag, so a subagent's healed-then-failed send can neither consume nor
+	// clobber the coder's own receipt. The KIND of record follows the
+	// OUTCOME of this turn, not which send was journaled first:
+	//
+	//   - error-recovered (stats.LastError != nil, err == nil): the run
+	//     finalized from what it had, so the turn SUCCEEDED and the record
+	//     is model.recovered_error — exactly one, and NO model.failure. A
+	//     failed send that was already journaled as model.failure by the
+	//     healing ladder (heal.go) is the unrecovered kind the turn now
+	//     settles as the recovered kind: one send, one record, the right
+	//     kind (the previous session-wide dedup let the wrong record win —
+	//     a recovered turn showed as "FAILED unrecovered" on
+	//     `cortex model`).
+	//   - a real error (err != nil, unrecovered "error" stop): the run
+	//     could not finalize, so the record is model.failure — settled
+	//     here from the same send-scoped receipt, the ladder no longer
+	//     journals it on the fly (heal.go no longer writes it directly).
+	//
+	// Both records ride the SAME class dir as the model.substitution events
+	// (heal.go's reportHeal); `cortex model`'s recent-events view reads one
+	// place for all of them, and the distinct types keep a recovered turn
+	// from being reported as "FAILED unrecovered".
+	if stats.StopReason == "error-recovered" && stats.LastError != nil {
+		cs.reportRecoverableError(roleCode, stats.LastError)
+	}
+	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
+	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
+	// self-dev driver — can print it to a human. Compute it here, after
+	// runLoop has settled every tool call, so the before/after is final —
+	// BEFORE the unrecovered-error return below so that path carries it too
+	// (an interrupted turn still names the test files it touched); captureTurn
+	// re-derives it (cheap, idempotent) for the journal record.
+	// Issue #154: the "leftover debug" receipt is computed and surfaced the
+	// same way — TurnResult.DebugReceipt.
+	testReceipt := cs.testwatchTestsReceipt()
+	debugReceipt := cs.testwatchDebugReceipt()
+	if err != nil {
+		if pf := pendingFailureOf(err); pf != nil {
+			cs.journalModelFailure(pf, err)
+		}
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
+	}
+
 	cs.turns++
 	cs.tokensIn += stats.InputTokens
 	cs.tokensOut += stats.OutputTokens
@@ -250,22 +309,83 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.LastPromptTokens = stats.LastPromptTokens
 	cs.LastCachedTokens = stats.LastCachedTokens
 
-	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
-	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
-	// self-dev driver — can print it to a human. Compute it here, after
-	// runLoop has settled every tool call, so the before/after is final;
-	// captureTurn re-derives it (cheap, idempotent) for the journal record.
-	// Issue #154: the "leftover debug" receipt is computed the same way and
-	// surfaced the same way — TurnResult.DebugReceipt.
-	testReceipt := cs.testwatchTestsReceipt()
-	debugReceipt := cs.testwatchDebugReceipt()
-
-	if err != nil {
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
-	}
-
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LastError: stats.LastError}, nil
+}
+
+// reportRecoverableError records the provider error a turn recovered from
+// (issue #117) to the two surfaces a user can find it after the fact:
+//
+//   - one model.recovered_error journal entry under the project's model class
+//     dir (.cortex/journal/model/), riding the SAME class dir as heal.go's
+//     model.failure (unrecovered) receipt — `cortex model`'s recent-events
+//     view reads one place for both, and the distinct type keeps a recovered
+//     turn from being reported as "FAILED unrecovered";
+//   - one log.Printf line, in the interactive REPL only (the REPL diverts
+//     the stdlib logger to .cortex/cortex.log) carrying the redacted
+//     message — which already names the HTTP status (the streaming path's
+//     "stream (503)" prefix, the blocking path's "agent returned 503") — so
+//     `tail -f .cortex/cortex.log` names what the finalize answer's "a
+//     backend error" was. Headless `cortex turn` skips it: its one line on
+//     stderr is runTurnCLI's backendErrorLine print, and a second logger
+//     line would be a duplicate (the issue asks for a single line).
+//
+// Best-effort: a failed write (no workspace, disk error) is swallowed — the
+// recovery already ran, the record is a post-hoc receipt, and a write failure
+// is not an engine error the caller should surface. The role is the role
+// binding that was running (the coder turn, roleCode); the model is the one
+// whose call failed (cs.Request.Model, which the healing sender may have
+// rebound — that's the model that actually errored, the right attribution).
+//
+// The message is redacted (redactSecrets) before it touches either surface:
+// a 400 rejecting the request can echo the Authorization header, and a key
+// in the journal or log would be a real leak.
+func (cs *CortexSession) reportRecoverableError(role string, cause error) {
+	if role == "" || cause == nil {
+		return
+	}
+	msg := redactSecrets(cause.Error())
+
+	// One log line, interactive REPL only: the durable, grep-able half (the
+	// REPL diverts the stdlib logger to .cortex/cortex.log; headless would
+	// keep it on stderr, duplicating runTurnCLI's own line — so headless
+	// skips it, and that one stderr line is the whole surface there).
+	if !cs.quiet {
+		log.Printf("backend error: %s", msg)
+	}
+
+	// One journal entry: the durable, queryable half. Best-effort — a failed
+	// write is swallowed, mirroring heal.go's journalModelFailure posture.
+	if cs.workspace == nil {
+		return // no workspace → no journal dir → skip the write
+	}
+	dir := modelSubstitutionJournalDir(cs.workspace.ContextDir())
+	if dir == "" {
+		return
+	}
+	detail := msg
+	if len(detail) > healDetailCap {
+		detail = detail[:healDetailCap]
+	}
+	entry, err := journal.NewModelRecoveredErrorEntry(journal.ModelRecoveredErrorPayload{
+		Role:   role,
+		Model:  cs.Request.Model,
+		Class:  string(classifyModelError(cause)),
+		Status: errStatus(cause),
+		Detail: detail,
+	})
+	if err != nil {
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: dir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return
+	}
+	defer w.Close()
+	_, _ = w.Append(entry)
 }

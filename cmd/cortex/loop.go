@@ -138,6 +138,18 @@ type loopStats struct {
 	StopReason               string // clean-finalize|salvaged-finalize|empty-finalize|max-iter|read-budget|no-progress|deadline|error
 	FinalizeForced           bool   // answered because a bound dragged finalize out
 
+	// LastError is the provider error the run recovered from when
+	// StopReason == "error-recovered" (a mid-loop send failed after progress,
+	// and the run finalized from what it had). nil on every other outcome —
+	// the unrecovered "error" stop returns the error itself to the caller.
+	// Carried so the caller (turn.go) can record it instead of the failure
+	// vanishing behind the finalize answer (issue #117): turn() journals it
+	// (a model.recovered_error entry — the recovered kind, distinct from the
+	// unrecovered model.failure the healing ladder journals) + logs it
+	// (cortex.log), and TurnResult.LastError lets the CLI/REPL print the
+	// one-line "backend error: <status> <message>" notice.
+	LastError error
+
 	Outlines  int
 	Greps     int
 	Reads     int
@@ -350,6 +362,10 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			// is sidestepped). Abort only on the first round or a real cancellation.
 			if i > 0 && ctx.Err() == nil {
 				stop = "error-recovered"
+				// Carry the failing send's error to the caller: the run still
+				// finalizes, so the error otherwise vanishes behind the
+				// finalize answer — the caller logs it and prints it (issue #117).
+				stats.LastError = err
 				break
 			}
 			stats.StopReason = "error"

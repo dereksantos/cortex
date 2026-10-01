@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // contextSessionEntries re-reads the just-written session transcript and
@@ -544,6 +546,431 @@ func TestTurnReasoningFallbackToolRoundReceipt(t *testing.T) {
 		t.Errorf("receipt stop_reason = %q, want tool-round (the receipt's own attribution; the run ended clean-finalize)",
 			p.StopReason)
 	}
+}
+
+// TestTurnRecoverableErrorJournalsAndRedacts is the issue #117 end-to-end
+// receipt: a mid-turn send fails AFTER progress (first round 200-with-tool-call,
+// second round HTTP 500), the loop recovers (StopReason error-recovered) and
+// the turn SUCCEEDS — so err is nil and the provider's 500 + body would
+// otherwise vanish behind the finalize answer. The fix records them in two
+// places, both secrets-redacted:
+//
+//   - exactly one model.recovered_error entry under .cortex/journal/model/
+//     with the HTTP status (503) and a detail that carries the body's message
+//     — a DISTINCT type from model.failure (the unrecovered kind the healing
+//     ladder journals), so the recovered turn is never reported as "FAILED
+//     unrecovered";
+//   - a one-line "backend error: 503 …" on the stdlib logger (the REPL
+//     diverts that to .cortex/cortex.log; headless keeps it on stderr).
+//
+// The fake backend echoes the request's Authorization header in the 500 body
+// (the 400-rejection leak class #117 names), so the test proves the key never
+// survives to the entry OR the log line.
+func TestTurnRecoverableErrorJournalsAndRedacts(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	const key = "sk-or-v1-1234567890abcdef"
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// First round: 200 with a tool call (progress made — the loop
+			// has gathered context, so a later failure is recoverable).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		if calls == 2 {
+			// Second round (after the tool result): HTTP 500 echoing the
+			// request's Authorization header in the body — the leak the
+			// redaction must catch. The SSE error path (wrapServerError)
+			// surfaces this as "<name> (500): server error: <body>".
+			body := fmt.Sprintf(`{"error":{"message":"boom: auth %s leaked"}}`, r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, body)
+			return
+		}
+		// Third round: the tools-withheld finalize (the recovery) succeeds.
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	// Capture the stdlib logger's output (the "cortex.log" surface) so the
+	// test asserts the key never reaches it. Restore the real output after.
+	logBuf := &strings.Builder{}
+	oldLogOut := log.Writer()
+	log.SetOutput(logBuf)
+	t.Cleanup(func() { log.SetOutput(oldLogOut) })
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL, APIKey: key,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	res, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr != nil {
+		t.Fatalf("turn should SUCCEED (recovered), not error: %v", turnErr)
+	}
+	if res.StopReason != "error-recovered" {
+		t.Fatalf("StopReason = %q, want error-recovered (the mid-turn 500 was recovered)", res.StopReason)
+	}
+	if res.LastError == nil {
+		t.Fatal("LastError = nil, want the recovered send's error carried on the result")
+	}
+	if calls != 3 {
+		t.Errorf("model calls = %d, want 3 (tool-call, 500, finalize)", calls)
+	}
+
+	// Exactly one model.recovered_error entry under .cortex/journal/model/,
+	// with the status and a detail carrying the body's message — but NEVER
+	// the key.
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "model"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var recovered []*journal.ModelRecoveredErrorPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p, perr := journal.ParseModelRecoveredError(e); perr == nil {
+			recovered = append(recovered, p)
+		}
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("got %d model.recovered_error entries, want exactly 1 (got %+v)", len(recovered), recovered)
+	}
+	p := recovered[0]
+	if p.Status != http.StatusServiceUnavailable {
+		t.Errorf("entry status = %d, want 503 (the recovered send's HTTP status)", p.Status)
+	}
+	if p.Role != roleCode || p.Model != "m" {
+		t.Errorf("entry role/model = %q/%q, want %s/m", p.Role, p.Model, roleCode)
+	}
+	if !strings.Contains(p.Detail, "boom") {
+		t.Errorf("entry detail %q does not carry the 500 body's message", p.Detail)
+	}
+	if strings.Contains(p.Detail, key) {
+		t.Errorf("entry detail %q leaked the API key — redaction failed", p.Detail)
+	}
+
+	// The stdlib-logger surface ("cortex.log"): one "backend error: …" line
+	// carrying the redacted message (which includes the streaming path's
+	// "stream (503)" status prefix), key never present.
+	logText := logBuf.String()
+	if n := strings.Count(logText, "backend error:"); n != 1 {
+		t.Errorf("log has %d \"backend error:\" lines, want exactly 1\nlog:\n%s", n, logText)
+	}
+	if !strings.Contains(logText, "boom") {
+		t.Errorf("log line %q does not carry the body's message", logText)
+	}
+	if !strings.Contains(logText, "stream (503)") {
+		t.Errorf("log line %q does not carry the HTTP status the streaming path bakes into the message", logText)
+	}
+	if strings.Contains(logText, key) {
+		t.Errorf("log %q leaked the API key — redaction failed", logText)
+	}
+}
+
+// TestTurnHealedRecoveryJournalsRecoveredError is the issue #117 review round
+// 3 pin for the MAIN production path: an OpenRouter backend with self-heal on,
+// and a healable failure class (5xx). The healing ladder walks FIRST (the
+// common case) — its candidates are all served but every one fails — so the
+// ladder's own receipt (the old model.failure + failureJournaled) used to be
+// the only record left, and the turn's model.recovered_error entry was skipped.
+// The mislabel that resulted: a turn that SUCCEEDED showing as "FAILED
+// unrecovered" on `cortex model` (renderRecentModelEvents' model.failure
+// branch).
+//
+// The fix settles exactly ONE journal record per failed send, the KIND
+// following the OUTCOME: a recovered turn produces exactly one
+// model.recovered_error entry and NO model.failure. The fake server returns a
+// tool call (progress), then 503 on the mid-turn send AND on every
+// healing-ladder candidate send (all fail, so the ladder reports the failure
+// to the loop), and 200 on the tools-withheld finalize (the recovery
+// succeeds). The loop recovers (error-recovered).
+func TestTurnHealedRecoveryJournalsRecoveredError(t *testing.T) {
+	quickRetries(t)
+	// Force the blocking send path: in a non-TTY test session, cs.send would
+	// stream (and report streamed=true), which makes healingSender skip the
+	// ladder (a streamed partial isn't re-sent). The blocking path reports
+	// streamed=false, so the 503 reaches the ladder.
+	t.Setenv("CORTEX_LOOP_STREAM", "0")
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	var calls int
+	// Blocking JSON responses (CORTEX_LOOP_STREAM=0 forces the blocking path):
+	// the SSE shape would be ignored by the blocking transport, so the
+	// tool-call and finalize rounds must return chat-completions JSON, not SSE.
+	toolCallJSON := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	answerJSON := `{"choices":[{"message":{"role":"assistant","content":"recovered answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// First round: 200 with a tool call (progress made — the loop has
+			// gathered context, so a later failure is recoverable).
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, toolCallJSON)
+			return
+		case 2, 3, 4:
+			// The mid-turn send (call 2) AND every healing-ladder candidate
+			// (calls 3, 4): HTTP 503 — the healable class that makes the
+			// ladder walk.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"backend down"}}`)
+			return
+		default:
+			// The tools-withheld finalize (call 5, the recovery): 200 with the
+			// answer.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, answerJSON)
+			return
+		}
+	}))
+	defer srv.Close()
+
+	// The OpenRouter Config with self-heal on and a healList stub that
+	// advertises two :free candidates (both served, both fail — so the ladder
+	// walks to its cap and reports the failure to the loop).
+	selfHeal := true
+	cfg := &Config{Backend: Backend{Type: "openrouter"}, Network: NetworkConfig{SelfHeal: &selfHeal}}
+	cs := &CortexSession{workspace: ws, Config: cfg,
+		Request: &AgentRequest{Model: "m", BaseURL: srv.URL, MaxAttempts: 1,
+			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
+		return []llm.OpenRouterModel{{ID: "a/coder:free", ContextLength: 32768}, {ID: "b/coder:free", ContextLength: 16384}}, nil
+	}
+
+	// Run the turn: the mid-turn send is 503 (one attempt, MaxAttempts=1 so the
+	// transport doesn't retry internally), the ladder walks (both candidates
+	// also 503), the loop recovers on the finalize (200). The turn SUCCEEDS.
+	res, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr != nil {
+		t.Fatalf("turn should SUCCEED (recovered), not error: %v", turnErr)
+	}
+	if res.StopReason != "error-recovered" {
+		t.Fatalf("StopReason = %q, want error-recovered (the mid-turn 503 was recovered)", res.StopReason)
+	}
+
+	// The journal records under .cortex/journal/model/ are:
+	//   - one model.substitution per candidate the ladder switched to (the
+	//     production behavior — each switch is journaled, like preflight's
+	//     startup substitutions),
+	//   - exactly ONE model.recovered_error for the recovered turn.
+	// No model.failure: a recovered turn must NOT be recorded as a failure.
+	// The ladder walked two candidates (a/coder:free, b/coder:free), so there
+	// are 2 substitutions + 1 recovered_error = 3 records.
+	all := modelJournalTypes(t, cs)
+	if len(all) != 3 {
+		t.Fatalf("got %d journal records under .cortex/journal/model/, want 3 (2 substitution + 1 recovered_error): %v", len(all), all)
+	}
+	var subCount, recoveredCount, failureCount int
+	for _, typ := range all {
+		switch typ {
+		case journal.TypeModelSubstitution:
+			subCount++
+		case journal.TypeModelRecoveredError:
+			recoveredCount++
+		case journal.TypeModelFailure:
+			failureCount++
+		}
+	}
+	if subCount != 2 {
+		t.Errorf("got %d model.substitution records, want 2 (one per ladder candidate): %v", subCount, all)
+	}
+	if recoveredCount != 1 {
+		t.Errorf("got %d model.recovered_error records, want 1: %v", recoveredCount, all)
+	}
+	if failureCount != 0 {
+		t.Errorf("got %d model.failure records, want 0 (a recovered turn must NOT be recorded as model.failure): %v", failureCount, all)
+	}
+}
+
+// TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery is the issue #117
+// review round 3 pin for the suppression scope: a STUDY subagent's own
+// healed-then-failed send (the study subagent goes through healingSender, so
+// it walks the ladder too) must NOT suppress the coder's own later recovered
+// error in the same turn. The old session-wide failureJournaled flag let any
+// healingSender in the turn (including the study subagent's) set it, which hid
+// the coder's own recovered error — the silent loss #117 is about.
+//
+// The receipt now rides the send-scoped marker on the error (heal.go's
+// pendingFailure, via healJournaledError), so a subagent's healed-then-failed
+// send carries its own marker and can't clobber the coder's. The test drives
+// the coder turn with a study tool call (the production path through the
+// tool dispatcher → RunSubagent → healingSender); the study subagent's send
+// 503s (its ladder walks, fails, study errors), and the coder's own later
+// send also 503s (its ladder walks, fails, loop recovers). The coder's
+// recovered error must still be recorded.
+func TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery(t *testing.T) {
+	quickRetries(t)
+	// Force the blocking send path (same reason as
+	// TestTurnHealedRecoveryJournalsRecoveredError): a streamed partial skips
+	// the ladder, so the 503 must reach it via the blocking path.
+	t.Setenv("CORTEX_LOOP_STREAM", "0")
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	var calls int
+	// Blocking JSON responses (CORTEX_LOOP_STREAM=0 forces the blocking path):
+	// the SSE shape would be ignored by the blocking transport, so the
+	// tool-call and finalize rounds must return chat-completions JSON, not SSE.
+	studyCallJSON := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"study","arguments":"{\"path\":\".\",\"goal\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	answerJSON := `{"choices":[{"message":{"role":"assistant","content":"recovered answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	// The call sequence (MaxAttempts=1 for the coder; MaxSendAttempts=1 for the
+	// study role — both ensure no internal retries):
+	//   1: coder round 1 → 200, study tool call
+	//   2: study subagent send → 503 (study's own failure)
+	//   3-4: study ladder candidates (s/coder:free, a/coder:free) → 503 each
+	//        (the study's ladder walks healMaxCandidates=3 but the study
+	//        errors after its candidates exhaust; marked session-dead)
+	//   5: study ladder candidate (t/coder:free) → 503 (study errors)
+	//   6: coder round 2 mid-turn send → 503 (the coder's own failure;
+	//      its ladder finds s/a/t session-dead, tries b/coder:free)
+	//   7: coder ladder candidate b/coder:free → 503 (ladder reports failure
+	//      to the loop)
+	//   8: tools-withheld finalize → 200 (the recovery)
+	// The study and coder ladders interleave because they share the session
+	// deadModels map (a study candidate that fails is dead for the coder
+	// too) — the distinct model names (study-m vs m) only prevent the study's
+	// rebind from clobbering the coder's Request.Model.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			fmt.Fprint(w, studyCallJSON)
+			return
+		}
+		if calls == 8 {
+			fmt.Fprint(w, answerJSON)
+			return
+		}
+		// Calls 2-7 (study subagent, its ladder, coder round 2, coder's ladder):
+		// all 503.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"message":"backend down"}}`)
+	}))
+	defer srv.Close()
+
+	selfHeal := true
+	cfg := &Config{Backend: Backend{Type: "openrouter"}, Network: NetworkConfig{SelfHeal: &selfHeal}}
+	cs := &CortexSession{workspace: ws, Config: cfg,
+		Request: &AgentRequest{Model: "m", BaseURL: srv.URL, MaxAttempts: 1,
+			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet},
+		Study: ModelSpec{Model: "study-m", Endpoint: srv.URL, MaxSendAttempts: 1}}
+	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
+		// The study ladder walks s/coder:free and t/coder:free (distinct from
+		// the coder's a/b candidates, so the coder's candidates are NOT marked
+		// session-dead by the study's walk — the coder's own ladder can still
+		// walk them). The coder's ladder walks a/coder:free and b/coder:free.
+		return []llm.OpenRouterModel{
+			{ID: "s/coder:free", ContextLength: 32768},
+			{ID: "t/coder:free", ContextLength: 16384},
+			{ID: "a/coder:free", ContextLength: 32768},
+			{ID: "b/coder:free", ContextLength: 16384},
+		}, nil
+	}
+
+	// Run the coder turn: round 1 returns a study tool call (the loop dispatches
+	// it — the study subagent's send 503s, the ladder walks, fails, study
+	// errors), round 2's send is 503 (the coder's own failure — the ladder
+	// finds both candidates session-dead, reports the failure to the loop), and
+	// the tools-withheld finalize is 200 (the recovery succeeds). The turn
+	// SUCCEEDS with error-recovered.
+	res, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr != nil {
+		t.Fatalf("turn should SUCCEED (recovered), not error: %v", turnErr)
+	}
+	if res.StopReason != "error-recovered" {
+		t.Fatalf("StopReason = %q, want error-recovered (the coder's mid-turn 503 was recovered)", res.StopReason)
+	}
+
+	// The coder's own recovered error must still be recorded — a
+	// model.recovered_error entry with role=code. The study subagent's
+	// healed-then-failed send (which also went through healingSender) must NOT
+	// have suppressed it (the old session-wide flag's bug).
+	recovered := modelRecoveredErrorPayloads(t, cs)
+	if len(recovered) < 1 {
+		t.Fatalf("got %d model.recovered_error entries, want at least 1 (the coder's own recovered error was suppressed by the study subagent's healed failure)", len(recovered))
+	}
+	var foundCode bool
+	for _, p := range recovered {
+		if p.Role == roleCode {
+			foundCode = true
+			break
+		}
+	}
+	if !foundCode {
+		t.Errorf("no model.recovered_error entry with role=%s — the coder's own recovered error is missing: %+v", roleCode, recovered)
+	}
+}
+
+// modelJournalTypes reads every entry under .cortex/journal/model/ and returns
+// their types (so a test can assert the EXACT set of record kinds a turn
+// produced — e.g. one model.recovered_error and no model.failure).
+func modelJournalTypes(t *testing.T, cs *CortexSession) []string {
+	t.Helper()
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "model"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var got []string
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		got = append(got, e.Type)
+	}
+	return got
+}
+
+// modelRecoveredErrorPayloads reads every model.recovered_error entry under
+// .cortex/journal/model/ and returns their parsed payloads (empty slice when
+// there are none).
+func modelRecoveredErrorPayloads(t *testing.T, cs *CortexSession) []*journal.ModelRecoveredErrorPayload {
+	t.Helper()
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "model"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var got []*journal.ModelRecoveredErrorPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p, perr := journal.ParseModelRecoveredError(e); perr == nil {
+			got = append(got, p)
+		}
+	}
+	return got
 }
 
 func TestEmitSessionMetrics(t *testing.T) {
