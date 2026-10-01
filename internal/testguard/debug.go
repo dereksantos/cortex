@@ -17,18 +17,22 @@ package testguard
 // fmt.Fprintln to os.Stderr / os.Stdout / println / print). Routine formatting
 // — fmt.Sprintf / fmt.Sprint*, or fmt.Fprintf(w, …) to an arbitrary writer —
 // is ordinary production code and never matches on its own. A scratch file is
-// one whose name carries a throwaway convention (IsScratchPath) that exists
-// after the turn (or existed at all).
+// one whose name carries a throwaway convention (IsScratchPath) that the turn
+// created and that still exists after the turn — a pre-existing scratch file
+// the turn only edited or deleted, or a scratch file the turn created and
+// then removed, is not "left behind".
 //
 // The debug-print signal is scoped to NON-TEST files — a debug print inside
 // a test is legitimate (t.Log, t.Logf, a fmt check in a _test.go body) — but
-// the scratch signal applies to every snapshotted path, test-named or not:
-// the #152 incident's zz_dbg_test.go is BOTH scratch- and test-named, and
-// only the scratch signal surfaces it. ScanDebug applies the non-test gate
-// to the debug-print signal alone, so a test-named scratch file is reported
-// with Scratch=true and zero debug prints. The caller (cmd/cortex's
-// testwatch) supplies FilePairs for the files it snapshotted before the turn;
-// an empty Before means the file did not exist before the turn.
+// the scratch signal applies to every path the turn CREATED, test-named or
+// not: the #152 incident's zz_dbg_test.go is BOTH scratch- and test-named,
+// and only the scratch signal surfaces it. Created carries that created fact
+// (FilePair.Created); a turn that merely edited or deleted a pre-existing
+// scratch file is not reported as leaving it behind. ScanDebug applies the
+// non-test gate to the debug-print signal alone, so a test-named scratch
+// file is reported with Scratch=true and zero debug prints. The caller
+// (cmd/cortex's testwatch) supplies FilePairs for the files it snapshotted
+// before the turn, setting Created when the turn made the file.
 
 import (
 	"path/filepath"
@@ -146,9 +150,12 @@ type DebugFileReport struct {
 	DebugPrints int
 	// DebugSample is a bounded sample of those added lines.
 	DebugSample []string
-	// Scratch reports the file is a scratch-named (IsScratchPath) file that
-	// exists after the turn (or existed at all) — a throwaway the model left
-	// in the workspace.
+	// Scratch reports the file is a scratch-named (IsScratchPath) file the
+	// TURN created and that still exists after the turn — a throwaway the
+	// model left in the workspace. A pre-existing scratch file (edited,
+	// deleted, or merely present) is never "left behind" by this turn, and a
+	// scratch file the turn created and then REMOVED was cleaned up, not
+	// left behind.
 	Scratch bool
 }
 
@@ -177,7 +184,7 @@ func (r DebugReport) IsEmpty() bool {
 func ScanDebug(files map[string]FilePair) DebugReport {
 	var rep DebugReport
 	for path, pair := range files {
-		frep, ok := scanDebugFile(path, pair.Before, pair.After, !IsTestPath(path))
+		frep, ok := scanDebugFile(path, pair.Before, pair.After, !IsTestPath(path), pair.Created)
 		if ok {
 			rep.Files = append(rep.Files, frep)
 		}
@@ -187,14 +194,23 @@ func ScanDebug(files map[string]FilePair) DebugReport {
 }
 
 // scanDebugFile reports one file. nonTest gates the debug-print signal
-// (a debug print in a test file is legitimate); the scratch signal is
-// always applied. ok=false when nothing is flagged.
-func scanDebugFile(path, before, after string, nonTest bool) (DebugFileReport, bool) {
-	scratch := IsScratchPath(path) && (after != "" || before != "")
+// (a debug print in a test file is legitimate); created gates the scratch
+// signal (only a scratch file the turn created is "left behind" — a
+// pre-existing scratch file the turn edited or deleted, or one the turn
+// created and then removed, is not). ok=false when nothing is flagged.
+func scanDebugFile(path, before, after string, nonTest, created bool) (DebugFileReport, bool) {
+	// "Left behind" means: the turn created this scratch-named file AND it
+	// still exists after the turn. before=="" is only the absence of a
+	// BEFORE-side the harness had — a bash-arm baseline, an unreadable
+	// file — not proof the turn created the file; pair.Created carries that
+	// fact. A turn that deletes a pre-existing scratch file (before!=
+	// "", after=="") cleaned up, not left behind; one that creates then
+	// removes (before=="", after=="", created=true) likewise cleaned up.
+	scratch := IsScratchPath(path) && created && after != ""
 	if before == after {
-		// Unchanged: only a pre-existing scratch file (present before AND
-		// after) is still a leftover; a freshly-created scratch file has
-		// before=="" so it never reaches here.
+		// Unchanged: only a scratch file the turn CREATED (before=="",
+		// created=true) is a leftover; a pre-existing file the turn never
+		// touched (or created=false) is not.
 		if scratch {
 			return DebugFileReport{Path: path, Scratch: true}, true
 		}

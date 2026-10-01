@@ -70,6 +70,13 @@ func testwatchTouchedPath(call ToolCall) string {
 // on a test file cannot starve the named-tool snapshot — the #127 incident
 // still produces a receipt for the write_file arm, and vice versa.
 //
+// The walk enforces the baseline cap (testwatchMaxBashBaselines) on the
+// BASELINES ONLY: once it is reached, the walk keeps descending and
+// RECORDING scratch-named paths (cs.testwatchScratchBefore) — the sweep
+// (sweepScratchFiles) has no cap of its own, so a scratch file missed here
+// (a pre-existing file in a directory past the cap) would be treated as NEW
+// and flagged on every bash turn. Only the file READS stop.
+//
 // Called from coderDispatcher BEFORE the bash command runs, so the
 // before-side is captured first. The walk runs ONCE per turn (the first
 // bash call arms it; subsequent bash calls in the same turn are no-ops),
@@ -91,9 +98,13 @@ func (cs *CortexSession) armTestwatch() {
 
 	var walk func(dir, rel string)
 	walk = func(dir, rel string) {
-		if len(cs.testwatchBash) >= testwatchMaxBashBaselines {
-			return
-		}
+		// The cap stops the BASELINE READS only, never the recursion:
+		// scratch-named paths must still be recorded into
+		// cs.testwatchScratchBefore past the cap — sweepScratchFiles has no
+		// cap of its own, so a pre-existing scratch file missed here (in a
+		// directory visited after the cap) would look NEW to the sweep and
+		// get a false "scratch file left behind" on every bash turn.
+		baselined := len(cs.testwatchBash) < testwatchMaxBashBaselines
 		ents, err := os.ReadDir(dir)
 		if err != nil {
 			return
@@ -109,9 +120,6 @@ func (cs *CortexSession) armTestwatch() {
 			}
 			if e.IsDir() {
 				walk(filepath.Join(dir, name), childRel)
-				if len(cs.testwatchBash) >= testwatchMaxBashBaselines {
-					return
-				}
 				continue
 			}
 			childKey := filepath.ToSlash(filepath.Clean(childRel))
@@ -120,15 +128,13 @@ func (cs *CortexSession) armTestwatch() {
 			// command sweep can tell a file the bash call CREATED from one
 			// that pre-existed (testdata/foo.bak, scripts/tmp_setup.sh, a
 			// committed scratchpad.go) and never re-flags the latter on
-			// every bash turn.
+			// every bash turn. It applies PAST the baseline cap, because
+			// the sweep walks uncapped (see above).
 			if testguard.IsScratchPath(childKey) {
 				cs.testwatchScratchBefore[childKey] = true
-				if testguard.IsTestPath(childKey) {
-					// A test-named scratch file has no full-content snapshot:
-					// the sweep must not re-arm it (the bash arm covers it), so
-					// the baseline is all the sweep needs.
-					continue
-				}
+			}
+			if !baselined {
+				continue
 			}
 			if !testguard.IsTestPath(childRel) {
 				continue
@@ -147,7 +153,7 @@ func (cs *CortexSession) armTestwatch() {
 			// a flat directory with more test files than the cap must
 			// stop at the cap, not keep reading past it.
 			if len(cs.testwatchBash) >= testwatchMaxBashBaselines {
-				return
+				break
 			}
 			data, err := os.ReadFile(filepath.Join(dir, name))
 			if err != nil {
@@ -187,11 +193,16 @@ const (
 
 // testwatchSnapshot is the per-turn before-side of the scan: the path a
 // mutating tool call named (as the model sees it) plus the file's content
-// read at turn start.
+// read at turn start. created marks a file the turn CREATED (it did not
+// exist at snapshot time) — the leftover-debug scan's scratch signal fires
+// only on those (a scratch file the turn merely edited or deleted is not
+// "left behind", and a scratch file created and then removed was cleaned
+// up).
 type testwatchSnapshot struct {
 	display string
 	abs     string
 	before  string
+	created bool
 }
 
 // touchFile records that a turn's tooling will mutate path. Called from
@@ -252,20 +263,23 @@ func (cs *CortexSession) touchFile(path string) {
 		return
 	}
 	// A MISSING scratch-named path (a write_file/edit_file target the turn is
-	// about to create) is recorded with an EMPTY before-side: the model's
-	// usual way of creating a file is write_file, and the sweep only runs
-	// after bash calls — without this, a turn that does write_file(zz_dbg.go)
-	// and never runs bash would leave the scratch file invisible to the
-	// turn-end ScanDebug (Before="", After=content → Scratch=true, "scratch
-	// file left behind"). A missing NON-scratch path is not recorded: a new
-	// production file is not a leftover, and the debug-print scan on a
-	// created non-scratch file has no meaningful before-side. Any other stat
+	// about to create) is recorded with an EMPTY before-side and created
+	// set: the model's usual way of creating a file is write_file, and the
+	// sweep only runs after bash calls — without this, a turn that does
+	// write_file(zz_dbg.go) and never runs bash would leave the scratch
+	// file invisible to the turn-end ScanDebug (Before="", After=content,
+	// Created=true → Scratch, "scratch file left behind"). created marks
+	// the file as the turn's own, so a turn that creates it and then removes
+	// it is not flagged (the scan requires the file to exist after the
+	// turn). A missing NON-scratch path is not recorded: a new production
+	// file is not a leftover, and the debug-print scan on a created
+	// non-scratch file has no meaningful before-side. Any other stat
 	// failure (non-file, unreadable, outside the workdir) degrades to "no
 	// snapshot".
 	info, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) && testguard.IsScratchPath(relKey) {
-			cs.testwatch[relKey] = &testwatchSnapshot{display: relKey, abs: abs, before: ""}
+			cs.testwatch[relKey] = &testwatchSnapshot{display: relKey, abs: abs, before: "", created: true}
 			return
 		}
 		return
@@ -313,17 +327,17 @@ func (cs *CortexSession) testwatchBytes() int {
 // "scratch file left behind" receipt on every turn that runs bash. A scratch
 // file the bash call CREATED is not in the baseline, so it lands here with
 // its post-bash content as the before-side (before==after — the file was
-// just created); the turn-end ScanDebug then sees before==after with
-// Scratch=true and flags it as "scratch file left behind".
+// just created) and created=true; the turn-end ScanDebug then sees
+// Before==After with Created=true and Scratch=true and flags it as "scratch
+// file left behind".
 //
 // A scratch file that pre-existed and was MUTATED by bash is NOT snapshotted
-// (it is in the baseline): its before-side would be the stale post-bash
-// content, and the leftover-debug scan's Scratch signal only cares that a
-// NEW scratch file EXISTS after the turn — a mutation of an old one is not
-// "left behind". The byte budget is shared with touchFile's named-tool
-// snapshots (cs.testwatch), so a turn that runs many bash commands creating
-// many scratch files can exhaust the 32-file / 1 MiB budget — the same
-// bounded, best-effort degradation as touchFile.
+// (it is in the baseline): the leftover-debug scan's Scratch signal only
+// cares that a scratch file the turn CREATED exists after the turn — a
+// mutation of an old one is not "left behind". The byte budget is shared
+// with touchFile's named-tool snapshots (cs.testwatch), so a turn that runs
+// many bash commands creating many scratch files can exhaust the 32-file /
+// 1 MiB budget — the same bounded, best-effort degradation as touchFile.
 //
 // Called from coderDispatcher AFTER the bash command runs (the dispatcher
 // already armed the baseline BEFORE the command; the sweep runs after, when
@@ -400,7 +414,7 @@ func (cs *CortexSession) sweepScratchFiles() {
 				continue
 			}
 			relKey := filepath.ToSlash(filepath.Clean(childRel))
-			cs.testwatch[relKey] = &testwatchSnapshot{display: relKey, abs: abs, before: string(data)}
+			cs.testwatch[relKey] = &testwatchSnapshot{display: relKey, abs: abs, before: string(data), created: true}
 		}
 	}
 	sweep(wd, "")
@@ -491,7 +505,9 @@ func (cs *CortexSession) testwatchDebugReceipt() string {
 // map so a file recorded by both is diffed once — the tests scan and the
 // leftover-debug scan see the same before/after and can't double-report the
 // same file. Keys are workdir-relative and cleaned, so a "./"-spelled
-// named-tool path and the bash arm's walk key are the same entry.
+// named-tool path and the bash arm's walk key are the same entry. Created
+// carries the snapshot's created flag (a bash-reconstructed baseline is
+// never created — it is a pre-turn state by construction).
 func (cs *CortexSession) testwatchFilePairs() map[string]testguard.FilePair {
 	if len(cs.testwatch) == 0 && len(cs.testwatchBash) == 0 {
 		return nil
@@ -499,7 +515,7 @@ func (cs *CortexSession) testwatchFilePairs() map[string]testguard.FilePair {
 	files := make(map[string]testguard.FilePair, len(cs.testwatch)+len(cs.testwatchBash))
 	for _, s := range cs.testwatch {
 		after, _ := os.ReadFile(s.abs)
-		files[s.display] = testguard.FilePair{Before: s.before, After: string(after)}
+		files[s.display] = testguard.FilePair{Before: s.before, After: string(after), Created: s.created}
 	}
 	for rel, base := range cs.testwatchBash {
 		after, err := os.ReadFile(filepath.Join(cs.Workdir(), rel))

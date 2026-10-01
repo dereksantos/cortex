@@ -808,6 +808,55 @@ func TestArmTestwatch(t *testing.T) {
 		}
 	})
 
+	t.Run("a pre-existing scratch-named test file still gets a tests-changed receipt", func(t *testing.T) {
+		// The #141 regression the reviewer caught: a file whose name is BOTH
+		// scratch- and test-named (debug_handler_test.go: the "debug_" prefix
+		// is a scratch marker; _test.go is a test marker). The arm must
+		// baseline it for the TESTS scan even though it also records it in
+		// the scratch baseline — the `continue` the scratch branch used to
+		// take would have skipped the MakeBaseline, so a bash `sed -i` that
+		// removed a test from the file produced no "tests changed" receipt.
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+			return shellrisk.Safe, "test stub", nil
+		}
+		// Two test definitions in a scratch- AND test-named file.
+		content := "package tools\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {}\n\nfunc TestBeta(t *testing.T) {}\n"
+		if err := os.WriteFile(filepath.Join(root, "debug_handler_test.go"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := &testwatchHarness{cs: cs}
+		// A bash call that greps TestAlpha out — the #127 sed shape on a
+		// scratch-named test file.
+		bc := bashCall("c1", "grep -v 'func TestAlpha' debug_handler_test.go > zz.tmp && mv zz.tmp debug_handler_test.go")
+		h.runTurn(t, "remove a test",
+			Message{Role: "assistant", ToolCalls: []ToolCall{bc}})
+		// The file is in the scratch baseline (the sweep must not re-snapshot
+		// it as a "new" scratch file)...
+		if !cs.testwatchScratchBefore["debug_handler_test.go"] {
+			t.Fatal("armTestwatch did not record the scratch-named test file in the scratch baseline")
+		}
+		// ...AND still got a tests-changed receipt (the arm's baseline must
+		// have been recorded despite the scratch branch).
+		got := lastCaptureResult(t, cs)
+		if !strings.Contains(got, "tests changed:") {
+			t.Fatalf("capture summary = %q, want a tests changed: line (scratch-named test file was baselined)", got)
+		}
+		if !strings.Contains(got, "debug_handler_test.go") {
+			t.Errorf("capture summary = %q, want the scratch-named test file path", got)
+		}
+		if !strings.Contains(got, "1 test definition removed") {
+			t.Errorf("capture summary = %q, want TestAlpha counted as removed", got)
+		}
+		// The sweep must not also report it as a leftover scratch file (it
+		// pre-existed the bash call; the scratch baseline covers it).
+		if strings.Contains(got, "leftover debug:") {
+			t.Errorf("capture summary = %q, want NO leftover debug: line (pre-existing scratch file was not created by the turn)", got)
+		}
+	})
+
 	t.Run("respects the bash-baseline cap", func(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
@@ -993,6 +1042,59 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 			t.Errorf("capture summary = %q, want TestGone counted as removed", got)
 		}
 	})
+
+	t.Run("a pre-existing scratch file past the baseline cap is not flagged", func(t *testing.T) {
+		// The reviewer's cap-interaction finding: the scratch baseline is
+		// recorded by the SAME walk as the baselines, and the old code
+		// RETURNED from the walk as soon as len(testwatchBash) hit the cap —
+		// so a pre-existing scratch file in a directory visited AFTER the
+		// cap was never recorded. sweepScratchFiles has no cap of its own,
+		// so it saw the file as NEW and the receipt flagged "scratch file
+		// left behind" on every bash turn. The walk now stops only the
+		// MakeBaseline READS and keeps recording scratch names.
+		root := t.TempDir()
+		cs := newTestwatchSession(t, root)
+		cs.workspace = mustWorkspace(t, root)
+		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+			return shellrisk.Safe, "test stub", nil
+		}
+		// Fill the baseline budget: a flat directory of
+		// testwatchMaxBashBaselines test files (all at the workspace root,
+		// read before the walk descends into "zzlate").
+		for i := 0; i < testwatchMaxBashBaselines; i++ {
+			p := fmt.Sprintf("f%03d_test.go", i)
+			if err := os.WriteFile(filepath.Join(root, p), []byte("package p\n\nfunc TestA(t *testing.T) {}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A pre-existing scratch file in a directory that the old walk
+		// never reached (it returned at the cap at the root level).
+		if err := os.MkdirAll(filepath.Join(root, "zzlate"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "zzlate", "zz_dbg_probe.go"), []byte("package tools\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h := &testwatchHarness{cs: cs}
+		// A harmless bash call: arms the baseline (the walk must record the
+		// scratch name past the cap) and changes nothing.
+		bc := bashCall("c1", "true")
+		h.runTurn(t, "run a probe",
+			Message{Role: "assistant", ToolCalls: []ToolCall{bc}})
+		// The arm DID record the past-the-cap scratch file...
+		if !cs.testwatchScratchBefore["zzlate/zz_dbg_probe.go"] {
+			t.Fatal("armTestwatch did not record the past-the-cap scratch file in the scratch baseline")
+		}
+		// ...so the sweep must NOT snapshot it as new (no double-report)...
+		if _, ok := cs.testwatch["zzlate/zz_dbg_probe.go"]; ok {
+			t.Errorf("sweepScratchFiles snapshotted a PRE-EXISTING past-the-cap scratch file; keys: %v", sortedKeys(cs.testwatch))
+		}
+		// ...and the receipt must stay silent.
+		got := lastCaptureResult(t, cs)
+		if strings.Contains(got, "leftover debug:") {
+			t.Errorf("capture summary = %q, want NO leftover debug: line (pre-existing scratch file past the cap)", got)
+		}
+	})
 }
 
 // TestTestwatchTurnReceiptLeftoverDebug is the issue #154 headline, driven
@@ -1105,6 +1207,81 @@ func TestTestwatchTurnReceiptLeftoverScratchFileViaWriteFile(t *testing.T) {
 	}
 	if !strings.Contains(got, "scratch file left behind") {
 		t.Errorf("capture summary = %q, want the scratch-file signal", got)
+	}
+}
+
+// TestTestwatchScratchCreatedThenRemovedBash is the created-flag fix, case 1:
+// a turn that CREATES a scratch-named file with bash and then REMOVES it
+// with bash is cleaning up, not leaving a scratch file behind. The sweep
+// snapshots the created file (created=true, before=post-bash content), but
+// the turn-end scan requires the file to EXIST after the turn (After!=""),
+// so the receipt stays silent. Without the created flag the old code
+// flagged every scratch-named file with a non-empty before OR after —
+// penalizing exactly the cleanup issue #154 asks for.
+func TestTestwatchScratchCreatedThenRemovedBash(t *testing.T) {
+	root := t.TempDir()
+	cs := newTestwatchSession(t, root)
+	cs.workspace = mustWorkspace(t, root)
+	cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		return shellrisk.Safe, "test stub", nil
+	}
+	h := &testwatchHarness{cs: cs}
+	// Bash call 1 creates the scratch file; bash call 2 removes it.
+	bc1 := bashCall("c1", "printf 'package tools\n' > zz_dbg.go")
+	bc2 := bashCall("c2", "rm zz_dbg.go")
+	h.runTurn(t, "add and remove a scratch probe",
+		Message{Role: "assistant", ToolCalls: []ToolCall{bc1, bc2}})
+	got := lastCaptureResult(t, cs)
+	if strings.Contains(got, "leftover debug:") {
+		t.Errorf("capture summary = %q, want NO leftover debug: line (the turn removed the scratch file it created)", got)
+	}
+}
+
+// TestTestwatchScratchCreatedThenRemovedWriteFile is the created-flag fix,
+// case 2: a turn that CREATES a scratch-named file with write_file and then
+// removes it with remove_path is cleaning up, not leaving a scratch file
+// behind. touchFile records the missing scratch target with created=true and
+// before=""; remove_path then deletes it, so the turn-end scan sees
+// Before="", After="", Created=true — cleaned up, not left behind.
+func TestTestwatchScratchCreatedThenRemovedWriteFile(t *testing.T) {
+	root := t.TempDir()
+	cs := newTestwatchSession(t, root)
+	cs.workspace = mustWorkspace(t, root)
+	h := &testwatchHarness{cs: cs}
+	h.runTurn(t, "add and remove a scratch probe",
+		writeCall("c1", "pkg/zz_dbg.go", "package tools\n\nfunc probe() {}\n"),
+		removePathCall("c2", "pkg/zz_dbg.go"))
+	got := lastCaptureResult(t, cs)
+	if strings.Contains(got, "leftover debug:") {
+		t.Errorf("capture summary = %q, want NO leftover debug: line (the turn removed the scratch file it created)", got)
+	}
+}
+
+// TestTestwatchPreExistingScratchEditedIsNotFlagged is the created-flag fix,
+// case 3: a turn that EDITs a pre-existing scratch-named file (scripts/
+// tmp_setup.sh in a real repo) does not leave it behind — the file existed
+// before the turn, so created=false and the scan's scratch signal is off.
+// The pre-round-2 false positive was that ANY scratch-named file with a
+// non-empty before OR after got flagged.
+func TestTestwatchPreExistingScratchEditedIsNotFlagged(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-existing scratch-named script (the scripts/tmp_setup.sh shape).
+	before := "#!/bin/sh\necho setup\n"
+	if err := os.WriteFile(filepath.Join(root, "scripts", "tmp_setup.sh"), []byte(before), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cs := newTestwatchSession(t, root)
+	cs.workspace = mustWorkspace(t, root)
+	h := &testwatchHarness{cs: cs}
+	// The turn edits (does not create) the pre-existing scratch file.
+	h.runTurn(t, "extend the setup script",
+		editCall("c1", "scripts/tmp_setup.sh", "echo setup\n", "echo setup\necho extra\n"))
+	got := lastCaptureResult(t, cs)
+	if strings.Contains(got, "leftover debug:") {
+		t.Errorf("capture summary = %q, want NO leftover debug: line (the turn edited a pre-existing scratch file, not created one)", got)
 	}
 }
 
@@ -1389,6 +1566,15 @@ func editCall(id, path, oldS, newS string) Message {
 	return Message{Role: "assistant", ToolCalls: []ToolCall{{
 		ID:       id,
 		Function: FunctionCall{Name: FunctionEditFile, Arguments: string(args)},
+	}}}
+}
+
+// removePathCall builds the assistant message carrying one remove_path call.
+func removePathCall(id, path string) Message {
+	args, _ := json.Marshal(map[string]string{"path": path})
+	return Message{Role: "assistant", ToolCalls: []ToolCall{{
+		ID:       id,
+		Function: FunctionCall{Name: FunctionRemove, Arguments: string(args)},
 	}}}
 }
 

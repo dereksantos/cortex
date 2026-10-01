@@ -468,7 +468,7 @@ func projectInstructions() string {
 // snapshotted path — so ScanDebug reports it as a leftover scratch file.
 func TestScanDebugFlagsScratchTestFile(t *testing.T) {
 	rep := ScanDebug(map[string]FilePair{
-		"cmd/cortex/zz_dbg_test.go": {Before: "", After: "package main\n\nimport \"testing\"\n\nfunc TestDbg(t *testing.T) {}\n"},
+		"cmd/cortex/zz_dbg_test.go": {Before: "", After: "package main\n\nimport \"testing\"\n\nfunc TestDbg(t *testing.T) {}\n", Created: true},
 	})
 	if rep.IsEmpty() {
 		t.Fatal("expected a report for a leftover scratch test file, got empty")
@@ -492,7 +492,7 @@ func TestScanDebugFlagsScratchTestFile(t *testing.T) {
 // zz_dbg.go scratch module) left in the workspace IS reported, with Scratch.
 func TestScanDebugScratchNonTestFile(t *testing.T) {
 	rep := ScanDebug(map[string]FilePair{
-		"cmd/cortex/zz_dbg.go": {Before: "", After: "package main\n\nfunc main() {}\n"},
+		"cmd/cortex/zz_dbg.go": {Before: "", After: "package main\n\nfunc main() {}\n", Created: true},
 	})
 	if rep.IsEmpty() {
 		t.Fatal("expected a report for a scratch non-test file")
@@ -503,6 +503,55 @@ func TestScanDebugScratchNonTestFile(t *testing.T) {
 	}
 	if f.Path != "cmd/cortex/zz_dbg.go" {
 		t.Errorf("path = %q", f.Path)
+	}
+}
+
+// TestScanDebugScratchNotFlaggedWithoutCreated pins the Created gate: a
+// scratch-named file the harness did NOT create (Created=false — a
+// pre-existing file it only saw through the baseline, or a file whose
+// created state is unknown) is never "left behind", whatever its
+// before/after shape.
+func TestScanDebugScratchNotFlaggedWithoutCreated(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		pair FilePair
+	}{
+		{
+			name: "pre-existing scratch file unchanged",
+			path: "testdata/foo.bak",
+			pair: FilePair{Before: "existing\n", After: "existing\n"},
+		},
+		{
+			name: "pre-existing scratch file deleted",
+			path: "scripts/tmp_setup.sh",
+			pair: FilePair{Before: "existing\n", After: ""},
+		},
+		{
+			name: "pre-existing scratch file edited",
+			path: "scripts/tmp_setup.sh",
+			pair: FilePair{Before: "existing\n", After: "existing\nedited\n"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if rep := ScanDebug(map[string]FilePair{tc.path: tc.pair}); !rep.IsEmpty() {
+				t.Errorf("ScanDebug() = %+v, want empty (%s is not the turn's leftover)", rep, tc.name)
+			}
+		})
+	}
+}
+
+// TestScanDebugScratchCreatedThenRemoved is case 1 of the Created gate: a
+// scratch file the turn created (Created=true, Before="") and then REMOVED
+// (After="") was cleaned up, not left behind — penalizing exactly the
+// cleanup the issue asks for would defeat the receipt's purpose.
+func TestScanDebugScratchCreatedThenRemoved(t *testing.T) {
+	rep := ScanDebug(map[string]FilePair{
+		"zz_dbg.go": {Before: "", After: "", Created: true},
+	})
+	if !rep.IsEmpty() {
+		t.Errorf("ScanDebug() = %+v, want empty (the turn removed the scratch file it created)", rep)
 	}
 }
 
