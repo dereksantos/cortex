@@ -341,7 +341,11 @@ var EditFile = newTool(FunctionEditFile,
 		"byte-perfect. old_string must still resolve to exactly one place unless "+
 		"replace_all is set. Prefer this over write_file for changes to an existing "+
 		"file. To make several changes at once, pass an `edits` array — they apply "+
-		"in order and atomically (all succeed or the file is left untouched).",
+		"in order and atomically (all succeed or the file is left untouched). The "+
+		"result reports lines removed/added and warns when an edit removes more "+
+		"lines than it adds, so review it to confirm nothing was meant to stay; "+
+		"on a failure, the error names the first match's line (ambiguity) or the "+
+		"closest line in the file (not found).",
 	objectSchema(map[string]any{
 		"path":        stringProp("Path to the file to edit."),
 		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
@@ -1201,6 +1205,14 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	edits := a.Edits
 	multi := len(edits) > 0
 	if !multi {
+		if a.OldString == "" {
+			// A single-edit call that carries neither old_string nor an edits
+			// array is missing its whole edit payload. Naming "old_string must
+			// not be empty" here (as applyEdit would) describes a different
+			// mistake and sends the model to retry the same shape. Point at the
+			// missing field with an example so the retry lands on the first try.
+			return "", fmt.Errorf("no edit specified: set old_string (and optionally new_string), or pass an edits array like {\"edits\":[{\"old_string\":\"...\",\"new_string\":\"...\"}]}")
+		}
 		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
 		printToolAction(deps, fmt.Sprintf("edit_file(%s)", a.Path))
 	} else {
@@ -1247,9 +1259,48 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// in memory here, so the check costs nothing.
 	warn := largeDeletionWarning(string(data), content)
 	if multi {
-		return resultWithWarning(fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), warn), nil
+		return resultWithWarning(editResultMessage(a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement"), string(data), content), warn), nil
 	}
-	return resultWithWarning(fmt.Sprintf("edited %s (%s)", a.Path, countNoun(total, "replacement")), warn), nil
+	return resultWithWarning(editResultMessage(a.Path, "", countNoun(total, "replacement"), string(data), content), warn), nil
+}
+
+// editResultMessage renders the model-facing result for a landed edit. Beyond
+// the "edited N (M replacement)" summary it reports the lines removed/added —
+// the thing the TTY-only diff doesn't put into context. A replacement that
+// drops more than it adds is the shape of the silent code loss from #152 (an
+// edit that succeeds but removes code the model didn't mean to touch), so when
+// the edit removes meaningfully more lines than it adds, the result appends a
+// warning to make the loss visible where the model actually reads it.
+func editResultMessage(path, editsNoun, replNoun, before, after string) string {
+	removed, added := lineDelta(before, after)
+	delta := fmt.Sprintf("%-d/%+d lines", -removed, added)
+	summary := replNoun
+	if editsNoun != "" {
+		summary = editsNoun + ", " + replNoun
+	}
+	msg := fmt.Sprintf("edited %s (%s, %s)", path, summary, delta)
+	if removed > added && removed >= 2 {
+		msg += fmt.Sprintf("; WARNING: removed %d lines and added %d — verify this was intended and re-read the edited region with read_file to confirm nothing was meant to stay", removed, added)
+	}
+	return msg
+}
+
+// lineDelta returns the number of lines removed and added going from before to
+// after, counted from the real line diff — a replacement that swaps lines for
+// the same number of different lines still removes the old ones and adds the
+// new ones, so both sides go non-zero where a line-count comparison would read
+// 0/+0 and stay silent (the #152 incident). It reuses the diff the TTY renders
+// (diffRows), so what the model is told matches what the terminal shows.
+func lineDelta(before, after string) (removed, added int) {
+	for _, r := range diffRows(splitLines(before), splitLines(after)) {
+		switch r.op {
+		case '-':
+			removed++
+		case '+':
+			added++
+		}
+	}
+	return removed, added
 }
 
 // largeDeletionWarning is the #141 receipt for the tool itself: when a
@@ -1326,7 +1377,12 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 			return strings.ReplaceAll(content, old, new), n, nil
 		}
 		if n > 1 {
-			return "", 0, fmt.Errorf("old_string found %d times; add surrounding context to make it unique, or set replace_all", n)
+			// Ambiguous: name where it first lands so the model can add the
+			// surrounding context that disambiguates, or set replace_all. The
+			// nearMissHint (closest-line) doesn't help here — the text IS in
+			// the file, the model needs to see its first position to anchor.
+			firstLine := 1 + strings.Count(content[:strings.Index(content, old)], "\n")
+			return "", 0, fmt.Errorf("old_string found %d times (first at line %d); add surrounding context to make it unique, or set replace_all", n, firstLine)
 		}
 		return strings.Replace(content, old, new, 1), 1, nil
 	}
@@ -1356,7 +1412,7 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 			continue
 		}
 		if !replaceAll && len(starts) > 1 {
-			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace); add context or set replace_all", len(starts))
+			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace) (first at line %d); add context or set replace_all", len(starts), starts[0]+1)
 		}
 		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
 	}
