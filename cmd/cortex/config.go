@@ -425,6 +425,12 @@ type Backend struct {
 	Endpoint   string `json:"endpoint"`
 	KeyEnv     string `json:"key_env"`
 	KeyService string `json:"key_service"`
+	// Provider is OpenRouter's provider-routing object
+	// (`{"order":["novita/fp8"],"allow_fallbacks":false}`), attached to
+	// every model request cortex sends — coder, subagents, summarizer, shell
+	// classifier — so one session is served by one pinned upstream. Only
+	// honored when type is "openrouter"; ignored (never sent) otherwise.
+	Provider *llm.ProviderRouting `json:"provider,omitempty"`
 }
 
 type Config struct {
@@ -1462,7 +1468,43 @@ func mergeBackend(base, over Backend) Backend {
 	if over.KeyService != "" {
 		base.KeyService = over.KeyService
 	}
+	// The routing object replaces wholesale rather than merging field by
+	// field: a project pinning {order:[X], allow_fallbacks:false} must not
+	// inherit a user-level `only`/`ignore` list that could contradict it.
+	if !over.Provider.IsZero() {
+		base.Provider = over.Provider
+	}
 	return base
+}
+
+// secretEnvNames lists every environment variable this config names as an
+// API key source (backend.key_env and each models.<role>.key_env). The bash
+// tool strips these from its shell's environment (internal/tools/shellenv.go)
+// so a model's `env` can never copy cortex's own credential into a transcript.
+func (c *Config) secretEnvNames() []string {
+	if c == nil {
+		return nil
+	}
+	var out []string
+	if c.Backend.KeyEnv != "" {
+		out = append(out, c.Backend.KeyEnv)
+	}
+	for _, m := range c.Models {
+		if m.KeyEnv != "" {
+			out = append(out, m.KeyEnv)
+		}
+	}
+	return out
+}
+
+// providerRouting is the OpenRouter provider-routing object to attach to
+// every model request, or nil when none is configured or the backend is not
+// OpenRouter (a local/LiteLLM endpoint must never see the unknown field).
+func (c *Config) providerRouting() *llm.ProviderRouting {
+	if !c.isOpenRouter() || c.Backend.Provider.IsZero() {
+		return nil
+	}
+	return c.Backend.Provider
 }
 
 func mergeModels(base, over map[string]ModelSpec) map[string]ModelSpec {

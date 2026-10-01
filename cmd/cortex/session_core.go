@@ -271,6 +271,7 @@ func NewCortexSession() *CortexSession {
 	instructionBytesCap = cfg.instructionBytesCap()
 	configurePrompt(cfg)
 	tools.Configure(cfg.toolLimits())
+	tools.SetShellSecretEnv(cfg.secretEnvNames())
 	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 	openRouterPreflightTimeout = cfg.preflightTimeout()
 	labelTickInterval = cfg.tickerInterval()
@@ -331,6 +332,7 @@ func NewCortexSession() *CortexSession {
 	if cfg.isOpenRouter() {
 		req.Usage = &usageInclude{Include: true}
 	}
+	req.Provider = cfg.providerRouting()
 
 	allowDelete := cfg.deleteEnabled()
 	deleteRoot := "."

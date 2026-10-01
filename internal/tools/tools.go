@@ -1691,6 +1691,8 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// serve/loop-hosted session's shell must act in ITS project, not wherever
 	// the hosting process was started (workdir.go).
 	shellCmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// nil when no secrets are configured → inherit the environment unchanged.
+	shellCmd.Env = shellEnv()
 	if wd := workdirOf(deps); wd != "" {
 		shellCmd.Dir = wd
 	}
