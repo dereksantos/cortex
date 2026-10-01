@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,51 +45,74 @@ func runStudyCLI(project, path, goal string) {
 	fmt.Println(out)
 }
 
-func runTurnCLI(args []string) {
-	sessionID, asJSON, project := "", false, ""
+// turnArgs is the parsed form of a `cortex turn` invocation (runTurnCLI).
+// Extracted from the flag loop so the parsing — including the new --plan
+// switch (#150) — is testable in isolation without driving a live session.
+type turnArgs struct {
+	sessionID string // --session / -s
+	asJSON    bool   // --json
+	plan      bool   // --plan: run the plan-then-execute path instead of one turn
+	project   string // --project
+	input     string // the joined positional input
+}
+
+// parseTurnArgs parses the arguments of `cortex turn` into turnArgs. It is
+// pure (no session, no I/O) so the flag handling — especially the new
+// --plan flag — is covered by a table-driven test. Unknown flags fall
+// through to the positional input, matching the historical behavior that
+// only --session/-s, --project, --json and (now) --plan are consumed.
+func parseTurnArgs(args []string) turnArgs {
+	var a turnArgs
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session", "-s":
 			if i+1 < len(args) {
-				sessionID = args[i+1]
+				a.sessionID = args[i+1]
 				i++
 			}
 		case "--json":
-			asJSON = true
+			a.asJSON = true
+		case "--plan":
+			a.plan = true
 		case "--project":
 			if i+1 < len(args) {
-				project = args[i+1]
+				a.project = args[i+1]
 				i++
 			}
 		default:
 			rest = append(rest, args[i])
 		}
 	}
+	a.input = strings.TrimSpace(strings.Join(rest, " "))
+	return a
+}
 
-	input := strings.TrimSpace(strings.Join(rest, " "))
-	if input == "" {
+func runTurnCLI(args []string) {
+	a := parseTurnArgs(args)
+
+	if a.input == "" {
 		if b, err := io.ReadAll(os.Stdin); err == nil {
-			input = strings.TrimSpace(string(b))
+			a.input = strings.TrimSpace(string(b))
 		}
 	}
-	if input == "" {
-		fmt.Fprintln(os.Stderr, "usage: cortex turn [--session <id>] [--project <name>] [--json] <input>")
+	if a.input == "" {
+		fmt.Fprintln(os.Stderr, "usage: cortex turn [--session <id>] [--project <name>] [--plan] [--json] <input>")
 		os.Exit(2)
 	}
 
 	session := NewCortexSession()
-	if err := applyProjectFlag(session, project); err != nil {
-		fmt.Fprintf(os.Stderr, "project %s: %v\n", project, err)
+	if err := applyProjectFlag(session, a.project); err != nil {
+		fmt.Fprintf(os.Stderr, "project %s: %v\n", a.project, err)
 		os.Exit(1)
 	}
 	session.quiet = true
-	if sessionID != "" {
-		if err := session.ResumeTranscript(sessionID); err != nil {
-			fmt.Fprintf(os.Stderr, "resume %s: %v - starting fresh\n", sessionID, err)
+	if a.sessionID != "" {
+		if err := session.ResumeTranscript(a.sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "resume %s: %v - starting fresh\n", a.sessionID, err)
 			session.StartTranscript()
 		} else {
-			session.showLoadedContext(sessionID)
+			session.showLoadedContext(a.sessionID)
 		}
 	} else {
 		session.StartTranscript()
@@ -103,13 +127,26 @@ func runTurnCLI(args []string) {
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		res, turnErr := session.Turn(ctx, input)
+
+		// --plan (#150): the plan-then-execute path. Each planned step is its
+		// own turn with the project's checks in between; the reply is the
+		// per-step report. Without --plan the pre-existing single-turn path
+		// runs, unchanged.
+		var res TurnResult
+		var turnErr error
+		if a.plan {
+			plan, planErr := session.TurnWithPlan(ctx, a.input)
+			res = TurnResult{Reply: plan.Reply, Interrupted: errors.Is(planErr, context.Canceled)}
+			turnErr = planErr
+		} else {
+			res, turnErr = session.Turn(ctx, a.input)
+		}
 
 		if session.turns > 0 {
 			session.emitSessionMetrics()
 		}
 
-		if asJSON {
+		if a.asJSON {
 			out := map[string]any{"session": session.SessionID, "reply": res.Reply}
 			if turnErr != nil {
 				out["error"] = turnErr.Error()

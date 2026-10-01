@@ -380,8 +380,8 @@ per-call `model` argument pins another. See
 cortex                            interactive REPL
 cortex --version | cortex version   print the version and exit
 cortex resume [id]                  resume a session; defaults to latest
-cortex turn [--session id] [--json] <input...>
-                                  run one headless turn
+cortex turn [--session id] [--plan] [--json] <input...>
+                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn)
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex learn [--project <name>]     run one background learning pass over the journal
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
@@ -407,6 +407,7 @@ helper, and writing table-driven tests):
 | `/help` | List the slash commands. |
 | `/context` | Show the current session's context-window map — the stable prefix vs. hydrated tail, plus the last request's prompt/cache usage. |
 | `/compact` | Summarize the conversation now as a safety net. |
+| `/plan <task>` | Plan-then-execute: one planning turn, then each step as its own turn (the `cortex turn --plan` path). |
 | `/clear` | Start a fresh session. |
 | `/sessions` | List persisted session IDs. |
 | `/model [name]` | Show role bindings or switch the coding model for this session. |

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -531,21 +532,34 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 }
 
 // runAnchoredTurn runs one turn with the prompt pinned to the bottom row and
-// every byte of turn output funneled above it. os.Stdout is redirected through
-// a pipe whose lines feed the anchor (so ad-hoc fmt.Print output, tool-action
-// lines, and the streamed answer all land above the prompt); the anchor draws
-// the input and "thinking" status straight to the real terminal. Keystrokes
-// typed during the turn edit the pinned line live and are returned to seed the
-// next prompt. ESC/Ctrl-C cancels via the anchor's context.
+// every byte of turn output funneled above it — the single-turn case of
+// runUnderAnchor.
 func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
+	return runUnderAnchor(session, editor, seed, func(ctx context.Context) error {
+		_, err := session.Turn(ctx, input)
+		return err
+	})
+}
+
+// runUnderAnchor runs fn inside a pinned anchor (interactive + render): the
+// prompt is pinned to the bottom row and every byte of fn's output
+// (fmt.Print, tool-action lines, …) is funneled above it via a stdout pipe;
+// keystrokes typed during fn edit the pinned line live. The pinned line is
+// erased on return and its (possibly edited) text is returned to seed the
+// next prompt. ESC/Ctrl-C cancels ctx.
+//
+// It is the general form of the anchored turn path: runAnchoredTurn is its
+// single-turn specialization (fn = one session.Turn), and the /plan REPL
+// command's TurnWithPlan (#150) is a multi-turn one.
+func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed string, fn func(ctx context.Context) error) (string, error) {
 	anchor, ctx := editor.Anchor(session.Prompt(), seed)
 	r, w, err := os.Pipe()
 	if err != nil {
-		// Pipe setup failed (rare): fall back to the silent-capture path so the
-		// turn still runs and cancels cleanly.
+		// Pipe setup failed (rare): run fn WITHOUT the anchor so it still runs
+		// and cancels cleanly, mirroring runAnchoredTurn's fallback.
 		anchor.Stop()
 		c, stop := editor.Interruptible(context.Background())
-		_, e := session.Turn(c, input)
+		e := fn(c)
 		return stop(), e
 	}
 	realStdout := os.Stdout
@@ -562,7 +576,7 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 		}
 	}()
 
-	_, turnErr := session.Turn(ctx, input)
+	turnErr := fn(ctx)
 
 	// Restore stdout, then close the write end so the drain goroutine sees EOF
 	// and flushes the last line before we erase the pinned block.
@@ -572,4 +586,48 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 	<-drained
 	r.Close()
 	return anchor.Stop(), turnErr
+}
+
+// afterTurn is the REPL's post-turn safety net, shared by the normal single
+// turn and the /plan (multi-turn) path so the two stay in sync. It reacts to
+// the error of a just-completed turn (or plan run):
+//
+//   - clean: compact at the turn boundary when the context gauge is red —
+//     the boundary is the only safe point (mid-turn compaction orphans
+//     tool_call sequences);
+//   - interrupted (context.Canceled): print "interrupted";
+//   - otherwise: print the error, diagnose a model error, and — if the error
+//     names a real context-window overflow — learn the window (the gauge and
+//     read_file guard self-correct, C2), compact, and ask the user to
+//     re-send.
+//
+// A plan run is up to planStepCap turns in a row — the place context grows
+// most — so it must reach this same safety net; without it the /plan path was
+// the only multi-turn path that never checked the compaction threshold.
+func afterTurn(session *CortexSession, err error) {
+	switch {
+	case err == nil:
+		// Red gauge: compact at the turn boundary, before the window actually
+		// overflows. The boundary is the only safe point — mid-turn
+		// compaction would orphan tool_call sequences.
+		if session.contextRatio() >= compactThreshold {
+			compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
+		}
+	case errors.Is(err, context.Canceled):
+		fmt.Println(withColor("interrupted", yellow))
+	default:
+		fmt.Printf("turn error: %v\n", err)
+		if d := diagnoseModelError(err); d != "" {
+			fmt.Println(withColor(d, yellow))
+		}
+		// An overflow error names the code model's real window: learn it
+		// (the gauge and read_file guard self-correct, C2) and compact so the
+		// next request fits. The failed request is in the digest; the user
+		// re-asks.
+		if real := parseCtxSize(err.Error()); real > 0 {
+			session.learnWindow(real)
+			compactNow(session, "context overflowed")
+			fmt.Println("please re-send your request")
+		}
+	}
 }
