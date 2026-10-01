@@ -112,7 +112,10 @@ func runTurnCLI(args []string) {
 			fmt.Fprintf(os.Stderr, "resume %s: %v - starting fresh\n", a.sessionID, err)
 			session.StartTranscript()
 		} else {
-			session.showLoadedContext(a.sessionID)
+			// Issue #118: the resume banner is a headless diagnostic —
+			// stderr, plain (no ANSI), never stdout. The colored REPL
+			// form stays showLoadedContext.
+			session.headlessLoadedContextBanner(a.sessionID)
 		}
 	} else {
 		session.StartTranscript()

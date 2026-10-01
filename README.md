@@ -381,7 +381,8 @@ cortex                            interactive REPL
 cortex --version | cortex version   print the version and exit
 cortex resume [id]                  resume a session; defaults to latest
 cortex turn [--session id] [--plan] [--json] <input...>
-                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn)
+                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn);
+                                  --session's resume banner and the session id go to stderr — stdout is the answer only
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex learn [--project <name>]     run one background learning pass over the journal
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle

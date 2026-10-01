@@ -140,9 +140,20 @@ func (cs *CortexSession) StartTranscript() {
 	}
 }
 
-// showLoadedContext prints a human-readable summary of what context was loaded.
-// Call this right after ResumeTranscript to make the loaded session visible.
-func (cs *CortexSession) showLoadedContext(id string) {
+// loadedContextBanner builds the human-readable summary of what context a
+// resumed session loaded: the demoted/hydrated turn counts, the message
+// count, and the session's id with its age. Pure over the session's loaded
+// state (plus the sessions dir, for the newest session's mtime). color=true
+// wraps the labels in ANSI (interactive REPL); color=false is the plain
+// form `cortex turn --session` prints to stderr for headless drivers
+// (issue #118) — stdout is the answer only, never diagnostics, so the
+// headless path stays machine-clean no matter what NO_COLOR or the TTY
+// say.
+func (cs *CortexSession) loadedContextBanner(id string, color bool) string {
+	col := func(v, c string) string { return v }
+	if color {
+		col = withColor
+	}
 	dir := cs.SessionsDir()
 
 	// Get session info for display
@@ -165,30 +176,57 @@ func (cs *CortexSession) showLoadedContext(id string) {
 	// Build context summary
 	msgCount := len(cs.Request.Messages)
 
+	var b strings.Builder
+
 	// Only show demotion info if we have turns (not a fresh session)
 	if totalTurns > 0 {
-		fmt.Printf("%s  %d turns (%d demoted, %d hydrated tail)\n",
-			withColor("context:", green),
+		fmt.Fprintf(&b, "%s  %d turns (%d demoted, %d hydrated tail)\n",
+			col("context:", green),
 			totalTurns, demotedTurns, hydratedTurns)
 	}
 
 	// Show message count
-	fmt.Printf("%s  %d messages\n",
-		withColor("messages:", green),
+	fmt.Fprintf(&b, "%s  %d messages\n",
+		col("messages:", green),
 		msgCount)
 
 	// Show session age if available
 	if info.ModTime.IsZero() {
-		fmt.Printf("%s  %s\n",
-			withColor("session:", gray),
-			withColor(id, cyan))
+		fmt.Fprintf(&b, "%s  %s\n",
+			col("session:", gray),
+			col(id, cyan))
 	} else {
 		age := relTime(info.ModTime)
-		fmt.Printf("%s  %s (%s old)\n",
-			withColor("session:", gray),
-			withColor(id, cyan),
-			withColor(age, gray))
+		fmt.Fprintf(&b, "%s  %s (%s old)\n",
+			col("session:", gray),
+			col(id, cyan),
+			col(age, gray))
 	}
+	return b.String()
+}
+
+// showLoadedContext prints a human-readable summary of what context was
+// loaded, colored (the interactive REPL path). Call this right after
+// ResumeTranscript to make the loaded session visible. Diagnostics — not
+// conversation — so it goes to stderr, keeping stdout free for the turn's
+// answer (issue #118).
+func (cs *CortexSession) showLoadedContext(id string) {
+	cs.printLoadedContextBanner(id, true)
+}
+
+// headlessLoadedContextBanner prints the resume banner in its plain, never-
+// colored form to stderr — `cortex turn --session`'s diagnostic (issue
+// #118): headless drivers read stdout as the answer, so the banner goes to
+// stderr, and a non-TTY/NO_COLOR pipe never gets ANSI escapes.
+func (cs *CortexSession) headlessLoadedContextBanner(id string) {
+	cs.printLoadedContextBanner(id, false)
+}
+
+// printLoadedContextBanner is the single stderr writer both banner forms
+// share (issue #118): the colored REPL form and the plain headless form
+// differ only in the color flag they pass to loadedContextBanner.
+func (cs *CortexSession) printLoadedContextBanner(id string, color bool) {
+	fmt.Fprint(os.Stderr, cs.loadedContextBanner(id, color))
 }
 
 func (cs *CortexSession) ResumeTranscript(id string) error {
