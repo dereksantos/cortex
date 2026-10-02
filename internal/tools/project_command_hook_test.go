@@ -329,11 +329,12 @@ func TestPostEditHookUntrustedNoteOnWrite(t *testing.T) {
 	}
 }
 
-// TestPostEditHookReportsTimeout drives the real timeout path via the
+// TestPostEditHookReportsTimeout drives the timeout path via the
 // hookRunner seam: a format command that hangs is cut off by the budget, the
-// hook reports the timeout, and the write still succeeds with the file left
-// as written. (No formatter ever hangs in practice, so the budget is
-// unreachable end-to-end without this seam.)
+// hook reports the timeout with the budget's duration AND the command's
+// name, and the write still succeeds with the file left as written. (No
+// formatter ever hangs in practice, so the budget is unreachable
+// end-to-end without this seam.)
 func TestPostEditHookReportsTimeout(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -350,8 +351,11 @@ func TestPostEditHookReportsTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a hook timeout must not fail the write, got %v", err)
 	}
-	if !strings.Contains(out, "timed out") {
-		t.Errorf("tool result should note the timeout, got %q", out)
+	// The note names the command that hung AND how long the budget let it
+	// run — "gofmt timed out after 10s" (the default budget; the note uses
+	// the elapsed the runner reported, which is the budget on a deadline).
+	if !strings.Contains(out, "gofmt timed out after 10s") {
+		t.Errorf("timeout note must name the command and the budget (\"gofmt timed out after 10s\"), got %q", out)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "y.go")); string(data) != "package main\n" {
 		t.Errorf("the file must be left as written when the hook times out")

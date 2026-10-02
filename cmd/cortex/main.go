@@ -711,19 +711,25 @@ func main() {
 		}
 
 		// /hook off|format|all turns the post-edit hook down or off for the
-		// current session (issue #129 piece 2). A bare /hook (or an
-		// unrecognized value) prints the current mode; a valid value lowers
-		// the session's mode in place (SetMode is monotone-down and clamped
-		// to the process ceiling, so nothing here can raise it above the
-		// configured mode, and trust is never affected).
+		// current session (issue #129 piece 2). A bare /hook prints the
+		// current (effective) mode; a valid value lowers the session's mode
+		// in place (SetMode is monotone-down, and the process ceiling is
+		// folded in at read time, so nothing here can raise it above the
+		// configured mode, and trust is never affected). An UNRECOGNIZED
+		// value prints usage and the current mode and lowers nothing:
+		// ParseHookMode maps unknown values to off, and a typo must never
+		// silently disable the operator's hook.
 		if input == "/hook" || strings.HasPrefix(input, "/hook ") {
 			val := strings.TrimSpace(strings.TrimPrefix(input, "/hook"))
-			if val == "" {
+			switch val {
+			case "":
 				fmt.Println("post-edit hook: " + session.hookModeName())
-				continue
+			case "off", "format", "all":
+				session.SetHookMode(tools.ParseHookMode(val))
+				fmt.Println("post-edit hook -> " + session.hookModeName())
+			default:
+				fmt.Printf("usage: /hook off|format|all (post-edit hook: %s)\n", session.hookModeName())
 			}
-			session.SetHookMode(tools.ParseHookMode(val))
-			fmt.Println("post-edit hook -> " + session.hookModeName())
 			continue
 		}
 

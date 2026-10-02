@@ -532,7 +532,8 @@ type ProjectConfig struct {
 	Trusted []string `json:"trusted"`
 	// CommandTimeoutSec is the per-command budget for the post-edit hook's
 	// format/lint runs (issue #129 piece 2) — seconds, 0 = the historical
-	// 10s (Config.commandTimeoutSec). A slow formatter is cut off here, and
+	// 10s (Config.toolLimits resolves it into the tools'
+	// HookCommandBudgetSec). A slow formatter is cut off here, and
 	// the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
 	// out after 10s").
 	CommandTimeoutSec int `json:"command_timeout_sec"`

@@ -259,12 +259,14 @@ func (headlessDeps) AttributionCommit() string { return "" }
 // HookMode is the post-edit hook's mode switch (issue #129 piece 2):
 // off | format | all. "all" (the default, the zero value) runs the
 // per-file format AND the per-package lint; "format" runs format only;
-// "off" runs nothing. The ordering is deliberate — the numeric value IS the
-// restrictiveness, so a monotone-down "lower" is a plain comparison and
-// min(ceiling, session) is the effective mode. A /hook command (or a
-// per-call `hook: "skip"`) may LOWER a session toward off, but nothing RAISES
-// it: an operator turns a slow hook down or off, and a mode the operator
-// never configured (above the ceiling) is unreachable.
+// "off" runs nothing. The ordering is deliberate — the numeric value IS
+// the restrictiveness, so a monotone-down "lower" is a plain comparison
+// (toward a LARGER value) and the effective mode is the MORE
+// restrictive of (ceiling, session) — larger wins (moreRestrictive). A
+// /hook command (or a per-call `hook: "skip"`) may LOWER a session
+// toward off, but nothing RAISES it: an operator turns a slow hook down
+// or off, and a mode the operator never configured (less restrictive than
+// the ceiling) is unreachable.
 type HookMode int
 
 const (
@@ -324,27 +326,23 @@ type PostEditHookState struct {
 
 // SetMode lowers the session-mode to m (all→format→off only): a REPL /hook
 // command is its sole caller, and it is a monotone-down setter — an attempt
-// to raise is a no-op (an operator turns the hook DOWN or off, never up),
-// and a mode above the process-wide ceiling (SetHookCeiling) is clamped to
-// the ceiling, so a session can never operate in a mode the operator never
-// configured. The agent has NO setter: it can only skip one call
-// (effectiveHookMode), and nothing here touches trust.
+// to raise is a no-op (an operator turns the hook DOWN or off, never up).
+// It does NOT clamp against the process-wide ceiling (SetHookCeiling):
+// effectiveMode folds the ceiling in at read time, so a session can hold a
+// mode the operator never configured — the effective mode is still
+// capped, but a ceiling that is RAISED later (a future reload) does not
+// silently re-widen a session the operator explicitly turned down. The
+// agent has NO setter: it can only skip one call (effectiveHookMode),
+// and nothing here touches trust.
 func (s *PostEditHookState) SetMode(m HookMode) {
-	if s == nil {
+	if s == nil || m <= s.mode {
 		return
 	}
-	capped := m
-	if capped > activeCeiling {
-		capped = activeCeiling
-	}
-	if capped < s.mode {
-		s.mode = capped
-	}
+	s.mode = m
 }
 
 // SessionMode is the current session-mode (all when the state is nil — a
-// caller with no session has no /hook to lower it from). The REPL's /hook
-// command uses this to display the current mode.
+// caller with no session has no /hook to lower it from).
 func (s *PostEditHookState) SessionMode() HookMode {
 	if s == nil {
 		return HookModeAll
@@ -371,15 +369,32 @@ func (s *PostEditHookState) announceInactive() {
 	s.inactiveAnnounced = true
 }
 
-// effectiveMode is the hook mode a session operates in: the more-restrictive
-// of the configured ceiling and the session's current mode (min, where
-// off < format < all). Both together are monotone-down from the config —
-// nothing here can raise.
-func effectiveMode(sessionMode HookMode) HookMode {
-	if sessionMode > activeCeiling {
-		return activeCeiling
+// moreRestrictive is the LARGER of two modes — the mode that runs LESS
+// (off=2 > format=1 > all=0, so larger is more restrictive). Every
+// "fold in the more restrictive" site (the ceiling, a /hook lowering, a
+// per-call skip) goes through this one comparison.
+func moreRestrictive(a, b HookMode) HookMode {
+	if b > a {
+		return b
 	}
-	return sessionMode
+	return a
+}
+
+// effectiveMode is the hook mode a session operates in: the
+// more-restrictive of the configured ceiling and the session's current
+// mode. Both together are monotone-down from the config — nothing here
+// can raise.
+func effectiveMode(sessionMode HookMode) HookMode {
+	return moreRestrictive(sessionMode, activeCeiling)
+}
+
+// EffectiveHookMode is the hook mode the session with this state operates
+// in (the more-restrictive of the session-mode and the process-wide
+// configured ceiling; nil state = a caller without a session, so just the
+// ceiling). The REPL's /hook display and a session's hook behavior must
+// agree on this value.
+func EffectiveHookMode(state *PostEditHookState) HookMode {
+	return effectiveMode(state.SessionMode())
 }
 
 // effectiveHookMode is the hook mode for THIS tool call: the session's
@@ -388,7 +403,7 @@ func effectiveMode(sessionMode HookMode) HookMode {
 // never raises, and nothing here touches trust). state nil = a caller
 // without a session: the ceiling directly.
 func effectiveHookMode(state *PostEditHookState, skip bool) HookMode {
-	m := effectiveMode(state.SessionMode())
+	m := EffectiveHookMode(state)
 	if skip && m != HookModeOff {
 		m = HookModeOff
 	}

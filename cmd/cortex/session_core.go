@@ -408,27 +408,23 @@ func NewCortexSession() *CortexSession {
 }
 
 // SetHookMode lowers the session's post-edit hook mode in place (issue #129
-// piece 2): a REPL /hook command is its sole caller. It is monotone-down and
-// clamped to the process ceiling (SetHookCeiling, installed at session
-// construction from the resolved config), so a session can never operate in a
-// mode the operator never configured; the agent has no setter at all.
+// piece 2): a REPL /hook command is its sole caller. It is monotone-down;
+// the process ceiling (SetHookCeiling, installed at session construction
+// from the resolved config) is folded in at read time by EffectiveHookMode,
+// so a session can never operate in a mode more permissive than the one
+// the operator configured; the agent has no setter at all.
 func (cs *CortexSession) SetHookMode(m tools.HookMode) {
 	if cs.hookState != nil {
 		cs.hookState.SetMode(m)
 	}
 }
 
-// hookModeName renders the session's current effective hook mode (the
-// /hook command's current-value display; min of the session mode and the
-// process ceiling, where off < format < all).
+// hookModeName renders the session's current EFFECTIVE hook mode (the
+// /hook command's current-value display; the more-restrictive of the
+// session mode and the process ceiling, where larger is more restrictive —
+// off > format > all).
 func (cs *CortexSession) hookModeName() string {
-	var m tools.HookMode
-	if cs.hookState != nil {
-		m = cs.hookState.SessionMode()
-	} else {
-		m = tools.HookModeAll
-	}
-	switch m {
+	switch tools.EffectiveHookMode(cs.hookState) {
 	case tools.HookModeOff:
 		return "off"
 	case tools.HookModeFormat:
