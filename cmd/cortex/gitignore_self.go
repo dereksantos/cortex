@@ -24,11 +24,11 @@ import (
 )
 
 // selfGitignoreBody is the exact content of the `.cortex/.gitignore` this
-// file writes: a lone `*` that ignores every entry directly under `.cortex/`.
-// A nested `.gitignore` only governs its own directory and its children, so
-// `*` covers sessions/, journal/, history, cortex.log, memory/, and anything
-// else `.cortex/` grows — without matching `.gitignore` itself, which stays
-// trackable so the ignore rule survives a fresh clone.
+// file writes: a lone `*` that ignores every entry directly under `.cortex/`
+// — sessions/, journal/, history, cortex.log, memory/, and anything else
+// `.cortex/` grows — including `.gitignore` itself. The file is per-checkout
+// state: the first session in each clone (re)creates it, and the repo never
+// carries it, so no tracked file can ever be deleted by an ignore rule.
 const selfGitignoreBody = "*\n"
 
 // ensureSelfGitignore makes the workspace's `.cortex/` dir self-ignoring in
@@ -37,17 +37,26 @@ const selfGitignoreBody = "*\n"
 // inside a git repository (or is one), `.cortex/` is not already ignored
 // (`git check-ignore -q .cortex`), and the self-ignore file is not already
 // present. Every other outcome is a silent no-op: there is no resolved
-// workspace, no `.cortex/` dir to ignore yet, the root is not in a git repo,
-// git is unavailable, or `.cortex/` is already ignored.
+// workspace, the root is not in a git repo, git is unavailable, or
+// `.cortex/` is already ignored.
 //
 // Idempotent: once `.cortex/.gitignore` exists (written by a prior run) the
 // file's presence short-circuits the check, so repeat sessions and repeat
-// invocations of `StartTranscript` (compaction, /clear) add nothing.
+// invocations of StartTranscript (compaction, /clear) add nothing.
 //
-// Called from StartTranscript (session.go) right after the sessions dir is
-// created, so every entry point that opens a transcript (the REPL, `turn`,
-// `study`, `learn`, `serve`, `discord`, and the loop scheduler) covers the
-// workspace's `.cortex/` at the first moment it could leak.
+// Called from two shared seams so every entry point is covered at the first
+// moment its workspace could write under `.cortex/`:
+//
+//   - NewCortexSession (session_core.go), right after the workspace is
+//     resolved — covers the REPL, `turn` (fresh and `--session` resume),
+//     `study`, `learn` (both scopes), `serve`, `discord`, the loop firings,
+//     and `study-eval`. This is the path study/learn need, because they run a
+//     session without ever opening a transcript (no StartTranscript) yet
+//     still write under `.cortex/` (journal, memory, the learn cursor).
+//
+//   - ResumeTranscript (session.go) — covers hand-built sessions (tests, and
+//     any future caller that never goes through NewCortexSession) resuming
+//     into an existing workspace.
 func (cs *CortexSession) ensureSelfGitignore() {
 	if cs == nil || cs.workspace == nil || cs.workspace.Root == "" {
 		return
@@ -63,9 +72,12 @@ func (cs *CortexSession) ensureSelfGitignore() {
 		return
 	}
 
-	// The `.cortex/` dir is not present yet: StartTranscript's MkdirAll runs
-	// immediately after this call, so there is nothing to protect this instant.
-	if _, err := os.Stat(ctxDir); err != nil {
+	// Best-effort: creating `.cortex/` on a read-only root must degrade to a
+	// silent no-op, like every other failure below. Callers that write
+	// directly (NewCortexSession) already MkdirAll'd the dir — this guard
+	// only covers ResumeTranscript and any other caller that hasn't created
+	// it yet.
+	if err := os.MkdirAll(ctxDir, 0o755); err != nil {
 		return
 	}
 
@@ -86,8 +98,7 @@ func (cs *CortexSession) ensureSelfGitignore() {
 	// .gitignore patterns textually, so the file need not exist for the
 	// query to work). With -q there is no output, so the exit status is the
 	// only signal: err == nil means "ignored", and we must NOT treat that as
-	// a failure. The earlier form (`err == nil && out == ""`) inverted this
-	// and skipped the write exactly when it was needed.
+	// a failure.
 	if _, err := gitCmdIn(root, "check-ignore", "-q", ".cortex"); err == nil {
 		return
 	}

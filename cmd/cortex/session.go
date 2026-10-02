@@ -121,10 +121,10 @@ func (cs *CortexSession) StartTranscript() {
 	}
 	// Issue #119: the .cortex/ dir now exists (it holds transcripts, journal,
 	// history, memory) and could be swept up by a routine `git add -A`;
-	// self-ignore it right now, via the one path every entry point
-	// (REPL/turn/study/learn/serve/discord/loop) funnels through. Best-effort
-	// and silent unless it actually wrote the self-ignore (see
-	// gitignore_self.go).
+	// self-ignore it right now — see gitignore_self.go for the full entry
+	// point coverage (every entry point is also covered when its workspace is
+	// first resolved, in NewCortexSession). Best-effort and silent unless it
+	// actually wrote the self-ignore.
 	cs.ensureSelfGitignore()
 	base := time.Now().Format("20060102-150405")
 	id := base
@@ -238,6 +238,11 @@ func (cs *CortexSession) printLoadedContextBanner(id string, color bool) {
 
 func (cs *CortexSession) ResumeTranscript(id string) error {
 	dir := cs.SessionsDir()
+	// Issue #119: the workspace's .cortex/ dir already holds the session
+	// being reopened, so cover it here too — NewCortexSession covers the
+	// CLI paths, this seam covers hand-built sessions (tests and future
+	// callers) resuming into an existing workspace. See gitignore_self.go.
+	cs.ensureSelfGitignore()
 	if id == "" {
 		var err error
 		if id, err = latestSessionID(dir); err != nil {

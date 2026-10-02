@@ -356,6 +356,15 @@ func NewCortexSession() *CortexSession {
 		allowDelete:  allowDelete,
 		sessionStart: time.Now(),
 	}
+	// Issue #119: the workspace is now resolved and every command that goes
+	// through this constructor (REPL, turn, study, learn, serve, discord,
+	// loop, study-eval) will write under its .cortex/ — journal, memory, the
+	// learn cursor — often without ever opening a transcript (study/learn
+	// never call StartTranscript). Self-ignore the dir now, before the first
+	// write could leak it; the --project / serve / loop re-targeting re-runs
+	// the same guard for its (possibly different) root. See
+	// gitignore_self.go.
+	cs.ensureSelfGitignore()
 	cs.ws = cs.newWorkingSet(1)
 	// Strip declarations for every IsToolEnabled-gated tool that config
 	// disabled — scan_landscape, web_search/fetch_url, agent, context_* — so

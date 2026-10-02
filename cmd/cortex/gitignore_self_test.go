@@ -130,6 +130,11 @@ func TestEnsureSelfGitignore(t *testing.T) {
 					t.Fatalf("write pre-existing .gitignore: %v", err)
 				}
 			}
+			if tt.seedDir {
+				if err := os.MkdirAll(filepath.Join(root, ".cortex"), 0o755); err != nil {
+					t.Fatalf("seed .cortex dir: %v", err)
+				}
+			}
 			cs := selfGitignoreSession(t, root)
 
 			// The production path is StartTranscript → ensureSelfGitignore.
@@ -150,7 +155,7 @@ func TestEnsureSelfGitignore(t *testing.T) {
 				t.Errorf(".cortex/.gitignore exists = %v, want %v (statErr=%v)", gotFile, tt.wantFile, statErr)
 			}
 
-			if tt.gitRepo {
+			if tt.wantStatus {
 				status := gitStatusPorcelain(t, root)
 				for _, line := range strings.Split(status, "\n") {
 					if strings.Contains(line, ".cortex") {
@@ -159,6 +164,44 @@ func TestEnsureSelfGitignore(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEnsureSelfGitignoreCoversStudyLearnPin is the study/learn coverage the
+// issue's headline misses: runStudyCLI/runLearnCLI build their session with
+// NewCortexSession and never open a transcript, so the self-ignore must fire
+// from the shared workspace-resolution seam (NewCortexSession), not from
+// StartTranscript. A hand-built *CortexSession — what those CLI functions
+// receive from NewCortexSession, workspace already resolved, before the first
+// write under .cortex/ — must leave .cortex/.gitignore on disk, so a first
+// `cortex study` or `cortex learn` in a fresh repo can't leave .cortex/
+// untracked. The seam itself (ensureSelfGitignore from workspace
+// resolution) is exactly what this asserts: no transcript, just the hook.
+func TestEnsureSelfGitignoreCoversStudyLearnPin(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	initGitRepo(t, root)
+
+	// The production study/learn flow resolves the workspace first
+	// (WorkspaceFromCWD / NewWorkspace), then runs the session. NewCortex
+	// Session invokes the same seam (ensureSelfGitignore) at that moment —
+	// mirror it here without re-invoking the full NewCortexSession (no live
+	// backend / model catalog in this hermetic test).
+	cs := selfGitignoreSession(t, root)
+	cs.ensureSelfGitignore()
+
+	// Now simulate the first real write under .cortex/ that study/learn does
+	// — a journal entry — and confirm the write lands inside a gitignored
+	// dir (the leak the issue describes).
+	writeFakeTranscript(t, filepath.Join(root, ".cortex"), "20260101-000000")
+
+	if _, err := os.Stat(filepath.Join(root, ".cortex", ".gitignore")); err != nil {
+		t.Fatalf(".cortex/.gitignore not written via workspace-resolution seam: %v", err)
+	}
+
+	status := gitStatusPorcelain(t, root)
+	if strings.Contains(status, ".cortex") {
+		t.Errorf("git status --porcelain lists .cortex after study/learn path: %q", status)
 	}
 }
 
