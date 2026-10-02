@@ -314,6 +314,11 @@ func TestSameActionLedger(t *testing.T) {
 				{command: "git commit -m x", wantRun: false, wantMarker: "blocked (risk:"},
 				{command: "git commit-tree HEAD", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
 				{command: "git commit --amend", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// The issue's exact workaround: after a blocked commit, the hook-
+				// disabling variants (a DIFFERENT class, one barred group) are
+				// refused by the ledger too — not re-classified.
+				{command: "git commit --no-verify -m x", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git -c core.hooksPath=/tmp/x commit -m x", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
 				{command: "git update-ref refs/heads/main abc123", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
 				{command: "git reset --hard HEAD~1", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
 				// A Risky command in a DIFFERENT class (no tracked effect class
@@ -329,6 +334,10 @@ func TestSameActionLedger(t *testing.T) {
 				// A later --no-verify variant (different subcommand) is in the
 				// same hook-disabling class → refused by the ledger.
 				{command: "git push --no-verify origin", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// The barred group runs both ways: a blocked hook-disabling
+				// command also bars a PLAIN same-effect history write, so a
+				// re-worded `git commit` can't re-enter the classifier.
+				{command: "git commit -m y", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
 			},
 		},
 		{

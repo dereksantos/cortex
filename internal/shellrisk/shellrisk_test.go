@@ -278,6 +278,8 @@ func TestEffectClass_GitHistoryWrite(t *testing.T) {
 		{"reset --keep", "git reset --keep HEAD~1", EffectGitHistoryWrite},
 		{"reset to a commit", "git reset origin/main", EffectGitHistoryWrite},
 		{"reset to a SHA", "git reset a1b2c3d", EffectGitHistoryWrite},
+		{"bare reset (over-approximation: kept in the class)", "git reset", EffectGitHistoryWrite},
+		{"reset with -C path", "git -C sub reset --hard HEAD~1", EffectGitHistoryWrite},
 		{"git -C path commit", "git -C sub commit -m x", EffectGitHistoryWrite},
 		{"chained: safe then commit", "git status && git commit -m x", EffectGitHistoryWrite},
 		{"piped: cat then commit", "cat file | git commit --stdin", EffectGitHistoryWrite},
@@ -310,6 +312,7 @@ func TestEffectClass_HookDisabling(t *testing.T) {
 		{"--no-verify after subcommand", "git commit -m x --no-verify", EffectHookDisabling},
 		{"reset -c core.hooksPath=empty (hook flag)", "git reset -c core.hooksPath=empty", EffectHookDisabling},
 		{"reset -c core.hooksPath=empty (hook flag, after subcommand)", "git reset --hard -c core.hooksPath=empty", EffectHookDisabling},
+		{"commit -c core.hooksPath=/dev/null (the issue's hook-bypass variant)", "git -c core.hooksPath=/dev/null commit -m x", EffectHookDisabling},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -350,6 +353,12 @@ func TestEffectClass_NoMatch(t *testing.T) {
 		{"shortlog", "git shortlog -s"},
 		{"blame", "git blame file.txt"},
 		{"config read", "git config user.name"},
+		{"reset unstage", "git reset -- file.txt"},
+		{"docker commit (not git)", "docker commit c1 img"},
+		{"svn commit (not git)", "svn commit -m x"},
+		{"hg commit (not git)", "hg commit"},
+		{"echo commit (not git)", "echo commit"},
+		{"make reset (not git)", "make reset"},
 		{"non-git with no-verify flag", "some-tool --no-verify"},
 		{"non-git with core.hooksPath", "some-tool -c core.hooksPath=x"},
 		{"rm -rf scoped (not a class)", "rm -rf ./build"},
