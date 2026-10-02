@@ -606,18 +606,23 @@ and the budgets. The config keys involved live under `project`:
 keys and blank values are ignored.
 
 `trusted`: the workspace trust list (documented with the post-edit hook
-below) — USER config only, managed with `cortex project trust`. A command carrying the `{file}` placeholder is
-per-file: the post-edit hook (below) substitutes the file just written.
-A command carrying `{dir}` is per-package: the hook substitutes the
-file's `"./"`-prefixed package directory, relative to the project root
-(`"./"` for a root-level file) — the correct unit for cross-file tools
-(`go vet` type-checks a whole package, so `go vet {dir}` never reports
-spurious `undefined:` for a symbol defined in a sibling file). Commands
-without either placeholder apply to the whole project and are reported
-but never auto-run per edit.
+below) — USER config only, managed with `cortex project trust`.
 
-The same keys can be declared in the project's `AGENTS.md` under a
-`## Commands` section (the cross-harness convention):
+A command carrying the `{file}` placeholder is per-file: the post-edit hook
+(below) substitutes the file just written. A command carrying `{dir}` is
+per-package: the hook substitutes the file's `"./"`-prefixed package
+directory, relative to the project root (`"./"` for a root-level file) —
+the correct unit for cross-file tools (`go vet` type-checks a whole
+package, so `go vet {dir}` never reports spurious `undefined:` for a symbol
+defined in a sibling file). Commands without either placeholder apply to the
+whole project and are reported but never auto-run per edit.
+
+The same keys can be declared under a `## Commands` section of the
+RESOLVED instruction file — the same file, resolved the same way, as the
+system prompt's [Project instructions](#project-instructions-seeded-from-the-repo)
+section: priority-ordered, first match wins (`AGENTS.md`, then
+`CLAUDE.md`, then `.github/copilot-instructions.md`), capped at
+`limits.max_instruction_bytes`.
 
 ```markdown
 ## Commands
@@ -629,7 +634,8 @@ The same keys can be declared in the project's `AGENTS.md` under a
 Only list items shaped `- <role>: <command>` in the LAST `## Commands`
 section are read (roles case-insensitive, limited to the four roles);
 the rest of the file is untouched. Precedence is field-by-field:
-**config.json beats AGENTS.md, which beats discovery** — the manifests
+**config.json beats the instruction file, which beats discovery** — the
+manifests
 (`go.mod` → `gofmt -w {file}` / `go vet {dir}` / `go test ./...` /
 `go build ./...`; `package.json` scripts — reported as their runnable npm
 form, `npm run <script>` (or the bare `npm test` for the test script),
@@ -638,14 +644,15 @@ which puts node_modules/.bin on PATH and runs pre/post hooks — or
 prettier/eslint deps; `pyproject.toml`'s `[tool.ruff]`/`[tool.black]` +
 pytest; `Cargo.toml`; make targets named format/lint/test/build). Resolution happens once per
 session in `resolveProjectCommands` (`cmd/cortex/session_core.go`), which
-reads the workspace root's `AGENTS.md` directly — the single parsing
-path for that section. A user-level `project.commands` entry beats a
-project-level AGENTS.md entry for the same role, like every other
+reads the resolved instruction file at the workspace root directly — the
+single parsing path for that section — and labels the source with the
+file's name (e.g. `CLAUDE.md`). A user-level `project.commands` entry
+beats an instruction-file declaration for the same role, like every other
 field-by-field merge.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `command_timeout_sec` | 10 | Per-command budget (seconds) for the post-edit hook's format runs. A slow formatter is cut off here and the note reports the elapsed time. |
+| `command_timeout_sec` | 10 | Per-command budget (seconds) for each hook run: the per-edit format and each turn-end lint run (capped at the time left in `turn_lint_budget_sec`). A slow formatter or linter is cut off here and the note/receipt reports the elapsed time. |
 | `turn_lint_budget_sec` | 60 | TOTAL wall-clock budget (seconds) for the turn-end lint pass. It caps the whole pass at once: a lint run that has not started when the budget is spent is not run, and a run in progress is cut off at the budget (the deadline travels into the run). A slow linter is reported as a budget hit in the receipt, not as a per-file timeout. |
 
 **The post-edit hook.** After `write_file`/`edit_file` lands, the session
@@ -671,13 +678,6 @@ An operator can lower it (the REPL's `/hook` command, the per-call
 `hook: "skip"` argument on `write_file`/`edit_file`) but nothing RAISES it
 above the configured ceiling — an agent can skip one call, never enable a
 mode. Trust is never affected by the mode.
-
-**`project.command_timeout_sec`** (default 10): the per-command budget in
-seconds for each hook run (the per-edit format command, and each turn-end
-lint run). A slow formatter is cut off here and the hook's note reports
-how long it ran ("gofmt 0.2s"). At the turn-end lint pass, each lint run's
-per-command budget is also capped at whatever time is left in the turn's
-total lint budget, so the pass can never overrun that total.
 
 **Workspace trust is the ONLY gate.** Trust is a persisted,
 per-workspace, USER-level decision: the user config's `project.trusted`
@@ -725,14 +725,25 @@ Editing round-trips the whole user config, so a trust edit never
 clobbers other settings (unknown top-level keys are preserved). Absent
 or empty means no workspace is trusted — the safe default.
 
-**Inspecting the resolved set:** `cortex project commands` prints the
-
-**Inspecting the resolved set:** `cortex project commands` prints the
-resolved format/lint/test/build commands with their provenance
-(manifest name = discovered; `config.json` / `AGENTS.md` = declared),
-or `--json` for the same data as a JSON document; `--project <name>`
-targets a registered project (from the registry) instead of the
-CWD-derived workspace root — the same pair the hook uses in a session.
+**Inspecting the resolved set.** `cortex project commands` prints the
+resolved format/lint/test/build commands, one per line (or a JSON document
+with `--json`), each carrying `role`, `command`, `source` — the manifest
+name when discovered, `config.json` when declared in `project.commands`, or
+the instruction file's name (`AGENTS.md`, `CLAUDE.md`,
+`.github/copilot-instructions.md`) when declared in its `## Commands`
+section — and `when`: when the post-edit hook runs this command NOW, for
+this workspace and session. `when` is one of: `per-edit` (a per-file
+format command, trusted workspace, hook mode format or all), `turn-end`
+(a lint with `{file}`/`{dir}`, trusted workspace, hook mode all), `never`
+(the test and build roles, or a whole-project format/lint — the hook never
+auto-runs those), `inactive: workspace untrusted` (nothing runs on an
+untrusted workspace), or `inactive: hook mode <mode>` (a trusted workspace
+whose hook mode would not run this role now). `when` is computed from the
+user-config trust list and the effective hook mode (the `CORTEX_POST_EDIT_HOOK`
+env var, then the config's `tools.post_edit_hook`, then the default `all`).
+`--project <name>` targets a registered project (from the registry) instead
+of the CWD-derived workspace root — the same pair the hook uses in a
+session.
 
 ## Validation
 

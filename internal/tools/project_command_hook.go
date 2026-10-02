@@ -189,7 +189,7 @@ func runHookDirect(ctx context.Context, argv []string, dir string) (elapsed time
 // (roleApplicable: format needs {file}; lint runs at the turn END via
 // RunTurnEndLint and needs {file}/{dir} there) ANDed with the trust gate
 // (untrusted → never). The report `cortex project commands` renders uses
-// this so runs_now can never drift from what the hook actually runs: a
+// this so When can never drift from what the hook actually runs: a
 // whole-project format command is never per-edit work, a lint without
 // {file}/{dir} is never auto-run work (the turn-end pass needs a target),
 // test/build NEVER run, and none of that changes on an untrusted workspace

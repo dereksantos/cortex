@@ -358,11 +358,12 @@ func TestBuildProjectCommandsReportPackageJSONRunnableForm(t *testing.T) {
 }
 
 // TestWhenFollowsHookApplicability pins the When verdict against the HOOK's
-// own applicability rules (tools.HookWouldRun): trust is the first gate (an
-// untrusted workspace runs nothing), and on a trusted workspace in mode all
-// the per-file format runs per-edit and the lint at the turn end while a
+// own applicability rules (tools.HookWouldRun / roleRunnable): trust is the
+// first gate (an untrusted workspace runs nothing), and on a trusted
+// workspace the per-file format runs per-edit (mode format/all), a lint with
+// {file} or {dir} runs at the turn end (mode all only), while a
 // whole-project format (no {file}), a whole-project lint (no {file}/{dir}),
-// and the test/build roles NEVER do — no matter how trusted.
+// and the test/build roles NEVER do — no matter how trusted or which mode.
 func TestWhenFollowsHookApplicability(t *testing.T) {
 	cmds := projectcmd.Commands{
 		Format: projectcmd.Command{Cmd: "gofmt -w {file}", PerFile: true, Source: "go.mod"},
@@ -408,6 +409,15 @@ func TestWhenFollowsHookApplicability(t *testing.T) {
 			cmds:    projectcmd.Commands{Lint: projectcmd.Command{Cmd: "cargo clippy --all-targets", Source: "go.mod"}},
 			trusted: true, mode: tools.HookModeAll,
 			want: map[string]string{"lint": "never"},
+		},
+		{
+			name: "dir-lint-trusted-all",
+			// A {dir} lint (PerFile=false, like `go vet {dir}`) is per-package
+			// work: roleRunnable covers it, so trusted in mode all it runs at
+			// the turn end — the branch that {file}-only lint tests miss.
+			cmds:    projectcmd.Commands{Lint: projectcmd.Command{Cmd: "go vet {dir}"}},
+			trusted: true, mode: tools.HookModeAll,
+			want: map[string]string{"lint": "turn-end"},
 		},
 	}
 	for _, tc := range cases {

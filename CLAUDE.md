@@ -193,9 +193,11 @@ the model-driven memory tools
   as a shell-free argv (templates with shell syntax are skipped with a
   note), each with a 10s budget — and appends a note (what ran, what it
   reported) to the result; the note never fails the edit. Commands are
-  declared in
-  `project.commands` or AGENTS.md `## Commands` (docs/configuration.md) and
-  shown by `cortex project commands`.
+  declared in `project.commands` or the `## Commands` section of the
+  resolved instruction file (AGENTS.md → CLAUDE.md →
+  .github/copilot-instructions.md; docs/configuration.md); `cortex
+  project commands` shows each command's source and when it runs
+  (per-edit / turn-end / never / inactive).
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked.
