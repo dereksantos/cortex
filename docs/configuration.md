@@ -637,10 +637,29 @@ path for that section. A user-level `project.commands` entry beats a
 project-level AGENTS.md entry for the same role, like every other
 field-by-field merge.
 
+| Field | Default | Meaning |
+|---|---|---|
+| `command_timeout_sec` | 10 | Per-command budget (seconds) for the post-edit hook's format/lint runs. A slow formatter is cut off here and the note reports the elapsed time. |
+
 **The post-edit hook.** After `write_file`/`edit_file` lands, the session
 runs the project's format command — and, if declared, its per-file or
 per-package lint — on the file just touched, so an unformatted or
 broken file never reaches review.
+
+**The mode switch.** `tools.post_edit_hook` controls how much the hook
+does: `"off"` (nothing runs), `"format"` (only the per-file format command),
+or `"all"` (default: format + per-file/per-package lint). Precedence: the
+`CORTEX_POST_EDIT_HOOK` env var (same values), then the project config's
+`tools.post_edit_hook`, then the user config's, then the default `"all"`.
+An operator can lower it (the REPL's `/hook` command, the per-call
+`hook: "skip"` argument on `write_file`/`edit_file`) but nothing RAISES it
+above the configured ceiling — an agent can skip one call, never enable a
+mode. Trust is never affected by the mode.
+
+**`project.command_timeout_sec`** (default 10): the per-command budget in
+seconds for the hook's format/lint runs. A slow formatter is cut off here
+and the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
+out after 10s"), so a slow tool is obvious in the result.
 
 **Workspace trust is the ONLY gate.** Trust is a persisted,
 per-workspace, USER-level decision: the user config's `project.trusted`

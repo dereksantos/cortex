@@ -417,6 +417,7 @@ helper, and writing table-driven tests):
 | `/clear` | Start a fresh session. |
 | `/sessions` | List persisted session IDs. |
 | `/model [name]` | Show role bindings or switch the coding model for this session. |
+| `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
 
 Durable memory is model-driven rather than a slash command. Ask naturally to

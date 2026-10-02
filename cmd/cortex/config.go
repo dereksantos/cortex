@@ -520,7 +520,7 @@ type ProjectConfig struct {
 	Commands map[string]string `json:"commands"`
 	// Trusted is the per-workspace trust list (issue #129's trust gate):
 	// workspace root directories the OPERATOR has decided are trusted — the
-	// ONLY gate for the post-edit hook (on an untrusted workspace it runs
+	// gate for the post-edit hook (on an untrusted workspace it runs
 	// nothing). It is a USER decision — read from the USER-level config
 	// only: this field is INERT on the merged config's read path (the
 	// accessor TrustedList always reads the user file directly), and
@@ -530,6 +530,12 @@ type ProjectConfig struct {
 	// put a workspace on its own trust list. Absent or empty means no
 	// workspace is trusted — the safe default.
 	Trusted []string `json:"trusted"`
+	// CommandTimeoutSec is the per-command budget for the post-edit hook's
+	// format/lint runs (issue #129 piece 2) — seconds, 0 = the historical
+	// 10s (Config.commandTimeoutSec). A slow formatter is cut off here, and
+	// the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
+	// out after 10s").
+	CommandTimeoutSec int `json:"command_timeout_sec"`
 }
 
 // DeclaredProjectCommands projects the config's declared commands onto
@@ -661,6 +667,16 @@ type ToolConfig struct {
 	// nil-means-enabled Enable* fields above, which gate already-shipped
 	// tools rather than a new default-off behavior.
 	EnableEffortEscalation *bool `json:"enable_effort_escalation"`
+
+	// PostEditHook is the post-edit hook's MODE (issue #129 piece 2):
+	// "off" | "format" | "all" — "" (absent) resolves to the default "all".
+	// It turns the hook down or off when formatters are slow or the run
+	// wants it quieter; an operator can LOWER it (the REPL's /hook, the
+	// per-call `hook: "skip"`) but nothing RAISES it above this, and trust
+	// is never affected. Precedence: the CORTEX_POST_EDIT_HOOK env var (same
+	// values), then the project config, then the user config — resolved once
+	// at session construction (Config.postEditHookMode).
+	PostEditHook string `json:"post_edit_hook"`
 
 	// CurationBudgetTokens / MaxToolOutput / OutlineDefaultBudget override
 	// internal/tools' same-named constants (0 = today's value).
@@ -1437,6 +1453,7 @@ func mergeProject(base, over ProjectConfig) ProjectConfig {
 		}
 		out.Commands = cmds
 	}
+	out.CommandTimeoutSec = mergeIntField(base.CommandTimeoutSec, over.CommandTimeoutSec)
 	out.Trusted = base.Trusted
 	return out
 }
@@ -1763,6 +1780,26 @@ func (c *Config) maxToolIterations() int {
 	return resolveInt(c.Limits.MaxToolIterations, maxToolIterations)
 }
 
+// postEditHookMode resolves the post-edit hook's MODE (issue #129 piece 2):
+// off | format | all. Precedence: the CORTEX_POST_EDIT_HOOK env var (same
+// values) — env wins because it is per-process, the way every other
+// CORTEX_* override does — then the merged config's tools.post_edit_hook
+// (project config over user config, like every other field), then the
+// default all. An unrecognized value resolves to the SAFE off (a typo must
+// never enable a hook the operator did not name). Resolved once at session
+// construction (NewCortexSession) and installed as the process-wide
+// ceiling via tools.SetHookCeiling; a REPL /hook command may then lower the
+// session below it but never raise it above it.
+func (c *Config) postEditHookMode() tools.HookMode {
+	if v, ok := os.LookupEnv("CORTEX_POST_EDIT_HOOK"); ok && v != "" {
+		return tools.ParseHookMode(v)
+	}
+	if c == nil {
+		return tools.HookModeAll
+	}
+	return tools.ParseHookMode(c.Tools.PostEditHook)
+}
+
 func (c *Config) instructionBytesCap() int {
 	if c == nil {
 		return maxInstructionBytes
@@ -1928,6 +1965,7 @@ func (c *Config) toolLimits() tools.Limits {
 		FetchMaxBodyBytes:    resolveInt(c.Tools.FetchURL.MaxBodyBytes, def.FetchMaxBodyBytes),
 		DefaultSearchMax:     resolveInt(c.Tools.WebSearch.DefaultMaxResults, def.DefaultSearchMax),
 		MaximumSearchMax:     resolveInt(c.Tools.WebSearch.MaximumMaxResults, def.MaximumSearchMax),
+		HookCommandBudgetSec: resolveInt(c.Project.CommandTimeoutSec, def.HookCommandBudgetSec),
 	}
 }
 

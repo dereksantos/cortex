@@ -107,7 +107,9 @@ Three capabilities distinguish it:
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
 REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
-`/model [name]`, `/plan <task>`, `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
+`/model [name]`, `/plan <task>`, `/hook off|format|all` (turns the post-edit
+hook down or off for this session — monotone-down, never raises it; bare
+`/hook` shows the current mode), `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
 commands are the `input ==` checks inside the REPL's input loop (`for {`).
 `/help` lists the commands; `/context`

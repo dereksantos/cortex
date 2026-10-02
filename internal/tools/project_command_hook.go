@@ -28,8 +28,23 @@
 // shell anywhere in the pipeline. A template containing shell-control
 // characters (pipe, chain, redirect, command substitution, subshell,
 // newline) can't run without a shell, so it is skipped with a note — its
-// intent is unexpressible, not dangerous. The 10s budget and the 2000-byte
-// output cap apply to every run.
+// intent is unexpressible, not dangerous. The per-command budget (default
+// 10s, configurable via project.command_timeout_sec) and the 2000-byte
+// output cap apply to every run; every hook note carries the elapsed time
+// ("gofmt 0.2s", "eslint timed out after 10s") so a slow tool is obvious in
+// the result.
+//
+// Two gates stand between a write/edit and a command run: workspace trust
+// and the mode switch. Trust is a persisted, per-workspace, USER-level
+// decision (the ~/.cortex user config's project.trusted list, set by
+// `cortex project trust`); it can never come from the workspace itself —
+// not from the project's .cortex/config.json, not from AGENTS.md — because
+// the repository is the untrusted party. The mode (off | format | all,
+// default all — config tools.post_edit_hook, env CORTEX_POST_EDIT_HOOK, REPL
+// /hook) turns the hook down or off when formatters are slow or the run
+// wants it quieter: an operator can lower it (the REPL's /hook, the
+// per-call `hook: "skip"` argument) but nothing RAISES it above the
+// configured ceiling, and trust is never affected by either.
 
 package tools
 
@@ -89,10 +104,15 @@ func workspaceTrusted(deps ToolDeps) bool {
 	return ok && wt.WorkspaceTrusted()
 }
 
-// formatBudget caps how long each hook command (format, then lint) may run.
-// A formatter that hangs must not stall the turn; on expiry the hook notes
-// the timeout and moves on — the edit already succeeded.
-var formatBudget = 10 * time.Second
+// hookCommandBudget caps how long each hook command (format, then lint) may
+// run. It reads from the Limits package var (HookCommandBudgetSec), which
+// defaults to 10s and is set once at session construction from
+// `project.command_timeout_sec`. A formatter that hangs must not stall the
+// turn; on expiry the hook notes the timeout and moves on — the edit
+// already succeeded.
+func hookCommandBudget() time.Duration {
+	return time.Duration(active.HookCommandBudgetSec) * time.Second
+}
 
 // errHookTimeout is the single sentinel the hook's exec path returns on a
 // budget expiry. Callers report it by identity (errors.Is), never by
@@ -100,38 +120,49 @@ var formatBudget = 10 * time.Second
 var errHookTimeout = errors.New("project command timed out")
 
 // hookRunner runs a project command's argv directly (no shell) under the
-// format budget, returning its combined output plus any error (nil on
-// success, errHookTimeout on deadline, or the exec error otherwise). dir is
-// the command's working directory — the project root for an anchored
-// session ("" = the process CWD, the CWD-implicit case) — which is what
-// makes a "./"-prefixed {dir} substitution resolvable from where the
+// per-command budget, returning the elapsed time, the combined output, and
+// any error (nil on success, errHookTimeout on deadline, or the exec error
+// otherwise). dir is the command's working directory — the project root for
+// an anchored session ("" = the process CWD, the CWD-implicit case) — which
+// is what makes a "./"-prefixed {dir} substitution resolvable from where the
 // manifest's commands are meant to run. It is a var — not an inline exec
 // command call — so a test can install a command that actually HANGS and
 // drive the real timeout path; no formatter ever hangs in practice, so the
-// budget can't be reached end-to-end without this seam. The default is
-// runHookDirect.
+// budget can't be reached end-to-end without this seam. The elapsed time is
+// what the hook notes fold in ("gofmt 0.2s", "eslint timed out after 10s")
+// so a slow tool is obvious. The default is runHookDirect.
 var hookRunner = runHookDirect
 
 // runHookDirect is the production hookRunner: exec argv[0] argv[1:]
 // directly — no shell (the injection-safety contract, package comment) —
-// under the format budget, returning combined output plus the run error.
-// A trusted workspace may name repo-local binaries (./node_modules/.bin/…,
-// ./bin/…), so no refusal is applied here: the trust decision already
-// authorized running what this repo configures, and the argv contract
-// (single substitution, no shell) keeps the file path one inert argument.
-func runHookDirect(ctx context.Context, argv []string, dir string) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, formatBudget)
+// under the per-command budget, returning the elapsed time, combined output,
+// and the run error. A trusted workspace may name repo-local binaries
+// (./node_modules/.bin/…, ./bin/…), so no refusal is applied here: the trust
+// decision already authorized running what this repo configures, and the
+// argv contract (single substitution, no shell) keeps the file path one
+// inert argument.
+func runHookDirect(ctx context.Context, argv []string, dir string) (elapsed time.Duration, out string, err error) {
+	cctx, cancel := context.WithTimeout(ctx, hookCommandBudget())
 	defer cancel()
 	if len(argv) == 0 {
-		return "", errors.New("empty command")
+		return 0, "", errors.New("empty command")
 	}
 	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
+	start := time.Now()
 	raw, runErr := cmd.CombinedOutput()
+	elapsed = time.Since(start)
 	if cctx.Err() == context.DeadlineExceeded {
-		return strings.TrimSpace(string(raw)), errHookTimeout
+		return elapsed, strings.TrimSpace(string(raw)), errHookTimeout
 	}
-	return strings.TrimSpace(string(raw)), runErr
+	return elapsed, strings.TrimSpace(string(raw)), runErr
+}
+
+// hookRunnerTimed is the lint path's direct use of the runner seam (the
+// format path goes through runAndWriteBack, which adds the before/after
+// read). It returns (elapsed, out, err) exactly as hookRunner does.
+func hookRunnerTimed(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
+	return hookRunner(ctx, argv, dir)
 }
 
 // HookWouldRun reports whether the post-edit hook would auto-run cmd in role
@@ -204,31 +235,40 @@ func hookGate(template, root, fsPath string, trusted bool) (argv []string, ok bo
 // runProjectCommandHook runs the post-edit format/lint hook for the file at
 // fsPath (the workdir-resolved path) and returns the note to append to the
 // tool result. root is the project root the commands are meant to run from
-// (the session's workdir, "" for a CWD-implicit session). It returns "" when
-// there is nothing to report — no command set, no command that applies to
-// the file's extension, an already-clean file with no applicable lint — so
-// the tool result is byte-identical to the pre-hook behavior in the common
-// case.
+// (the session's workdir, "" for a CWD-implicit session). mode is the
+// resolved hook mode for this call (effectiveHookMode: the configured
+// ceiling, the session-mode a /hook command lowered, and the per-call
+// `hook: "skip"` already folded in): off runs nothing and is silent; format
+// runs the per-file format command only; all (the default) runs format and
+// the per-file/per-package lint. It returns "" when there is nothing to
+// report — no command set, no command that applies to the file's
+// extension, an already-clean file with no applicable lint — so the tool
+// result is byte-identical to the pre-hook behavior in the common case.
 //
-// On an untrusted workspace it runs NOTHING. The one-line "hook inactive"
-// note is emitted exactly once per SESSION: state is the session's per-run
-// state (nil when the caller has none — such a caller has no session to
-// announce for, so the note is never surfaced; that is also why every
-// command-less or headless edit stays byte-identical to the pre-hook
-// result), and the slot is marked consumed only when the note is actually
-// emitted — a trusted workspace never touches the state.
+// On an untrusted workspace it runs NOTHING (trust is the hard gate, ahead
+// of the mode): the one-line "hook inactive" note is emitted exactly once
+// per SESSION (state is the session's per-run state, nil when the caller
+// has none — such a caller has no session to announce for, so the note is
+// never surfaced; that is also why every command-less or headless edit
+// stays byte-identical to the pre-hook result), and the slot is marked
+// consumed only when the note is actually emitted — a trusted workspace
+// never touches the state.
 //
 // It never returns an error: the hook observes, it doesn't veto. Every
 // failure (template refusal, spawn error, timeout, lint failure) is folded
 // into the note string, because the contract is that the hook never blocks
-// the edit.
-func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState) string {
+// the edit — and every note carries the elapsed time ("gofmt 0.2s", "eslint
+// timed out after 10s") so a slow tool is obvious in the result.
+func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) string {
 	if !trusted {
 		if state != nil && state.inactiveNoteDue() {
 			state.announceInactive()
 			return "post-edit hook inactive: this workspace isn't trusted (`cortex project trust add <root>` to enable)"
 		}
 		return ""
+	}
+	if mode == HookModeOff {
+		return "" // off: nothing runs, and it's the operator's choice, so silent
 	}
 
 	var b strings.Builder
@@ -244,26 +284,26 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 		argv, ok, refusal := hookGate(cmds.Format.Cmd, root, fsPath, trusted)
 		switch {
 		case ok:
-			changed, out, err := runAndWriteBack(ctx, argv, root, fsPath)
+			elapsed, changed, out, err := runAndWriteBack(ctx, argv, root, fsPath)
 			switch {
 			case errors.Is(err, errHookTimeout):
-				b.WriteString("note: project format command timed out after " + formatBudget.String() + "; it was NOT run to completion")
+				b.WriteString("note: " + cmdName(cmds.Format.Cmd) + " timed out after " + fmtSeconds(elapsed) + "; it was NOT run to completion")
 			case err != nil:
 				// A run error (spawn failure, gofmt on an unparseable file,
 				// etc.). The tool's output, if any, rides along as an
 				// observation — the file is left as written.
 				if s := strings.TrimSpace(out); s != "" {
-					fmt.Fprintf(&b, "note: project format command ran with an error (%v): %s", err, clipNote(s))
+					fmt.Fprintf(&b, "note: %s ran with an error in %s (%v): %s", cmdName(cmds.Format.Cmd), fmtSeconds(elapsed), err, clipNote(s))
 				} else {
-					fmt.Fprintf(&b, "note: project format command could not run: %v", err)
+					fmt.Fprintf(&b, "note: %s could not run: %v", cmdName(cmds.Format.Cmd), err)
 				}
 			case changed:
-				b.WriteString("note: formatted " + fsPath + " with the project format command (" + cmds.Format.Cmd + ")")
+				b.WriteString("note: formatted " + fsPath + " with the project format command (" + cmds.Format.Cmd + ", " + fmtSeconds(elapsed) + ")")
 			default:
 				// Clean run, no change. Surface any tool output as an
 				// observation; otherwise the file was already clean.
 				if s := strings.TrimSpace(out); s != "" {
-					b.WriteString("note: project format command reported: " + clipNote(s))
+					b.WriteString("note: project format command reported (" + fmtSeconds(elapsed) + "): " + clipNote(s))
 				}
 			}
 		default:
@@ -273,26 +313,26 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 		}
 	}
 
-	// --- Per-file / per-package lint (if declared) -------------------------
+	// --- Per-file / per-package lint (if declared; format+all only) --------
 	// A lint carrying {file} reports problems for the file just touched; one
 	// carrying {dir} type-checks the file's WHOLE PACKAGE (the correct unit
 	// for cross-file tools — see projectcmd.DirPlaceholder). A whole-project
 	// lint (neither token) is skipped — re-linting the world on every edit
 	// is not what the hook is for. The command's extension set gates it the
 	// same way it gates format (appliesTo). Output is folded into the note,
-	// success or failure.
-	if lintApplies(cmds.Lint, fsPath) {
+	// success or failure. In "format" mode this whole step is skipped.
+	if mode == HookModeAll && lintApplies(cmds.Lint, fsPath) {
 		argv, ok, refusal := hookGate(cmds.Lint.Cmd, root, fsPath, trusted)
 		switch {
 		case ok:
-			out, err := hookRunner(ctx, argv, root)
+			elapsed, out, err := hookRunnerTimed(ctx, argv, root)
 			switch {
 			case errors.Is(err, errHookTimeout):
-				b.WriteString("note: project lint command timed out after " + formatBudget.String())
+				b.WriteString("note: " + cmdName(cmds.Lint.Cmd) + " timed out after " + fmtSeconds(elapsed))
 			case err != nil && strings.TrimSpace(out) == "":
-				b.WriteString("note: project lint command could not run: " + err.Error())
+				b.WriteString("note: " + cmdName(cmds.Lint.Cmd) + " could not run: " + err.Error())
 			case strings.TrimSpace(out) != "":
-				b.WriteString("note: project lint for " + fsPath + ":\n" + clipNote(strings.TrimSpace(out)))
+				b.WriteString("note: " + cmdName(cmds.Lint.Cmd) + " for " + fsPath + " (" + fmtSeconds(elapsed) + "):\n" + clipNote(strings.TrimSpace(out)))
 			}
 			// A clean lint (exit 0, no output) is silent.
 		default:
@@ -303,6 +343,29 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 	}
 
 	return b.String()
+}
+
+// cmdName is the first word of a hook command's template ("gofmt -w
+// {file}" → "gofmt", "./bin/my-fmt {file}" → "./bin/my-fmt") — the short
+// identity the elapsed-time notes use ("gofmt 0.2s").
+func cmdName(template string) string {
+	f := strings.Fields(template)
+	if len(f) == 0 {
+		return "the project command"
+	}
+	return f[0]
+}
+
+// fmtSeconds renders an elapsed duration the way the hook notes read it: a
+// sub-second run as fractional seconds ("0.2s"), a whole-second run as an
+// integer ("10s"), and the timeout's "timed out after Ns" uses the budget
+// (which is always a whole second). One decimal for sub-second keeps a slow
+// tool obvious without a wall of digits.
+func fmtSeconds(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return fmt.Sprintf("%ds", int(d.Round(time.Second).Seconds()))
 }
 
 // appliesTo reports whether cmd's declared source-extension set (Extends)
@@ -384,21 +447,22 @@ func packageDirArg(root, fsPath string) string {
 }
 
 // runAndWriteBack runs argv (which may rewrite path on disk, e.g. gofmt -w),
-// then reports whether path changed. err is the run error (errHookTimeout on
-// a deadline, nil on a clean run); a non-zero exit WITH output (gofmt on an
+// then reports whether path changed. elapsed is how long the run took (what
+// the hook's note folds in), err is the run error (errHookTimeout on a
+// deadline, nil on a clean run); a non-zero exit WITH output (gofmt on an
 // unparseable file) is captured in out as well, because it is an observation
 // — the file is left exactly as written, the hook just reports what it saw.
-func runAndWriteBack(ctx context.Context, argv []string, root, path string) (changed bool, out string, err error) {
+func runAndWriteBack(ctx context.Context, argv []string, root, path string) (elapsed time.Duration, changed bool, out string, err error) {
 	before, rerr := os.ReadFile(path)
 	if rerr != nil {
-		return false, "", rerr
+		return 0, false, "", rerr
 	}
-	out, runErr := hookRunner(ctx, argv, root)
+	dur, runOut, runErr := hookRunner(ctx, argv, root)
 	after, werr := os.ReadFile(path)
 	if werr != nil {
-		return false, out, werr
+		return dur, false, runOut, werr
 	}
-	return !stringEqual(before, after), out, runErr
+	return dur, !stringEqual(before, after), runOut, runErr
 }
 
 // clipNote bounds a tool's output folded into a tool result so a chatty

@@ -252,6 +252,7 @@ var helpLines = []string{
 	"/clear             reset the conversation and start a fresh session",
 	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
+	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
 }
 
@@ -706,6 +707,23 @@ func main() {
 				session.SetModel(name)
 				fmt.Printf("code model -> %s\n", name)
 			}
+			continue
+		}
+
+		// /hook off|format|all turns the post-edit hook down or off for the
+		// current session (issue #129 piece 2). A bare /hook (or an
+		// unrecognized value) prints the current mode; a valid value lowers
+		// the session's mode in place (SetMode is monotone-down and clamped
+		// to the process ceiling, so nothing here can raise it above the
+		// configured mode, and trust is never affected).
+		if input == "/hook" || strings.HasPrefix(input, "/hook ") {
+			val := strings.TrimSpace(strings.TrimPrefix(input, "/hook"))
+			if val == "" {
+				fmt.Println("post-edit hook: " + session.hookModeName())
+				continue
+			}
+			session.SetHookMode(tools.ParseHookMode(val))
+			fmt.Println("post-edit hook -> " + session.hookModeName())
 			continue
 		}
 

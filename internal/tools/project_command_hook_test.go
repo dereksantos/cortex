@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/projectcmd"
 )
@@ -102,7 +103,7 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write_file must not fail because of a failing lint, got %v", err)
 	}
-	if !strings.Contains(out, "lint") {
+	if !strings.Contains(out, "for bad.go") {
 		t.Errorf("tool result should surface the per-file lint, got %q", out)
 	}
 	if !strings.Contains(out, "%d") {
@@ -339,8 +340,8 @@ func TestPostEditHookReportsTimeout(t *testing.T) {
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 
 	orig := hookRunner
-	hookRunner = func(ctx context.Context, argv []string, dir string) (string, error) {
-		return "", errHookTimeout // a hung command, budget expired
+	hookRunner = func(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
+		return 10 * time.Second, "", errHookTimeout // a hung command, budget expired
 	}
 	t.Cleanup(func() { hookRunner = orig })
 
@@ -394,8 +395,8 @@ func TestPostEditHookRunsOnEditFile(t *testing.T) {
 // said about the result.
 func TestPostEditHookNoteComposesWithEditWarnings(t *testing.T) {
 	orig := hookRunner
-	hookRunner = func(ctx context.Context, argv []string, dir string) (string, error) {
-		return "HOOK-OUTPUT-MARKER", nil
+	hookRunner = func(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
+		return 50 * time.Millisecond, "HOOK-OUTPUT-MARKER", nil
 	}
 	t.Cleanup(func() { hookRunner = orig })
 	cmds := projectcmd.Commands{

@@ -109,8 +109,10 @@ type CortexSession struct {
 	projectCommands projectcmd.Commands
 	// hookState is the session-scoped state of the post-edit hook
 	// (issue #129): the "workspace not trusted" note fires once per
-	// session, and the session is the unit that owns that flag
-	// (tools.PostEditHookState).
+	// session, and the session is the unit that owns that flag AND the
+	// current mode (tools.PostEditHookState; a REPL /hook command lowers
+	// it in place via SetMode — it never raises above the process
+	// ceiling installed below from the resolved config).
 	hookState     *tools.PostEditHookState
 	deleteRoot    string
 	allowDelete   bool
@@ -305,6 +307,7 @@ func NewCortexSession() *CortexSession {
 	instructionBytesCap = cfg.instructionBytesCap()
 	configurePrompt(cfg)
 	tools.Configure(cfg.toolLimits())
+	tools.SetHookCeiling(cfg.postEditHookMode())
 	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 	openRouterPreflightTimeout = cfg.preflightTimeout()
 	labelTickInterval = cfg.tickerInterval()
@@ -402,6 +405,37 @@ func NewCortexSession() *CortexSession {
 	// its own check as defense-in-depth against a hallucinated tool name.
 	cs.Request.Tools = filterEnabledTools(cs.Request.Tools, cs.IsToolEnabled)
 	return cs
+}
+
+// SetHookMode lowers the session's post-edit hook mode in place (issue #129
+// piece 2): a REPL /hook command is its sole caller. It is monotone-down and
+// clamped to the process ceiling (SetHookCeiling, installed at session
+// construction from the resolved config), so a session can never operate in a
+// mode the operator never configured; the agent has no setter at all.
+func (cs *CortexSession) SetHookMode(m tools.HookMode) {
+	if cs.hookState != nil {
+		cs.hookState.SetMode(m)
+	}
+}
+
+// hookModeName renders the session's current effective hook mode (the
+// /hook command's current-value display; min of the session mode and the
+// process ceiling, where off < format < all).
+func (cs *CortexSession) hookModeName() string {
+	var m tools.HookMode
+	if cs.hookState != nil {
+		m = cs.hookState.SessionMode()
+	} else {
+		m = tools.HookModeAll
+	}
+	switch m {
+	case tools.HookModeOff:
+		return "off"
+	case tools.HookModeFormat:
+		return "format"
+	default:
+		return "all"
+	}
 }
 
 // IsToolEnabled reports whether a context window tool is enabled via config.
