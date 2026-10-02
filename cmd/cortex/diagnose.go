@@ -50,9 +50,10 @@ func diagnoseModelError(err error) string {
 const recentModelEventsShown = 5
 
 // renderRecentModelEvents renders the last few model.substitution /
-// model.failure receipts from the project's model journal class, or ""
-// when there are none (or no journal exists) — the section simply doesn't
-// print. Best-effort by design: a malformed entry is skipped, never fatal.
+// model.failure / model.recovered_error receipts from the project's model
+// journal class, or "" when there are none (or no journal exists) — the
+// section simply doesn't print. Best-effort by design: a malformed entry is
+// skipped, never fatal.
 func renderRecentModelEvents(journalDir string) string {
 	r, err := journal.NewReader(journalDir)
 	if err != nil {
@@ -88,6 +89,17 @@ func renderRecentModelEvents(journalDir string) string {
 			}
 			lines = append(lines, fmt.Sprintf("  %s  %s: %s FAILED unrecovered (%s%s)",
 				e.TS.Format("2006-01-02 15:04"), p.Role, p.Model, p.Class, status))
+		case journal.TypeModelRecoveredError:
+			p, perr := journal.ParseModelRecoveredError(e)
+			if perr != nil {
+				continue
+			}
+			status := ""
+			if p.Status > 0 {
+				status = fmt.Sprintf(", %d", p.Status)
+			}
+			lines = append(lines, fmt.Sprintf("  %s  %s: %s FAILED, turn recovered (%s%s)",
+				e.TS.Format("2006-01-02 15:04"), p.Role, p.Model, p.Class, status))
 		}
 	}
 	if len(lines) == 0 {
@@ -96,6 +108,6 @@ func renderRecentModelEvents(journalDir string) string {
 	if len(lines) > recentModelEventsShown {
 		lines = lines[len(lines)-recentModelEventsShown:]
 	}
-	return "Recent model events (substitutions and unrecovered failures):\n" +
+	return "Recent model events (substitutions, failures, and recovered errors):\n" +
 		strings.Join(lines, "\n") + "\n"
 }
