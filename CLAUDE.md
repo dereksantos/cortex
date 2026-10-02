@@ -242,8 +242,9 @@ is canonical; storage is regeneratable from it. Per-segment flock makes
 capture cross-process safe. See [`docs/journal.md`](docs/journal.md).
 Invariants still enforced: **local-only by default**
 (`journal.AssertLocalOnly` is a code-review tripwire for outbound paths),
-**`.cortex/` in `.gitignore`**, **jq-readable plain JSONL**, closed
-segments gzippable.
+**`.cortex/` is gitignored** (self-ignoring — a session in a git workspace
+writes a lone-`*` `.cortex/.gitignore` rather than editing the user's file,
+#119), **jq-readable plain JSONL**, closed segments gzippable.
 
 ## Go patterns
 

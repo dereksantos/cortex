@@ -119,6 +119,13 @@ func (cs *CortexSession) StartTranscript() {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
+	// Issue #119: the .cortex/ dir now exists (it holds transcripts, journal,
+	// history, memory) and could be swept up by a routine `git add -A`;
+	// self-ignore it right now, via the one path every entry point
+	// (REPL/turn/study/learn/serve/discord/loop) funnels through. Best-effort
+	// and silent unless it actually wrote the self-ignore (see
+	// gitignore_self.go).
+	cs.ensureSelfGitignore()
 	base := time.Now().Format("20060102-150405")
 	id := base
 	var f *os.File
