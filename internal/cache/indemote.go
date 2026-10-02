@@ -1,6 +1,9 @@
 package cache
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // indemote.go — in-turn demotion, the message-grained sibling of turn demotion
 // (WorkingSet.DemoteBatch). Within one turn nothing demotes until the turn
@@ -20,6 +23,14 @@ import "strconv"
 // InTurnStubContent. Only the wire-side message list is ever mutated; the
 // transcript (the lossless record) is never touched, so recall and resume keep
 // seeing the original content.
+
+// InTurnStubPrefix is the fixed prefix every in-turn demotion stub's content
+// carries. PlanInTurnDemotion skips tool results whose Content already starts
+// with it, so a message an earlier send stubbed is never stubbed again (a
+// re-stub of the stub text would read it as a fresh one-line result and lose
+// the original's line count and error status — wrong information to the model
+// for almost no token savings).
+const InTurnStubPrefix = "[demoted:"
 
 // InTurnDemotionPolicy is the in-turn demotion budget. HighWM/LowWM are the
 // hydrated-tail watermarks (the same values turn demotion uses — the high
@@ -53,7 +64,12 @@ type Msg struct {
 //   - any message that is not role:"tool" (user messages — the first real
 //     input and any harness-injected nudge — and assistant messages, whose
 //     text and tool calls are the model's own reasoning), or
-//   - the most recent policy.KeepRecent tool results.
+//   - the most recent policy.KeepRecent tool results, or
+//   - a tool result that an earlier send already stubbed (Content already
+//     carries InTurnStubPrefix) — re-stubbing the stub text would read it as
+//     a fresh one-line result (wrong line count and error status) while
+//     saving almost no tokens. Stubs still count toward the turn's total,
+//     so they contribute to the over-budget test.
 //
 // It stubs tool results oldest-first until the remaining token estimate (after
 // each stub, whose content shrinks to the short stub line) is at or under
@@ -65,12 +81,16 @@ func PlanInTurnDemotion(msgs []Msg, estimator func(Msg) int, policy InTurnDemoti
 		return nil
 	}
 	// Collect the stubbable tool-result indices, oldest-first. The last
-	// KeepRecent are excluded (they stay verbatim); everything before them is
-	// a candidate.
+	// KeepRecent are excluded (they stay verbatim); a message an earlier send
+	// already stubbed is excluded too (see InTurnStubPrefix). Everything else
+	// is a candidate.
 	var candidates []int
 	for i, m := range msgs {
 		if m.Role != "tool" {
 			continue
+		}
+		if strings.HasPrefix(m.Content, InTurnStubPrefix) {
+			continue // already stubbed — never re-stub the stub text
 		}
 		candidates = append(candidates, i)
 	}
@@ -125,10 +145,11 @@ func citationFor(msgs []Msg, i int, sessionID string) string {
 // InTurnStubContent renders the one-line stub that replaces a demoted tool
 // result's content. tool is the tool name, sizeLines the original result's
 // line count, ok whether it succeeded, firstErrLine the result's first line
-// (present only when !ok), and citation the @session/<id>#m<i>-<i> coordinate
-// recall resolves to the original. The shape is fixed by the issue:
+// (present only when !ok), and citation the @session/<id>#m<i>-<i+1>
+// coordinate (the half-open single-message range Recall resolves) that
+// resolves to the original. The shape is fixed by the issue:
 //
-//	[demoted: <tool>(<short args>) → <N> lines, <ok|error><: first error line, if any>. recall @session/<id>#m<i>-<i> for the full output]
+//	[demoted: <tool>(<short args>) → <N> lines, <ok|error><: first error line, if any>. recall @session/<id>#m<i>-<i+1> for the full output]
 //
 // "<short args>" is the caller's job (it has the full ToolCall to label); this
 // helper takes the label (or "" for a bare name) and the rest of the line.
@@ -137,7 +158,7 @@ func InTurnStubContent(toolLabel string, sizeLines int, ok bool, firstErrLine, c
 	if !ok {
 		status = "error"
 	}
-	b := "[demoted: " + toolLabel + " → " + strconv.Itoa(sizeLines) + " lines, " + status
+	b := InTurnStubPrefix + " " + toolLabel + " → " + strconv.Itoa(sizeLines) + " lines, " + status
 	if !ok && firstErrLine != "" {
 		b += ": " + firstErrLine
 	}

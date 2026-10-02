@@ -261,6 +261,156 @@ func TestApplyInTurnDemotionTranscriptUntouched(t *testing.T) {
 	}
 }
 
+// TestApplyInTurnDemotionTurnEndConsumersSeeOriginals locks the turn-side of
+// issue #171 item 5: when a turn's tool result was an "Error: …" failure and
+// in-turn demotion stubbed it on the wire, the turn-END consumers read the
+// ORIGINAL content, never the stub — (a) the turn-end outline entry labels the
+// call [err] (the stub's content would start with "[demoted:" and look like a
+// success to turnOutlineEntry's "Error:" check), and (b) captureTurn's
+// journal artifacts are built from the original content (web_search/
+// fetch_url lines are the real tool output, not stub text). For a turn
+// demotion never touched, the original view is identical to the wire copy.
+func TestApplyInTurnDemotionTurnEndConsumersSeeOriginals(t *testing.T) {
+	cs := indemoteSession(120000) // highWM 60000, lowWM 40000
+	turnStart := len(cs.Request.Messages)
+	errResult := "Error: exit 1\n" + strings.Repeat("t", 4000) + "\n" + strings.Repeat("u", 4000)
+	for i := 0; i < 30; i++ {
+		a, r := indemoteToolResult(i, 12000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+	// The OLDEST tool result is the one the drain stubs first — make it the
+	// failed call.
+	var errIdx int
+	for i := turnStart; i < len(cs.Request.Messages); i++ {
+		if cs.Request.Messages[i].Role == RoleTool {
+			errIdx = i
+			cs.Request.Messages[i].Content = errResult
+			break
+		}
+	}
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+	// Fixture sanity: the failed result must be stubbed on the wire (it is the
+	// oldest tool result, and the turn is far over the high watermark).
+	if !strings.HasPrefix(cs.Request.Messages[errIdx].Content, "[demoted:") {
+		t.Fatalf("fixture: the failed tool result at index %d was not stubbed on the wire", errIdx)
+	}
+
+	// (a) The turn-end outline entry must label the failed call [err], reading
+	// through the originals (a stubbed "[demoted: …" result would otherwise be
+	// marked [ok] by turnOutlineEntry's "Error:" check).
+	entry := turnOutlineEntry(1, cache.TurnSpan{Start: turnStart, End: len(cs.Request.Messages)}, cs.turnOriginalSpan(cs.Request, turnStart), cs.SessionID)
+	found := false
+	for _, a := range entry.Actions {
+		if strings.Contains(a, "[err]") {
+			found = true
+		}
+		if strings.Contains(a, "[ok]") && !found && errIdx < len(cs.Request.Messages) {
+			// The FIRST action is the oldest result's call: it must be [err],
+			// not [ok]. (Later actions may legitimately be [ok].)
+			t.Errorf("the failed call's outline action is %q, want it labeled [err] (the wire copy was a stub; the outline must read the original)", a)
+		}
+	}
+	if !found {
+		t.Errorf("no outline action labeled [err] for the failed tool result; actions: %v", entry.Actions)
+	}
+
+	// (b) captureTurn's artifacts come from the ORIGINAL content: the journal
+	// summary's answer/tool text is the original, never the stub.
+	view := cs.turnOriginalSpan(cs.Request, turnStart)
+	_, answer := turnArtifacts(view)
+	_ = answer
+	results := toolResultsByID(view)
+	origForCall, ok := results["call_0"]
+	if !ok {
+		t.Fatal("fixture: no tool result indexed for call_0 in the original view")
+	}
+	if origForCall != errResult {
+		t.Errorf("captureTurn's view of the failed result = %q..., want the ORIGINAL content (Error: …), not the stub", first200(origForCall))
+	}
+	if strings.Contains(origForCall, "[demoted:") {
+		t.Errorf("captureTurn's view contains the STUB — journal artifacts must be built from the original content")
+	}
+
+	// The original view restores the originals at every stubbed index and
+	// leaves every other message byte-for-byte identical to the wire copy
+	// (only the drained — oldest-first — results are stubbed, so their
+	// indices are exactly the ones with a "[demoted:" stub on the wire).
+	for i, m := range cs.Request.Messages[turnStart:] {
+		if !strings.HasPrefix(m.Content, "[demoted:") {
+			if view[i].Content != m.Content {
+				t.Errorf("original view message %d differs from the wire copy, want byte-for-byte (only stubbed indices are restored)", i)
+			}
+		}
+	}
+}
+
+// TestApplyInTurnDemotionTwiceKeepsFirstStub locks the session-side half of
+// the re-stub bug: a later send in the same turn, over the high watermark
+// again, must NOT rebuild an already-stubbed message from its stub text —
+// the first stub's "240 lines, error: …" (original line count and error
+// status) survives the second call byte-for-byte, while the drain moves on to
+// the next-oldest verbatim results.
+func TestApplyInTurnDemotionTwiceKeepsFirstStub(t *testing.T) {
+	cs := indemoteSession(120000) // highWM 60000, lowWM 40000
+	kr := inTurnKeepRecentDefault - 1
+	cs.Config = &Config{Context: ContextConfig{InTurnKeepRecent: &kr}} // keep 5
+	turnStart := len(cs.Request.Messages)
+	errResult := "Error: exit 1\n" + strings.Repeat("e", 9000) // 93 lines
+	// 24 results of 12000 chars = 72000 tokens — over the 60k highWM; the
+	// failed result (index 2, the oldest) is the first one the drain stubs.
+	for i := 0; i < 24; i++ {
+		a, r := indemoteToolResult(i, 12000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+	// The oldest tool result is a failed call (the "Error: …" shape the
+	// dispatcher returns). 24 results total, keepRecent 5 → the failed result
+	// (index 2) is the oldest candidate.
+	var errIdx int
+	for i := turnStart; i < len(cs.Request.Messages); i++ {
+		if cs.Request.Messages[i].Role == RoleTool {
+			errIdx = i
+			cs.Request.Messages[i].Content = errResult
+			break
+		}
+	}
+
+	// First send: over budget → the oldest verbatim results are stubbed, the
+	// failed one among them.
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+	firstStub := cs.Request.Messages[errIdx].Content
+	if !strings.HasPrefix(firstStub, "[demoted:") {
+		t.Fatalf("fixture: after the first call the oldest result at index %d is not a stub: %q", errIdx, first200(firstStub))
+	}
+	// The first stub must carry the ORIGINAL line count and the error status.
+	wantLines := ritoa(countLines(errResult))
+	if !strings.Contains(firstStub, "→ "+wantLines+" lines, error: ") {
+		t.Fatalf("first stub lost the original's line count/error status: %q", first200(firstStub))
+	}
+
+	// Grow the turn (a later round of tool results) so the turn is over the
+	// high watermark AGAIN — after the first call the turn is ~46k (at
+	// lowWM); 3 more results of 36000 chars = 27000 tokens push it back over
+	// the 60k highWM — and call the hook the second time, the situation a
+	// later send in the same turn hits.
+	for i := 0; i < 3; i++ {
+		a, r := indemoteToolResult(100+i, 36000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+
+	// THE assertion: the first stub is byte-for-byte unchanged after the
+	// second call. The regression rebuilt it from the stub text — countLines
+	// (stub)=1 and isErr (stub)=false — turning "error: Error: exit 1" into
+	// "1 lines, ok": wrong information about a failed call, and a wasted drain
+	// slot.
+	if got := cs.Request.Messages[errIdx].Content; got != firstStub {
+		t.Errorf("second call re-stubbed the first stub: got %q, want the unchanged first stub %q", first200(got), first200(firstStub))
+	}
+	if got := cs.Request.Messages[errIdx].Content; strings.Contains(got, "1 lines, ok") {
+		t.Errorf("the re-stubbed message reads as a successful one-line result: %q", first200(got))
+	}
+}
+
 // --- helpers ---
 
 // ritoa is int→string for citation/index formatting in fixtures (the

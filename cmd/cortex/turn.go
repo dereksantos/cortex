@@ -136,6 +136,17 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		ordinal := cs.ws.Demoted() - len(batch) + i + 1
 		cs.outline = append(cs.outline, turnOutlineEntry(ordinal, span, cs.Request.Messages[span.Start:span.End], cs.SessionID))
 	}
+	// Issue #171: a demoted span's wire copy may hold one-line in-turn stubs
+	// (applyInTurnDemotion mutated it before the send). The outline entry must
+	// label the ORIGINAL results — an "Error: …" result is [err], not [ok] —
+	// so read through the originals (turnOriginalSpan); for spans demotion
+	// never touched the view is identical to the wire copy.
+	if cs.inTurnOriginals != nil {
+		for i, span := range batch {
+			ordinal := cs.ws.Demoted() - len(batch) + i + 1
+			cs.outline[len(cs.outline)-len(batch)+i] = turnOutlineEntry(ordinal, span, cs.turnOriginalSpan(cs.Request, span.Start), cs.SessionID)
+		}
+	}
 	cs.foldOutlineIfNeeded(ctx)
 	if len(cs.outline) > 0 || cs.outlineFolded != "" {
 		cs.Request.OutlineBlock = cs.renderOutlineBlock()
@@ -334,8 +345,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
 	}
 
-	turnMsgs := cs.Request.Messages[turnStart:]
-	cs.captureTurn(input, turnMsgs)
+	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
+	// lines) must be built from the ORIGINAL tool results, not the one-line
+	// wire stubs applyInTurnDemotion left in cs.Request.Messages (item 5); for
+	// a turn demotion never touched the view is identical to the wire copy.
+	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart))
 
 	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LastError: stats.LastError}, nil
 }

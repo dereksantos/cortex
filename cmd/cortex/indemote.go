@@ -20,11 +20,23 @@ package main
 //     original content, so recall(@session/<id>#m<i>-<i+1>) resolves the
 //     stubbed message to its full original output (see Recall, tool_deps.go).
 //
-// The wire-side swap is the ONLY mutation. cs.Request.Messages IS the request
-// slice runLoop re-sends each round (it is passed by reference and appended
-// to in place), so mutating it here shrinks the NEXT send — exactly what the
-// BeforeSend seam (loop.go) asks for: shrink this turn's accumulated tool
-// results before the request is built, byte-for-byte when under budget.
+// turn.go wires the hook:
+//
+//	ts.BeforeSend = func(req *AgentRequest) { cs.applyInTurnDemotion(req, turnStart) }
+//
+// and the turn-end consumers (the outline entry, captureTurn) read the
+// originals back through turnOriginalSpan.
+//
+// The wire-side swap is the ONLY mutation of cs.Request.Messages — the slice
+// runLoop re-sends each round (passed by reference, appended to in place), so
+// mutating it here shrinks the NEXT send, exactly what the BeforeSend seam
+// (loop.go) asks for, byte-for-byte when under budget. The swap is lossless
+// by design: applyInTurnDemotion records each stubbed message's ORIGINAL
+// content in cs.inTurnOriginals (keyed by absolute index) before the swap,
+// and the turn-end consumers (turn.go's outline entry and captureTurn) read
+// the originals back through turnOriginalSpan — the transcript itself is
+// never touched (writeTranscript already recorded the original content, so
+// recall of the stub's citation returns the full output).
 
 import (
 	"fmt"
@@ -129,6 +141,18 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	for i, m := range turn {
 		msgs[i] = inTurnMsg(m)
 	}
+	if cs.inTurnOriginals == nil {
+		cs.inTurnOriginals = map[int]string{}
+	}
+	if cs.inTurnOrigTurn != turnStart {
+		// A new turn starts: the previous turn's originals are no longer
+		// needed (its turn-end consumers — the outline entry and the journal
+		// capture — already read them, and its messages are now an
+		// outline-eligible past turn). Drop them so a session of long turns
+		// doesn't accumulate original content in memory.
+		cs.inTurnOriginals = map[int]string{}
+		cs.inTurnOrigTurn = turnStart
+	}
 	estimator := func(m cache.Msg) int {
 		// Mirror estTurnTokens: a tool result carries the tool-call-id overhead
 		// on the wire; assistant tool calls add name+args, but those are not in
@@ -141,9 +165,40 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 		abs := turnStart + idx
 		m := &req.Messages[abs]
 		label := activityLabelForCallID(req.Messages, m.ToolCallID)
+		if _, seen := cs.inTurnOriginals[abs]; !seen {
+			// Record the ORIGINAL content before the swap: turn-end consumers
+			// (turn.go's outline entry and captureTurn) read this map instead of
+			// the wire copy, so they see the original result, never the stub
+			// (issue #171 item 5). The transcript already holds it — this is the
+			// in-memory half, for the in-session turn only.
+			cs.inTurnOriginals[abs] = m.Content
+		}
 		m.Content = cache.InTurnStubContent(label, countLines(m.Content),
 			!isErrResult(m.Content), firstErrLine(m.Content), fmtCitation(cs.SessionID, abs))
 	}
+}
+
+// turnOriginalSpan copies req.Messages[turnStart:] with the original content
+// restored at every stubbed index (from cs.inTurnOriginals, recorded by
+// applyInTurnDemotion before the wire swap). It is the view turn-end consumers
+// need — the turn-end outline entry and captureTurn read the original tool
+// results (an [err] label, the true content for journal artifacts), not the
+// one-line wire stubs (issue #171 item 5). Under budget (or with demotion
+// disabled) the copy is identical to the wire copy.
+func (cs *CortexSession) turnOriginalSpan(req *AgentRequest, turnStart int) []Message {
+	n := len(req.Messages) - turnStart
+	if n == 0 {
+		return nil
+	}
+	out := make([]Message, n)
+	copy(out, req.Messages[turnStart:])
+	for i := range out {
+		abs := turnStart + i
+		if orig, ok := cs.inTurnOriginals[abs]; ok {
+			out[i].Content = orig
+		}
+	}
+	return out
 }
 
 // fmtCitation builds the transcript coordinate for message index abs: a

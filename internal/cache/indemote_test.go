@@ -15,6 +15,15 @@ func testMsgEstimator(m Msg) int {
 	return TokensOf(len(m.Content) + len(m.Role) + len(m.ToolCallID))
 }
 
+// first80 truncates s to 80 runes for test diagnostics.
+func first80(s string) string {
+	r := []rune(s)
+	if len(r) <= 80 {
+		return s
+	}
+	return string(r[:80]) + "…"
+}
+
 // mkTurn builds a turn: one user message, then n assistant/tool pairs. Each
 // tool result is sizeChars long (the accumulated spill) and tagged with its
 // ordinal so tests can name a specific result. Returns the messages and, per
@@ -165,6 +174,54 @@ func TestPlanInTurnDemotion(t *testing.T) {
 		for _, idx := range stubbed {
 			if msgs[idx].Role != "tool" {
 				t.Errorf("stubbed index %d is role %q, want only role:tool", idx, msgs[idx].Role)
+			}
+		}
+	})
+
+	t.Run("already-stubbed results are never re-stubbed, and still count toward the total", func(t *testing.T) {
+		// Simulates a later send in the same turn: an earlier send already
+		// stubbed the two oldest tool results (their Content is the stub an
+		// earlier applyInTurnDemotion wrote). They must NOT be stubbed again —
+		// re-stubbing the stub text would read it as a fresh one-line result
+		// (countLines=1, isErr=false) and silently lose the original's line
+		// count and "error: …" status — but they STILL count toward the total,
+		// so the over-budget test fires and the next oldest VERBATIM results
+		// are the ones stubbed.
+		msgs, toolIdx := mkTurn(8, 4000, "bash")
+		// The two oldest tool results are ALREADY stubs — exactly as a later
+		// send in the same turn would see them after an earlier
+		// applyInTurnDemotion. One carries the error status (a failed
+		// "Error: …" result) so the "1 lines, ok" regression is detectable.
+		msgs[toolIdx[0]].Content = InTurnStubContent("bash(go test)", 240, false, "Error: exit 1", citationFor(msgs, toolIdx[0], sessionID))
+		msgs[toolIdx[1]].Content = InTurnStubContent("bash(go vet)", 12, true, "", citationFor(msgs, toolIdx[1], sessionID))
+		policy := InTurnDemotionPolicy{HighWM: 5000, LowWM: 1000, KeepRecent: 2, SessionID: sessionID}
+		stubbed := PlanInTurnDemotion(msgs, testMsgEstimator, policy)
+		if len(stubbed) == 0 {
+			t.Fatal("nothing stubbed; the turn is still over the high watermark (the stubs count toward the total)")
+		}
+		for _, idx := range stubbed {
+			if idx == toolIdx[0] || idx == toolIdx[1] {
+				t.Errorf("already-stubbed tool result at index %d was stubbed again; a stub must never be re-stubbed", idx)
+			}
+		}
+		// The new stubs must be the next-oldest VERBATIM results (toolIdx[2],
+		// toolIdx[3], … oldest-first, keepRecent 2 untouched).
+		wantFrom := 2
+		for i, idx := range stubbed {
+			if idx != toolIdx[wantFrom+i] {
+				t.Fatalf("stubbed[%d] = %d, want %d (the %d-th oldest VERBATIM result, oldest-first)", i, idx, toolIdx[wantFrom+i], wantFrom+i)
+			}
+		}
+		// The first pass's stubs must be byte-for-byte unchanged — the model
+		// keeps seeing "240 lines, error: …" (the original's count and status),
+		// not a re-stubbed "1 lines, ok".
+		firstPassStubs := []string{
+			InTurnStubContent("bash(go test)", 240, false, "Error: exit 1", citationFor(msgs, toolIdx[0], sessionID)),
+			InTurnStubContent("bash(go vet)", 12, true, "", citationFor(msgs, toolIdx[1], sessionID)),
+		}
+		for k, i := range []int{toolIdx[0], toolIdx[1]} {
+			if msgs[i].Content != firstPassStubs[k] {
+				t.Errorf("pre-existing stub at index %d was rewritten (re-stubbed from its own stub text): got %q, want %q", i, first80(msgs[i].Content), first80(firstPassStubs[k]))
 			}
 		}
 	})
