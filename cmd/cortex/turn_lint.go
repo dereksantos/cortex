@@ -88,7 +88,7 @@ func (cs *CortexSession) turnLintAtFinalize(ctx context.Context) string {
 		return ""
 	}
 	cs.lintReceipt = receipt
-	return "Before you finish: the turn-end lint pass (your project's lint, run once over the files you touched) reported the following. Fix them if you can, or restate your complete final answer — first your summary of what you changed and why, then plainly account for each finding: " + receipt + ". Lint findings you leave unfixed are findings the reviewer will see."
+	return "Before you finish: the turn-end lint pass (your project's lint, run once over the files you touched) reported the following. You have no tools in this round, so you cannot fix anything now — restate your complete final answer: first your summary of what you changed and why, then, for each finding, state it and what would fix it (a short fix plan the user or a follow-up turn can act on). Lint findings left unfixed are findings the reviewer will see: " + receipt
 }
 
 // runTurnLint runs the turn-end lint pass for the turn's touched files and
@@ -96,9 +96,11 @@ func (cs *CortexSession) turnLintAtFinalize(ctx context.Context) string {
 // mode "all" (the effective mode — the configured ceiling folded with a
 // /hook lowering), workspace trust, a lint command with a target
 // ({file}/{dir}), at least one applicable touched file, and the turn's
-// total lint budget (the deadline). It never fails: every degradation is
-// folded into the receipt or silently skipped, the per-edit hook's
-// contract.
+// total lint budget (project.turn_lint_budget_sec, 0 = the default 60s —
+// runTurnLint passes it through and RunTurnEndLint converts it to a
+// deadline that cuts off a run in progress, not just unstarted ones). It
+// never fails: every degradation is folded into the receipt or silently
+// skipped, the per-edit hook's contract.
 func (cs *CortexSession) runTurnLint(ctx context.Context) string {
 	if tools.EffectiveHookMode(cs.hookState) != tools.HookModeAll {
 		return "" // "format" and "off" skip the turn-end lint
@@ -106,12 +108,11 @@ func (cs *CortexSession) runTurnLint(ctx context.Context) string {
 	if !cs.WorkspaceTrusted() {
 		return "" // trust is the hard gate — untrusted runs nothing
 	}
-	budgetSec := cs.turnLinter.budgetSec
-	if budgetSec <= 0 {
-		budgetSec = tools.DefaultLimits().TurnLintBudgetSec
-	}
 	files := cs.turnLinter.touched
-	receipt := tools.RunTurnEndLint(ctx, cs.projectCommands, cs.Workdir(), files, true, time.Now().Add(time.Duration(budgetSec)*time.Second))
+	// budgetSec 0 = "not armed by NewCortexSession" (hand-built test
+	// sessions): pass it through and let RunTurnEndLint fall back to the
+	// default total budget.
+	receipt := tools.RunTurnEndLint(ctx, cs.projectCommands, cs.Workdir(), files, true, time.Duration(cs.turnLinter.budgetSec)*time.Second)
 	cs.lintReceipt = receipt
 	return receipt
 }

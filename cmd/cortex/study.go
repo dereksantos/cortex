@@ -215,6 +215,18 @@ func (cs *CortexSession) dispatcherFor(sa tools.Subagent) AgentDispatcher {
 		if refusal != "" {
 			return refusal
 		}
+		// Issue #129 piece 3: the subagent's own writes are the TURN's edits —
+		// the turn-end lint pass must see them (pre-piece-3, the per-edit
+		// hook ran for these very edits, so a subagent edit going unlinted
+		// would be a regression). The Agent profile is the only one with
+		// write_file/edit_file; the path is already ConfinePath'd, so it is
+		// workdir-resolvable (lintTouchedPath drops anything outside the
+		// workspace, and RunTurnEndLint skips files that no longer exist).
+		if call.Function.Name == tools.FunctionWriteFile || call.Function.Name == tools.FunctionEditFile {
+			if p, err := call.StringArg("path"); err == nil {
+				cs.lintTouchedPath(p)
+			}
+		}
 		out, err := tools.Execute(ctx, call, cs)
 		if err != nil {
 			return "Error: " + err.Error()

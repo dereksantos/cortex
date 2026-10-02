@@ -113,7 +113,7 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	}
 	// The turn-end pass runs the lint once over the distinct touched files
 	// and surfaces the finding in its receipt.
-	receipt := RunTurnEndLint(context.Background(), goRepoCmds(), "", []string{"bad.go"}, true, time.Now().Add(time.Minute))
+	receipt := RunTurnEndLint(context.Background(), goRepoCmds(), "", []string{"bad.go"}, true, time.Minute)
 	if !strings.Contains(receipt, "for bad.go") {
 		t.Errorf("turn-end lint receipt should name the touched file, got %q", receipt)
 	}
@@ -128,7 +128,7 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRepoFile(t, filepath.Join(root, "cleanpkg", "ok.go"), "package cleanpkg\n")
-	if got := RunTurnEndLint(context.Background(), goRepoCmds(), "", []string{"cleanpkg/ok.go"}, true, time.Now().Add(time.Minute)); got != "" {
+	if got := RunTurnEndLint(context.Background(), goRepoCmds(), "", []string{"cleanpkg/ok.go"}, true, time.Minute); got != "" {
 		t.Errorf("clean turn-end lint must be silent (no extra round), got %q", got)
 	}
 }

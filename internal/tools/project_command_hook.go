@@ -336,16 +336,26 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 //   - no lint command, or a lint command without {file}/{dir}: nothing to
 //     run (a whole-project lint is reported but never auto-run — the same
 //     rule roleApplicable applies);
-//   - no touched files (or none the command's extension set applies to):
-//     nothing to lint.
+//   - no touched files (or none the command's extension set applies to): nothing
+//     to lint. A touched file that no longer exists on disk is skipped too:
+//     the turn may have DELETED one of the files it wrote (write_file then
+//     remove_path), and linting a missing path would report a spurious
+//     "could not run" finding for a file that is gone on purpose.
 //
 // The caller gates the MODE (only "all" runs lint — "format" and "off" skip
-// it) and passes the turn's total lint budget as deadline (time.Time, the
-// moment the budget runs out; zero = no budget, nothing runs): the per-
-// command budget (hookCommandBudget, project.command_timeout_sec) still
-// applies to every run so a broken linter can't hang the turn, and the
-// deadline caps the whole pass — when it trips, the remaining commands are
-// not run and the receipt says so ("turn lint budget exhausted — …").
+// it) and passes the turn's total lint budget (budget, seconds; <=0 means
+// "use the default", currently 60s — project.turn_lint_budget_sec): the
+// deadline is start + budget, the moment the budget runs out. It binds TWO
+// ways: a run that has not started when the deadline passes is not run, and
+// a run in progress is cut off at the deadline — the deadline travels into
+// each hookRunner call as the run's context, which caps the per-command
+// budget (hookCommandBudget, project.command_timeout_sec) at the turn
+// deadline. So the pass can never overrun the total budget even when
+// command_timeout_sec > turn_lint_budget_sec, and a deadline-cancelled run
+// is reported as a budget hit ("turn lint budget (Ns) exhausted — M of R
+// runs not run"), not as "timed out after 10s". The per-command budget
+// still applies on its own (a broken linter in a long, cheap pass must not
+// hang the turn).
 //
 // For {file} commands each touched file is linted once, in the order the
 // turn touched them. For {dir} commands (per-package tools like
@@ -356,16 +366,26 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 // per run, clipped to 2000 bytes like every other hook note. It never
 // returns an error: like the per-edit hook, the pass observes, it doesn't
 // veto.
-func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, files []string, trusted bool, deadline time.Time) string {
+func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, files []string, trusted bool, budget time.Duration) string {
 	if !trusted {
 		return "" // untrusted: the hard gate — nothing runs (the per-edit hook already announced the inactive state)
 	}
 	if !lintApplies(cmds.Lint, "") {
 		return "" // no lint command, or a whole-project lint: nothing to auto-run
 	}
-	if deadline.IsZero() {
-		return "" // no budget: a zero budget would kill every command, so the caller must gate this
+	// Zero means "the caller didn't arm a budget" (a hand-built test
+	// session): the default total budget applies. A NEGATIVE budget is a
+	// deadline already in the past (the test seam for "the budget is spent
+	// before the pass starts"): the budget line reports the configured
+	// duration, and nothing runs.
+	negative := budget < 0
+	if negative {
+		return "lint: turn lint budget (" + fmtSeconds(-budget) + ") exhausted — no runs were made"
 	}
+	if budget <= 0 {
+		budget = time.Duration(DefaultLimits().TurnLintBudgetSec) * time.Second // caller not armed: the default total budget
+	}
+	deadline := time.Now().Add(budget)
 	if hookTemplateRejected(cmds.Lint.Cmd) != "" {
 		return "" // shell-syntax template: unexpressible without a shell — nothing runs (the per-edit hook notes this for format; the turn-end pass has no tool result to fold a refusal into, and the session gates the mode anyway)
 	}
@@ -381,6 +401,14 @@ func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, 
 	seenDir := map[string]bool{}
 	for _, f := range files {
 		if !appliesTo(cmds.Lint, f) {
+			continue
+		}
+		// Skip files the turn deleted since writing them (write_file then
+		// remove_path): linting a missing path reports a spurious finding
+		// for a file that is gone on purpose. The workdir anchor is root —
+		// the directory the pass runs the commands in (same as the {dir}
+		// substitution); "" (a CWD-implicit session) means the process CWD.
+		if _, err := os.Stat(filepath.Join(root, f)); err != nil {
 			continue
 		}
 		argv, ok, _ := hookGate(cmds.Lint.Cmd, root, f, true) // trust already checked above
@@ -401,23 +429,46 @@ func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, 
 	}
 
 	name := cmdName(cmds.Lint.Cmd)
+	// The deadline binds EVERY run, not just the gaps between them: it
+	// travels into each hookRunner call as the run's context, so a run in
+	// progress is cut off at the turn deadline (and so is the per-command
+	// budget, which WithTimeout caps at the remaining time) — the pass can
+	// never overrun its total budget even when command_timeout_sec >
+	// turn_lint_budget_sec.
+	lctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var findings []string
 	budgetHit := false
+	runNo := 0
 	for _, r := range runs {
 		if time.Now().After(deadline) {
 			budgetHit = true
 			break
 		}
-		elapsed, out, err := hookRunner(ctx, r.argv, root)
+		runNo++
+		elapsed, out, err := hookRunner(lctx, r.argv, root)
 		switch {
 		case errors.Is(err, errHookTimeout):
+			// The per-command budget (hookCommandBudget) is capped at the
+			// deadline by lctx, so this sentinel only fires when the
+			// per-command budget is SHORTER than the time left in the turn
+			// budget — a genuine per-command timeout, not a budget hit.
 			findings = append(findings, name+" for "+r.display+" timed out after "+fmtSeconds(elapsed))
+		case lctx.Err() == context.DeadlineExceeded:
+			// The run was in progress when the turn deadline passed: the
+			// hookRunner's exec was cut off at the deadline. This is a
+			// budget hit, not a finding about the file — the run's own
+			// output (if any) is discarded with the timeout's half-result.
+			budgetHit = true
 		case err != nil && strings.TrimSpace(out) == "":
 			findings = append(findings, name+" for "+r.display+" could not run: "+err.Error())
 		case strings.TrimSpace(out) != "":
 			findings = append(findings, name+" for "+r.display+" ("+fmtSeconds(elapsed)+"): "+clipNote(strings.TrimSpace(out)))
 		}
 		// A clean run (exit 0, no output) is silent.
+		if budgetHit {
+			break // the budget is spent; the remaining runs are not run
+		}
 	}
 
 	if len(findings) == 0 && !budgetHit {
@@ -432,11 +483,7 @@ func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, 
 		b.WriteString(f)
 	}
 	if budgetHit {
-		budget := time.Until(deadline)
-		if budget < 0 {
-			budget = 0
-		}
-		fmt.Fprintf(&b, "\nturn lint budget exhausted after ~%s — some commands were not run", fmtSeconds(budget))
+		fmt.Fprintf(&b, "\nturn lint budget (%s) exhausted — %d of %d runs not run", fmtSeconds(budget), len(runs)-runNo, len(runs))
 	}
 	return b.String()
 }

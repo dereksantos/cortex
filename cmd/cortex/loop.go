@@ -1002,7 +1002,15 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			// Issue #129 piece 3: record the touched file for the turn-end
 			// lint pass (the per-edit hook is format-only; lint runs once at
 			// finalize over the turn's distinct touched files, turn_lint.go).
-			cs.lintTouchedPath(p)
+			// Only write_file / edit_file feed the lint list — remove_path
+			// deletes, and linting a file the turn just removed would report a
+			// spurious "could not run" finding for a file that is gone on
+			// purpose (RunTurnEndLint also skips missing paths, belt and
+			// suspenders: a write the turn then deleted via bash is covered
+			// there, this covers the remove_path leg).
+			if call.Function.Name == tools.FunctionWriteFile || call.Function.Name == tools.FunctionEditFile {
+				cs.lintTouchedPath(p)
+			}
 		}
 		cs.startActivity(call.ActivityLabel())
 		out, err := tools.Execute(ctx, call, cs)
