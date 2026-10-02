@@ -606,6 +606,17 @@ func printTestReceipt(receipt string) {
 	}
 }
 
+// printLintReceipt prints a turn's "lint: …" receipt (issue #129 piece 3,
+// the turn-end lint pass) to the REPL at the turn boundary — the turn's
+// lint findings, the same fact the model saw in the finalize round and the
+// journal carries. A no-op for the empty receipt (a clean turn: no findings
+// and no extra round, by the pass's contract).
+func printLintReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(withColor(receipt, yellow))
+	}
+}
+
 // afterTurn is the REPL's post-turn safety net, shared by the normal single
 // turn and the /plan (multi-turn) path so the two stay in sync. It reacts to
 // the error of a just-completed turn (or plan run):

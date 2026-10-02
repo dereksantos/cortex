@@ -186,6 +186,32 @@ type CortexSession struct {
 	// on every turn that runs bash. Dropped with the snapshot (testwatchDrop).
 	testwatchScratchBefore map[string]bool
 
+	// turnLinter is the turn-end lint pass's (issue #129 piece 3) per-turn
+	// state: the DISTINCT files this turn's write_file/edit_file calls
+	// touched (workdir-resolved paths, first-touch order — the same keys
+	// touchFile uses, normalized), and the turn's total lint budget
+	// (project.turn_lint_budget_sec, 0 = the default 60s) as a deadline.
+	// Armed by lintTouchedPath (the coder dispatcher, before each mutating
+	// call), read by turnLintAtFinalize at the clean-finalize point (the
+	// turn's FinalizeHook, alongside the #141 test-loss receipt), and
+	// dropped with the snapshot (testwatchDrop). Lint moved off the per-
+	// edit hook because clippy/eslint are slow and noisy: format stays
+	// per-edit, lint runs once per turn over the distinct touched files.
+	// Nil outside a turn; budgetSec 0 means "not armed by NewCortexSession"
+	// (hand-built test sessions use the default budget).
+	turnLinter struct {
+		touched   []string
+		budgetSec int
+	}
+	// lintReceipt is this turn's "lint: …" receipt (issue #129 piece 3):
+	// computed at the clean-finalize point by turnLintAtFinalize (stored
+	// there because the pass must run BEFORE the model's final answer, so
+	// the model can fix findings) and read by turn.go into
+	// TurnResult.LintReceipt (the REPL / `cortex turn` print it) and by
+	// captureTurn (the journal record shows it). "" between turns (dropped
+	// with the snapshot).
+	lintReceipt string
+
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to
 	// MaybeCaptureScanRoots (scanroots.go) treats that reply as the

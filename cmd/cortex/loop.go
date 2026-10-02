@@ -999,6 +999,10 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			cs.armTestwatch()
 		} else if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
+			// Issue #129 piece 3: record the touched file for the turn-end
+			// lint pass (the per-edit hook is format-only; lint runs once at
+			// finalize over the turn's distinct touched files, turn_lint.go).
+			cs.lintTouchedPath(p)
 		}
 		cs.startActivity(call.ActivityLabel())
 		out, err := tools.Execute(ctx, call, cs)

@@ -658,6 +658,7 @@ func main() {
 			// changed" receipt; the plan run carries them (TurnWithPlan) so
 			// a /plan run reports test loss exactly like a single turn.
 			printTestReceipt(plan.TestReceipt)
+			printLintReceipt(plan.LintReceipt)
 			afterTurn(session, planErr)
 			continue
 		}
@@ -775,6 +776,10 @@ func main() {
 		// human gets it here, in the terminal, on the turn that produced it —
 		// the loss is reported where a reviewer would look.
 		printTestReceipt(res.TestReceipt)
+		// Issue #129 piece 3: the turn-end lint receipt rides the same
+		// turn-boundary surface — the findings the model saw in the finalize
+		// round reach the human in the terminal too.
+		printLintReceipt(res.LintReceipt)
 		afterTurn(session, err)
 	}
 

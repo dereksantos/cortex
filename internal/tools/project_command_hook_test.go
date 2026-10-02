@@ -87,9 +87,12 @@ func TestPostEditHookFormatsUnformattedFile(t *testing.T) {
 	}
 }
 
-// TestPostEditHookSurfacesFailingLint: on a TRUSTED workspace, a
-// well-formatted but vet-FAILING file must not fail the write — the hook
-// runs the per-file lint and folds its failure into the tool result.
+// TestPostEditHookSurfacesFailingLint pins the turn-end lint pass (issue
+// #129 piece 3): lint moved off the per-edit hook — clippy/eslint are slow
+// and noisy per edit — so the per-edit write_file result carries only the
+// format observation, and the finding surfaces ONCE at the turn end, over
+// the distinct files the turn touched (RunTurnEndLint). The write must not
+// fail because of a failing lint.
 func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
@@ -103,11 +106,30 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write_file must not fail because of a failing lint, got %v", err)
 	}
-	if !strings.Contains(out, "for bad.go") {
-		t.Errorf("tool result should surface the per-file lint, got %q", out)
+	// Piece 3: the per-edit hook is format-only — the write result carries
+	// no lint (lint runs once at the turn end).
+	if strings.Contains(out, "lint") || strings.Contains(out, "%d") {
+		t.Errorf("the per-edit write result must not carry lint (lint moved to the turn end), got %q", out)
 	}
-	if !strings.Contains(out, "%d") {
-		t.Errorf("tool result should carry the lint's finding, got %q", out)
+	// The turn-end pass runs the lint once over the distinct touched files
+	// and surfaces the finding in its receipt.
+	receipt := RunTurnEndLint(context.Background(), goRepoCmds(), "", []string{"bad.go"}, true, time.Now().Add(time.Minute))
+	if !strings.Contains(receipt, "for bad.go") {
+		t.Errorf("turn-end lint receipt should name the touched file, got %q", receipt)
+	}
+	if !strings.Contains(receipt, "%d") {
+		t.Errorf("turn-end lint receipt should carry the lint's finding, got %q", receipt)
+	}
+	// A clean turn (a vet-PASSING package) gets no receipt — no extra round.
+	// (go vet {dir} type-checks the whole package, so the bad file above
+	// would still taint a same-package "clean" run — the ok file gets its
+	// own package dir, where the pass is genuinely clean.)
+	if err := os.MkdirAll(filepath.Join(root, "cleanpkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRepoFile(t, filepath.Join(root, "cleanpkg", "ok.go"), "package cleanpkg\n")
+	if got := RunTurnEndLint(context.Background(), goRepoCmds(), "", []string{"cleanpkg/ok.go"}, true, time.Now().Add(time.Minute)); got != "" {
+		t.Errorf("clean turn-end lint must be silent (no extra round), got %q", got)
 	}
 }
 
@@ -396,7 +418,9 @@ func TestPostEditHookRunsOnEditFile(t *testing.T) {
 // the change (#153's line delta and removal WARNING, #141's large-deletion
 // NOTE): every note survives, and the hook's note comes last — the tool's own
 // account of the change it applied first, then what the project's commands
-// said about the result.
+// said about the result. Piece 3: the stub command stands in for the FORMAT
+// command (the per-edit hook is format-only; lint runs once at the turn end,
+// and the turn-end receipt composition is pinned by TestTurnEndLintReceipt).
 func TestPostEditHookNoteComposesWithEditWarnings(t *testing.T) {
 	orig := hookRunner
 	hookRunner = func(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
@@ -404,7 +428,7 @@ func TestPostEditHookNoteComposesWithEditWarnings(t *testing.T) {
 	}
 	t.Cleanup(func() { hookRunner = orig })
 	cmds := projectcmd.Commands{
-		Lint: projectcmd.Command{Cmd: "go vet {dir}", Extends: []string{".go"}, Source: "go.mod"},
+		Format: projectcmd.Command{Cmd: "fmt-marker {file}", PerFile: true, Extends: []string{".go"}, Source: "go.mod"},
 	}
 
 	var body strings.Builder

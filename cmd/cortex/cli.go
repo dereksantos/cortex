@@ -153,6 +153,9 @@ func runTurnCLI(args []string) {
 			if res.TestReceipt != "" {
 				out["tests_changed"] = res.TestReceipt
 			}
+			if res.LintReceipt != "" {
+				out["lint"] = res.LintReceipt
+			}
 			if turnErr != nil {
 				out["error"] = turnErr.Error()
 				out["interrupted"] = res.Interrupted
@@ -176,6 +179,12 @@ func runTurnCLI(args []string) {
 			// under "tests_changed" above.
 			if res.TestReceipt != "" {
 				fmt.Fprintln(os.Stderr, res.TestReceipt)
+			}
+			// Issue #129 piece 3: the turn-end lint receipt rides the same
+			// stderr surface ("lint: …"), and the --json path carries it under
+			// "lint" above.
+			if res.LintReceipt != "" {
+				fmt.Fprintln(os.Stderr, res.LintReceipt)
 			}
 			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
 		}

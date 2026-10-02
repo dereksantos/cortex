@@ -1,10 +1,13 @@
-// project_command_hook.go is the post-edit hook for issue #129.
+// project_command_hook.go is the post-edit hook and the turn-end lint pass
+// for issue #129.
 //
 // After write_file / edit_file lands, the session runs the project's OWN
-// format command (and, if declared, its per-file or per-package lint) on
-// the file that was just touched, so an unformatted or broken file never
-// reaches review. The hook is a best-effort observation: it appends what
-// it ran and what the tool reported to the tool result — including lint
+// format command on the file that was just touched, so an unformatted file
+// never reaches review. Lint is NOT per-edit (it is slow and noisy —
+// clippy, eslint): RunTurnEndLint runs it ONCE at the end of the turn, over
+// the distinct files the turn touched, under the turn's total lint budget
+// (RunTurnEndLint's doc). The hook is a best-effort observation: it appends
+// what it ran and what the tool reported to the tool result — including
 // failures and timeouts — but it NEVER fails the edit. A broken formatter,
 // a missing toolchain, or a command that takes too long all degrade to a
 // note, never to a refused edit.
@@ -44,7 +47,9 @@
 // /hook) turns the hook down or off when formatters are slow or the run
 // wants it quieter: an operator can lower it (the REPL's /hook, the
 // per-call `hook: "skip"` argument) but nothing RAISES it above the
-// configured ceiling, and trust is never affected by either.
+// configured ceiling, and trust is never affected by either. In "all" mode
+// the turn-end lint pass (RunTurnEndLint) runs the project's lint once over
+// the turn's touched files; "format" and "off" skip it.
 
 package tools
 
@@ -158,22 +163,16 @@ func runHookDirect(ctx context.Context, argv []string, dir string) (elapsed time
 	return elapsed, strings.TrimSpace(string(raw)), runErr
 }
 
-// hookRunnerTimed is the lint path's direct use of the runner seam (the
-// format path goes through runAndWriteBack, which adds the before/after
-// read). It returns (elapsed, out, err) exactly as hookRunner does.
-func hookRunnerTimed(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
-	return hookRunner(ctx, argv, dir)
-}
-
 // HookWouldRun reports whether the post-edit hook would auto-run cmd in role
 // with the given trust state — the hook's own applicability rules
-// (roleApplicable: format needs {file}, lint needs {file}/{dir}, test and
-// build are never hook-run) ANDed with the trust gate (untrusted → never).
-// The report `cortex project commands` renders uses this so runs_now can
-// never drift from what the hook actually runs: a whole-project format
-// command is never per-edit work, a lint without {file}/{dir} is never
-// per-edit work, test/build NEVER run, and none of that changes on an
-// untrusted workspace — the hook runs nothing there.
+// (roleApplicable: format needs {file}; lint runs at the turn END via
+// RunTurnEndLint and needs {file}/{dir} there) ANDed with the trust gate
+// (untrusted → never). The report `cortex project commands` renders uses
+// this so runs_now can never drift from what the hook actually runs: a
+// whole-project format command is never per-edit work, a lint without
+// {file}/{dir} is never auto-run work (the turn-end pass needs a target),
+// test/build NEVER run, and none of that changes on an untrusted workspace
+// — the hook runs nothing there.
 func HookWouldRun(role projectcmd.Role, cmd projectcmd.Command, trusted bool) bool {
 	return trusted && roleApplicable(role, cmd)
 }
@@ -182,10 +181,9 @@ func HookWouldRun(role projectcmd.Role, cmd projectcmd.Command, trusted bool) bo
 // the hook's own inline checks: the format role runs only a PER-FILE
 // command (a whole-project format has no argument to substitute for the
 // one file just touched), and the lint role only a command carrying the
-// {file} or {dir} token (a whole-project lint is not the hook's job —
-// exactly the hook's `lintApplies`-style inline test, without the Extends
-// gate the hook applies per touched file). The test and build roles are
-// never hook-run at all.
+// {file} or {dir} token (a whole-project lint has no per-touched-file
+// target — the turn-end pass, like the old per-edit lint, is not its job).
+// The test and build roles are never hook-run at all.
 func roleApplicable(role projectcmd.Role, cmd projectcmd.Command) bool {
 	switch role {
 	case projectcmd.RoleFormat:
@@ -232,18 +230,19 @@ func hookGate(template, root, fsPath string, trusted bool) (argv []string, ok bo
 	return splitProjectCommand(template, root, fsPath), true, ""
 }
 
-// runProjectCommandHook runs the post-edit format/lint hook for the file at
+// runProjectCommandHook runs the post-edit FORMAT hook for the file at
 // fsPath (the workdir-resolved path) and returns the note to append to the
 // tool result. root is the project root the commands are meant to run from
 // (the session's workdir, "" for a CWD-implicit session). mode is the
 // resolved hook mode for this call (effectiveHookMode: the configured
 // ceiling, the session-mode a /hook command lowered, and the per-call
 // `hook: "skip"` already folded in): off runs nothing and is silent; format
-// runs the per-file format command only; all (the default) runs format and
-// the per-file/per-package lint. It returns "" when there is nothing to
-// report — no command set, no command that applies to the file's
-// extension, an already-clean file with no applicable lint — so the tool
-// result is byte-identical to the pre-hook behavior in the common case.
+// and all both run the per-file format command only — lint moved to the
+// turn end (RunTurnEndLint) because per-edit lint is slow and noisy
+// (clippy, eslint). It returns "" when there is nothing to report — no
+// command set, no command that applies to the file's extension — so the
+// tool result is byte-identical to the pre-hook behavior in the common
+// case.
 //
 // On an untrusted workspace it runs NOTHING (trust is the hard gate, ahead
 // of the mode): the one-line "hook inactive" note is emitted exactly once
@@ -270,6 +269,10 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 	if mode == HookModeOff {
 		return "" // off: nothing runs, and it's the operator's choice, so silent
 	}
+
+	// Note: in "all" mode lint is NOT run per edit (clippy/eslint are slow
+	// and noisy); RunTurnEndLint runs it once at the turn end over the
+	// turn's touched files. The per-edit hook is format-only.
 
 	var b strings.Builder
 
@@ -313,35 +316,128 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 		}
 	}
 
-	// --- Per-file / per-package lint (if declared; format+all only) --------
-	// A lint carrying {file} reports problems for the file just touched; one
-	// carrying {dir} type-checks the file's WHOLE PACKAGE (the correct unit
-	// for cross-file tools — see projectcmd.DirPlaceholder). A whole-project
-	// lint (neither token) is skipped — re-linting the world on every edit
-	// is not what the hook is for. The command's extension set gates it the
-	// same way it gates format (appliesTo). Output is folded into the note,
-	// success or failure. In "format" mode this whole step is skipped.
-	if mode == HookModeAll && lintApplies(cmds.Lint, fsPath) {
-		argv, ok, refusal := hookGate(cmds.Lint.Cmd, root, fsPath, trusted)
-		switch {
-		case ok:
-			elapsed, out, err := hookRunnerTimed(ctx, argv, root)
-			switch {
-			case errors.Is(err, errHookTimeout):
-				b.WriteString("note: " + cmdName(cmds.Lint.Cmd) + " timed out after " + fmtSeconds(elapsed))
-			case err != nil && strings.TrimSpace(out) == "":
-				b.WriteString("note: " + cmdName(cmds.Lint.Cmd) + " could not run: " + err.Error())
-			case strings.TrimSpace(out) != "":
-				b.WriteString("note: " + cmdName(cmds.Lint.Cmd) + " for " + fsPath + " (" + fmtSeconds(elapsed) + "):\n" + clipNote(strings.TrimSpace(out)))
-			}
-			// A clean lint (exit 0, no output) is silent.
-		default:
-			// A skipped lint is advisory (folded into the result), so the
-			// refusal is noted for the same reason the format refusal is.
-			b.WriteString("note: project lint command not run: " + refusal)
-		}
+	return b.String()
+}
+
+// RunTurnEndLint is the turn-end lint pass (issue #129, piece 3): lint is
+// slow and noisy per edit (clippy, eslint), so it runs ONCE per turn, here,
+// instead of inside runProjectCommandHook. The session calls it at the
+// clean-finalize point (the turn's FinalizeHook, alongside the #141
+// test-loss receipt) with the DISTINCT files the turn touched (workdir-
+// resolved paths, in first-touch order), so the model sees lint problems
+// while it can still fix them (the finalize round appends the model's
+// answer to the turn's answer) and a human sees them in the REPL and in
+// `cortex turn` output (the session's lint receipt) and in the journal
+// (the session folds the receipt into the capture summary).
+//
+// Gates, in order — all fail closed:
+//   - untrusted workspace: nothing runs (trust is the hard gate, ahead of
+//     the mode, exactly like the per-edit hook);
+//   - no lint command, or a lint command without {file}/{dir}: nothing to
+//     run (a whole-project lint is reported but never auto-run — the same
+//     rule roleApplicable applies);
+//   - no touched files (or none the command's extension set applies to):
+//     nothing to lint.
+//
+// The caller gates the MODE (only "all" runs lint — "format" and "off" skip
+// it) and passes the turn's total lint budget as deadline (time.Time, the
+// moment the budget runs out; zero = no budget, nothing runs): the per-
+// command budget (hookCommandBudget, project.command_timeout_sec) still
+// applies to every run so a broken linter can't hang the turn, and the
+// deadline caps the whole pass — when it trips, the remaining commands are
+// not run and the receipt says so ("turn lint budget exhausted — …").
+//
+// For {file} commands each touched file is linted once, in the order the
+// turn touched them. For {dir} commands (per-package tools like
+// "go vet {dir}") the files are deduplicated by their package dir — one
+// run per distinct dir, in first-touch dir order — so several edits in one
+// turn produce exactly one lint run per touched dir. A clean run (exit 0,
+// no output) is silent; a finding is folded into the receipt as one line
+// per run, clipped to 2000 bytes like every other hook note. It never
+// returns an error: like the per-edit hook, the pass observes, it doesn't
+// veto.
+func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, files []string, trusted bool, deadline time.Time) string {
+	if !trusted {
+		return "" // untrusted: the hard gate — nothing runs (the per-edit hook already announced the inactive state)
+	}
+	if !lintApplies(cmds.Lint, "") {
+		return "" // no lint command, or a whole-project lint: nothing to auto-run
+	}
+	if deadline.IsZero() {
+		return "" // no budget: a zero budget would kill every command, so the caller must gate this
+	}
+	if hookTemplateRejected(cmds.Lint.Cmd) != "" {
+		return "" // shell-syntax template: unexpressible without a shell — nothing runs (the per-edit hook notes this for format; the turn-end pass has no tool result to fold a refusal into, and the session gates the mode anyway)
 	}
 
+	// Build the argv list: per-file is one run per touched file (the
+	// command's Extends gate applies per file); per-package dedups by the
+	// file's package dir, in first-touch dir order.
+	type lintRun struct {
+		argv    []string
+		display string // what the receipt shows for this run (the file or the dir)
+	}
+	var runs []lintRun
+	seenDir := map[string]bool{}
+	for _, f := range files {
+		if !appliesTo(cmds.Lint, f) {
+			continue
+		}
+		argv, ok, _ := hookGate(cmds.Lint.Cmd, root, f, true) // trust already checked above
+		if !ok {
+			continue
+		}
+		if strings.Contains(cmds.Lint.Cmd, projectcmd.DirPlaceholder) {
+			dir := packageDirArg(root, f)
+			if seenDir[dir] {
+				continue // one lint run per touched dir
+			}
+			seenDir[dir] = true
+		}
+		runs = append(runs, lintRun{argv: argv, display: f})
+	}
+	if len(runs) == 0 {
+		return ""
+	}
+
+	name := cmdName(cmds.Lint.Cmd)
+	var findings []string
+	budgetHit := false
+	for _, r := range runs {
+		if time.Now().After(deadline) {
+			budgetHit = true
+			break
+		}
+		elapsed, out, err := hookRunner(ctx, r.argv, root)
+		switch {
+		case errors.Is(err, errHookTimeout):
+			findings = append(findings, name+" for "+r.display+" timed out after "+fmtSeconds(elapsed))
+		case err != nil && strings.TrimSpace(out) == "":
+			findings = append(findings, name+" for "+r.display+" could not run: "+err.Error())
+		case strings.TrimSpace(out) != "":
+			findings = append(findings, name+" for "+r.display+" ("+fmtSeconds(elapsed)+"): "+clipNote(strings.TrimSpace(out)))
+		}
+		// A clean run (exit 0, no output) is silent.
+	}
+
+	if len(findings) == 0 && !budgetHit {
+		return "" // clean: no extra round, no receipt
+	}
+	var b strings.Builder
+	b.WriteString("lint: ")
+	for i, f := range findings {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(f)
+	}
+	if budgetHit {
+		budget := time.Until(deadline)
+		if budget < 0 {
+			budget = 0
+		}
+		fmt.Fprintf(&b, "\nturn lint budget exhausted after ~%s — some commands were not run", fmtSeconds(budget))
+	}
 	return b.String()
 }
 
@@ -387,17 +483,17 @@ func appliesTo(cmd projectcmd.Command, path string) bool {
 	return false
 }
 
-// lintApplies reports whether the lint role has a command the hook runs for
-// path: non-empty, carrying the {file} or {dir} token (per-file or
-// per-package — a whole-project lint is not the hook's job), and applicable
-// to the file's extension. (roleApplicable — used by HookWouldRun for the
-// report's runs_now — uses the same {file}/{dir} test WITHOUT the Extends
-// gate: applicability to a SPECIFIC file is the hook's per-edit call, while
-// the report asks whether the command is per-edit work AT ALL.)
+// lintApplies reports whether the lint role has a command the harness runs
+// automatically for path: non-empty, carrying the {file} or {dir} token
+// (per-file or per-package — a whole-project lint is never auto-run), and
+// (when path is non-empty) applicable to the file's extension. With an
+// empty path the extension gate is skipped — RunTurnEndLint gates each
+// touched file through appliesTo itself, and the turn-level question is
+// only "is there a lint command with a target".
 func lintApplies(cmd projectcmd.Command, path string) bool {
 	return cmd.Cmd != "" &&
 		(cmd.PerFile || strings.Contains(cmd.Cmd, projectcmd.DirPlaceholder)) &&
-		appliesTo(cmd, path)
+		(path == "" || appliesTo(cmd, path))
 }
 
 // splitProjectCommand turns a template into the argv the hook execs

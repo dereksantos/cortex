@@ -23,6 +23,7 @@ func TestDefaultLimitsMatchHistoricalConstants(t *testing.T) {
 		DefaultSearchMax:     5,
 		MaximumSearchMax:     10,
 		HookCommandBudgetSec: 10,
+		TurnLintBudgetSec:    60,
 	}
 	if def != want {
 		t.Errorf("DefaultLimits() = %+v, want %+v", def, want)

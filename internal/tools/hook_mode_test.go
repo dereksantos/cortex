@@ -218,7 +218,11 @@ func TestEffectiveHookModeCeilingFold(t *testing.T) {
 // TestHookModeByTrustAndCeiling is the requested matrix: mode {off,
 // format, all} × trusted {true, false}, driven through the real write_file
 // path. The stub hookRunner records argv, so the test asserts the hook's
-// DECISION (which commands ran), not the execution.
+// DECISION (which commands ran), not the execution. Piece 3: the per-edit
+// hook is FORMAT-ONLY — lint runs once at the turn end (RunTurnEndLint), so
+// "all" runs the format step per edit exactly like "format" did before, and
+// the turn-end pass's mode gate ("all" only) is pinned separately by the
+// turn-lint tests in cmd/cortex.
 func TestHookModeByTrustAndCeiling(t *testing.T) {
 	for _, mode := range []HookMode{HookModeOff, HookModeFormat, HookModeAll} {
 		for _, trusted := range []bool{false, true} {
@@ -241,13 +245,10 @@ func TestHookModeByTrustAndCeiling(t *testing.T) {
 					if len(rec.ran) != 0 {
 						t.Fatalf("off: commands ran = %v, want none", rec.ran)
 					}
-				case mode == HookModeFormat:
+				default: // format AND all: the per-edit hook runs the format
+					// step only (lint is the turn-end pass's job, piece 3).
 					if len(rec.ran) != 1 || !strings.HasPrefix(rec.ran[0], "fmt-ran ") {
-						t.Fatalf("format: commands ran = %v, want only the format step", rec.ran)
-					}
-				default: // HookModeAll
-					if len(rec.ran) != 2 || !strings.HasPrefix(rec.ran[0], "fmt-ran ") || !strings.HasPrefix(rec.ran[1], "lint-ran ") {
-						t.Fatalf("all: commands ran = %v, want format then lint", rec.ran)
+						t.Fatalf("mode %s: commands ran = %v, want only the per-edit format step", hookModeName(mode), rec.ran)
 					}
 				}
 			})
@@ -303,8 +304,11 @@ func TestPerCallHookSkip(t *testing.T) {
 			}
 			_ = out1
 
-			// Second call: no skip → the mode's commands run (the skip
-			// must not have leaked into the next call).
+			// Second call: no skip → the mode's per-edit commands run (the
+			// skip must not have leaked into the next call). Piece 3: the
+			// per-edit hook is format-only, so "all" runs the same one format
+			// step as "format" — the turn-end lint pass is the "all" half that
+			// moved to finalize, pinned by cmd/cortex's turn-lint tests.
 			_, err = Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
 				"path":       "s.go",
 				"old_string": "var v = 2",
@@ -314,13 +318,8 @@ func TestPerCallHookSkip(t *testing.T) {
 				t.Fatalf("edit_file: %v", err)
 			}
 			want := 0
-			switch mode {
-			case HookModeOff:
-				want = 0
-			case HookModeFormat:
+			if mode != HookModeOff {
 				want = 1
-			case HookModeAll:
-				want = 2
 			}
 			if len(rec.ran) != want {
 				t.Fatalf("call after skip: commands ran = %v, want %d (mode %s)", rec.ran, want, hookModeName(mode))

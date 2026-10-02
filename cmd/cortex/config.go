@@ -537,6 +537,14 @@ type ProjectConfig struct {
 	// the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
 	// out after 10s").
 	CommandTimeoutSec int `json:"command_timeout_sec"`
+	// TurnLintBudgetSec is the TOTAL budget for the turn-end lint pass
+	// (issue #129 piece 3) — seconds, 0 = the default 60s (Config.toolLimits
+	// resolves it into the tools' TurnLintBudgetSec). Lint runs once per
+	// turn over the turn's distinct touched files (not per edit, where
+	// clippy/eslint are slow and noisy), and the whole pass shares this
+	// budget: a slow linter is cut off at the budget and the receipt says
+	// so.
+	TurnLintBudgetSec int `json:"turn_lint_budget_sec"`
 }
 
 // DeclaredProjectCommands projects the config's declared commands onto
@@ -1967,6 +1975,7 @@ func (c *Config) toolLimits() tools.Limits {
 		DefaultSearchMax:     resolveInt(c.Tools.WebSearch.DefaultMaxResults, def.DefaultSearchMax),
 		MaximumSearchMax:     resolveInt(c.Tools.WebSearch.MaximumMaxResults, def.MaximumSearchMax),
 		HookCommandBudgetSec: resolveInt(c.Project.CommandTimeoutSec, def.HookCommandBudgetSec),
+		TurnLintBudgetSec:    resolveInt(c.Project.TurnLintBudgetSec, def.TurnLintBudgetSec),
 	}
 }
 
