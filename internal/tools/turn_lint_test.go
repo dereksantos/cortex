@@ -187,6 +187,30 @@ func TestRunTurnEndLintDeletedFileIsNotLinted(t *testing.T) {
 	}
 }
 
+// cutOffAtDeadline is a stub hookRunner that mimics the PRODUCTION runner
+// (runHookDirect) at a deadline: it hangs until its ctx is canceled and then
+// reports the run as errHookTimeout — exactly the mapping runHookDirect makes
+// whenever cctx.Err() == context.DeadlineExceeded, which includes the case
+// where the PARENT's deadline (the turn budget) is what fired. The run's
+// output is empty, like a killed process.
+func cutOffAtDeadline(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
+	select {
+	case <-time.After(30 * time.Second):
+		return 30 * time.Second, "", nil
+	case <-ctx.Done():
+		return 0, "", errHookTimeout
+	}
+}
+
+// installCutOffRunner swaps the package hookRunner for cutOffAtDeadline for
+// the duration of the test.
+func installCutOffRunner(t *testing.T) {
+	t.Helper()
+	orig := hookRunner
+	hookRunner = cutOffAtDeadline
+	t.Cleanup(func() { hookRunner = orig })
+}
+
 // TestRunTurnEndLintSlowRunCutOffAtTurnBudget pins the budget fix: the
 // deadline is not just a check between runs — it travels into each
 // hookRunner call as the run's context, so a run in progress is cut off at
@@ -195,22 +219,13 @@ func TestRunTurnEndLintDeletedFileIsNotLinted(t *testing.T) {
 // budget, not a clamped time.Until(deadline) (the old "after ~0s").
 func TestRunTurnEndLintSlowRunCutOffAtTurnBudget(t *testing.T) {
 	t.Chdir(t.TempDir())
-	// The stub hangs until its ctx is canceled, then reports the run error
-	// as the ctx's error — exactly how exec.CommandContext surfaces a
-	// deadline (the run's output is empty, like a killed process). The pass
-	// classifies a deadline-caused run error as a budget hit, not as a
-	// per-file finding.
-	slow := func(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
-		select {
-		case <-time.After(30 * time.Second):
-			return 30 * time.Second, "", nil
-		case <-ctx.Done():
-			return 0, "", ctx.Err()
-		}
-	}
-	orig := hookRunner
-	hookRunner = slow
-	t.Cleanup(func() { hookRunner = orig })
+	// The stub mimics runHookDirect (see cutOffAtDeadline): on a deadline
+	// expiry it returns errHookTimeout, the SAME sentinel the production
+	// runner returns whether the per-command budget or the turn deadline
+	// fired. The pass must still classify a turn-deadline cut-off as a
+	// budget hit, not a per-file "timed out" finding — that is the ordering
+	// this test pins.
+	installCutOffRunner(t)
 
 	writeRepoFile(t, "a.go", "package main\n")
 	writeRepoFile(t, "b.go", "package main\n")
@@ -222,10 +237,41 @@ func TestRunTurnEndLintSlowRunCutOffAtTurnBudget(t *testing.T) {
 	if elapsed > time.Second {
 		t.Fatalf("the pass took %s; a slow linter must be cut off near the turn budget, not after the per-command 10s", elapsed)
 	}
-	if !strings.Contains(got, "turn lint budget (0.1s) exhausted — 1 of 2 runs not run") {
-		t.Errorf("receipt = %q, want \"1 of 2 runs not run\" (the first run was cut off in progress, the second was never started)", got)
+	// The cut-off run is a budget hit: the receipt names the CONFIGURED
+	// budget and reports "2 of 2 runs not run" — the FIRST run was cut off
+	// in progress (counted as not run) and the second was never started. It
+	// is NOT a per-file "timed out" finding for the cut-off run.
+	if !strings.Contains(got, "turn lint budget (0.1s) exhausted — 2 of 2 runs not run") {
+		t.Errorf("receipt = %q, want \"2 of 2 runs not run\" (the first run was cut off in progress and counts as not run, the second was never started)", got)
 	}
 	if !strings.Contains(got, "lint:") {
 		t.Errorf("receipt = %q, want the \"lint: \" prefix", got)
+	}
+	if strings.Contains(got, "timed out") {
+		t.Errorf("a run cut off at the TURN budget must be reported as a budget hit, not a per-file \"timed out\" finding; got %q", got)
+	}
+}
+
+// TestRunTurnEndLintSingleRunBudgetCutOff is the single-run budget case the
+// multi-run test can't reach: a slow linter is the ONLY run, and it is cut
+// off at the turn budget in progress. The receipt must say the budget was
+// hit and must NOT carry a per-file "timed out" finding for the cut-off
+// run.
+func TestRunTurnEndLintSingleRunBudgetCutOff(t *testing.T) {
+	t.Chdir(t.TempDir())
+	installCutOffRunner(t)
+
+	writeRepoFile(t, "only.go", "package main\n")
+
+	got := RunTurnEndLint(context.Background(), lintCmds(), "", []string{"only.go"}, true, 150*time.Millisecond)
+
+	if !strings.Contains(got, "turn lint budget (0.1s) exhausted — 1 of 1 runs not run") {
+		t.Errorf("receipt = %q, want the budget-exhausted line for a single cut-off run", got)
+	}
+	if strings.Contains(got, "timed out") {
+		t.Errorf("the single cut-off run must be a budget hit, not a per-file \"timed out\" finding; got %q", got)
+	}
+	if !strings.Contains(got, "budget") {
+		t.Errorf("receipt = %q, want it to mention the budget", got)
 	}
 }

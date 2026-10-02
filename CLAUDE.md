@@ -178,14 +178,22 @@ the model-driven memory tools
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits.
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
-  own format/lint on the file just touched — workspace trust (the user
-  config's `project.trusted`, set via `cortex project trust`) is the ONLY
-  gate: on an untrusted workspace it runs nothing (one-line "hook inactive"
-  note on the session's first edit), on a trusted one it runs any
-  applicable per-file (or per-package, `{dir}`) command as a shell-free
-  argv (templates with shell syntax are skipped with a note), each with a
-  10s budget — and appends a note (what ran, what it reported) to the
-  result; the note never fails the edit. Commands are declared in
+  own format on the file just touched — it is FORMAT-ONLY. Lint moved to
+  the turn END: in mode "all" on a trusted workspace it runs once per turn
+  over the distinct `write_file`/`edit_file` paths (including the `agent`
+  subagent's, minus files deleted since) — one run per file for `{file}`,
+  one per distinct package dir for `{dir}` — under the turn's total lint
+  budget (`project.turn_lint_budget_sec`, default 60s); findings reach the
+  model in a tools-withheld finalize round and appear in the REPL, in
+  `cortex turn` stderr + its `lint` JSON field, and in the journal.
+  Workspace trust (the user config's `project.trusted`, set via
+  `cortex project trust`) is the ONLY gate: on an untrusted workspace it
+  runs nothing (one-line "hook inactive" note on the session's first
+  edit), on a trusted one it runs the applicable per-file format command
+  as a shell-free argv (templates with shell syntax are skipped with a
+  note), each with a 10s budget — and appends a note (what ran, what it
+  reported) to the result; the note never fails the edit. Commands are
+  declared in
   `project.commands` or AGENTS.md `## Commands` (docs/configuration.md) and
   shown by `cortex project commands`.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged

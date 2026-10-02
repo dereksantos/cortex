@@ -639,16 +639,26 @@ field-by-field merge.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `command_timeout_sec` | 10 | Per-command budget (seconds) for the post-edit hook's format/lint runs. A slow formatter is cut off here and the note reports the elapsed time. |
+| `command_timeout_sec` | 10 | Per-command budget (seconds) for the post-edit hook's format runs. A slow formatter is cut off here and the note reports the elapsed time. |
+| `turn_lint_budget_sec` | 60 | TOTAL wall-clock budget (seconds) for the turn-end lint pass. It caps the whole pass at once: a lint run that has not started when the budget is spent is not run, and a run in progress is cut off at the budget (the deadline travels into the run). A slow linter is reported as a budget hit in the receipt, not as a per-file timeout. |
 
 **The post-edit hook.** After `write_file`/`edit_file` lands, the session
-runs the project's format command — and, if declared, its per-file or
-per-package lint — on the file just touched, so an unformatted or
-broken file never reaches review.
+runs the project's format command on the file just touched, so an
+unformatted file never reaches review. It is FORMAT-ONLY: lint is slow and
+noisy per edit (clippy, eslint), so it is not run per edit. Instead, on a
+TRUSTED workspace in `"all"` mode, lint runs ONCE at the turn end, over the
+distinct files the turn touched (the `write_file`/`edit_file` paths,
+including the `agent` subagent's, minus any the turn deleted since) —
+one run per file for a `{file}` lint, one run per distinct package dir for
+a `{dir}` lint. Findings reach the model in one more tools-withheld
+(finalize) round, and appear in the REPL, in `cortex turn`'s stderr and its
+`lint` JSON field, and in the turn's journal capture.
 
 **The mode switch.** `tools.post_edit_hook` controls how much the hook
-does: `"off"` (nothing runs), `"format"` (only the per-file format command),
-or `"all"` (default: format + per-file/per-package lint). Precedence: the
+does: `"off"` (nothing runs), `"format"` (only the per-file format command
+per edit — lint is skipped), or `"all"` (default: the per-file format
+command per edit, plus the turn-end lint pass over the turn's touched
+files). Precedence: the
 `CORTEX_POST_EDIT_HOOK` env var (same values), then the project config's
 `tools.post_edit_hook`, then the user config's, then the default `"all"`.
 An operator can lower it (the REPL's `/hook` command, the per-call
@@ -657,9 +667,11 @@ above the configured ceiling — an agent can skip one call, never enable a
 mode. Trust is never affected by the mode.
 
 **`project.command_timeout_sec`** (default 10): the per-command budget in
-seconds for the hook's format/lint runs. A slow formatter is cut off here
-and the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
-out after 10s"), so a slow tool is obvious in the result.
+seconds for each hook run (the per-edit format command, and each turn-end
+lint run). A slow formatter is cut off here and the hook's note reports
+how long it ran ("gofmt 0.2s"). At the turn-end lint pass, each lint run's
+per-command budget is also capped at whatever time is left in the turn's
+total lint budget, so the pass can never overrun that total.
 
 **Workspace trust is the ONLY gate.** Trust is a persisted,
 per-workspace, USER-level decision: the user config's `project.trusted`
@@ -675,22 +687,22 @@ what the repo configures. The first edit of a session on an untrusted
 workspace gets a one-line "post-edit hook inactive" note (later edits
 stay silent); a trusted workspace gets no note.
 
-On a TRUSTED workspace, any applicable command runs: the command must be
-per-file or per-package (a whole-project command has no argument to
-substitute per edit) and applicable to the file's extension (a
-manifest-set like gofmt's `.go`; a declaration or script with no
-recognized toolchain applies to all files). It runs as a plain argv —
-the template is split once and `{file}`/`{dir}` are each substituted as
-a single argument AFTER the split, exec'd directly with no shell, so a
-path is always one inert argument. A template containing shell syntax
-(pipe, chain, redirect, command substitution, subshell, or newline)
-cannot run without a shell and is skipped with a note — its intent is
-unexpressible, not dangerous. Each command gets a 10s budget; a timeout,
-a non-zero exit, or a lint finding is folded into the tool result as a
-note (capped at 2000 bytes of output), appended after the tool's own
-observations about the change (`edit_file`'s line delta and removal
-warning, and the large-deletion note either tool adds). The hook never
-fails the edit — the result of the write stands regardless.
+On a TRUSTED workspace, the per-edit format command runs when it applies:
+the command must be per-file (a whole-project format has no argument to
+substitute per edit) and applicable to the file's extension (a manifest-set
+like gofmt's `.go`; a declaration or script with no recognized toolchain
+applies to all files). It runs as a plain argv — the template is split once
+and `{file}`/`{dir}` are each substituted as a single argument AFTER the
+split, exec'd directly with no shell, so a path is always one inert
+argument. A template containing shell syntax (pipe, chain, redirect,
+command substitution, subshell, or newline) cannot run without a shell and
+is skipped with a note — its intent is unexpressible, not dangerous. The
+format command gets the per-command budget (default 10s); a timeout or a
+non-zero exit is folded into the tool result as a note (capped at 2000 bytes
+of output), appended after the tool's own observations about the change
+(`edit_file`'s line delta and removal warning, and the large-deletion note
+either tool adds). The hook never fails the edit — the result of the write
+stands regardless.
 
 **`project.trusted` — the workspace trust list.** A list of workspace
 root directories the operator has decided are trusted — the only gate

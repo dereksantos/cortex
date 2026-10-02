@@ -138,6 +138,27 @@ var errHookTimeout = errors.New("project command timed out")
 // so a slow tool is obvious. The default is runHookDirect.
 var hookRunner = runHookDirect
 
+// SetHookRunner swaps the package-wide hookRunner (the exec seam the hook
+// and the turn-end lint pass run every command through) and returns the
+// previous value so the caller can restore it. It is the EXPORTED seam:
+// the internal tests touch hookRunner directly (same package), while a
+// cmd/cortex session test that drives a REAL turn must stand in for the
+// linter through it (the pass would otherwise exec the project's actual
+// lint command), and the test package can't reach the unexported var.
+// Production code never calls it.
+func SetHookRunner(r func(ctx context.Context, argv []string, dir string) (elapsed time.Duration, out string, err error)) (prev func(ctx context.Context, argv []string, dir string) (time.Duration, string, error)) {
+	prev = hookRunner
+	hookRunner = r
+	return prev
+}
+
+// HookRunner returns the current hookRunner (the value SetHookRunner
+// swapped in, or runHookDirect). cmd/cortex's session tests pair it with
+// SetHookRunner to save/restore across a turn.
+func HookRunner() func(ctx context.Context, argv []string, dir string) (time.Duration, string, error) {
+	return hookRunner
+}
+
 // runHookDirect is the production hookRunner: exec argv[0] argv[1:]
 // directly — no shell (the injection-safety contract, package comment) —
 // under the per-command budget, returning the elapsed time, combined output,
@@ -439,35 +460,49 @@ func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, 
 	defer cancel()
 	var findings []string
 	budgetHit := false
-	runNo := 0
+	completed := 0
 	for _, r := range runs {
 		if time.Now().After(deadline) {
 			budgetHit = true
 			break
 		}
-		runNo++
 		elapsed, out, err := hookRunner(lctx, r.argv, root)
+		// A run is "completed" when it ran to its own outcome (a finding or
+		// a clean run), whether or not the pass then stops on the budget. A
+		// run cut off at the turn deadline (the cases below) is NOT
+		// completed — it counts as not run, so the receipt's "N of M runs
+		// not run" includes the cut-off run itself.
 		switch {
+		case lctx.Err() == context.DeadlineExceeded:
+			// Checked FIRST, ahead of the timeout sentinel: a run cut off at
+			// the TURN deadline is a budget hit, not a finding about the
+			// file. The order matters — the production runner (runHookDirect)
+			// maps any deadline expiry to errHookTimeout, including the
+			// parent's (the turn budget's), so when the turn deadline fires
+			// mid-run this case and the next are BOTH true; only this one is
+			// correct there. This is a budget hit, not a per-file timeout —
+			// the run's half-output (if any) is discarded with the cut-off.
+			budgetHit = true
 		case errors.Is(err, errHookTimeout):
 			// The per-command budget (hookCommandBudget) is capped at the
-			// deadline by lctx, so this sentinel only fires when the
-			// per-command budget is SHORTER than the time left in the turn
-			// budget — a genuine per-command timeout, not a budget hit.
+			// deadline by lctx, so after the case above this sentinel only
+			// fires when the per-command budget is SHORTER than the time
+			// left in the turn budget — a genuine per-command timeout, not a
+			// budget hit.
 			findings = append(findings, name+" for "+r.display+" timed out after "+fmtSeconds(elapsed))
-		case lctx.Err() == context.DeadlineExceeded:
-			// The run was in progress when the turn deadline passed: the
-			// hookRunner's exec was cut off at the deadline. This is a
-			// budget hit, not a finding about the file — the run's own
-			// output (if any) is discarded with the timeout's half-result.
-			budgetHit = true
+			completed++
 		case err != nil && strings.TrimSpace(out) == "":
 			findings = append(findings, name+" for "+r.display+" could not run: "+err.Error())
+			completed++
 		case strings.TrimSpace(out) != "":
 			findings = append(findings, name+" for "+r.display+" ("+fmtSeconds(elapsed)+"): "+clipNote(strings.TrimSpace(out)))
+			completed++
+		default:
+			completed++ // a clean run (exit 0, no output) is silent
 		}
-		// A clean run (exit 0, no output) is silent.
+		// The budget is spent: stop (the remaining runs are not run).
 		if budgetHit {
-			break // the budget is spent; the remaining runs are not run
+			break
 		}
 	}
 
@@ -483,7 +518,10 @@ func RunTurnEndLint(ctx context.Context, cmds projectcmd.Commands, root string, 
 		b.WriteString(f)
 	}
 	if budgetHit {
-		fmt.Fprintf(&b, "\nturn lint budget (%s) exhausted — %d of %d runs not run", fmtSeconds(budget), len(runs)-runNo, len(runs))
+		// len(runs)-completed, not len(runs)-runNo: a run cut off in
+		// progress counts as not run, so the message reads "M of R runs not
+		// run" with M including the cut-off run.
+		fmt.Fprintf(&b, "\nturn lint budget (%s) exhausted — %d of %d runs not run", fmtSeconds(budget), len(runs)-completed, len(runs))
 	}
 	return b.String()
 }
