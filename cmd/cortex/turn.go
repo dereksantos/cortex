@@ -122,6 +122,12 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// against that turn's own before-side; the 32-file cap can't fill up
 	// across turns either.
 	cs.testwatchDrop()
+	// Issue #169: drop any stale per-turn same-action ledger from a prior
+	// turn that never reached its end (error or interrupt paths). cs.turnNo
+	// is already stamped to a new value above, so a fresh map starts each
+	// turn; the explicit clear here mirrors testwatchDrop's lifecycle and
+	// keeps the ledger's lifetime obvious at the turn boundary.
+	cs.sameActionBlocked = nil
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
 	// the working set engages wherever turn content happens to start.
 	if cs.ws == nil {

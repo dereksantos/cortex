@@ -64,6 +64,31 @@ type Verdict struct {
 	Tier   string // "deny-floor" | "safe-path" | "classified" | "fail-closed"
 }
 
+// BlockedMessage is the single shared source for the message a blocked
+// command returns to the model (issue #169). Both call sites — the
+// session's gateShell and the headlessDeps stub — must use it so the
+// wording can't drift: a Risky command with no interactive approver, a
+// Risky command inside a subagent, and a Risky command whose approver
+// timed out all read identically to the model. The phrasing states that
+// the *action* isn't allowed (not just this spelling of it), and tells
+// the model to continue without it rather than to route around the
+// block with a same-effect variant — the behavior the per-turn same-
+// action gate (EffectClass) enforces mechanically.
+func BlockedMessage(reason string) string {
+	return "blocked (risk: " + reason + "): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it and say in your final answer what you couldn't do."
+}
+
+// SameActionBlockedMessage is the message a same-effect command returns to
+// the model when it belongs to an effect class that was already blocked in
+// the current turn (issue #169). The block is mechanical: the harness
+// records the class of the first blocked command in a turn and refuses any
+// later command in the same class before it is even classified. The
+// message names the class (so the model knows *what* is barred, not just
+// that this spelling was) and points it back to the earlier block.
+func SameActionBlockedMessage(effectClass string) string {
+	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it and say in your final answer what you couldn't do."
+}
+
 // ClassifyFn is the tier-3 gray-zone classifier. It returns Safe or Risky
 // (never Blocked — the deny-floor owns catastrophe) plus a reason. An error
 // makes Classify fail closed to Risky. ProviderClassifier builds the
@@ -293,4 +318,167 @@ func lastPathElement(s string) string {
 		return s[i+1:]
 	}
 	return s
+}
+
+// --- Same-effect classes (issue #169) -------------------------------------
+
+// EffectClass names an action class whose members a harness treats as
+// "the same action" once one member has been blocked in the turn. A
+// classifier miss that would have routed around the block is not an
+// obstacle to work around — it is the same action, and the block stands.
+//
+// The classes today:
+//
+//	hook-disabling       --no-verify and -c core.hooksPath=… (and its global
+//	                      variant). Checked FIRST: a command that is BOTH a
+//	                      git history write AND hook-disabling (e.g. `git
+//	                      commit --no-verify`) is reported as the hook-
+//	                      disabling action, since the hook flag is the more
+//	                      specific "route around the gate" signal.
+//	git-history-write    commit / commit-tree, update-ref, and `git reset`
+//	                      in a form that moves HEAD or a branch ref
+//	                      (explicit commit arg, or one of the explicit mode
+//	                      flags --soft/--mixed/--hard/--merge/--keep). A
+//	                      bare `git reset` is in the class (historical
+//	                      default is HEAD~1); `git reset -- <path>` is the
+//	                      unstage form and is NOT in the class.
+//
+// Detection is deliberately coarse: it over-approximates "same effect" so a
+// plausible variant of a blocked action is caught, at the cost of lumping a
+// few benign commands with their risky twins.
+const (
+	EffectGitHistoryWrite = "git-history-write"
+	EffectHookDisabling   = "hook-disabling"
+)
+
+var (
+	// hooksDisableFlagRe is the flag that silences pre-commit/commit-msg
+	// hooks on a single invocation.
+	hooksDisableFlagRe = regexp.MustCompile(`^--no-verify$`)
+	// hooksConfigRe is a `core.hooksPath=…`-style override of where git
+	// looks for hooks (a variant of disabling hooks: point them at an empty
+	// directory). Matches the value after `-c`, or the bare `core.hooksPath=`
+	// form (including `--global-core.hooksPath=…`).
+	hooksConfigRe = regexp.MustCompile(`^(?:--global-)?core\.hooksPath=`)
+	// historySubRe is a git subcommand that creates or rewrites commit
+	// objects. `commit` also matches `commit-tree` (a model reaching for
+	// `git commit-tree` is reaching for exactly this).
+	historySubRe = regexp.MustCompile(`^commit(-tree)?$`)
+)
+
+// EffectClass returns the effect class cmd belongs to, or "" when it
+// belongs to no tracked class. It looks at the WHOLE command string: a
+// chained command that contains a member counts as that member (the shell
+// will run every part of it).
+func EffectClass(command string) string {
+	// Split on shell-control boundaries so a chained/piped command is seen
+	// as the sequence of simple commands it is. Quoted arguments are not
+	// shell-aware, but the class matchers only care about subcommand and
+	// flag words, and a quoted "git commit" in a string literal is not a
+	// command.
+	for _, part := range strings.FieldsFunc(command, func(r rune) bool {
+		return r == '|' || r == '&' || r == ';' || r == '\n'
+	}) {
+		if c := effectClassOfPart(part); c != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// effectClassOfPart inspects one whitespace-separated simple command.
+func effectClassOfPart(part string) string {
+	fields := strings.Fields(part)
+	if len(fields) == 0 {
+		return ""
+	}
+	// A leading VAR=val is an env-mutated invocation, not a bare binary —
+	// its class cannot be determined reliably from tokens alone.
+	if strings.Contains(fields[0], "=") {
+		return ""
+	}
+	bin := lastPathElement(fields[0])
+	args := fields[1:]
+	// `git -C <dir> commit` — the firstSubcommand walk already skips the
+	// value of -C, but its args still include <dir>. Reuse firstSubcommand's
+	// own skip logic so we get a sub + its real args.
+	sub, ok := firstSubcommand(args)
+	if !ok {
+		return ""
+	}
+	// --no-verify / -c core.hooksPath=… are git-level flags that can appear
+	// before OR after the subcommand; they disable hooks on any git command
+	// in this invocation. Scan all args. Git is the only tool we scope this
+	// to — a random non-git tool with a flag of the same name is a false
+	// positive we deliberately do not pay for here (matching the deny-floor's
+	// git focus).
+	if bin == "git" {
+		// Walk the args, but a `-c` flag consumes the NEXT token as its value
+		// (e.g. `-c core.hooksPath=…`). The two tokens together form the
+		// config override; neither one alone is the flag.
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			if a == "-c" && i+1 < len(args) {
+				i++
+				if hooksConfigRe.MatchString(args[i]) {
+					return EffectHookDisabling
+				}
+				continue
+			}
+			if hooksDisableFlagRe.MatchString(a) {
+				return EffectHookDisabling
+			}
+			if hooksConfigRe.MatchString(a) {
+				return EffectHookDisabling
+			}
+		}
+	}
+	if historySubRe.MatchString(sub) {
+		return EffectGitHistoryWrite
+	}
+	switch sub {
+	case "update-ref":
+		// update-ref writes refs. With no arguments it is a no-op, but the
+		// class is about the subcommand's capability, not one call's args.
+		return EffectGitHistoryWrite
+	case "reset":
+		// `git reset <commit>` with an explicit commit arg, or with one of
+		// the explicit mode flags (--soft/--mixed/--hard/--merge/--keep) that
+		// can move HEAD, IS in the class. A bare `git reset` (no args at all)
+		// defaults to HEAD~1 in git <2.35 and moves HEAD, so it is in the
+		// class. `git reset -- <path>` (explicit -- with no commit arg) is
+		// the unstage form and is NOT in the class.
+		seenCommit := false
+		inPathspec := false
+		for _, a := range args {
+			if inPathspec {
+				continue
+			}
+			if a == "--" {
+				inPathspec = true
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				switch a {
+				case "--soft", "--mixed", "--hard", "--merge", "--keep":
+					seenCommit = true
+				}
+				continue
+			}
+			seenCommit = true
+			break
+		}
+		// `git reset -- <path>`: unstage form, no HEAD move. Out of the class.
+		if inPathspec && !seenCommit {
+			return ""
+		}
+		// `git reset` with no args at all: in the class (historical default).
+		if len(args) == 0 {
+			return EffectGitHistoryWrite
+		}
+		if seenCommit {
+			return EffectGitHistoryWrite
+		}
+	}
+	return ""
 }

@@ -207,3 +207,165 @@ func TestClassify_DenyFloorBeatsSafeLooking(t *testing.T) {
 		t.Errorf("got %s/%s, want blocked/deny-floor", v.Level, v.Tier)
 	}
 }
+
+// TestBlockedMessage pins the exact wording the blocked-result message
+// returns to the model (issue #169). The phrasing states that the *action*
+// isn't allowed — not just this spelling of it — and tells the model to
+// continue without it rather than route around the block with a
+// same-effect variant. Both call sites (cmd/cortex's gateShell and the
+// headlessDeps stub in internal/tools) must use this single constructor so
+// the wording can't drift; this test fails loudly if it does.
+func TestBlockedMessage(t *testing.T) {
+	got := BlockedMessage("rewrites git history")
+	want := "blocked (risk: rewrites git history): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it and say in your final answer what you couldn't do."
+	if got != want {
+		t.Errorf("BlockedMessage(\"rewrites git history\") =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestBlockedMessage_EmptyReason pins the empty-reason edge case: the
+// message still carries the full shape so the model reads the same
+// instruction regardless of the reason.
+func TestBlockedMessage_EmptyReason(t *testing.T) {
+	got := BlockedMessage("")
+	want := "blocked (risk: ): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it and say in your final answer what you couldn't do."
+	if got != want {
+		t.Errorf("BlockedMessage(\"\") =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestSameActionBlockedMessage pins the exact wording the per-turn same-
+// action gate returns when a later command belongs to an effect class that
+// was already blocked in the current turn (issue #169). Both call sites
+// (cmd/cortex's gateShell and any other consumer) must use this single
+// constructor so the wording can't drift.
+func TestSameActionBlockedMessage(t *testing.T) {
+	got := SameActionBlockedMessage(EffectGitHistoryWrite)
+	want := "blocked (same action: git-history-write): same action as an earlier blocked command in this turn. This action is not permitted; continue without it and say in your final answer what you couldn't do."
+	if got != want {
+		t.Errorf("SameActionBlockedMessage(git-history-write) =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestEffectClass pins the same-effect detection used to block "same action
+// as an earlier blocked command" within a turn (issue #169). It is
+// deliberately over-approximating: anything plausible that rewrites git
+// history or silences hooks gets lumped into its class, at the cost of a
+// few false positives. The exact list of classes is a harness policy, not a
+// shellrisk classifier decision — this test pins the detector's shape so a
+// regression there fails loudly.
+func TestEffectClass_GitHistoryWrite(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"bare commit", "git commit -m x", EffectGitHistoryWrite},
+		{"commit -a", "git commit -a -m x", EffectGitHistoryWrite},
+		{"commit -m", "git commit -m 'fix'", EffectGitHistoryWrite},
+		{"commit with message file", "git commit -F msg.txt", EffectGitHistoryWrite},
+		{"commit with amend", "git commit --amend --no-edit", EffectGitHistoryWrite},
+		{"commit --amend -a", "git commit --amend -a", EffectGitHistoryWrite},
+		{"commit --no-verify (hook flag first)", "git commit --no-verify -m x", EffectHookDisabling},
+		{"commit-tree", "git commit-tree HEAD", EffectGitHistoryWrite},
+		{"commit-tree --amend", "git commit-tree --amend HEAD", EffectGitHistoryWrite},
+		{"update-ref", "git update-ref refs/heads/main abc123", EffectGitHistoryWrite},
+		{"update-ref with -d", "git update-ref -d refs/heads/main", EffectGitHistoryWrite},
+		{"reset --hard", "git reset --hard HEAD~1", EffectGitHistoryWrite},
+		{"reset --soft", "git reset --soft HEAD~1", EffectGitHistoryWrite},
+		{"reset --mixed", "git reset --mixed HEAD~1", EffectGitHistoryWrite},
+		{"reset --merge", "git reset --merge HEAD~1", EffectGitHistoryWrite},
+		{"reset --keep", "git reset --keep HEAD~1", EffectGitHistoryWrite},
+		{"reset to a commit", "git reset origin/main", EffectGitHistoryWrite},
+		{"reset to a SHA", "git reset a1b2c3d", EffectGitHistoryWrite},
+		{"git -C path commit", "git -C sub commit -m x", EffectGitHistoryWrite},
+		{"chained: safe then commit", "git status && git commit -m x", EffectGitHistoryWrite},
+		{"piped: cat then commit", "cat file | git commit --stdin", EffectGitHistoryWrite},
+		{"semicolon chain", "git status; git commit --amend", EffectGitHistoryWrite},
+		{"reset HEAD -- file (moves HEAD)", "git reset HEAD -- file.txt", EffectGitHistoryWrite},
+		{"commit -c core.hooksPath=empty (hook-disabling takes precedence)", "git commit -c core.hooksPath=empty -m x", EffectHookDisabling},
+		{"commit -c core.hooksPath=.githooks (hook-disabling takes precedence)", "git commit -c core.hooksPath=.githooks -m x", EffectHookDisabling},
+		{"commit --global-core.hooksPath= (hook-disabling takes precedence)", "git commit --global-core.hooksPath=/nonexistent -m x", EffectHookDisabling},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EffectClass(tt.cmd)
+			if got != tt.want {
+				t.Errorf("EffectClass(%q) = %q, want %q", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEffectClass_HookDisabling pins the hook-disabling flag detector.
+func TestEffectClass_HookDisabling(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"commit --no-verify", "git commit --no-verify -m x", EffectHookDisabling},
+		{"commit --no-verify (any subcommand)", "git push --no-verify origin", EffectHookDisabling},
+		{"commit --global-core.hooksPath= (hook flag)", "git commit --global-core.hooksPath=/nonexistent -m x", EffectHookDisabling},
+		{"--no-verify after subcommand", "git commit -m x --no-verify", EffectHookDisabling},
+		{"reset -c core.hooksPath=empty (hook flag)", "git reset -c core.hooksPath=empty", EffectHookDisabling},
+		{"reset -c core.hooksPath=empty (hook flag, after subcommand)", "git reset --hard -c core.hooksPath=empty", EffectHookDisabling},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EffectClass(tt.cmd)
+			if got != tt.want {
+				t.Errorf("EffectClass(%q) = %q, want %q", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEffectClass_NoMatch pins that routine, harmless commands do not get
+// lumped into a same-effect class.
+func TestEffectClass_NoMatch(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{"status", "git status"},
+		{"log", "git log --oneline"},
+		{"diff", "git diff"},
+		{"diff HEAD", "git diff HEAD"},
+		{"rev-parse", "git rev-parse HEAD"},
+		{"push", "git push origin main"},
+		{"pull", "git pull origin main"},
+		{"fetch", "git fetch origin"},
+		{"checkout", "git checkout main"},
+		{"merge", "git merge main"},
+		{"rebase", "git rebase main"},
+		{"revert", "git revert HEAD"},
+		{"cherry-pick", "git cherry-pick abc123"},
+		{"add", "git add ."},
+		{"stash", "git stash push"},
+		{"clean", "git clean -fd"},
+		{"commit-verbose (not commit)", "git commit-verbose"},
+		{"commit-msg-hook (not commit)", "git commit-msg-hook"},
+		{"ls-files", "git ls-files"},
+		{"shortlog", "git shortlog -s"},
+		{"blame", "git blame file.txt"},
+		{"config read", "git config user.name"},
+		{"non-git with no-verify flag", "some-tool --no-verify"},
+		{"non-git with core.hooksPath", "some-tool -c core.hooksPath=x"},
+		{"rm -rf scoped (not a class)", "rm -rf ./build"},
+		{"go build", "go build ./..."},
+		{"ls", "ls -la"},
+		{"empty", ""},
+		{"only spaces", "   "},
+		{"echo mentioning git commit", "echo 'run git commit later'"},
+		{"git commit as string arg", "echo \"git commit\""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EffectClass(tt.cmd)
+			if got != "" {
+				t.Errorf("EffectClass(%q) = %q, want \"\" (no class)", tt.cmd, got)
+			}
+		})
+	}
+}
