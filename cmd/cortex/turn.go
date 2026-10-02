@@ -203,6 +203,17 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		maxIter = maxIterOverride
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
+	// Issue #171: in-turn demotion. Before each main-loop send, shrink the
+	// current turn's accumulated tool results (oldest first, keepRecent stay
+	// verbatim, drain to the low watermark) so a long turn cannot overflow the
+	// window before the next request is built. The hook mutates req in place
+	// (applyInTurnDemotion); under budget it is a byte-for-byte no-op. turnStart
+	// bounds the hook to this turn's own messages — earlier (already demoted
+	// to the outline) turns must not be re-stubbed. Subagent callers build
+	// their own Toolset without this hook, so only the coder turn gets it.
+	ts.BeforeSend = func(req *AgentRequest) {
+		cs.applyInTurnDemotion(req, turnStart)
+	}
 	// Issue #141: the model must account for test removals it made. The
 	// receipt is computed at the clean-finalize point (runLoop calls
 	// ts.FinalizeHook exactly when the model answers with no tool calls,

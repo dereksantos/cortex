@@ -71,6 +71,18 @@ type Toolset struct {
 	Dispatch        AgentDispatcher
 	BeforeBatch     func()
 	AfterToolResult func()
+	// BeforeSend, when non-nil, is called once per iteration of the main
+	// tool-call loop, immediately before send.Send — the seam where the
+	// in-turn demotion policy (issue #171) shrinks this turn's accumulated
+	// tool results before the next request is built. The hook receives the
+	// request about to be sent and may mutate it (the coder wires it to swap
+	// over-budget tool-result messages for recall-citable stubs); it must NOT
+	// send or otherwise perform a model round-trip. nil = today's behavior,
+	// byte for byte. The finalize and salvage sends (finalizeLoop and the
+	// salvage/reasoning-fallback re-asks) are deliberately NOT wired — the
+	// turn has already answered or is being recovered, and there the wire
+	// already carries the demoted stubs from the main loop's hook.
+	BeforeSend func(*AgentRequest)
 	// Finalize selects the forced-finalize closing (see FinalizeStyle). Zero
 	// value = FinalizeSubagent, so subagent callers need no change.
 	Finalize FinalizeStyle
@@ -348,6 +360,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				restoreEffort = escalateEffortOnce(req)
 			}
 			jitter = false
+		}
+		// In-turn demotion seam (issue #171): before the request is sent this
+		// round, give the harness a chance to shrink the turn's accumulated tool
+		// results. nil (subagents, tests, every non-coder caller) skips this and
+		// the request goes out byte-for-byte as today. The finalize and salvage
+		// sends are deliberately not wired — see the BeforeSend field doc.
+		if ts.BeforeSend != nil {
+			ts.BeforeSend(req)
 		}
 		res, _, err := send.Send(ctx, req)
 		req.Temperature = baseTemp // one-shot: restore so the rest of the turn stays deterministic

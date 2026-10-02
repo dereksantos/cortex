@@ -194,8 +194,19 @@ func newPlanTestBackend(t *testing.T, replies ...string) *planTestBackend {
 		// the Nth request (0-based). The in-flight Send then observes
 		// ctx.Err() == context.Canceled and returns it, exactly as a real
 		// interrupt would.
+		//
+		// DETERMINISM: cancel and then return WITHOUT writing a response for
+		// this request. The client's in-flight Do(ctx) cannot then complete
+		// with a normal body (none is sent), so it is forced to return
+		// context.Canceled once the (now-canceled) context is observed. Writing
+		// a reply here, as this test did, raced the client's body-read against
+		// the cancel: under load the client sometimes read the reply before it
+		// noticed the cancel and the step completed ("done") instead of being
+		// interrupted — a flaky interrupt simulation. Holding the response
+		// makes the interrupt deterministic.
 		if b.cancelAt == idx && b.cancelCtx != nil {
 			b.cancelCtx()
+			return
 		}
 
 		reply := ""
