@@ -1016,8 +1016,13 @@ func printCoderProse(msg Message) {
 // coderDispatcher executes one coder tool call: the activity spinner + Execute
 // against the full session, refusing nothing (the coder is granted every tool).
 // A canceled ctx short-circuits with an interrupted observation, matching the
-// old runToolCalls per-call behavior.
+// old runToolCalls per-call behavior. testerDispatcherOverride (CortexSession's
+// test-only seam, session_core.go) can replace it entirely for tests that drive
+// the REAL turn path with scripted tool results instead of real file access.
 func (cs *CortexSession) coderDispatcher() AgentDispatcher {
+	if cs.coderDispatcherOverride != nil {
+		return cs.coderDispatcherOverride()
+	}
 	return DispatchFunc(func(ctx context.Context, call ToolCall) string {
 		if ctx.Err() != nil {
 			return "Error: interrupted by user before this tool ran"

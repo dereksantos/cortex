@@ -32,9 +32,11 @@ package main
 // mutating it here shrinks the NEXT send, exactly what the BeforeSend seam
 // (loop.go) asks for, byte-for-byte when under budget. The swap is lossless
 // by design: applyInTurnDemotion records each stubbed message's ORIGINAL
-// content in cs.inTurnOriginals (keyed by absolute index) before the swap,
+// content in cs.inTurnOriginals (keyed by absolute index, kept until the
+// owning turn is demoted or the log is rewritten) —
 // and the turn-end consumers (turn.go's outline entry and captureTurn) read
-// the originals back through turnOriginalSpan — the transcript itself is
+// the originals back through turnOriginalSpan, bounded to their own span —
+// the transcript itself is
 // never touched (writeTranscript already recorded the original content, so
 // recall of the stub's citation returns the full output).
 
@@ -144,15 +146,17 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	if cs.inTurnOriginals == nil {
 		cs.inTurnOriginals = map[int]string{}
 	}
-	if cs.inTurnOrigTurn != turnStart {
-		// A new turn starts: the previous turn's originals are no longer
-		// needed (its turn-end consumers — the outline entry and the journal
-		// capture — already read them, and its messages are now an
-		// outline-eligible past turn). Drop them so a session of long turns
-		// doesn't accumulate original content in memory.
-		cs.inTurnOriginals = map[int]string{}
-		cs.inTurnOrigTurn = turnStart
-	}
+	// Entries stay in the map until their OWNING turn is demoted (turn.go
+	// deletes them when it builds the demoted span's outline entry), NOT
+	// when the next turn starts: DemoteBatch drains the oldest turns from the
+	// hydrated tail, usually several turns after they ran, so a per-turn reset
+	// here would drop the originals before the outline was built — a stubbed
+	// "Error: …" result would then outline as [ok] with a one-line stub
+	// (issue #171 item 5). The map is keyed by absolute index and cleared
+	// wholesale wherever the message log is rewritten (Compact, /clear,
+	// ResumeTranscript), because the indices shift there. In the normal
+	// append-only flow it therefore holds at most one turn's worth of
+	// content per demotion cycle — bounded, no leak.
 	estimator := func(m cache.Msg) int {
 		// Mirror estTurnTokens: a tool result carries the tool-call-id overhead
 		// on the wire; assistant tool calls add name+args, but those are not in
@@ -164,36 +168,39 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	for _, idx := range stubbed {
 		abs := turnStart + idx
 		m := &req.Messages[abs]
-		label := activityLabelForCallID(req.Messages, m.ToolCallID)
-		if _, seen := cs.inTurnOriginals[abs]; !seen {
-			// Record the ORIGINAL content before the swap: turn-end consumers
-			// (turn.go's outline entry and captureTurn) read this map instead of
-			// the wire copy, so they see the original result, never the stub
-			// (issue #171 item 5). The transcript already holds it — this is the
-			// in-memory half, for the in-session turn only.
-			cs.inTurnOriginals[abs] = m.Content
+		if _, seen := cs.inTurnOriginals[abs]; seen {
+			continue // already recorded (a no-op re-stub of this index is impossible — the plan skips stubs — but the record is the source of truth either way)
 		}
+		// Record the ORIGINAL content before the swap: turn-end consumers
+		// (turn.go's outline entry and captureTurn) read this map instead of
+		// the wire copy, so they see the original result, never the stub
+		// (issue #171 item 5). The transcript already holds it — this is the
+		// in-memory half.
+		cs.inTurnOriginals[abs] = m.Content
+		label := activityLabelForCallID(req.Messages, m.ToolCallID)
 		m.Content = cache.InTurnStubContent(label, countLines(m.Content),
 			!isErrResult(m.Content), firstErrLine(m.Content), fmtCitation(cs.SessionID, abs))
 	}
 }
 
-// turnOriginalSpan copies req.Messages[turnStart:] with the original content
+// turnOriginalSpan copies req.Messages[start:end] with the original content
 // restored at every stubbed index (from cs.inTurnOriginals, recorded by
 // applyInTurnDemotion before the wire swap). It is the view turn-end consumers
 // need — the turn-end outline entry and captureTurn read the original tool
 // results (an [err] label, the true content for journal artifacts), not the
-// one-line wire stubs (issue #171 item 5). Under budget (or with demotion
-// disabled) the copy is identical to the wire copy.
-func (cs *CortexSession) turnOriginalSpan(req *AgentRequest, turnStart int) []Message {
-	n := len(req.Messages) - turnStart
-	if n == 0 {
+// one-line wire stubs (issue #171 item 5). The copy is bounded to the span
+// [start, end) — a demoted turn's span, or the in-flight turn up to the
+// current end of the log — so a later turn's tool calls and reply can never
+// leak into an older turn's entry. Under budget (or with demotion disabled)
+// the copy is identical to the wire copy.
+func (cs *CortexSession) turnOriginalSpan(req *AgentRequest, start, end int) []Message {
+	if end <= start {
 		return nil
 	}
-	out := make([]Message, n)
-	copy(out, req.Messages[turnStart:])
+	out := make([]Message, end-start)
+	copy(out, req.Messages[start:end])
 	for i := range out {
-		abs := turnStart + i
+		abs := start + i
 		if orig, ok := cs.inTurnOriginals[abs]; ok {
 			out[i].Content = orig
 		}

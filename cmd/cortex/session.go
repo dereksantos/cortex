@@ -255,6 +255,9 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 	cs.ws, cs.turns = cs.replayWorkingSet(msgs, turns)
 	cs.outline = nil
 	cs.outlineFolded = ""
+	// The transcript is replaced, so the absolute indices inTurnOriginals is
+	// keyed by no longer refer to this log (issue #171): clear it.
+	cs.inTurnOriginals = nil
 	if state != nil {
 		// A process can stop after appending part of a turn but before its state
 		// checkpoint. In that case the latest checkpoint is stale: replay the
@@ -558,6 +561,10 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	cs.ws, _ = cs.replayWorkingSet(cs.Request.Messages, append([]int{0, 0}, keptTurns...))
 	cs.outline = nil
 	cs.outlineFolded = ""
+	// The message log was rewritten (older turns replaced by the digest), so
+	// the absolute indices inTurnOriginals is keyed by no longer refer to it
+	// (issue #171): clear it.
+	cs.inTurnOriginals = nil
 	cs.Request.OutlineBlock = ""
 	cs.Request.PrefixEnd = cs.ws.Base()
 	cs.Request.TailFrom = cs.ws.FrontierMsg()
@@ -607,6 +614,9 @@ func (cs *CortexSession) Clear() {
 	cs.ws = cs.newWorkingSet(1)
 	cs.outline = nil
 	cs.outlineFolded = ""
+	// The message log was replaced, so the absolute indices inTurnOriginals
+	// is keyed by no longer refer to it (issue #171): clear it.
+	cs.inTurnOriginals = nil
 	cs.Request.OutlineBlock = ""
 	cs.Request.PrefixEnd = 0
 	cs.Request.TailFrom = 0

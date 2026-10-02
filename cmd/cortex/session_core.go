@@ -136,23 +136,38 @@ type CortexSession struct {
 	// named-tool arm's 32-file / 1 MiB content budget — a turn that runs
 	// `go test` before a write_file on a test file must still get a
 	// receipt for the write_file. Nil / false outside a turn.
+	testwatchBash      map[string]testguard.Baseline
+	testwatchBashArmed bool
+
 	// inTurnOriginals records, per absolute message index, the ORIGINAL
 	// content of every tool result applyInTurnDemotion stubbed on the wire
-	// copy this turn (indemote.go). Turn-end consumers — the turn-end
+	// copy (indemote.go). Turn-end consumers — the turn-end
 	// outline entry (turnOutlineEntry) and the journal capture (captureTurn)
 	// — read through turnOriginalSpan instead of the mutated wire copy, so
 	// they see the original result (an [err] label, the true content for
 	// web_search/fetch_url artifacts), never the one-line stub (issue #171
-	// item 5). The map holds at most one turn's worth of content:
-	// applyInTurnDemotion drops it when a new turn starts (cs.inTurnOrigTurn).
-	// The transcript already holds every original losslessly; this is the
-	// in-session in-memory half for the current turn only. Pure in-memory
-	// cache: never written to session state, so nothing persists it.
+	// item 5). Entries live until their OWNING turn is demoted — turn.go
+	// deletes a span's entries when it builds that span's outline entry,
+	// because DemoteBatch usually drains a turn several turns after it ran,
+	// not at the next turn's start — and the map is cleared wholesale
+	// wherever the message log is rewritten (Compact, /clear, ResumeTranscript),
+	// because the absolute indices shift there. The transcript already holds
+	// every original losslessly; this is the in-session in-memory half.
+	// Pure in-memory cache: never written to session state, so nothing
+	// persists it.
 	inTurnOriginals map[int]string
-	inTurnOrigTurn  int // turnStart of the inTurnOriginals entries; 0 = none
-
-	testwatchBash      map[string]testguard.Baseline
-	testwatchBashArmed bool
+	// senderOverride, when non-nil, replaces the coder's round-trip sender
+	// (the network-backed coderSender) inside the healing ladder — a TEST-ONLY
+	// seam (no production code sets it) that lets a test drive the REAL turn
+	// path with a scripted model and zero network (the same pattern healList
+	// is injectable for tests).
+	senderOverride Sender
+	// coderDispatcherOverride, when non-nil, replaces coderDispatcher() (loop.go)
+	// — the tool-call dispatcher the coder's Toolset is built with (turn.go).
+	// TEST-ONLY seam (no production code sets it) for the same class of test
+	// as senderOverride: drive the REAL turn path with scripted tool results
+	// instead of real file access. Both are nil in every production session.
+	coderDispatcherOverride func() AgentDispatcher
 
 	// testwatchScratchBefore is the leftover-debug arm's (issue #154)
 	// PRE-bash baseline of scratch-named paths: the set of workdir-relative

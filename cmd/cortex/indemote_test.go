@@ -298,7 +298,7 @@ func TestApplyInTurnDemotionTurnEndConsumersSeeOriginals(t *testing.T) {
 	// (a) The turn-end outline entry must label the failed call [err], reading
 	// through the originals (a stubbed "[demoted: …" result would otherwise be
 	// marked [ok] by turnOutlineEntry's "Error:" check).
-	entry := turnOutlineEntry(1, cache.TurnSpan{Start: turnStart, End: len(cs.Request.Messages)}, cs.turnOriginalSpan(cs.Request, turnStart), cs.SessionID)
+	entry := turnOutlineEntry(1, cache.TurnSpan{Start: turnStart, End: len(cs.Request.Messages)}, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)), cs.SessionID)
 	found := false
 	for _, a := range entry.Actions {
 		if strings.Contains(a, "[err]") {
@@ -316,7 +316,7 @@ func TestApplyInTurnDemotionTurnEndConsumersSeeOriginals(t *testing.T) {
 
 	// (b) captureTurn's artifacts come from the ORIGINAL content: the journal
 	// summary's answer/tool text is the original, never the stub.
-	view := cs.turnOriginalSpan(cs.Request, turnStart)
+	view := cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages))
 	_, answer := turnArtifacts(view)
 	_ = answer
 	results := toolResultsByID(view)
@@ -478,6 +478,302 @@ func messagesEqual(a, b []Message) bool {
 		}
 	}
 	return true
+}
+
+// --- step 3b: the turn-end consumers across MULTIPLE turns ---
+//
+// The tests above call the adapter (applyInTurnDemotion) and the consumer
+// (turnOutlineEntry) directly, which is the right granularity for the policy —
+// but it can't see the WIRING in turn.go: how the demote-then-send block
+// reads each span's originals and when the originals are dropped. The two
+// regression shapes that wiring has to keep out of every outline entry are:
+//
+//   1. an UNBOUNDED original view — turnOriginalSpan(req, start) with no end
+//      would copy every message from the span's start to the CURRENT end of
+//      the log, so a turn demoted two or more turns later would collect all
+//      later turns' tool calls in its actions and take the latest turn's
+//      reply as its ReplyHead;
+//   2. a per-turn reset of the originals map — applyInTurnDemotion used to
+//      drop every entry when a new turn started, but DemoteBatch drains the
+//      oldest turns from the hydrated tail, usually several turns after they
+//      ran. By then a stubbed "Error: …" result's original is gone, the
+//      outline reads the one-line wire stub, and a failed call outlines as
+//      [ok].
+//
+// This test drives the REAL turn path (cs.Turn → cs.turn → the DemoteBatch
+// block in turn.go) across several turns with a fake Sender — the same
+// seam the engine's BeforeSend hook uses — and asserts the rendered outline.
+
+// multiTurnScriptedSender returns a fake Sender that replays scripted
+// responses, one per request, until the script is exhausted (the last
+// response is then repeated). No network: the turn's coderSender is
+// replaced wholesale via the session's test-only senderOverride seam.
+func multiTurnScriptedSender(responses []*AgentResponse) Sender {
+	var i int
+	return SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		r := responses[i]
+		if i < len(responses)-1 {
+			i++
+		}
+		return r, false, nil
+	})
+}
+
+// multiTurnScriptedSession builds a scripted, transcript-backed session whose
+// coder's round-trip is driven by script (the fake Sender), not a live
+// backend. Window 12000 (highWM 6000, lowWM 4000 — W/2, W/3) with in-turn
+// demotion ENABLED (nil Config) and keepRecent 3, so turn 1's batch of 6
+// 4000-token results drains its oldest three on the FIRST send — the same
+// shape a real session hits, on the smallest fixture that forces it. The
+// transcript is opened so captureTurn (and Recall) work as in production.
+func multiTurnScriptedSession(t *testing.T, script []*AgentResponse) *CortexSession {
+	t.Helper()
+	dir := t.TempDir()
+	ws, err := NewWorkspace(dir)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	if err := os.MkdirAll(ws.SessionsDir(), 0755); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
+	cs := &CortexSession{
+		workspace: ws,
+		Window:    12000, // highWM 6000, lowWM 4000 (W/2, W/3)
+		SessionID: "multi-turn-session",
+		Config:    &Config{Context: ContextConfig{InTurnKeepRecent: intPtr(3)}},
+		Request:   &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "sys"}}},
+	}
+	f, err := openTranscript(filepath.Join(ws.SessionsDir(), cs.SessionID+".jsonl"), os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	t.Cleanup(func() { f.Close() })
+	cs.transcript = f
+	cs.writeTranscript(cs.Request.Messages[0])
+	cs.senderOverride = multiTurnScriptedSender(script)
+	return cs
+}
+
+// TestTurnEndConsumersSeeOriginalsAcrossTurns is the turn-level lock for the
+// outline half of issue #171 item 5: a failed tool result that in-turn
+// demotion stubbed on the wire in turn 1 must still outline as [err] when
+// turn 1 is demoted two or more turns later — and every demoted entry must
+// hold only its own span's actions and its own reply (no later turn's tool
+// calls or reply may leak in). It drives the REAL turn path (DemoteBatch →
+// turnOutlineEntry in turn.go) with a fake Sender, so both wiring
+// regressions above are caught:
+//
+//   - turn 1 stubs an "Error: …" result (oldest-first drain); turns 2 and 3
+//     then run; at turn 4's start DemoteBatch drains turn 1 — two turns after
+//     it ran — and its outline entry must read the ORIGINAL (the stub's
+//     "[demoted: …" text would read as a success → [ok]);
+//   - the same entry must list only turn 1's call and turn 1's reply: the
+//     turn-2/turn-3 tool calls and the latest reply must not appear in it.
+func TestTurnEndConsumersSeeOriginalsAcrossTurns(t *testing.T) {
+	t.Chdir(t.TempDir())                                       // workspace root so the turn's coderDispatcher has a valid workspace
+	errResult := "Error: exit 1\n" + strings.Repeat("t", 4000) // the failed call's ORIGINAL result
+	// Turn 1: a batch of 6 tool results at 12000 chars each (3000 tokens each,
+	// 18000 total — over the 6000 highWM; keepRecent 3 → the oldest three,
+	// including the failed one, are stubbed on the FIRST send of the turn).
+	turn1Calls := []ToolCall{}
+	var turn1Msgs []Message
+	for i := 0; i < 6; i++ {
+		id := "t1call_" + ritoa(i)
+		path := "t1f" + ritoa(i) + ".go"
+		turn1Calls = append(turn1Calls, readCall(id, path))
+		turn1Msgs = append(turn1Msgs,
+			Message{Role: RoleTool, Content: strings.Repeat("x", 12000), ToolCallID: id})
+	}
+	// The OLDEST tool result is the failed call — the first one the drain stubs.
+	turn1Msgs[0].Content = errResult
+	// Turns 2 and 3: one distinct call each, then their own replies.
+	// turn 3's reply is also the LATEST assistant reply in the log — the value
+	// an unbounded original view would wrongly give turn 1's ReplyHead.
+	script := []*AgentResponse{
+		respWithCalls(turn1Calls), // turn 1 round 1: issue the 30 calls
+		respWithAnswer("t1-reply-marker done"),
+		respWithCalls([]ToolCall{readCall("t2call_0", "t2f0.go")}), // turn 2
+		respWithAnswer("t2-reply-marker done"),
+		respWithCalls([]ToolCall{readCall("t3call_0", "t3f0.go")}), // turn 3
+		respWithAnswer("t3-reply-marker done"),
+		respWithAnswer("t4-reply-marker done"), // turn 4: plain answer, no tool calls
+	}
+	cs := multiTurnScriptedSession(t, script)
+	// The REAL turn path (turn.go's Toolset) is driven by the script above.
+	// Replace the tool dispatcher so the scripted read_file calls return the
+	// fixture's tool results instead of touching real files — the sender is
+	// already scripted (senderOverride), so the only live seam left is the
+	// dispatcher's file access. This keeps the test honest about the wire
+	// (cs.Request.Messages) and the transcript, which are what the outline
+	// reads, without depending on the contents of real files.
+	origDispatcher := cs.coderDispatcherOverride
+	cs.coderDispatcherOverride = func() AgentDispatcher {
+		return DispatchFunc(func(_ context.Context, call ToolCall) string {
+			for _, m := range turn1Msgs {
+				if m.ToolCallID == call.ID {
+					return m.Content
+				}
+			}
+			return "ok"
+		})
+	}
+	defer func() { cs.coderDispatcherOverride = origDispatcher }()
+
+	if _, err := cs.Turn(context.Background(), "turn 1: read the big files"); err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+	// Fixture sanity: the failed result must actually be stubbed on the wire
+	// (it is the oldest of six results over the high watermark).
+	stubbedErr := false
+	for _, m := range cs.Request.Messages {
+		if m.Role == RoleTool && m.ToolCallID == "t1call_0" && strings.HasPrefix(m.Content, "[demoted:") {
+			stubbedErr = true
+		}
+	}
+	if !stubbedErr {
+		t.Fatal("fixture: turn 1's failed result was never stubbed on the wire — the test would not exercise the outline-from-originals path")
+	}
+	// Fixture sanity: after turn 1, the tail (turn 1 alone) must still be over
+	// the 6000 highWM, so the demote-then-send block at turn 2's start
+	// demotes turn 1 — the span is then rebuilt from the originals while the
+	// stubs still ride the wire.
+	if tok := cs.ws.TailTokens(); tok <= 6000 {
+		t.Fatalf("fixture: turn 1's tail is %d tokens, <= the 6000 highWM — it would never demote and the outline path is not exercised", tok)
+	}
+
+	if _, err := cs.Turn(context.Background(), "turn 2"); err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+	if _, err := cs.Turn(context.Background(), "turn 3"); err != nil {
+		t.Fatalf("turn 3: %v", err)
+	}
+	// Turn 4's start runs the DemoteBatch: turn 1 (over the high watermark at
+	// that point) is demoted to the outline — TWO turns after it ran, so the
+	// per-turn originals reset (the regression) would have dropped turn 1's
+	// originals long before this point.
+	if _, err := cs.Turn(context.Background(), "turn 4"); err != nil {
+		t.Fatalf("turn 4: %v", err)
+	}
+	if cs.ws.Demoted() < 1 {
+		t.Fatalf("Demoted() = %d, want >= 1: the scripted turns were over the watermark, turn 1 must have demoted at turn 4's start", cs.ws.Demoted())
+	}
+
+	// Find turn 1's outline entry (its user content is the turn-1 input).
+	var entry *cache.OutlineEntry
+	for i := range cs.outline {
+		if strings.Contains(cs.outline[i].User, "turn 1") {
+			entry = &cs.outline[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("turn 1's span was not demoted into the outline (entries: %+v)", cs.outline)
+	}
+
+	// (a) The failed call must be labeled [err] — read from the ORIGINAL
+	// "Error: …" result, not the one-line wire stub (which would read as [ok]).
+	errAction := ""
+	for _, a := range entry.Actions {
+		if strings.Contains(a, "[err]") {
+			errAction = a
+		}
+	}
+	if errAction == "" {
+		t.Errorf("turn 1's failed call is not labeled [err] in the outline — its original was lost by turn-end demotion (the stub's text reads as a success); actions: %v", entry.Actions)
+	}
+	if strings.Contains(strings.Join(entry.Actions, " "), "t2f0.go") || strings.Contains(strings.Join(entry.Actions, " "), "t3f0.go") {
+		t.Errorf("turn 1's entry carries a LATER turn's tool call in its actions (unbounded original view leaked later spans); actions: %v", entry.Actions)
+	}
+	// (b) Turn 1's entry must hold ONLY its own actions: its 30 turn-1 calls
+	// (call ids are distinct per turn, so a count is exact) and none of the
+	// later turns'.
+	if got, want := len(entry.Actions), 6; got != want {
+		t.Errorf("turn 1's entry has %d actions, want %d (its own calls only); actions: %v", got, want, entry.Actions)
+	}
+	// (c) Its ReplyHead must be turn 1's OWN reply — not the latest turn's
+	// reply, which an unbounded original view would take from the end of the
+	// log.
+	if entry.ReplyHead != "t1-reply-marker done" {
+		t.Errorf("turn 1's ReplyHead = %q, want %q (its own reply; the unbounded view would have taken the latest turn's reply)", entry.ReplyHead, "t1-reply-marker done")
+	}
+
+	// (d) The later demoted entries (turns 2/3, if the batch drained them too)
+	// must each hold only their own single call — the same span-boundedness
+	// guarantee for every entry in the batch, not just the first.
+	for i := range cs.outline {
+		e := &cs.outline[i]
+		if e == entry {
+			continue
+		}
+		// Every action in the entry must name only ONE turn's file — an
+		// action mixing file names from two turns' spans is a leak from an
+		// unbounded original view.
+		for _, a := range e.Actions {
+			var owner string
+			for _, own := range []string{"t1f", "t2f", "t3f"} {
+				if strings.Contains(a, own) {
+					if owner != "" && owner != own {
+						t.Errorf("entry %d mixes turns in one action: %q", e.Turn, a)
+					}
+					owner = own
+				}
+			}
+		}
+		// Each single-call entry (turns 2/3) holds exactly one action and its
+		// own reply head — no later turn's reply in it.
+		if len(e.Actions) == 1 {
+			switch {
+			case strings.Contains(e.Actions[0], "t2f"):
+				if e.ReplyHead != "t2-reply-marker done" {
+					t.Errorf("turn 2's entry ReplyHead = %q, want its own reply %q (unbounded view leak)", e.ReplyHead, "t2-reply-marker done")
+				}
+			case strings.Contains(e.Actions[0], "t3f"):
+				if e.ReplyHead != "t3-reply-marker done" {
+					t.Errorf("turn 3's entry ReplyHead = %q, want its own reply %q (unbounded view leak)", e.ReplyHead, "t3-reply-marker done")
+				}
+			}
+		}
+	}
+	// (e) The originals for the DEMOTED span are dropped (the entry has read
+	// them; keeping them would be a memory leak in a long session). A turn
+	// that was never stubbed has no originals to keep, so this assertion
+	// holds vacuously for it — the per-turn-reset regression is caught by
+	// the [err] assertion (a): an unbounded or cleared map would leave the
+	// stub's text in the outline and the [err] check would fail.
+	var t1Span cache.TurnSpan
+	foundSpan := false
+	for _, s := range cs.ws.TurnSpans() {
+		if s.End-s.Start > 5 { // turn 1 is the only oversized span
+			t1Span = s
+			foundSpan = true
+		}
+	}
+	if !foundSpan {
+		t.Fatalf("turn 1's span not found in the working set: %+v", cs.ws.TurnSpans())
+	}
+	if cs.inTurnOriginals != nil {
+		left := 0
+		for k := range cs.inTurnOriginals {
+			if k >= t1Span.Start && k < t1Span.End {
+				left++
+			}
+		}
+		if left != 0 {
+			t.Errorf("%d original entries survive inside a DEMOTED span's indices (they must be dropped when the entry is built); left in %+v: %d", left, t1Span, left)
+		}
+	}
+}
+
+// respWithCalls builds an AgentResponse whose single choice is an assistant
+// message with the given tool calls and no content.
+func respWithCalls(calls []ToolCall) *AgentResponse {
+	return &AgentResponse{Choices: []Choice{{Index: 0, Message: Message{Role: "assistant", ToolCalls: calls}, FinishReason: "tool_calls"}}}
+}
+
+// respWithAnswer builds an AgentResponse whose single choice is an assistant
+// message with plain content (no tool calls) — the turn's finalize.
+func respWithAnswer(answer string) *AgentResponse {
+	return &AgentResponse{Choices: []Choice{{Index: 0, Message: Message{Role: "assistant", Content: answer}, FinishReason: "stop"}}}
 }
 
 // --- step 5: end-to-end runLoop with a fake Sender ---
