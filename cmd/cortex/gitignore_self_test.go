@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/registry"
 )
 
 // initGitRepo runs `git init -q` in dir and configures the minimal identity
@@ -42,9 +44,11 @@ func gitStatusPorcelain(t *testing.T, dir string) string {
 	return out
 }
 
-// writeFakeTranscript drops a tiny JSONL transcript under .cortex/sessions so
-// the `git status --porcelain` assertion has a real file to be (or not be)
-// listing — the exact leak the issue describes.
+// writeFakeTranscript appends one line to the transcript file the test
+// session's StartTranscript already opened, so the
+// `git status --porcelain` assertion has a real file to be (or not be)
+// listing — the exact leak the issue describes. (The file is the session's
+// own transcript, id == cs.SessionID — this is NOT a journal write.)
 func writeFakeTranscript(t *testing.T, ctxDir, id string) {
 	t.Helper()
 	sessDir := filepath.Join(ctxDir, "sessions")
@@ -58,9 +62,12 @@ func writeFakeTranscript(t *testing.T, ctxDir, id string) {
 
 // selfGitignoreSession builds a hermetic *CortexSession whose workspace is
 // rooted at root, mirroring the hand-built-session convention
-// greeting_test.go/serve_turn_test.go establish. Rooting the workspace (vs.
-// relying on CWD) is what production NewCortexSession does, and it lets the
-// test target an explicit temp repo.
+// greeting_test.go/serve_turn_test.go establish. It assigns cs.workspace
+// DIRECTLY (not via SetWorkspace): these tests exercise the
+// StartTranscript/ResumeTranscript/ensureSelfGitignore seams themselves, and
+// they need a workspace without the re-target guard running first. Rooting
+// the workspace (vs. relying on CWD) is what production NewCortexSession
+// does, and it lets the test target an explicit temp repo.
 func selfGitignoreSession(t *testing.T, root string) *CortexSession {
 	t.Helper()
 	ws, err := NewWorkspace(root)
@@ -68,6 +75,34 @@ func selfGitignoreSession(t *testing.T, root string) *CortexSession {
 		t.Fatalf("NewWorkspace(%s): %v", root, err)
 	}
 	cs := &CortexSession{quiet: true, workspace: ws, Request: CortexArgs{}.Request()}
+	return cs
+}
+
+// freshGitSession is a session built the way runStudyCLI/runTurnCLI/
+// runLearnCLI build theirs — via NewCortexSession, not a hand-built
+// struct — with the environment isolated so construction stays hermetic:
+// CORTEX_BACKEND pins the endpoint (no model discovery in a temp dir) and
+// CORTEX_HOME points user config / the project registry / the user journal
+// at a throwaway home. No network call is made during NewCortexSession
+// (config + binding resolution only) — but the test must still exercise the
+// REAL constructor's SetWorkspace hook, so this goes through the full
+// constructor, not a shortcut around it.
+func freshGitSession(t *testing.T) *CortexSession {
+	t.Helper()
+	t.Setenv("CORTEX_BACKEND", "http://localhost:0")
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	// NewCortexSession mutates package-level prompt/cap state (instructionBytesCap,
+	// promptBase/Append/Attribution via configurePrompt/configureAttributionPrompt).
+	// The seam under test is only the SetWorkspace/ensureSelfGitignore hook, not
+	// that state — snapshot it and restore on cleanup so it doesn't leak into the
+	// later prompt/instruction tests in this package (they assert on SystemPrompt
+	// verbatim and a 16 KiB cap). resetPrompt (prompt_test.go) already guards the
+	// prompt vars; instructionBytesCap has no equivalent, so snapshot it here too.
+	resetPrompt(t)
+	oldCap := instructionBytesCap
+	t.Cleanup(func() { instructionBytesCap = oldCap })
+	cs := NewCortexSession()
+	cs.quiet = true
 	return cs
 }
 
@@ -91,11 +126,13 @@ func TestEnsureSelfGitignore(t *testing.T) {
 			wantStatus: true,
 		},
 		{
-			// StartTranscript always creates .cortex/sessions, so the self-ignore
-			// fires even without a pre-seeded .cortex/ — the "first session" in
-			// the field always has the dir by the time this runs. wantStatus is
-			// the real acceptance criterion here: status stays clean of .cortex/.
-			name:       "fresh git repo: .cortex/ created by StartTranscript gets self-ignored",
+			// No pre-seeded .cortex/ at all: ensureSelfGitignore's own
+			// MkdirAll (run only once the git checks have said the write is
+			// wanted — see the ordering comment in gitignore_self.go) must
+			// create the dir, write the self-ignore into it, and leave git
+			// status clean of .cortex/. wantStatus is the real acceptance
+			// criterion here: status stays clean of .cortex/.
+			name:       "fresh git repo: .cortex/ created by ensureSelfGitignore's own MkdirAll gets self-ignored",
 			gitRepo:    true,
 			seedDir:    false,
 			wantFile:   true,
@@ -105,6 +142,18 @@ func TestEnsureSelfGitignore(t *testing.T) {
 			name:       "non-git dir: no file written, no error",
 			gitRepo:    false,
 			seedDir:    true,
+			wantFile:   false,
+			wantStatus: false,
+		},
+		{
+			// Non-git CWD with NO pre-existing .cortex/: the rev-parse check
+			// must run before the MkdirAll, so this hook leaves NO self-ignore
+			// file (and no hook-created .cortex/) behind — the dir here is
+			// created by StartTranscript's own MkdirAll, not by this hook
+			// (NewCortexSession does no MkdirAll of its own).
+			name:       "non-git dir, no pre-seeded .cortex/: hook writes no self-ignore file",
+			gitRepo:    false,
+			seedDir:    false,
 			wantFile:   false,
 			wantStatus: false,
 		},
@@ -144,15 +193,28 @@ func TestEnsureSelfGitignore(t *testing.T) {
 			if cs.transcript != nil {
 				defer cs.transcript.Close()
 			}
-			// StartTranscript always creates .cortex/sessions; that is the
-			// real "first session" state the issue starts from.
-			writeFakeTranscript(t, filepath.Join(root, ".cortex"), "20260101-000000")
+			// StartTranscript always creates .cortex/sessions with the
+			// session's own transcript inside; that is the real "first
+			// session" state the issue starts from.
+			writeFakeTranscript(t, filepath.Join(root, ".cortex"), cs.SessionID)
 
 			gitignorePath := filepath.Join(root, ".cortex", ".gitignore")
 			_, statErr := os.Stat(gitignorePath)
 			gotFile := statErr == nil
 			if gotFile != tt.wantFile {
 				t.Errorf(".cortex/.gitignore exists = %v, want %v (statErr=%v)", gotFile, tt.wantFile, statErr)
+			}
+
+			// When the case expects no self-file (non-git, or the user already
+			// ignores .cortex/), the hook must write no .cortex/.gitignore. The
+			// .cortex/ dir itself may legitimately exist — StartTranscript
+			// always creates .cortex/sessions (the real "first session" state) —
+			// but the hook's own MkdirAll must not have run for a no-write case.
+			// (A pre-seeded dir may of course still be there.)
+			if !tt.wantFile {
+				if _, err := os.Stat(gitignorePath); err == nil {
+					t.Errorf(".cortex/.gitignore was written in a no-write case")
+				}
 			}
 
 			if tt.wantStatus {
@@ -170,38 +232,106 @@ func TestEnsureSelfGitignore(t *testing.T) {
 // TestEnsureSelfGitignoreCoversStudyLearnPin is the study/learn coverage the
 // issue's headline misses: runStudyCLI/runLearnCLI build their session with
 // NewCortexSession and never open a transcript, so the self-ignore must fire
-// from the shared workspace-resolution seam (NewCortexSession), not from
-// StartTranscript. A hand-built *CortexSession — what those CLI functions
-// receive from NewCortexSession, workspace already resolved, before the first
-// write under .cortex/ — must leave .cortex/.gitignore on disk, so a first
-// `cortex study` or `cortex learn` in a fresh repo can't leave .cortex/
-// untracked. The seam itself (ensureSelfGitignore from workspace
-// resolution) is exactly what this asserts: no transcript, just the hook.
+// from the shared workspace-resolution seam (CortexSession.SetWorkspace,
+// called by NewCortexSession right after the workspace resolves —
+// workspace.go), not from StartTranscript. Delete that hook and this test
+// fails: a real NewCortexSession in a fresh git repo must leave
+// .cortex/.gitignore on disk before the session's first write, so a first
+// `cortex study` or `cortex learn` can't leave .cortex/ untracked. No
+// transcript is ever opened — that is the point.
 func TestEnsureSelfGitignoreCoversStudyLearnPin(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	initGitRepo(t, root)
 
-	// The production study/learn flow resolves the workspace first
-	// (WorkspaceFromCWD / NewWorkspace), then runs the session. NewCortex
-	// Session invokes the same seam (ensureSelfGitignore) at that moment —
-	// mirror it here without re-invoking the full NewCortexSession (no live
-	// backend / model catalog in this hermetic test).
-	cs := selfGitignoreSession(t, root)
-	cs.ensureSelfGitignore()
-
-	// Now simulate the first real write under .cortex/ that study/learn does
-	// — a journal entry — and confirm the write lands inside a gitignored
-	// dir (the leak the issue describes).
-	writeFakeTranscript(t, filepath.Join(root, ".cortex"), "20260101-000000")
+	// The production study/learn flow is exactly NewCortexSession() followed
+	// by writes under the CWD workspace's .cortex/ (journal, memory, the
+	// learn cursor) — no StartTranscript in between. Drive the real
+	// constructor (freshGitSession isolates CORTEX_BACKEND/CORTEX_HOME so it
+	// stays hermetic; NewCortexSession itself makes no network calls) and
+	// assert on the on-disk outcome it must produce at construction time.
+	cs := freshGitSession(t)
+	if cs.workspace == nil || cs.workspace.Root == "" {
+		t.Fatal("NewCortexSession did not resolve a workspace")
+	}
+	if resolved := resolvedPath(t, cs.workspace.Root); resolved != resolvedPath(t, root) {
+		t.Fatalf("workspace root = %q, want CWD %q (the study/learn CWD-implicit leg)", resolved, resolvedPath(t, root))
+	}
 
 	if _, err := os.Stat(filepath.Join(root, ".cortex", ".gitignore")); err != nil {
-		t.Fatalf(".cortex/.gitignore not written via workspace-resolution seam: %v", err)
+		t.Fatalf(".cortex/.gitignore not written by the NewCortexSession/SetWorkspace seam: %v", err)
+	}
+
+	// Now the first real write under .cortex/ that study/learn do — a
+	// transcript line, standing in for a journal entry — and confirm it
+	// lands inside a gitignored dir (the leak the issue describes).
+	if err := os.MkdirAll(filepath.Join(root, ".cortex", "sessions"), 0o755); err != nil {
+		t.Fatalf("MkdirAll sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".cortex", "sessions", "20260101-000000.jsonl"),
+		[]byte(`{"kind":"message","role":"user","content":"secret"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write session transcript: %v", err)
 	}
 
 	status := gitStatusPorcelain(t, root)
 	if strings.Contains(status, ".cortex") {
-		t.Errorf("git status --porcelain lists .cortex after study/learn path: %q", status)
+		t.Errorf("git status --porcelain lists .cortex after the study/learn path: %q", status)
+	}
+}
+
+// TestApplyProjectByNameCoversTargetRootSelfIgnore is the --project leg of
+// issue #119: applyProjectByName re-targets the session at a DIFFERENT root
+// than NewCortexSession resolved (the CWD), and its SetWorkspace call must
+// re-run the guard for that target's .cortex/. Without it, `cortex
+// study|learn|turn --project X` writes under X/.cortex/ while only the CWD
+// workspace is protected — and X may be a git repo whose .cortex/ would be
+// swept up by a routine `git add -A`.
+func TestApplyProjectByNameCoversTargetRootSelfIgnore(t *testing.T) {
+	target := t.TempDir()
+	initGitRepo(t, target)
+
+	// Build the session the way the CLI entry points do: NewCortexSession
+	// from an UNRELATED CWD (a git repo too, so the CWD-side guard has
+	// something to protect — the assertion below is about the target, not
+	// the CWD).
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	initGitRepo(t, cwd)
+	cs := freshGitSession(t)
+
+	regPath := filepath.Join(t.TempDir(), "projects.json")
+	reg := registry.NewAt(regPath)
+	if err := reg.Save(registry.Project{Name: "target", Root: target}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if err := applyProjectByName(cs, reg, "target"); err != nil {
+		t.Fatalf("applyProjectByName: %v", err)
+	}
+	if resolved := resolvedPath(t, cs.workspace.Root); resolved != resolvedPath(t, target) {
+		t.Fatalf("workspace root after re-target = %q, want %q", resolved, resolvedPath(t, target))
+	}
+
+	// The target's .cortex/ must now be self-ignored — written by the
+	// re-target's SetWorkspace, not by the CWD-side guard.
+	if _, err := os.Stat(filepath.Join(target, ".cortex", ".gitignore")); err != nil {
+		t.Fatalf("target .cortex/.gitignore not written by applyProjectByName: %v", err)
+	}
+
+	// And the target repo's status is clean: a real file written under the
+	// target's .cortex/ (what learn --project does with its journal/cursor)
+	// must not appear as untracked.
+	if err := os.MkdirAll(filepath.Join(target, ".cortex", "journal"), 0o755); err != nil {
+		t.Fatalf("MkdirAll target journal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".cortex", "journal", "probe"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write target journal probe: %v", err)
+	}
+	status := gitStatusPorcelain(t, target)
+	for _, line := range strings.Split(status, "\n") {
+		if strings.Contains(line, ".cortex") {
+			t.Errorf("target git status --porcelain still lists .cortex: %q\n(full output: %q)", line, status)
+		}
 	}
 }
 

@@ -44,19 +44,24 @@ const selfGitignoreBody = "*\n"
 // file's presence short-circuits the check, so repeat sessions and repeat
 // invocations of StartTranscript (compaction, /clear) add nothing.
 //
-// Called from two shared seams so every entry point is covered at the first
-// moment its workspace could write under `.cortex/`:
+// Every call site runs at the first moment its workspace could write under
+// `.cortex/`, so every entry point is covered:
 //
-//   - NewCortexSession (session_core.go), right after the workspace is
-//     resolved — covers the REPL, `turn` (fresh and `--session` resume),
-//     `study`, `learn` (both scopes), `serve`, `discord`, the loop firings,
-//     and `study-eval`. This is the path study/learn need, because they run a
-//     session without ever opening a transcript (no StartTranscript) yet
-//     still write under `.cortex/` (journal, memory, the learn cursor).
+//   - CortexSession.SetWorkspace (workspace.go) — the single seam both
+//     production workspace assignments go through: NewCortexSession
+//     (session_core.go) on the CWD-derived root, and applyProjectByName
+//     (project_workspace.go) on the re-targeted project root. Covers the
+//     REPL, `turn` (fresh and `--session` resume), `study`, `learn` (both
+//     scopes, including `--project`), serve's per-project sessions, the loop
+//     firings, `discord`, and `study-eval`. This is the path study/learn
+//     need, because they run a session without ever opening a transcript
+//     (no StartTranscript) yet still write under `.cortex/` (journal,
+//     memory, the learn cursor).
 //
-//   - ResumeTranscript (session.go) — covers hand-built sessions (tests, and
-//     any future caller that never goes through NewCortexSession) resuming
-//     into an existing workspace.
+//   - StartTranscript / ResumeTranscript (session.go) — belt-and-braces
+//     coverage for hand-built sessions (tests, and any future caller that
+//     assigns cs.workspace directly and never goes through SetWorkspace)
+//     that open a transcript.
 func (cs *CortexSession) ensureSelfGitignore() {
 	if cs == nil || cs.workspace == nil || cs.workspace.Root == "" {
 		return
@@ -69,15 +74,6 @@ func (cs *CortexSession) ensureSelfGitignore() {
 	// this up" both land here). Stat'ing first means a repeated session never
 	// spawns a git process at all.
 	if _, err := os.Stat(gitignorePath); err == nil {
-		return
-	}
-
-	// Best-effort: creating `.cortex/` on a read-only root must degrade to a
-	// silent no-op, like every other failure below. Callers that write
-	// directly (NewCortexSession) already MkdirAll'd the dir — this guard
-	// only covers ResumeTranscript and any other caller that hasn't created
-	// it yet.
-	if err := os.MkdirAll(ctxDir, 0o755); err != nil {
 		return
 	}
 
@@ -100,6 +96,25 @@ func (cs *CortexSession) ensureSelfGitignore() {
 	// only signal: err == nil means "ignored", and we must NOT treat that as
 	// a failure.
 	if _, err := gitCmdIn(root, "check-ignore", "-q", ".cortex"); err == nil {
+		return
+	}
+
+	// Create `.cortex/` only now — after both git checks have said the write
+	// is wanted — so a non-git or already-ignored workspace never gets an
+	// empty `.cortex/` from this hook. It is not the caller's job to have
+	// pre-created the dir: NewCortexSession does no MkdirAll of its own, and
+	// neither does ResumeTranscript (StartTranscript does, before it calls
+	// this). Best-effort: a read-only root degrades to a silent no-op, like
+	// every other failure in this function.
+	if err := os.MkdirAll(ctxDir, 0o755); err != nil {
+		return
+	}
+
+	// Re-stat: a concurrent process may have written the self-ignore between
+	// the first Stat and our MkdirAll (cross-process sessions on the same
+	// workspace are exactly what the per-transcript fslock assumes
+	// elsewhere); never clobber an existing file.
+	if _, err := os.Stat(gitignorePath); err == nil {
 		return
 	}
 
