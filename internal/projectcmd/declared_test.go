@@ -150,6 +150,9 @@ func TestResolve(t *testing.T) {
 		want       map[Role]Command
 		wantAbsent []Role
 		wantRoots  []string
+		// instructionsFile is the resolved instruction file's name (the
+		// Source label for a winning instruction-file declaration).
+		instructionsFile string
 	}{
 		{
 			name:       "discovery-only",
@@ -163,11 +166,12 @@ func TestResolve(t *testing.T) {
 			wantRoots: []string{"go.mod"},
 		},
 		{
-			name:       "agents-md-beats-discovery",
-			discovered: goDiscovered(),
-			agents:     Declared{RoleFormat: "prettier --write {file}"},
+			name:             "agents-md-beats-discovery",
+			discovered:       goDiscovered(),
+			agents:           Declared{RoleFormat: "prettier --write {file}"},
+			instructionsFile: "AGENTS.md",
 			want: map[Role]Command{
-				RoleFormat: {Cmd: "prettier --write {file}", PerFile: true, Source: SourceAgents},
+				RoleFormat: {Cmd: "prettier --write {file}", PerFile: true, Source: "AGENTS.md"},
 				RoleLint:   {Cmd: "go vet {dir}", Source: "go.mod"},
 				RoleTest:   {Cmd: "go test ./...", Source: "go.mod"},
 				RoleBuild:  {Cmd: "go build ./...", Source: "go.mod"},
@@ -175,15 +179,17 @@ func TestResolve(t *testing.T) {
 			wantRoots: []string{"go.mod"},
 		},
 		{
-			name:       "config-beats-agents-beats-discovery",
-			discovered: goDiscovered(),
-			config:     Declared{RoleFormat: "custom-fmt -w {file}", RoleTest: "go test -race ./..."},
-			agents:     Declared{RoleFormat: "prettier --write {file}", RoleLint: "golangci-lint run"},
+			name:             "config-beats-agents-beats-discovery",
+			discovered:       goDiscovered(),
+			config:           Declared{RoleFormat: "custom-fmt -w {file}", RoleTest: "go test -race ./..."},
+			agents:           Declared{RoleFormat: "prettier --write {file}", RoleLint: "golangci-lint run"},
+			instructionsFile: "CLAUDE.md",
 			want: map[Role]Command{
-				// config wins over AGENTS.md for format.
+				// config wins over the instruction file for format.
 				RoleFormat: {Cmd: "custom-fmt -w {file}", PerFile: true, Source: SourceConfig},
-				// config silent, AGENTS.md wins over discovery for lint.
-				RoleLint: {Cmd: "golangci-lint run", Source: SourceAgents},
+				// config silent, the instruction file (CLAUDE.md) wins over
+				// discovery for lint and is labeled by the file it came from.
+				RoleLint: {Cmd: "golangci-lint run", Source: "CLAUDE.md"},
 				// config wins over discovery for test.
 				RoleTest: {Cmd: "go test -race ./...", Source: SourceConfig},
 				// nobody declared: discovery.
@@ -192,13 +198,14 @@ func TestResolve(t *testing.T) {
 			wantRoots: []string{"go.mod"},
 		},
 		{
-			name:       "declaration-adding-a-role",
-			discovered: Commands{Test: Command{Cmd: "go test ./...", Source: "go.mod"}, Roots: []string{"go.mod"}},
-			agents:     Declared{RoleFormat: "black {file}", RoleBuild: "python -m build"},
+			name:             "declaration-adding-a-role",
+			discovered:       Commands{Test: Command{Cmd: "go test ./...", Source: "go.mod"}, Roots: []string{"go.mod"}},
+			agents:           Declared{RoleFormat: "black {file}", RoleBuild: "python -m build"},
+			instructionsFile: "AGENTS.md",
 			want: map[Role]Command{
-				RoleFormat: {Cmd: "black {file}", PerFile: true, Source: SourceAgents},
+				RoleFormat: {Cmd: "black {file}", PerFile: true, Source: "AGENTS.md"},
 				RoleTest:   {Cmd: "go test ./...", Source: "go.mod"},
-				RoleBuild:  {Cmd: "python -m build", Source: SourceAgents},
+				RoleBuild:  {Cmd: "python -m build", Source: "AGENTS.md"},
 			},
 			wantAbsent: []Role{RoleLint},
 			wantRoots:  []string{"go.mod"},
@@ -216,12 +223,13 @@ func TestResolve(t *testing.T) {
 			wantRoots: nil,
 		},
 		{
-			name:       "empty-discovery-pure-declaration",
-			discovered: Commands{},
-			agents:     Declared{RoleTest: "node --test"},
-			config:     Declared{RoleFormat: "npx prettier --write {file}"},
+			name:             "empty-discovery-pure-declaration",
+			discovered:       Commands{},
+			agents:           Declared{RoleTest: "node --test"},
+			config:           Declared{RoleFormat: "npx prettier --write {file}"},
+			instructionsFile: "AGENTS.md",
 			want: map[Role]Command{
-				RoleTest:   {Cmd: "node --test", Source: SourceAgents},
+				RoleTest:   {Cmd: "node --test", Source: "AGENTS.md"},
 				RoleFormat: {Cmd: "npx prettier --write {file}", PerFile: true, Source: SourceConfig},
 			},
 			wantAbsent: []Role{RoleLint, RoleBuild},
@@ -237,11 +245,12 @@ func TestResolve(t *testing.T) {
 			wantRoots: []string{"go.mod"},
 		},
 		{
-			name:       "resolve-does-not-mutate-input",
-			discovered: goDiscovered(),
-			agents:     Declared{RoleFormat: "other {file}"},
+			name:             "resolve-does-not-mutate-input",
+			discovered:       goDiscovered(),
+			agents:           Declared{RoleFormat: "other {file}"},
+			instructionsFile: "AGENTS.md",
 			want: map[Role]Command{
-				RoleFormat: {Cmd: "other {file}", PerFile: true, Source: SourceAgents},
+				RoleFormat: {Cmd: "other {file}", PerFile: true, Source: "AGENTS.md"},
 			},
 			wantRoots: []string{"go.mod"},
 		},
@@ -250,7 +259,7 @@ func TestResolve(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := tt.discovered
-			got := Resolve(in, tt.config, tt.agents)
+			got := Resolve(in, tt.config, tt.agents, tt.instructionsFile)
 
 			for role, want := range tt.want {
 				cmd, ok := got.Get(role)

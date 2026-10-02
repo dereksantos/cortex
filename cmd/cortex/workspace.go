@@ -82,7 +82,21 @@ func (w *Workspace) SessionsDir() string { return filepath.Join(w.ContextDir(), 
 // root — so the caller can name the loaded file (systemPromptContent's
 // label, #147).
 func (w *Workspace) Instructions() (path, instructions string) {
-	p := resolveInstructionFile(w.Root)
+	return workspaceInstructions(w.Root)
+}
+
+// workspaceInstructions resolves an explicit root's instruction file the
+// same way #152's instruction-file resolution does: the FIRST entry of
+// agentInstructionFiles present at root (AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md — no concatenation), read with the same
+// instructionBytesCap (readInstructions) the system prompt's seed uses. It
+// returns the resolved file's path ("") and its body, so both legs —
+// Workspace.Instructions (explicit root) and the root-direct reads the
+// `## Commands` declaration takes (session_core.go's
+// resolveProjectCommands) — label and parse the SAME file a system prompt
+// would load from that root.
+func workspaceInstructions(root string) (path, instructions string) {
+	p := resolveInstructionFile(root)
 	if p == "" {
 		return "", ""
 	}

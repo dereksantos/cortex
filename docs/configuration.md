@@ -581,7 +581,13 @@ Loop firings record whether the commit they made carried the trailer, as
 firing made no commit). Commits from `cortex change commit`, Discord
 checkpoints and the `bash` tool are not journaled with an attribution flag.
 
-## `project.commands` — project's own format/lint/test/build commands
+## Project commands, post-edit hook and workspace trust
+
+Cortex discovers each project's own `format`/`lint`/`test`/`build` commands
+from its manifests, and runs them after edits — but only in a workspace you
+have trusted. This section is the single reference for that whole feature:
+how the commands are found, when each runs, the trust gate, the mode switch,
+and the budgets. The config keys involved live under `project`:
 
 ```json
 {

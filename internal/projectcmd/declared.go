@@ -1,24 +1,28 @@
 // Declaration is the other half of project commands: instead of being
 // discovered from manifest files, the project names its own commands in
 // a `project.commands` section of .cortex/config.json or in a
-// `## Commands` section of AGENTS.md (the cross-harness convention
-// Cortex already reads into its seed).
+// `## Commands` section of its RESOLVED instruction file (AGENTS.md, then
+// CLAUDE.md, then .github/copilot-instructions.md — the same file the
+// system prompt's seed loads, #152).
 //
 // Declaration beats discovery field-by-field, and a config declaration
-// beats an AGENTS.md declaration (issue #129: discovery is an inference
-// from manifests; a declaration is the project's own word).
+// beats an instruction-file declaration (issue #129: discovery is an
+// inference from manifests; a declaration is the project's own word).
 package projectcmd
 
 import (
 	"strings"
 )
 
-// Source labels for declared (vs discovered) commands, so a rendered
-// report can show where each command came from. Discovered commands
-// carry their manifest name ("go.mod", ...) as Source.
+// SourceConfig is the provenance label for a command declared in the
+// config's project.commands section. A command declared in the instruction
+// file's `## Commands` section carries the RESOLVED file's name as its
+// Source ("AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md") —
+// the file it was actually read from, named by the caller (Resolve's
+// instructionsFile argument). Discovered commands carry their manifest name
+// ("go.mod", "package.json", ...) as Source.
 const (
 	SourceConfig = "config.json"
-	SourceAgents = "AGENTS.md"
 )
 
 // Declared is a set of explicitly declared commands, keyed by role.
@@ -121,14 +125,18 @@ func RoleKnown(role Role) bool {
 
 // Resolve applies declarations over discovery, field by field: a
 // command the project declared wins over one the manifests implied, a
-// config declaration beats an AGENTS.md declaration for the same role,
-// and a role no source declared stays discovered. Roots is pruned to the
-// manifests that still supply a final command — a fully overridden
-// manifest is no longer a source of the set.
-func Resolve(discovered Commands, configDeclared, agentsDeclared Declared) Commands {
+// config declaration beats an instruction-file declaration for the same
+// role, and a role no source declared stays discovered. instructionsFile
+// names the instruction file the instruction-file declaration was read from
+// (AGENTS.md, CLAUDE.md, .github/copilot-instructions.md — the resolved
+// file's name) and becomes the Source label for every instruction-file
+// declaration that wins; pass "AGENTS.md" for the historical case. Roots
+// is pruned to the manifests that still supply a final command — a fully
+// overridden manifest is no longer a source of the set.
+func Resolve(discovered Commands, configDeclared, agentsDeclared Declared, instructionsFile string) Commands {
 	out := discovered
 	for _, role := range []Role{RoleFormat, RoleLint, RoleTest, RoleBuild} {
-		cmd, source, ok := resolveRole(role, configDeclared, agentsDeclared)
+		cmd, source, ok := resolveRole(role, configDeclared, agentsDeclared, instructionsFile)
 		if !ok {
 			continue
 		}
@@ -153,14 +161,16 @@ func Resolve(discovered Commands, configDeclared, agentsDeclared Declared) Comma
 	return out
 }
 
-// resolveRole picks the winning command for one role: config beats
-// AGENTS.md beats nothing. ok=false leaves the discovered command.
-func resolveRole(role Role, configDeclared, agentsDeclared Declared) (cmd, source string, ok bool) {
+// resolveRole picks the winning command for one role: config beats the
+// instruction file beats nothing. ok=false leaves the discovered command.
+// The instruction-file win's Source is the file it was read from
+// (instructionsFile), not a fixed label.
+func resolveRole(role Role, configDeclared, agentsDeclared Declared, instructionsFile string) (cmd, source string, ok bool) {
 	if cmd, declared := configDeclared.Get(role); declared {
 		return cmd, SourceConfig, true
 	}
 	if cmd, declared := agentsDeclared.Get(role); declared {
-		return cmd, SourceAgents, true
+		return cmd, instructionsFile, true
 	}
 	return "", "", false
 }

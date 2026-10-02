@@ -22,13 +22,18 @@ import (
 
 // resolveProjectCommands computes a workspace's resolved command set
 // (issue #129): discovery from the root's manifests, with the config's
-// project.commands declarations and the root's AGENTS.md `## Commands`
-// section overriding it field-by-field (config > AGENTS.md > discovery).
-// It is the ONE parsing path for the AGENTS.md `## Commands` declaration:
-// read from the workspace root directly, so the hook works for a
-// CWD-implicit project with no config file. It never fails: an
-// undetectable root or unreadable manifest degrades to an empty set,
-// which the post-edit hook treats as "no hook".
+// project.commands declarations and the root's RESOLVED instruction
+// file's `## Commands` section overriding it field-by-field (config >
+// instruction file > discovery). The instruction file is resolved the
+// same way the system prompt's project-instructions seed resolves it
+// (#152): the first of AGENTS.md, CLAUDE.md, .github/copilot-instructions.md
+// present at the root (no concatenation), read with the same size cap
+// (readInstructions) — so a repo whose instructions live in CLAUDE.md
+// still has its declared commands picked up. It is the ONE parsing path
+// for the `## Commands` declaration: read from the workspace root
+// directly, so the hook works for a CWD-implicit project with no config
+// file. It never fails: an undetectable root or unreadable manifest
+// degrades to an empty set, which the post-edit hook treats as "no hook".
 func resolveProjectCommands(root string, cfg *Config) projectcmd.Commands {
 	discovered, err := projectcmd.Discover(root)
 	if err != nil {
@@ -38,8 +43,13 @@ func resolveProjectCommands(root string, cfg *Config) projectcmd.Commands {
 	if cfg != nil {
 		declared = cfg.DeclaredProjectCommands()
 	}
-	agents := projectcmd.ParseAgentsCommands(readInstructions(filepath.Join(root, "AGENTS.md")))
-	return projectcmd.Resolve(discovered, declared, agents)
+	// The `## Commands` section is read from the RESOLVED instruction file
+	// (workspaceInstructions, #152's resolution); the file's name becomes
+	// the Source label for any declaration that wins, so the report shows
+	// where it came from. No file → no declarations (Resolve gets "").
+	agentsPath, instructions := workspaceInstructions(root)
+	agents := projectcmd.ParseAgentsCommands(instructions)
+	return projectcmd.Resolve(discovered, declared, agents, fileLabel(root, agentsPath))
 }
 
 type CortexArgs []string
@@ -103,9 +113,10 @@ type CortexSession struct {
 	workspace *Workspace
 	// projectCommands is the resolved project command set (issue #129) —
 	// discovery from the workspace's manifests, overridden by the config's
-	// project.commands declarations and the AGENTS.md `## Commands` section.
-	// Computed once at session construction / project targeting; nil-safety
-	// means an empty value (no manifest, no declarations) is a no-op hook.
+	// project.commands declarations and the resolved instruction file's
+	// `## Commands` section. Computed once at session construction /
+	// project targeting; nil-safety means an empty value (no manifest, no
+	// declarations) is a no-op hook.
 	projectCommands projectcmd.Commands
 	// hookState is the session-scoped state of the post-edit hook
 	// (issue #129): the "workspace not trusted" note fires once per

@@ -482,9 +482,11 @@ type Config struct {
 	// Project holds project-scoped declarations (issue #129). Commands
 	// declares the project's own format/lint/test/build commands and
 	// OVERRIDES discovery from manifest files, field by field — see
-	// internal/projectcmd.Resolve. A `## Commands` section in AGENTS.md
-	// declares the same keys and sits below this one (config beats
-	// AGENTS.md beats discovery).
+	// internal/projectcmd.Resolve. A `## Commands` section in the repo's
+	// RESOLVED instruction file (AGENTS.md, then CLAUDE.md, then
+	// .github/copilot-instructions.md — the same file the system prompt's
+	// seed loads, #152) declares the same keys and sits below this one
+	// (config beats instruction file beats discovery).
 	Project ProjectConfig `json:"project"`
 }
 
@@ -1213,11 +1215,14 @@ func LoadConfig() *Config {
 }
 
 // loadMergedConfig layers user config under project config
-// (field-by-field; a missing file is an absent layer). AGENTS.md is NOT
-// read here — the AGENTS.md `## Commands` declaration is parsed at
+// (field-by-field; a missing file is an absent layer). The instruction
+// file's `## Commands` declaration is NOT read here — it is parsed at
 // resolution time (session_core.go's resolveProjectCommands, from the
-// workspace root), so there is exactly one parsing path for it (issue
-// #129): config commands beat AGENTS.md commands, which beat discovery.
+// root's RESOLVED instruction file: AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md — the same file the system prompt's
+// project-instructions seed loads, #152), so there is exactly one parsing
+// path for it (issue #129): config commands beat instruction-file commands,
+// which beat discovery.
 func loadMergedConfig(userPath, projectPath string) *Config {
 	user := readConfigFile(userPath)
 	project := readConfigFile(projectPath)

@@ -4,7 +4,8 @@
 // convention as renderProjectListGolden); buildProjectCommandsReport is
 // exercised end-to-end against a fixture tree to prove the CLI shows the
 // SAME resolved commands the post-edit hook runs (discovery + config +
-// AGENTS.md precedence).
+// instruction-file declarations) and the same "when it runs now" verdict
+// the hook applies in that workspace.
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/projectcmd"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // TestCommandsReportInfoProjectsInRoleOrder pins the pure projection: a
@@ -28,13 +30,13 @@ func TestCommandsReportInfoProjectsInRoleOrder(t *testing.T) {
 		Test:   projectcmd.Command{Cmd: "go test ./...", Source: "go.mod"},
 		Build:  projectcmd.Command{Cmd: "go build ./...", Source: "go.mod"},
 	}
-	got := commandsReportInfo(cmds, false)
-	// Trust is the only gate: untrusted → nothing runs.
+	// Untrusted: nothing runs, whatever the mode says.
+	got := commandsReportInfo(cmds, false, tools.HookModeAll)
 	want := []ProjectCommandInfo{
-		{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", PerFile: true, RunsNow: false},
-		{Role: "lint", Command: "go vet {file}", Source: "go.mod", PerFile: true, RunsNow: false},
-		{Role: "test", Command: "go test ./...", Source: "go.mod", RunsNow: false},
-		{Role: "build", Command: "go build ./...", Source: "go.mod", RunsNow: false},
+		{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "inactive: workspace untrusted"},
+		{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "inactive: workspace untrusted"},
+		{Role: "test", Command: "go test ./...", Source: "go.mod", When: "inactive: workspace untrusted"},
+		{Role: "build", Command: "go build ./...", Source: "go.mod", When: "inactive: workspace untrusted"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d commands, want %d: %+v", len(got), len(want), got)
@@ -45,20 +47,50 @@ func TestCommandsReportInfoProjectsInRoleOrder(t *testing.T) {
 		}
 	}
 
-	// Trusted: the per-file format/lint run; test/build never do.
-	got = commandsReportInfo(cmds, true)
+	// Trusted, mode all: the per-file format runs per edit, the lint at the
+	// turn end; test/build never do.
+	got = commandsReportInfo(cmds, true, tools.HookModeAll)
 	want = []ProjectCommandInfo{
-		{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", PerFile: true, RunsNow: true},
-		{Role: "lint", Command: "go vet {file}", Source: "go.mod", PerFile: true, RunsNow: true},
-		{Role: "test", Command: "go test ./...", Source: "go.mod", RunsNow: false},
-		{Role: "build", Command: "go build ./...", Source: "go.mod", RunsNow: false},
+		{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "per-edit"},
+		{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "turn-end"},
+		{Role: "test", Command: "go test ./...", Source: "go.mod", When: "never"},
+		{Role: "build", Command: "go build ./...", Source: "go.mod", When: "never"},
 	}
 	if len(got) != len(want) {
-		t.Fatalf("trusted: got %d commands, want %d: %+v", len(got), len(want), got)
+		t.Fatalf("trusted/all: got %d commands, want %d: %+v", len(got), len(want), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("trusted commands[%d] = %+v, want %+v", i, got[i], want[i])
+			t.Errorf("trusted/all commands[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// Trusted, mode format: per-file format still runs per edit; the turn-end
+	// lint is skipped by the mode; test/build still never.
+	got = commandsReportInfo(cmds, true, tools.HookModeFormat)
+	want = []ProjectCommandInfo{
+		{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "per-edit"},
+		{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "inactive: hook mode format"},
+		{Role: "test", Command: "go test ./...", Source: "go.mod", When: "never"},
+		{Role: "build", Command: "go build ./...", Source: "go.mod", When: "never"},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("trusted/format commands[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// Trusted, mode off: nothing runs, and it's the mode that keeps it off.
+	got = commandsReportInfo(cmds, true, tools.HookModeOff)
+	want = []ProjectCommandInfo{
+		{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "inactive: hook mode off"},
+		{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "inactive: hook mode off"},
+		{Role: "test", Command: "go test ./...", Source: "go.mod", When: "never"},
+		{Role: "build", Command: "go build ./...", Source: "go.mod", When: "never"},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("trusted/off commands[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }
@@ -70,62 +102,68 @@ func TestCommandsReportInfoSkipsUnsuppliedRoles(t *testing.T) {
 	cmds := projectcmd.Commands{
 		Test: projectcmd.Command{Cmd: "make test", Source: "Makefile"},
 	}
-	got := commandsReportInfo(cmds, false)
+	got := commandsReportInfo(cmds, false, tools.HookModeAll)
 	if len(got) != 1 || got[0].Role != "test" || got[0].Command != "make test" {
 		t.Errorf("got %+v, want only the discovered test role", got)
 	}
-	// A test target is never hook-run — untrusted or trusted.
-	if got[0].RunsNow {
-		t.Errorf("make test must have runs_now=false, got %+v", got)
+	// A test target is never hook-run in a TRUSTED workspace (any mode); in
+	// an untrusted one, trust is the first gate and nothing runs at all.
+	if got[0].When != "inactive: workspace untrusted" {
+		t.Errorf("untrusted make test must read when=inactive: workspace untrusted, got %+v", got)
+	}
+	// Trusted, any mode: the test role is never auto-run.
+	got = commandsReportInfo(cmds, true, tools.HookModeAll)
+	if got[0].When != "never" {
+		t.Errorf("trusted make test must read when=never, got %+v", got)
 	}
 }
 
 // TestRenderProjectCommandsTextGolden pins the exact text layout `cortex
 // project commands` prints for a discovered Go project in an UNTRUSTED
-// workspace (the default): the hook runs nothing, so every per-edit command
-// reads "not run by the post-edit hook".
+// workspace (the default): the hook runs nothing, so every command reads
+// "inactive: workspace untrusted".
 func TestRenderProjectCommandsTextGolden(t *testing.T) {
 	got := renderProjectCommandsText(ProjectCommandsReport{
 		Root: "/fixture/go",
 		Commands: []ProjectCommandInfo{
-			{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", PerFile: true, RunsNow: false},
-			{Role: "lint", Command: "go vet {file}", Source: "go.mod", PerFile: true, RunsNow: false},
-			{Role: "test", Command: "go test ./...", Source: "go.mod", RunsNow: false},
-			{Role: "build", Command: "go build ./...", Source: "go.mod", RunsNow: false},
+			{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "inactive: workspace untrusted"},
+			{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "inactive: workspace untrusted"},
+			{Role: "test", Command: "go test ./...", Source: "go.mod", When: "inactive: workspace untrusted"},
+			{Role: "build", Command: "go build ./...", Source: "go.mod", When: "inactive: workspace untrusted"},
 		},
-	}, false)
+	})
 	want := "Project commands (/fixture/go):\n" +
-		"  format  gofmt -w {file} (go.mod) [per-file] — not run by the post-edit hook\n" +
-		"  lint    go vet {file} (go.mod) [per-file] — not run by the post-edit hook\n" +
-		"  test    go test ./... (go.mod) — not run by the post-edit hook\n" +
-		"  build   go build ./... (go.mod) — not run by the post-edit hook\n" +
-		"  source: manifest name = discovered; config.json / AGENTS.md = declared\n" +
-		"  runs now / trusted-workspace required: the post-edit hook's call for this workspace (cortex project trust); the hook runs only in a trusted workspace, and never runs test/build or whole-project commands per edit\n"
+		"  format gofmt -w {file} (go.mod) — inactive: workspace untrusted\n" +
+		"  lint   go vet {file} (go.mod) — inactive: workspace untrusted\n" +
+		"  test   go test ./... (go.mod) — inactive: workspace untrusted\n" +
+		"  build  go build ./... (go.mod) — inactive: workspace untrusted\n" +
+		"  source: manifest name = discovered; config.json / instruction file (AGENTS.md, CLAUDE.md, …) = declared\n" +
+		"  when: per-edit (the post-edit hook, after each write/edit), turn-end (the turn-end lint pass), never (the hook never auto-runs it), or inactive (this workspace or hook mode does not run it)\n"
 	if got != want {
 		t.Errorf("renderProjectCommandsText = %q, want %q", got, want)
 	}
 }
 
 // TestRenderProjectCommandsTextTrustedGolden pins the TRUSTED workspace's
-// text layout: per-edit commands read "runs now", test/build still read
-// "not run by the post-edit hook".
+// text layout in mode all: the per-file format reads "per-edit", the lint
+// "turn-end", and test/build read "never".
 func TestRenderProjectCommandsTextTrustedGolden(t *testing.T) {
 	got := renderProjectCommandsText(ProjectCommandsReport{
 		Root: "/fixture/go",
 		Commands: []ProjectCommandInfo{
-			{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", PerFile: true, RunsNow: true},
-			{Role: "lint", Command: "go vet {file}", Source: "go.mod", PerFile: true, RunsNow: true},
-			{Role: "test", Command: "go test ./...", Source: "go.mod", RunsNow: false},
-			{Role: "build", Command: "go build ./...", Source: "go.mod", RunsNow: false},
+			{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "per-edit"},
+			{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "turn-end"},
+			{Role: "test", Command: "go test ./...", Source: "go.mod", When: "never"},
+			{Role: "build", Command: "go build ./...", Source: "go.mod", When: "never"},
 		},
-	}, true)
+	})
 	want := "Project commands (/fixture/go):\n" +
-		"  format  gofmt -w {file} (go.mod) [per-file] — runs now\n" +
-		"  lint    go vet {file} (go.mod) [per-file] — runs now\n" +
-		"  test    go test ./... (go.mod) — not run by the post-edit hook\n" +
-		"  build   go build ./... (go.mod) — not run by the post-edit hook\n" +
-		"  source: manifest name = discovered; config.json / AGENTS.md = declared\n" +
-		"  runs now / trusted-workspace required: the post-edit hook's call for this workspace (cortex project trust); the hook runs only in a trusted workspace, and never runs test/build or whole-project commands per edit\n"
+		"  format gofmt -w {file} (go.mod) — per-edit\n" +
+		"  lint   go vet {file} (go.mod) — turn-end\n" +
+		"  test   go test ./... (go.mod) — never\n" +
+		"  build  go build ./... (go.mod) — never\n" +
+		"  source: manifest name = discovered; config.json / instruction file (AGENTS.md, CLAUDE.md, …) = declared\n" +
+		"  when: per-edit (the post-edit hook, after each write/edit), turn-end (the turn-end lint pass), never (the hook never auto-runs it), or inactive (this workspace or hook mode does not run it)\n"
 	if got != want {
 		t.Errorf("renderProjectCommandsText = %q, want %q", got, want)
 	}
@@ -133,7 +171,7 @@ func TestRenderProjectCommandsTextTrustedGolden(t *testing.T) {
 
 // TestRenderProjectCommandsTextEmptyGolden pins the empty-report message.
 func TestRenderProjectCommandsTextEmptyGolden(t *testing.T) {
-	got := renderProjectCommandsText(ProjectCommandsReport{Root: "/fixture/empty"}, false)
+	got := renderProjectCommandsText(ProjectCommandsReport{Root: "/fixture/empty"})
 	want := "No project commands discovered for /fixture/empty\n"
 	if got != want {
 		t.Errorf("renderProjectCommandsText(empty) = %q, want %q", got, want)
@@ -141,18 +179,17 @@ func TestRenderProjectCommandsTextEmptyGolden(t *testing.T) {
 }
 
 // TestProjectCommandsReportJSON pins the exact --json payload for a
-// discovered Go project — the shape external consumers (run.sh) parse.
-// per_file is omitempty (whole-project commands omit it); runs_now is
-// always present. The report is built directly (the serialization shape,
-// not the discovery, is under test).
+// discovered Go project — the shape external consumers (run.sh) parse. The
+// report is built directly (the serialization shape, not the discovery, is
+// under test).
 func TestProjectCommandsReportJSON(t *testing.T) {
 	report := ProjectCommandsReport{
 		Root: "/fixture/go",
 		Commands: []ProjectCommandInfo{
-			{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", PerFile: true, RunsNow: true},
-			{Role: "lint", Command: "go vet {file}", Source: "go.mod", PerFile: true, RunsNow: true},
-			{Role: "test", Command: "go test ./...", Source: "go.mod", RunsNow: false},
-			{Role: "build", Command: "go build ./...", Source: "go.mod", RunsNow: false},
+			{Role: "format", Command: "gofmt -w {file}", Source: "go.mod", When: "per-edit"},
+			{Role: "lint", Command: "go vet {file}", Source: "go.mod", When: "turn-end"},
+			{Role: "test", Command: "go test ./...", Source: "go.mod", When: "never"},
+			{Role: "build", Command: "go build ./...", Source: "go.mod", When: "never"},
 		},
 	}
 	b, err := json.MarshalIndent(report, "", "  ")
@@ -166,27 +203,25 @@ func TestProjectCommandsReportJSON(t *testing.T) {
       "role": "format",
       "command": "gofmt -w {file}",
       "source": "go.mod",
-      "per_file": true,
-      "runs_now": true
+      "when": "per-edit"
     },
     {
       "role": "lint",
       "command": "go vet {file}",
       "source": "go.mod",
-      "per_file": true,
-      "runs_now": true
+      "when": "turn-end"
     },
     {
       "role": "test",
       "command": "go test ./...",
       "source": "go.mod",
-      "runs_now": false
+      "when": "never"
     },
     {
       "role": "build",
       "command": "go build ./...",
       "source": "go.mod",
-      "runs_now": false
+      "when": "never"
     }
   ]
 }`
@@ -204,9 +239,9 @@ func TestProjectCommandsReportJSON(t *testing.T) {
 }
 
 // TestBuildProjectCommandsReportPrecedence is the end-to-end proof: the CLI
-// report for a Go project with a config declaration AND an AGENTS.md
-// declaration shows config > AGENTS.md > discovery, exactly the commands
-// the post-edit hook resolves. A controlled *Config is passed (not
+// report for a Go project with a config declaration AND an instruction-file
+// declaration shows config > instruction file > discovery, exactly the
+// commands the post-edit hook resolves. A controlled *Config is passed (not
 // LoadConfig) so the test is deterministic and independent of the caller's
 // user config.
 func TestBuildProjectCommandsReportPrecedence(t *testing.T) {
@@ -222,7 +257,7 @@ func TestBuildProjectCommandsReportPrecedence(t *testing.T) {
 	}
 	cfg := &Config{Project: ProjectConfig{Commands: map[string]string{"format": "cfg-fmt {file}"}}}
 
-	report := buildProjectCommandsReport(dir, cfg, false)
+	report := buildProjectCommandsReport(dir, cfg, false, tools.HookModeAll)
 
 	got := map[string]ProjectCommandInfo{}
 	for _, c := range report.Commands {
@@ -234,7 +269,7 @@ func TestBuildProjectCommandsReportPrecedence(t *testing.T) {
 	if c := got["format"]; c.Command != "cfg-fmt {file}" || c.Source != projectcmd.SourceConfig {
 		t.Errorf("format = %+v, want the config declaration to win", c)
 	}
-	if c := got["lint"]; c.Command != "my-lint {file}" || c.Source != projectcmd.SourceAgents {
+	if c := got["lint"]; c.Command != "my-lint {file}" || c.Source != "AGENTS.md" {
 		t.Errorf("lint = %+v, want AGENTS.md to beat discovery", c)
 	}
 	if c := got["test"]; c.Command != "go test ./..." || c.Source != "go.mod" {
@@ -244,13 +279,13 @@ func TestBuildProjectCommandsReportPrecedence(t *testing.T) {
 		t.Errorf("build = %+v, want discovery to stand", c)
 	}
 	// The text render reflects the same precedence (format is the config's).
-	if !strings.Contains(renderProjectCommandsText(report, false), "cfg-fmt {file} (config.json)") {
-		t.Errorf("text render should show the config-declared format, got:\n%s", renderProjectCommandsText(report, false))
+	if !strings.Contains(renderProjectCommandsText(report), "cfg-fmt {file} (config.json)") {
+		t.Errorf("text render should show the config-declared format, got:\n%s", renderProjectCommandsText(report))
 	}
 	// Untrusted: nothing runs.
 	for role, c := range got {
-		if c.RunsNow {
-			t.Errorf("%s runs_now must be false in an untrusted workspace, got %+v", role, c)
+		if c.When != "inactive: workspace untrusted" {
+			t.Errorf("%s when = %q, want the untrusted label in an untrusted workspace, got %+v", role, c.When, c)
 		}
 	}
 }
@@ -268,7 +303,7 @@ func TestBuildProjectCommandsReportPackageJSONRunnableForm(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	report := buildProjectCommandsReport(dir, nil, false)
+	report := buildProjectCommandsReport(dir, nil, false, tools.HookModeAll)
 	got := map[string]ProjectCommandInfo{}
 	for _, c := range report.Commands {
 		got[c.Role] = c
@@ -293,42 +328,42 @@ func TestBuildProjectCommandsReportPackageJSONRunnableForm(t *testing.T) {
 			t.Errorf("%s = %q must not echo the raw script body", role, c.Command)
 		}
 		// Untrusted: nothing runs — npm scripts included.
-		if c.RunsNow {
+		if c.When != "inactive: workspace untrusted" {
 			t.Errorf("%s = %+v: an untrusted workspace must not auto-run anything", role, c)
 		}
 	}
 	// The text render (what `cortex project commands` prints) shows the
-	// same runnable form — and, untrusted, every role reads "not run by
-	// the post-edit hook".
-	text := renderProjectCommandsText(report, false)
+	// same runnable form — and, untrusted, every role reads "inactive:
+	// workspace untrusted".
+	text := renderProjectCommandsText(report)
 	for _, wantLine := range []string{
-		"lint    npm run lint (package.json) — not run by the post-edit hook",
-		"test    npm test (package.json) — not run by the post-edit hook",
-		"build   npm run build (package.json) — not run by the post-edit hook",
+		"lint   npm run lint (package.json) — inactive: workspace untrusted",
+		"test   npm test (package.json) — inactive: workspace untrusted",
+		"build  npm run build (package.json) — inactive: workspace untrusted",
 	} {
 		if !strings.Contains(text, wantLine) {
 			t.Errorf("text render missing %q:\n%s", wantLine, text)
 		}
 	}
-	// A TRUSTED workspace flips runs_now for the PER-FILE lint — the npm
-	// lint here is a whole-project script (no {file}/{dir}), so even
-	// trusted it does not auto-run: the hook never runs a whole-project
-	// lint per edit. test/build never run either.
-	trusted := buildProjectCommandsReport(dir, nil, true)
+	// A TRUSTED workspace in mode all flips the verdict, but only for a
+	// per-file command — the npm lint here is a whole-project script (no
+	// {file}/{dir}), so even trusted it is never auto-run: the hook never
+	// runs a whole-project lint. test/build never run either.
+	trusted := buildProjectCommandsReport(dir, nil, true, tools.HookModeAll)
 	for _, c := range trusted.Commands {
-		if c.RunsNow {
-			t.Errorf("trusted workspace: %s = %+v, want runs_now=false (no per-file lint, no test/build auto-run)", c.Role, c)
+		if c.When != "never" {
+			t.Errorf("trusted workspace: %s = %+v, want when=never (no per-file command, no test/build auto-run)", c.Role, c)
 		}
 	}
 }
 
-// TestRunsNowFollowsHookApplicability pins runs_now against the HOOK's own
-// applicability rules (tools.HookWouldRun): trust is the first gate (an
-// untrusted workspace runs nothing), and on a trusted workspace the
-// per-file format/lint run while a whole-project format (no {file}), a
-// whole-project lint (no {file}/{dir}), and the test/build roles NEVER do —
-// no matter how trusted.
-func TestRunsNowFollowsHookApplicability(t *testing.T) {
+// TestWhenFollowsHookApplicability pins the When verdict against the HOOK's
+// own applicability rules (tools.HookWouldRun): trust is the first gate (an
+// untrusted workspace runs nothing), and on a trusted workspace in mode all
+// the per-file format runs per-edit and the lint at the turn end while a
+// whole-project format (no {file}), a whole-project lint (no {file}/{dir}),
+// and the test/build roles NEVER do — no matter how trusted.
+func TestWhenFollowsHookApplicability(t *testing.T) {
 	cmds := projectcmd.Commands{
 		Format: projectcmd.Command{Cmd: "gofmt -w {file}", PerFile: true, Source: "go.mod"},
 		Lint:   projectcmd.Command{Cmd: "cargo clippy {file}", PerFile: true, Source: "go.mod"},
@@ -339,17 +374,23 @@ func TestRunsNowFollowsHookApplicability(t *testing.T) {
 		name    string
 		cmds    projectcmd.Commands
 		trusted bool
-		want    map[string]bool // role → runs_now
+		mode    tools.HookMode
+		want    map[string]string // role → when
 	}{
 		{
-			name: "per-file-trusted-flips",
-			cmds: cmds, trusted: true,
-			want: map[string]bool{"format": true, "lint": true, "test": false, "build": false},
+			name: "per-file-trusted-all",
+			cmds: cmds, trusted: true, mode: tools.HookModeAll,
+			want: map[string]string{"format": "per-edit", "lint": "turn-end", "test": "never", "build": "never"},
 		},
 		{
 			name: "per-file-untrusted-runs-nothing",
-			cmds: cmds, trusted: false,
-			want: map[string]bool{"format": false, "lint": false, "test": false, "build": false},
+			cmds: cmds, trusted: false, mode: tools.HookModeAll,
+			want: map[string]string{"format": "inactive: workspace untrusted", "lint": "inactive: workspace untrusted", "test": "inactive: workspace untrusted", "build": "inactive: workspace untrusted"},
+		},
+		{
+			name: "per-file-trusted-off",
+			cmds: cmds, trusted: true, mode: tools.HookModeOff,
+			want: map[string]string{"format": "inactive: hook mode off", "lint": "inactive: hook mode off", "test": "never", "build": "never"},
 		},
 		{
 			name: "whole-project-format-never-runs",
@@ -359,25 +400,25 @@ func TestRunsNowFollowsHookApplicability(t *testing.T) {
 				Format: projectcmd.Command{Cmd: "go fmt ./...", Source: "go.mod"},
 				Lint:   projectcmd.Command{Cmd: "eslint {file}", PerFile: true, Source: "go.mod"},
 			},
-			trusted: true,
-			want:    map[string]bool{"format": false, "lint": true},
+			trusted: true, mode: tools.HookModeAll,
+			want: map[string]string{"format": "never", "lint": "turn-end"},
 		},
 		{
 			name:    "whole-project-lint-never-runs",
 			cmds:    projectcmd.Commands{Lint: projectcmd.Command{Cmd: "cargo clippy --all-targets", Source: "go.mod"}},
-			trusted: true,
-			want:    map[string]bool{"lint": false},
+			trusted: true, mode: tools.HookModeAll,
+			want: map[string]string{"lint": "never"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, c := range commandsReportInfo(tc.cmds, tc.trusted) {
+			for _, c := range commandsReportInfo(tc.cmds, tc.trusted, tc.mode) {
 				want, ok := tc.want[c.Role]
 				if !ok {
 					continue
 				}
-				if c.RunsNow != want {
-					t.Errorf("%s runs_now = %v, want %v (%+v)", c.Role, c.RunsNow, want, c)
+				if c.When != want {
+					t.Errorf("%s when = %q, want %q (%+v)", c.Role, c.When, want, c)
 				}
 			}
 		})
@@ -386,9 +427,10 @@ func TestRunsNowFollowsHookApplicability(t *testing.T) {
 
 // TestBuildProjectCommandsReportAgentsMDWithoutConfig pins the external
 // consumer scenario (run.sh on a project that declares its commands only in
-// AGENTS.md, with no .cortex/config.json): the report must still surface the
-// AGENTS.md declarations over discovery, because resolveProjectCommands
-// reads AGENTS.md from the root directly — a nil config drops nothing.
+// its instruction file, with no .cortex/config.json): the report must still
+// surface the instruction-file declarations over discovery, because
+// resolveProjectCommands reads the RESOLVED instruction file from the root
+// directly — a nil config drops nothing.
 func TestBuildProjectCommandsReportAgentsMDWithoutConfig(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o644); err != nil {
@@ -398,9 +440,9 @@ func TestBuildProjectCommandsReportAgentsMDWithoutConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No .cortex/config.json at all → a nil config (what configForRoot yields).
-	report := buildProjectCommandsReport(dir, nil, false)
+	report := buildProjectCommandsReport(dir, nil, false, tools.HookModeAll)
 	for _, c := range report.Commands {
-		if c.Role == "format" && (c.Command != "agents-fmt {file}" || c.Source != projectcmd.SourceAgents) {
+		if c.Role == "format" && (c.Command != "agents-fmt {file}" || c.Source != "AGENTS.md") {
 			t.Errorf("format = %+v, want the AGENTS.md declaration over go.mod discovery", c)
 		}
 	}
@@ -412,12 +454,12 @@ func TestBuildProjectCommandsReportAgentsMDWithoutConfig(t *testing.T) {
 // JSON list.
 func TestBuildProjectCommandsReportNoManifestNoDeclarations(t *testing.T) {
 	dir := t.TempDir() // no go.mod, no AGENTS.md
-	report := buildProjectCommandsReport(dir, nil, false)
+	report := buildProjectCommandsReport(dir, nil, false, tools.HookModeAll)
 	if len(report.Commands) != 0 {
 		t.Errorf("expected no commands, got %+v", report.Commands)
 	}
-	if !strings.HasPrefix(renderProjectCommandsText(report, false), "No project commands discovered") {
-		t.Errorf("text should report no commands, got:\n%s", renderProjectCommandsText(report, false))
+	if !strings.HasPrefix(renderProjectCommandsText(report), "No project commands discovered") {
+		t.Errorf("text should report no commands, got:\n%s", renderProjectCommandsText(report))
 	}
 	// JSON must carry an explicit empty list (not null) so consumers can rely
 	// on the field being present.

@@ -106,7 +106,7 @@ func TestLoadMergedConfigProjectCommands(t *testing.T) {
 		if cmd, ok := resolved.Get(projectcmd.RoleFormat); !ok || cmd.Cmd != "cfg-fmt {file}" || cmd.Source != projectcmd.SourceConfig {
 			t.Errorf("format = %+v (ok=%v), want config.json to win over AGENTS.md", cmd, ok)
 		}
-		if cmd, ok := resolved.Get(projectcmd.RoleLint); !ok || cmd.Cmd != "golangci-lint run" || cmd.Source != projectcmd.SourceAgents {
+		if cmd, ok := resolved.Get(projectcmd.RoleLint); !ok || cmd.Cmd != "golangci-lint run" || cmd.Source != "AGENTS.md" {
 			t.Errorf("lint = %+v (ok=%v), want AGENTS.md to win over discovery", cmd, ok)
 		}
 		if cmd, ok := resolved.Get(projectcmd.RoleTest); !ok || cmd.Cmd != "go test ./..." || cmd.Source != "go.mod" {
@@ -124,7 +124,7 @@ func TestLoadMergedConfigProjectCommands(t *testing.T) {
 			t.Fatal("merged config is nil")
 		}
 		resolved := resolveProjectCommands(dir, cfg)
-		if cmd, ok := resolved.Get(projectcmd.RoleFormat); !ok || cmd.Cmd != "custom-fmt -w {file}" || cmd.Source != projectcmd.SourceAgents {
+		if cmd, ok := resolved.Get(projectcmd.RoleFormat); !ok || cmd.Cmd != "custom-fmt -w {file}" || cmd.Source != "AGENTS.md" {
 			t.Errorf("format = %+v (ok=%v), want the AGENTS.md declaration over the go.mod discovery", cmd, ok)
 		}
 	})
@@ -157,6 +157,88 @@ func TestLoadMergedConfigProjectCommands(t *testing.T) {
 			t.Fatalf("want nil config, got %+v", cfg)
 		}
 	})
+}
+
+// TestResolveProjectCommandsReadsResolvedInstructionFile pins the #152 fix:
+// the `## Commands` declaration is read from the same RESOLVED instruction
+// file the system prompt's project-instructions seed uses — AGENTS.md, then
+// CLAUDE.md, then .github/copilot-instructions.md, first present, same cap —
+// NOT always from AGENTS.md. A repo whose instructions live in CLAUDE.md (or
+// copilot-instructions.md) still has its declared commands picked up, with
+// the source labeled by the file they came from; and where AGENTS.md is also
+// present it still wins over CLAUDE.md, exactly as the seed's resolution does.
+func TestResolveProjectCommandsReadsResolvedInstructionFile(t *testing.T) {
+	const goModBody = "module example.com/proj\n\ngo 1.26\n"
+	const commandsSection = "## Commands\n\n- format: custom-fmt -w {file}\n"
+	const otherSection = "## Other\n\n- format: must-not-be-read\n"
+
+	cases := []struct {
+		name       string
+		files      map[string]string
+		wantCmd    string
+		wantSource string
+	}{
+		{
+			name:       "claude-md-only",
+			files:      map[string]string{"CLAUDE.md": commandsSection, "go.mod": goModBody},
+			wantCmd:    "custom-fmt -w {file}",
+			wantSource: "CLAUDE.md",
+		},
+		{
+			name:       "agents-md-only",
+			files:      map[string]string{"AGENTS.md": commandsSection, "go.mod": goModBody},
+			wantCmd:    "custom-fmt -w {file}",
+			wantSource: "AGENTS.md",
+		},
+		{
+			name:       "copilot-instructions-only",
+			files:      map[string]string{".github/copilot-instructions.md": commandsSection, "go.mod": goModBody},
+			wantCmd:    "custom-fmt -w {file}",
+			wantSource: ".github/copilot-instructions.md",
+		},
+		{
+			// AGENTS.md present wins the resolution, so its section (and
+			// only its section) is read — CLAUDE.md's is ignored, matching
+			// the seed's first-present-wins rule.
+			name:       "agents-md-beats-claude-md",
+			files:      map[string]string{"AGENTS.md": commandsSection, "CLAUDE.md": otherSection, "go.mod": goModBody},
+			wantCmd:    "custom-fmt -w {file}",
+			wantSource: "AGENTS.md",
+		},
+		{
+			// No file with a ## Commands section: the declaration is empty,
+			// so discovery (go.mod) stands for format.
+			name:       "no-commands-section-discovery-stands",
+			files:      map[string]string{"CLAUDE.md": otherSection, "go.mod": goModBody},
+			wantCmd:    "gofmt -w {file}",
+			wantSource: "go.mod",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				p := filepath.Join(dir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolved := resolveProjectCommands(dir, nil)
+			cmd, ok := resolved.Get(projectcmd.RoleFormat)
+			if !ok {
+				t.Fatalf("format not resolved, want %q from %q", tc.wantCmd, tc.wantSource)
+			}
+			if cmd.Cmd != tc.wantCmd {
+				t.Errorf("format = %q, want %q", cmd.Cmd, tc.wantCmd)
+			}
+			if cmd.Source != tc.wantSource {
+				t.Errorf("format source = %q, want %q (the resolved instruction file's name)", cmd.Source, tc.wantSource)
+			}
+		})
+	}
 }
 
 func TestMergeProjectCommands(t *testing.T) {
