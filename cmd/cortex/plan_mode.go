@@ -67,6 +67,15 @@ const planStepFloor = 2
 // shape parsePlan relies on: bare "N. text" lines, one per step, 2–6 of
 // them. It asks for no tool use and no prose beyond the list so the reply
 // stays mechanically parseable.
+//
+// The reproduction-verification rule (issue #178) is spelled out so the plan
+// itself is shaped around a reproducible bug: a step that must first
+// reproduce a reported bug is a VERIFICATION step, and its honest outcome
+// when the bug does not reproduce is to report no-repro with evidence — not
+// to plan a speculative fix for it. Without the rule the plan happily hands
+// the executor a bug that isn't there, and the executor then spends the
+// whole session building (and tearing down) a fix whose leftover comment and
+// test still claim a change that was never made.
 const planModeInstruction = `You are planning a multi-part task. First produce ONLY a plan, then I will execute each step as its own turn.
 
 Respond with a numbered list of steps, one per line, in this exact shape:
@@ -79,7 +88,8 @@ Rules:
 - Give 2 to 6 steps (a small, ordered list — no more than 6).
 - One line per step, starting at 1; nothing before the list, nothing after.
 - No prose, no headings, no bullet markers — only "N. step" lines.
-- Do not use any tools; just output the numbered list.`
+- Do not use any tools; just output the numbered list.
+- If a step must first REPRODUCE a reported bug, plan it as a verification step: reproduce it on the current code BEFORE any fix. If the bug does not reproduce, the step's outcome is to report "not reproduced" with the evidence (the test or command and its output) and move on — do NOT plan a speculative fix for a bug you have not reproduced.`
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -304,12 +314,18 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out Pla
 	// --- 4. Execute each step as its own turn ----------------------------
 	stepResults := make([]StepResult, 0, len(steps))
 	for i, step := range steps {
-		// Every step prompt carries the ORIGINAL task, not just the step
-		// line: demotion at the turn boundaries (#131) can fold the planning
-		// turn — the only place the full task text lived — into the outline,
-		// and a later step must not run blind to the overall goal or the
-		// requirements the step text didn't restate (#94's failure mode).
-		_, err := turn(fmt.Sprintf("Overall task: %s\n\nPlan step %d of %d: %s", task, i+1, len(steps), step))
+		// Every step prompt carries the ORIGINAL task (not just the step
+		// line) AND the no-repro rule (issue #178): demotion at the turn
+		// boundaries (#131) can fold the planning turn — the only place the
+		// full task text lived — into the outline, and a later step must not
+		// run blind to the overall goal or the requirements the step text
+		// didn't restate (#94's failure mode). planStepPrompt restates both
+		// so each step turn (tools present) carries them. The step's OWN
+		// reply is kept (not discarded): a step that reports a reported bug
+		// does NOT reproduce (issue #178) is a verification, and its evidence
+		// must survive into the per-step report instead of being buried under
+		// a "check passed" summary.
+		stepRes, err := turn(planStepPrompt(task, i+1, len(steps), step))
 		if err != nil {
 			// A cancelled context (Ctrl-C / ESC mid-step) is an INTERRUPT, not
 			// a step failure: record the step and every later step, return the
@@ -362,6 +378,16 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out Pla
 			// reported as its own note verbatim — those notes already carry
 			// the "check skipped: " prefix — and must never be rendered as a
 			// "check passed" with a command the user believes ran.
+			// A no-repro verification (issue #178): the step's job was to
+			// reproduce a reported bug and it could NOT — its reply is the
+			// evidence. Keep that note on the step so the report line says
+			// what happened, not a bare "done" (nor a "check passed" that
+			// would bury the verification outcome). The step is DONE, not
+			// failed: nothing broke and no speculative fix was built.
+			if reproNote := noReproNote(stepRes.Reply); reproNote != "" {
+				stepResults = append(stepResults, StepResult{Step: step, Status: stepDone, Note: reproNote})
+				continue
+			}
 			sr := StepResult{Step: step, Status: stepDone, Note: note}
 			if cmdLine != "" {
 				// The command actually ran and exited 0: name it.
@@ -391,6 +417,47 @@ func interruptPlan(stepResults []StepResult, steps []string, i int, err error) (
 	}
 	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))},
 		fmt.Errorf("plan interrupted at step %d: %w", i+1, err)
+}
+
+// noReproNote is a step's own verification note when its reply reports that
+// the bug it was asked to reproduce does NOT reproduce (issue #178). A
+// non-empty result means "keep this note on the step" — it is the evidence
+// the step's report line carries instead of a bare "done" (or a "check
+// passed" that would bury the verification outcome).
+//
+// It is a SUBSTRING probe on the reply, not a parse: a no-repro report reads
+// "not reproduced: <evidence>" / "I could not reproduce …" / "did not
+// reproduce it", and every one of those contains a bare "not reproduce"
+// ("reproduced", "reproduction", "reproduce" do NOT). We deliberately do not
+// look for "does not reproduce": that phrasing lives in the PROMPT (the rule
+// we restated), not the reply — a reply that merely echoed the prompt's words
+// without a verdict would be a false positive.
+func noReproNote(reply string) string {
+	trimmed := strings.TrimSpace(reply)
+	if trimmed == "" || !strings.Contains(strings.ToLower(trimmed), "not reproduce") {
+		return ""
+	}
+	return truncateNote(trimmed)
+}
+
+// planStepPrompt builds the prompt for ONE planned step's turn (issue #178).
+// It restates BOTH the overall task and the no-repro rule, so each step turn
+// (tools present) carries them even after demotion folds the planning turn
+// into the outline (#131 / #94's failure mode).
+//
+// The no-repro rule mirrors planModeInstruction's (step 1 of this issue): a
+// step whose job is to reproduce a reported bug is a VERIFICATION step — if
+// the bug does not reproduce on the current code, the step's outcome is to
+// report "not reproduced" with evidence and move on, never to build a
+// speculative fix. The step-turn tools are present here (unlike the planning
+// turn), so the model can and should run the test or command that proves it.
+func planStepPrompt(task string, i, total int, step string) string {
+	return fmt.Sprintf(
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n"+
+			"Reminder: if this step must first REPRODUCE a reported bug, do so on the current code BEFORE any fix. "+
+			"If the bug does not reproduce, report \"not reproduced\" with the evidence (the test or command and its output) and move on — do NOT build a speculative fix for a bug you have not reproduced.",
+		task, i, total, step,
+	)
 }
 
 // truncateNote bounds a raw note (check output) embedded in a skip note, so a

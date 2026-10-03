@@ -93,7 +93,7 @@ Three capabilities distinguish it:
 |---|---|
 | `cortex` | Interactive REPL (default) |
 | `cortex resume [id]` | Resume a prior session (default: latest); its resume banner goes to stderr (issue #118) |
-| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118) |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); a step that must first reproduce a reported bug is a verification step — if it can't reproduce, it reports "not reproduced" with evidence and moves on (never a speculative fix) (issue #178); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118) |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
