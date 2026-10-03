@@ -1770,6 +1770,13 @@ func TestTurnRedactsTranscriptOnly(t *testing.T) {
 // again) so every persistence surface — transcript (writeTranscript), journal
 // (captureTurn) — actually masks it, exactly as the transcript test does, but
 // here we check the RECORDING and REPORTING of the count, not the masking.
+//
+// The turn is run TWICE (same secret, so both turns mask it): the session
+// total (cs.redactionsTotal) must equal the SUM of the per-turn
+// TurnResult.Redactions figures — the journal metadata's counts (captureTurn
+// folds its own masking counts into cs.redactions) must reach the session
+// total too (docs/journal.md's invariant: the summary records the same count
+// the capture does).
 func TestTurnRedactionCountRecordedAndReported(t *testing.T) {
 	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
 	// Build the SSE chunks with json.Marshal so the nested quoting is exact.
@@ -1817,16 +1824,36 @@ func TestTurnRedactionCountRecordedAndReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
+	turnRedactions := res.Redactions
+
+	// A second turn with the SAME secret: the per-turn counter resets at
+	// turn start, so turn 2's TurnResult.Redactions is turn 2's own figure
+	// (not a running total), and the session-cumulative total must fold it
+	// in too — the sum of the per-turn figures.
+	res2, err := cs.Turn(context.Background(), "print my key again")
+	if err != nil {
+		t.Fatalf("Turn 2: %v", err)
+	}
+	if res2.Redactions <= 0 {
+		t.Fatalf("turn 2 TurnResult.Redactions = %d, want > 0 (the second turn's persisted messages carried the same secret)", res2.Redactions)
+	}
+	if res2.Redactions != turnRedactions {
+		t.Fatalf("turn 2 TurnResult.Redactions = %d, want %d (the per-turn count resets each turn — same secret, same count)", res2.Redactions, turnRedactions)
+	}
 
 	// 1) The per-turn count is carried on the result (the same fact the other
 	//    surfaces record/report) and is non-zero (the turn saw a secret).
-	if res.Redactions <= 0 {
-		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried a secret)", res.Redactions)
+	if turnRedactions <= 0 {
+		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried a secret)", turnRedactions)
 	}
 
-	// 2) The session-cumulative total is folded in at turn end.
-	if cs.redactionsTotal != res.Redactions {
-		t.Errorf("cs.redactionsTotal = %d, want %d (this turn's per-turn count folded in at turn end)", cs.redactionsTotal, res.Redactions)
+	// 2) The session-cumulative total equals the SUM of the per-turn
+	//    TurnResult.Redactions figures (both turns' counts folded in — the
+	//    capture's own masking counts included, since the fold runs after
+	//    captureTurn, which adds them to cs.redactions).
+	wantTotal := turnRedactions + res2.Redactions
+	if cs.redactionsTotal != wantTotal {
+		t.Errorf("cs.redactionsTotal = %d, want %d (the sum of the per-turn TurnResult.Redactions figures: %d + %d)", cs.redactionsTotal, wantTotal, turnRedactions, res2.Redactions)
 	}
 
 	// 3) The session summary (the "where the session reports the turn" surface)
@@ -1872,12 +1899,12 @@ func TestTurnRedactionCountRecordedAndReported(t *testing.T) {
 			if err := json.Unmarshal(e.Payload, &ev); err != nil {
 				continue
 			}
-			if v, ok := ev.Metadata["redactions"].(float64); ok && int(v) == res.Redactions {
+			if v, ok := ev.Metadata["redactions"].(float64); ok && (int(v) == turnRedactions || int(v) == res2.Redactions) {
 				sawRedactions = true
 			}
 		}
 	}
 	if !sawRedactions {
-		t.Errorf("the turn's journal capture does not record redactions=%d in its metadata — the count must ride the capture", res.Redactions)
+		t.Errorf("the turn's journal capture does not record redactions=%d in its metadata — the count must ride the capture", turnRedactions)
 	}
 }

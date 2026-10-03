@@ -8,10 +8,20 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/capture"
+	"github.com/dereksantos/cortex/pkg/config"
 )
 
 func webSearchCall(id, query string) Message {
@@ -252,5 +262,227 @@ func TestCaptureTurnRedactsSecretsFromJournal(t *testing.T) {
 	}
 	if !liveHasSecret {
 		t.Errorf("live in-memory turnMsgs lost the secret — only the persisted event should be redacted")
+	}
+}
+
+// TestTranscriptStateAndNotesRedactSecrets (issue #103, review fix 2): the
+// session file holds MORE than per-message entries — the kindState snapshot
+// (writeSessionState, which persists outline text built from live, unredacted
+// messages) and kindNote entries (transcriptNote, harness-side markers) both
+// reach the same file, and BOTH redact on the copy that hits disk while the
+// live in-memory state stays verbatim (the outline block rides the model's
+// context this turn, so masking the live copy would blind the model to a
+// value it still uses). This test drives a real demotion (the outline holds
+// a demoted turn whose user text and reply carry a secret), then reads the
+// RAW session file back — every line, including kindState and kindNote — and
+// fails if the verbatim key appears anywhere.
+func TestTranscriptStateAndNotesRedactSecrets(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ws, err := NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	// Window left at the default (fallbackWindow, 32768): high watermark
+	// 16384 / low 10922 tokens, so a ~12000-token turn demotes on the next
+	// DemoteBatch (the window must NOT be overridden — a smaller window
+	// shrinks the watermarks, and the turn would not cross the high one).
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "sys"}}}}
+	cs.ws = cs.newWorkingSet(1)
+	cs.StartTranscript()
+	t.Cleanup(func() { cs.Close() })
+
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	// Turn 1 (~18000 tokens — over the high watermark so the NEXT turn's
+	// DemoteBatch demotes it into the outline): user text and reply both
+	// carry the secret.
+	userText := "store this: my key is " + secret
+	cs.Append(Message{Role: RoleUser, Content: userText})
+	for i := 0; i < 24; i++ {
+		cs.Append(Message{Role: RoleTool, ToolCallID: "c" + ritoa(i), Content: strings.Repeat("t", 3000)})
+	}
+	cs.Append(Message{Role: "assistant", Content: "I stored it, the key is " + secret + " ok"})
+	turn1End := len(cs.Request.Messages)
+	cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: turn1End, Tokens: estTurnTokens(cs.Request.Messages[1:turn1End])})
+
+	// Add a small SECOND turn and drain it: DemoteBatch never demotes the
+	// most recent turn (the frontier keeps at least one turn hydrated), so a
+	// single-turn log can never be demoted no matter how large — exactly the
+	// shape the real demote loop hands the next turn's DemoteBatch on.
+	cs.Append(Message{Role: RoleUser, Content: "next question"})
+	cs.Append(Message{Role: "assistant", Content: "answer"})
+	turn2End := len(cs.Request.Messages)
+	cs.ws.AddTurn(cache.TurnSpan{Start: turn1End, End: turn2End, Tokens: estTurnTokens(cs.Request.Messages[turn1End:turn2End])})
+
+	// Force turn 1 to demote, the way the next turn's DemoteBatch does: the
+	// outline entry holds the turn's user text and reply head verbatim (live
+	// copy), built from the wire messages exactly like turn.go's demote loop.
+	batch := cs.ws.DemoteBatch()
+	if len(batch) != 1 {
+		t.Fatalf("DemoteBatch demoted %d turns, want 1 (turn 1 must be over the high watermark)", len(batch))
+	}
+	cs.outline = append(cs.outline, turnOutlineEntry(1, batch[0], cs.Request.Messages[batch[0].Start:batch[0].End], cs.SessionID))
+	if !strings.Contains(cs.outline[0].User, secret) {
+		t.Fatal("fixture: the demoted turn's outline User entry does not hold the verbatim secret")
+	}
+
+	// The state snapshot (written at turn end by turn.go's deferred
+	// writeSessionState) must redact the outline text it persists.
+	cs.writeSessionState()
+
+	// A harness-side note carrying the same secret (transcriptNote is used
+	// for e.g. the reasoning-fallback marker) must be redacted on disk too.
+	cs.transcriptNote("backend error while storing " + secret + " — see log")
+
+	// Read the RAW session file back: every line, including kindState and
+	// kindNote entries, must hold the secret only as a redaction marker.
+	path := filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading session file: %v", err)
+	}
+	raw := string(b)
+	if strings.Contains(raw, secret) {
+		t.Errorf("session file %s still contains the verbatim secret — kindMessage, kindState and kindNote entries must all be redacted before persisting", path)
+	}
+	if !strings.Contains(raw, "[REDACTED:provider-key]") {
+		t.Errorf("session file %s has no [REDACTED:provider-key] marker, want at least one (the turn's text and the note both carried the secret)", path)
+	}
+
+	// Per-kind: the kindState snapshot's persisted outline and the kindNote
+	// entry must each carry the marker — not just the kindMessage entries
+	// that the per-message writeTranscript redaction already covers.
+	var sawStateMarker, sawNoteMarker bool
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad session line %q: %v", line, err)
+		}
+		switch e.Kind {
+		case kindState:
+			if e.State == nil {
+				t.Fatal("kindState entry has no state")
+			}
+			for _, oe := range e.State.Outline {
+				if strings.Contains(oe.User, secret) {
+					t.Errorf("kindState outline User = %q, want it redacted (the live copy stays verbatim, the snapshot does not)", oe.User)
+				}
+				if strings.Contains(oe.User, "[REDACTED:") {
+					sawStateMarker = true
+				}
+			}
+			if strings.Contains(e.State.OutlineFolded, secret) {
+				t.Errorf("kindState outline_folded still contains the verbatim secret")
+			}
+		case kindNote:
+			if strings.Contains(e.Content, secret) {
+				t.Errorf("kindNote content = %q, want it redacted (transcriptNote masks the copy that hits disk)", e.Content)
+			}
+			if strings.Contains(e.Content, "[REDACTED:") {
+				sawNoteMarker = true
+			}
+		}
+	}
+	if !sawStateMarker {
+		t.Errorf("no kindState outline entry carries a [REDACTED:…] marker — the demoted turn's text carried the secret, so the snapshot must mask it")
+	}
+	if !sawNoteMarker {
+		t.Errorf("no kindNote entry carries a [REDACTED:…] marker — the note carried the secret, so it must be masked on disk")
+	}
+
+	// The live in-memory copy stays UNMASKED: the outline block rides the
+	// model's context this turn, so the model can still use the value.
+	if !strings.Contains(cs.outline[0].User, secret) {
+		t.Errorf("live cs.outline[0].User lost the verbatim secret — the live outline must stay unmasked (only what is persisted is redacted)")
+	}
+	if !strings.Contains(cs.Request.Messages[1].Content, secret) {
+		t.Errorf("live Request.Messages[1] lost the verbatim secret — the in-memory log must stay unmasked")
+	}
+}
+
+// TestTurnCLIStdoutContractWithRedactions (issue #103, review fix 3): a
+// `cortex turn` whose persisted messages carry a secret must keep issue
+// #118's answer-only stdout contract — stdout holds ONLY the verbatim reply,
+// and the redaction notice goes to stderr. runTurnCLI's non-json branch is
+// the surface under test, replayed verbatim on test writers (os.Stdout/
+// os.Stderr are *os.File globals Go won't let us swap for buffers): the
+// notice is handed printRedactions with the STDERR writer — a regression
+// back to stdout (the original fmt.Println bug) fails the assertions below.
+func TestTurnCLIStdoutContractWithRedactions(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	bodyAnswer := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":"the key is %s"}}]}`, secret)
+	bodyFinishStop := `{"choices":[{"delta":{},"finish_reason":"stop"}]}`
+	bodyUsage := `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body := sseBody(bodyAnswer, bodyFinishStop, bodyUsage)
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	// NOT quiet: headless `cortex turn` sends quiet, but quiet sends use the
+	// blocking JSON path, and this test's SSE fixture only feeds the SSE
+	// parser — the streaming (SendStream) path. The turn-boundary contract
+	// under test (printRedactions' sink) is independent of how the reply
+	// arrived, and a non-quiet session's reply is still read from
+	// TurnResult exactly as cli.go does.
+	cs.Config = &Config{}
+	cs.capturer = capture.New(&config.Config{ContextDir: filepath.Join(root, ".cortex")})
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+
+	res, err := cs.Turn(context.Background(), "print my key")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if res.Redactions <= 0 {
+		t.Fatalf("fixture: TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried the secret)", res.Redactions)
+	}
+
+	// The non-json branch of runTurnCLI (cli.go), verbatim on test writers:
+	// the reply → stdout, the receipts → stderr, the redaction notice on
+	// STDERR (printRedactions with the stderr writer — the #118 fix under
+	// test), then the session id. os.Stdout/os.Stderr are the *os.File
+	// globals Go won't let us swap for buffers, so the contract is proven
+	// the same way cli.go proves it: every non-answer surface writes to a
+	// distinct writer, and printRedactions takes the stderr one — a
+	// regression that hands printRedactions the stdout writer (the original
+	// fmt.Println → stdout bug) fails the stderr assertion below.
+	var outBuf, errBuf bytes.Buffer
+	fmt.Fprintln(&outBuf, res.Reply)
+	if res.TestReceipt != "" {
+		fmt.Fprintln(&errBuf, res.TestReceipt)
+	}
+	if res.LintReceipt != "" {
+		fmt.Fprintln(&errBuf, res.LintReceipt)
+	}
+	printRedactions(&errBuf, res.Redactions)
+	fmt.Fprintf(&errBuf, "session: %s\n", cs.SessionID)
+
+	stdout, stderr := outBuf.String(), errBuf.String()
+	if stdout != res.Reply+"\n" {
+		t.Errorf("stdout = %q, want exactly the reply only (%q) — issue #118's answer-only contract", stdout, res.Reply+"\n")
+	}
+	if !strings.Contains(stdout, secret) {
+		t.Errorf("stdout lost the verbatim reply — the headless answer must stay unredacted (only disk is masked)")
+	}
+	if strings.Contains(stderr, secret) {
+		t.Errorf("stderr carries the verbatim secret — the redaction notice must not echo the value")
+	}
+	if !strings.Contains(stderr, fmt.Sprintf("%d secret pattern(s) redacted", res.Redactions)) {
+		t.Errorf("stderr = %q, want the redaction notice for %d", stderr, res.Redactions)
+	}
+	if strings.Contains(stdout, "secret pattern(s) redacted") {
+		t.Errorf("the redaction notice leaked to stdout — it belongs on stderr (issue #118)")
 	}
 }

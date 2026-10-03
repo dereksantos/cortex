@@ -209,6 +209,33 @@ func TestRedact_Assignment_FalsePositives(t *testing.T) {
 			in:   "the monkey jumped over the fence",
 			want: "the monkey jumped over the fence",
 		},
+		// Prose where the secret-named word is a SUBJECT: a letter-led bare
+		// value after `is` is ordinary English, never a secret — the
+		// over-masking the issue #103 review caught (these rows must stay
+		// untouched, count 0).
+		{
+			name: "prose, 'API is' untouched",
+			in:   "The API is available now",
+			want: "The API is available now",
+		},
+		{
+			name: "prose, 'token is' untouched",
+			in:   "the token is required here",
+			want: "the token is required here",
+		},
+		{
+			name: "prose, 'Password is' untouched",
+			in:   "Password is incorrect for this user",
+			want: "Password is incorrect for this user",
+		},
+		// Code where the secret-named word is a composite key in a
+		// struct/map literal: a letter-led bare value after `:` is a
+		// selector, not a secret.
+		{
+			name: "code, 'apiKey:' untouched",
+			in:   "apiKey: cfg.APIKey",
+			want: "apiKey: cfg.APIKey",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

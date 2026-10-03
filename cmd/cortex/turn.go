@@ -425,9 +425,12 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// reset at turn start and counting exactly the in-flight turn) into the
 	// session-cumulative total so the session summary and the eval journal
 	// report the session-wide total, while TurnResult.Redactions still carries
-	// the per-turn figure. Settled on every path (including error/interrupt),
-	// exactly like turns/tokens above.
-	cs.redactionsTotal += cs.redactions
+	// the per-turn figure. It is folded AFTER captureTurn on the success path
+	// (captureTurn adds the capture's own masking counts to cs.redactions, so
+	// the fold must see them — the session summary records the same total
+	// the journal metadata does, docs/journal.md), and BEFORE the
+	// unrecovered-error return on the error path (a failed turn still
+	// reports what it redacted before it died).
 	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
 	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
 	// self-dev driver — can print it to a human. Compute it here, after
@@ -457,7 +460,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// lines) must be built from the ORIGINAL tool results, not the one-line
 	// wire stubs applyInTurnDemotion left in cs.Request.Messages (item 5); for
 	// a turn demotion never touched the view is identical to the wire copy.
+	// It also masks the capture's own artifacts (web_search/fetch_url lines
+	// and the answer) — issue #103 — adding those counts to cs.redactions.
 	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)))
+	// Issue #103: fold AFTER captureTurn so the session-cumulative total
+	// includes the capture's own masking counts (the journal metadata and the
+	// session summary record the same figure, docs/journal.md).
+	cs.redactionsTotal += cs.redactions
 
 	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError, Redactions: cs.redactions}, nil
 }
