@@ -291,12 +291,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// calls, so the testwatch and turn-end-lint receipts would vanish exactly
 	// when the work is most likely unfinished. OnForcedFinalize reuses the
 	// SAME raw receipt lines the clean-finalize path reads (the testwatch
-	// tests/debug lines via cs.testwatchReceipt, the turn-lint receipt via
-	// cs.turnLintAtFinalize — that receipt's "Before you finish …" framing is
-	// already baked into turn_lint.go's delivery path, so it rides through
-	// verbatim here too) and gives them ONE forced-finishing lead-in that
-	// names the actual stop reason and a single restatement ask — never a
-	// second framing wrapped around an already-framed note (two "before you
+	// tests/debug lines via cs.testwatchReceipt, the raw turn-lint receipt
+	// via cs.runTurnLint) and gives them ONE forced-finishing lead-in that
+	// names the actual stop reason and a single restatement ask — never the
+	// clean-finalize framings ("Before you finish …") or a second
+	// restatement ask wrapped around an already-framed note (two "before you
 	// …" framings and two restatement asks in one message to a small
 	// model). An empty note (nothing to report) leaves the forced answer
 	// untouched, byte for byte — the common case.
@@ -531,23 +530,27 @@ func (cs *CortexSession) reportRecoverableError(role, model string, cause error)
 // FinalizeHook pairing (testwatchFinalizeNote + turnLintAtFinalize, the same
 // receipts cs.turn's FinalizeHook consults at the clean-finalize point): it
 // assembles the forced-finishing note from the RAW receipt lines — the
-// testwatch tests/debug lines via cs.testwatchReceipt, the turn-lint receipt
-// via cs.turnLintAtFinalize (that receipt's "Before you finish …" framing is
-// already baked into turn_lint.go's delivery path, so it rides through
-// verbatim) — under ONE forced-finishing lead-in that names the bound that
-// actually forced the finish (the stop reason the run's stats carry:
-// "the tool-call limit" only for max-iter, "the token budget" only for
-// token-budget, a generic "a harness bound" for every other stop reason —
-// never a false cause), and a single restatement ask covering whichever
-// facts are present. The clean-finalize counterparts' "Before you finish: …"
-// framing and restatement strings are NEVER reused here: this note is built
-// from the raw lines, so a small model sees exactly one framing and one
-// restate instruction. "" (nothing to report) means the forced answer is
+// testwatch tests/debug lines via cs.testwatchReceipt, the raw turn-lint
+// receipt via cs.runTurnLint (NOT turnLintAtFinalize, whose "Before you
+// finish …" framing and restatement ask are the clean-finalize path's own
+// delivery wording and would double the framing here) — under ONE
+// forced-finishing lead-in that names the bound that actually forced the
+// finish (the stop reason the run's stats carry: "the tool-call limit" only
+// for max-iter, "the token budget" only for token-budget, a generic "a
+// harness bound" for every other stop reason — never a false cause), and a
+// single restatement ask covering whichever facts are present. So a small
+// model sees exactly one framing and one restate instruction, whichever way
+// the turn was cut off. "" (nothing to report) means the forced answer is
 // left untouched.
 func (cs *CortexSession) forcedFinalizeNote(ctx context.Context, stats loopStats) string {
 	testwatchNote := cs.testwatchReceipt()
-	lintNote := cs.turnLintAtFinalize(ctx)
-	if testwatchNote == "" && lintNote == "" {
+	// The RAW lint receipt, not turnLintAtFinalize's framed note: that
+	// framing ("Before you finish …") and its own restatement ask belong to
+	// the clean-finalize path and would double the framing here. runTurnLint
+	// also stores cs.lintReceipt, so TurnResult.LintReceipt stays populated
+	// on the forced path.
+	lintReceipt := cs.runTurnLint(ctx)
+	if testwatchNote == "" && lintReceipt == "" {
 		return ""
 	}
 	var b strings.Builder
@@ -581,11 +584,14 @@ func (cs *CortexSession) forcedFinalizeNote(ctx context.Context, stats loopStats
 	if testwatchNote != "" {
 		b.WriteString(testwatchNote)
 	}
-	if lintNote != "" {
+	if lintReceipt != "" {
 		if testwatchNote != "" {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(lintNote)
+		// Join the receipt without a forced ". ": it may already end in
+		// punctuation (a budget-hit line ends in ")"), and the restatement
+		// ask below carries its own sentence break.
+		b.WriteString(strings.TrimSuffix(lintReceipt, "."))
 	}
 	b.WriteString(". Restate your complete final answer: first your summary of what you changed and why, then plainly account for every item above — which tests you removed or shrank, which debug prints you added, which scratch files you left behind, and for each lint finding state it and what would fix it. Unfinished work left unreported is a worse failure than a partial answer that names what is missing.")
 	return b.String()

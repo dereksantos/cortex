@@ -33,6 +33,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // forcedFinalizeScriptedSession builds a scripted session whose coder's
@@ -66,6 +69,39 @@ func forcedFinalizeScriptedSession(t *testing.T, script []*AgentResponse) *Corte
 		}
 		return r, false, nil
 	})
+	return cs
+}
+
+// lintNoteShapeSession is a forcedFinalizeScriptedSession with the turn-end
+// lint pass armed and TRUSTED — the shape the note's lint half reads
+// (cs.runTurnLint): a {dir} lint over .go files that reports one finding on
+// every run it is asked to make, so the raw receipt the note folds in
+// carries the finding ("lint: … — …finding…"). The stub hookRunner
+// (tools.SetHookRunner) is restored by the test's cleanup; the ceiling is
+// pinned to "all" the way turn_lint_test.go's turnLintSession does.
+func lintNoteShapeSession(t *testing.T, script []*AgentResponse) *CortexSession {
+	t.Helper()
+	cs := forcedFinalizeScriptedSession(t, script)
+	// The trust gate reads cs.Config.WorkspaceTrusted: a nil config is
+	// untrusted (tool_deps.go), so the session needs a config. The
+	// user-level trust list must name the session's OWN dir — redirect
+	// CORTEX_HOME to a private temp home and write the list there, the way
+	// turn_lint_test.go's corpusTrustUserConfig does.
+	home := t.TempDir()
+	t.Setenv("CORTEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.json"),
+		[]byte(`{"project": {"trusted": ["`+cs.Workdir()+`"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cs.Config = &Config{}
+	cs.hookState = &tools.PostEditHookState{}
+	cs.projectCommands = goLintProjectCmds()
+	tools.SetHookCeiling(tools.HookModeAll)
+	t.Cleanup(func() { tools.SetHookCeiling(tools.HookModeAll) })
+	prev := tools.SetHookRunner(func(_ context.Context, _ []string, _ string) (time.Duration, string, error) {
+		return 10 * time.Millisecond, "LINT-FINDING: unused variable in pkg", nil
+	})
+	t.Cleanup(func() { tools.SetHookRunner(prev) })
 	return cs
 }
 
@@ -524,6 +560,67 @@ func TestForcedFinalizeNoteShape(t *testing.T) {
 		cs := forcedFinalizeScriptedSession(t, []*AgentResponse{answerResp("clean")})
 		if note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: "max-iter"}); note != "" {
 			t.Fatalf("note = %q, want empty (nothing to report)", note)
+		}
+	})
+
+	t.Run("lint: the receipt folds in raw — one framing, one restate ask", func(t *testing.T) {
+		// The turn touched a .go file the {dir} lint covers: the note's lint
+		// half is the RAW receipt (cs.runTurnLint's "lint: …" line), NOT
+		// turnLintAtFinalize's already-framed "Before you finish …" note —
+		// wrapping the framed note in the forced note's own lead-in gave the
+		// model two framings and two restatement asks (the double framing
+		// this test's other subtests pin for the testwatch half).
+		cs := lintNoteShapeSession(t, []*AgentResponse{answerResp("partial work")})
+		if err := os.MkdirAll("pkg", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join("pkg", "a.go"), []byte("package pkg\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cs.lintTouchedPath("pkg/a.go")
+		note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: "max-iter"})
+		if note == "" {
+			t.Fatal("forced-finalize note is empty, want the lint receipt")
+		}
+		// The finding itself reaches the model (the receipt is raw, but not
+		// dropped).
+		if !strings.Contains(note, "lint:") || !strings.Contains(note, "LINT-FINDING") {
+			t.Errorf("note = %q, want the raw lint receipt with the finding", note)
+		}
+		// Case-insensitive count: the lint copy says "restate" (lowercase),
+		// the forced note's own ask says "Restate" — exactly ONE of the ask
+		// total, and the clean-finalize framing ("Before you finish") never
+		// rides the note.
+		lower := strings.ToLower(note)
+		if n := strings.Count(lower, "restate your complete final answer"); n != 1 {
+			t.Errorf("note contains the restatement ask %d times (case-insensitive), want exactly 1:\n%s", n, note)
+		}
+		if n := strings.Count(note, "Before you finish"); n != 0 {
+			t.Errorf("note contains the clean-finalize framing %q %d times, want 0:\n%s", "Before you finish", n, note)
+		}
+		// Exactly one of the forced note's own framings.
+		if n := strings.Count(note, "Before you answer: the harness detected that this turn "); n != 1 {
+			t.Errorf("note contains the forced lead-in %d times, want exactly 1:\n%s", n, note)
+		}
+		// The receipt joins the note without a doubled sentence break: a
+		// receipt that already ends in punctuation must not pick up a second
+		// one.
+		if strings.Contains(note, ")..") || strings.Contains(note, "..") {
+			t.Errorf("note = %q, want a single sentence break around the receipt", note)
+		}
+		// runTurnLint stores the receipt: the TurnResult surface stays
+		// populated on the forced path.
+		if cs.lintReceipt == "" || !strings.Contains(cs.lintReceipt, "LINT-FINDING") {
+			t.Errorf("cs.lintReceipt = %q, want the pass's receipt stored", cs.lintReceipt)
+		}
+	})
+
+	t.Run("lint clean: no touched .go file leaves the note empty", func(t *testing.T) {
+		// The pass is armed and trusted, but the turn touched no .go file:
+		// no receipt, no note — the common case is byte-for-byte silent.
+		cs := lintNoteShapeSession(t, []*AgentResponse{answerResp("clean")})
+		if note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: "max-iter"}); note != "" {
+			t.Fatalf("note = %q, want empty (the lint pass found nothing applicable)", note)
 		}
 	})
 }

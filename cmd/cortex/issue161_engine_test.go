@@ -288,8 +288,9 @@ type capWarningCase struct {
 	maxIter       int
 	readBudget    int // 0 = none; when set, ReadBudgetBytes bounds the run
 	wantStop      string
-	wantWarnings  int // how many cap warnings on the wire
-	wantRemaining int // the remaining count the warning names (0 = absent)
+	wantWarnings  int      // how many cap warnings on the wire
+	wantRemaining int      // the remaining count the warning names (0 = absent)
+	wantPhrases   []string // phrases the warning must carry (cleanup asks; "" = unchecked)
 }
 
 // TestCapWarningTable pins the cap-approaching warning's contract,
@@ -314,12 +315,20 @@ func TestCapWarningTable(t *testing.T) {
 			// toolRounds 92 < MaxIter 100: first crossing at i = 100-10 = 90,
 			// names 10; rounds 90..99 are exactly ten — the count names exactly
 			// the rounds the model still gets. Finalizes at i = 92, clean.
+			// This row also carries the cleanup-ask check the note must make:
+			// the warning tells the model to remove debug prints, delete
+			// scratch files, and leave the tests honest (the wrap-up asks).
 			name:          "fires once with the right remaining count",
 			toolRounds:    92,
 			maxIter:       100,
 			wantStop:      "clean-finalize",
 			wantWarnings:  1,
 			wantRemaining: 10,
+			wantPhrases: []string{
+				"remove debug prints",
+				"delete scratch files",
+				"state plainly which ones fail",
+			},
 		},
 		{
 			// Same first crossing (i = 90, names 10) — and no re-fire at
@@ -434,6 +443,11 @@ func TestCapWarningTable(t *testing.T) {
 				wantPhrase := "you have " + ritoa(tc.wantRemaining) + " tool-call round(s) left"
 				if !strings.Contains(warnText, wantPhrase) {
 					t.Errorf("warning = %q, want it to name %q", warnText, wantPhrase)
+				}
+				for _, phrase := range tc.wantPhrases {
+					if !strings.Contains(warnText, phrase) {
+						t.Errorf("warning = %q, want the cleanup ask (missing %q)", warnText, phrase)
+					}
 				}
 			}
 		})

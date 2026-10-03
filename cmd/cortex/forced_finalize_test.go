@@ -338,12 +338,6 @@ func capRunOpts(t *testing.T, spec capRunOptsSpec) (string, string, []Message) {
 	return stats.StopReason, content, msgs
 }
 
-// capRun is the read-budget-less shorthand over capRunOpts.
-func capRun(t *testing.T, toolRounds int, maxIter int, answer string) (string, string, []Message) {
-	t.Helper()
-	return capRunOpts(t, capRunOptsSpec{toolRounds: toolRounds, maxIter: maxIter, answer: answer})
-}
-
 // harnessNotes returns the RoleUser "Harness note: …" messages a run
 // appended, with the seed user message excluded (it has no "Harness note"
 // prefix, so it is excluded by the check anyway).
@@ -368,172 +362,12 @@ func capWarningAt(notes []string) int {
 	return -1
 }
 
-// TestCapApproachingWarning is the issue #161 step-2 contract: when the
-// model asks for tool calls with at most toolCapWarningRounds left, runLoop
-// injects ONE "Harness note" naming the remaining count and asking the model
-// to wrap up or clean up (remove debug prints, delete scratch files, leave
-// tests honest) — so the cap no longer arrives without warning. The no-op
-// cases are pinned too: a run that never crosses the threshold, a clean
-// finalize before it, and a cap below the threshold.
-//
-// Every expected count is derived from the loop's arithmetic: the loop runs
-// `for i := 0; i < MaxIter; i++` (round i is the (i+1)-th round), so with
-// MaxIter = 100 the model that issues tool calls on rounds i = 0..99 gets the
-// warning first on round i = 90 — the tool-call rounds it can still spend,
-// this batch plus the ones after it, are remaining = MaxIter - i = 10 — and
-// rounds 90..99 are exactly ten: the stated count equals the number of tool
-// rounds the model actually still gets.
-func TestCapApproachingWarning(t *testing.T) {
-	t.Run("fires once with the right remaining count", func(t *testing.T) {
-		// 92 tool rounds on a 100-round cap: the warning fires at i=90
-		// (remaining = 100-90 = 10, the first round where remaining <= 10),
-		// then the model finalizes at i=92.
-		stop, _, msgs := capRun(t, 92, 100, "wrapped up")
-		if stop != "clean-finalize" {
-			t.Fatalf("stop = %q, want clean-finalize", stop)
-		}
-		notes := harnessNotes(msgs)
-		if w := capWarningAt(notes); w != 0 || len(notes) != 1 {
-			t.Fatalf("harness notes = %d (warning at %d), want exactly one, the cap warning", len(notes), w)
-		}
-		if !strings.Contains(notes[0], "you have 10 tool-call round(s) left") {
-			t.Errorf("warning = %q, want it to name 10 remaining rounds", notes[0])
-		}
-		for _, phrase := range []string{
-			"remove debug prints",
-			"delete scratch files",
-			"state plainly which ones fail",
-		} {
-			if !strings.Contains(notes[0], phrase) {
-				t.Errorf("warning = %q, want the cleanup ask (missing %q)", notes[0], phrase)
-			}
-		}
-	})
-
-	t.Run("fires only at the threshold, not before", func(t *testing.T) {
-		// 89 tool rounds on a 100-round cap: the last tool round is i=88,
-		// remaining = 100-88 = 12 > 10 — still past the threshold, so no
-		// warning fires; the model finalizes at i=89 without one.
-		stop, _, msgs := capRun(t, 89, 100, "done quietly")
-		if stop != "clean-finalize" {
-			t.Fatalf("stop = %q, want clean-finalize", stop)
-		}
-		if notes := harnessNotes(msgs); len(notes) != 0 {
-			t.Fatalf("harness notes = %v, want none (remaining 12 is past the warning threshold)", notes)
-		}
-	})
-
-	t.Run("fires once even when many rounds remain after", func(t *testing.T) {
-		// 98 tool rounds on a 100-round cap: the warning fires at i=90
-		// (remaining 10) and NOT again at i=91…97 (remaining 9…3) —
-		// the "10 remaining" count is the one the model gets (once per turn),
-		// and it is the count that equals the rounds the model actually still
-		// gets when the warning lands (rounds 90..99 are exactly ten).
-		stop, _, msgs := capRun(t, 98, 100, "finished close to the cap")
-		if stop != "clean-finalize" {
-			t.Fatalf("stop = %q, want clean-finalize", stop)
-		}
-		notes := harnessNotes(msgs)
-		if len(notes) != 1 {
-			t.Fatalf("harness notes = %d, want exactly one (once per turn)", len(notes))
-		}
-		if !strings.Contains(notes[0], "you have 10 tool-call round(s) left") {
-			t.Errorf("warning = %q, want the 10-remaining count (the first crossing)", notes[0])
-		}
-	})
-
-	t.Run("fires on the round that then forces finalize", func(t *testing.T) {
-		// 100 tool rounds on a 100-round cap: the warning fires at i=90
-		// (remaining 10 — rounds 90..99 are exactly ten), the loop exhausts
-		// the cap at i=99, the last of the ten rounds the count promised, and
-		// the forced finalize runs — the warning did its job, the model was
-		// told, and it was cut off only at the round the count named.
-		stop, _, msgs := capRun(t, 100, 100, "forced")
-		if stop != "max-iter" {
-			t.Fatalf("stop = %q, want max-iter", stop)
-		}
-		notes := harnessNotes(msgs)
-		if len(notes) != 1 || !strings.Contains(notes[0], "you have 10 tool-call round(s) left") {
-			t.Fatalf("harness notes = %v, want exactly one cap warning naming 10 remaining", notes)
-		}
-	})
-
-	t.Run("no warning when MaxIter is below the threshold", func(t *testing.T) {
-		// 8 tool rounds on an 8-round cap: every round is "within 10" of the
-		// cap, so the warning is suppressed (it would be every round) and
-		// the cap still forces finalize.
-		stop, _, msgs := capRun(t, 8, 8, "forced")
-		if stop != "max-iter" {
-			t.Fatalf("stop = %q, want max-iter", stop)
-		}
-		if notes := harnessNotes(msgs); len(notes) != 0 {
-			t.Fatalf("harness notes = %v, want none (MaxIter 8 is at or below the threshold 10)", notes)
-		}
-	})
-
-	t.Run("a forced exit before the threshold stays quiet", func(t *testing.T) {
-		// 5 tool rounds, then the model finalizes, on a 100-round cap: the
-		// run ends clean long before the warning threshold — no note.
-		stop, _, msgs := capRun(t, 5, 100, "early finish")
-		if stop != "clean-finalize" {
-			t.Fatalf("stop = %q, want clean-finalize", stop)
-		}
-		if notes := harnessNotes(msgs); len(notes) != 0 {
-			t.Fatalf("harness notes = %v, want none (the run ended well before the cap)", notes)
-		}
-	})
-}
-
-// TestForcedFinalizeOtherExits covers the remaining seam contract clause:
-// the other bound-forced exits route through the same seam — token-budget
-// trips on spend, not round count, and its forced answer gets the note
-// round too.
-func TestForcedFinalizeOtherExits(t *testing.T) {
-	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
-		return "OBS for " + call.Function.Arguments
-	})
-
-	t.Run("token-budget exit fires the seam", func(t *testing.T) {
-		var calls int
-		var i int
-		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
-		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
-		send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
-			i++
-			if i == 2 {
-				return fakeResp("the forced answer", nil, 5, 5), false, nil
-			}
-			if i == 3 {
-				return fakeResp("the leftover accounting", nil, 5, 5), false, nil
-			}
-			// 8 in + 4 out on round 1 crosses a 10-token budget.
-			return fakeResp("", []ToolCall{readCall("c1", "a.go")}, 8, 4), false, nil
-		})
-		ts := Toolset{
-			Tools:    []Tool{tools.ReadFile},
-			Dispatch: disp,
-			OnForcedFinalize: func(stats loopStats) string {
-				calls++
-				if stats.StopReason != "token-budget" {
-					t.Errorf("hook saw stop=%q, want token-budget", stats.StopReason)
-				}
-				return "harness leftover note"
-			},
-		}
-		content, stats, err := runLoop(context.Background(), send, req, ts,
-			Bounds{MaxTokens: 100, MaxIter: 100, TokenBudget: 10}, nil, appendMsg, nil)
-		if err != nil {
-			t.Fatalf("runLoop: %v", err)
-		}
-		if stats.StopReason != "token-budget" {
-			t.Fatalf("stop = %q, want token-budget", stats.StopReason)
-		}
-		if calls != 1 {
-			t.Errorf("OnForcedFinalize calls = %d, want 1", calls)
-		}
-		want := "the forced answer\n\nthe leftover accounting"
-		if content != want {
-			t.Errorf("content = %q, want the note round's reply appended: %q", content, want)
-		}
-	})
-}
+// TestCapApproachingWarning's contract — when the model asks for tool calls
+// with at most toolCapWarningRounds left, runLoop injects ONE "Harness note"
+// naming the remaining count and asking the model to wrap up or clean up (so
+// the cap no longer arrives without warning), with the no-op cases pinned
+// too — is locked by TestCapWarningTable in issue161_engine_test.go, which
+// is the single place the warning arithmetic is derived and asserted. The
+// token-budget exit's seam clause (the other bound-forced exit routes
+// through the same OnForcedFinalize seam) is the "token-budget: non-empty
+// note appended" row of TestForcedFinalizeSeamTable, likewise.
