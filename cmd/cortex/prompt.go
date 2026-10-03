@@ -31,6 +31,8 @@ Test integrity. Removing or changing an existing test to make a failing build pa
 
 ` + debugWorkingStylePrinciple + `
 
+` + locateFirstPrinciple + `
+
 Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
 
 # How you communicate
@@ -48,6 +50,14 @@ You have a persistent memory: named notes you've written in earlier sessions, ma
 // after "Test integrity" (see the ` + debugWorkingStylePrinciple + ` above),
 // keeping it in the "# How you work" block.
 const debugWorkingStylePrinciple = "Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code."
+
+// locateFirstPrinciple is the issue #142 locate-first working-style
+// principle — a const so CLAUDE.md's "The agent's tools" section mirrors the
+// EXACT same text (the docs describe the guidance the model actually
+// receives, so the two can't drift apart). It is spliced into SystemPrompt
+// after the debugging principle (see the ` + locateFirstPrinciple + `
+// above), keeping it in the "# How you work" block.
+const locateFirstPrinciple = "Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers."
 
 // memoryPromptSection is the full memory guidance — the four bullets plus the
 // outline/recall paragraph — appended to the system prompt only when there's

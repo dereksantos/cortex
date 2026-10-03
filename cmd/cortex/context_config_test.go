@@ -70,6 +70,11 @@ func worstCaseFillRatio(t *testing.T, cfg ContextConfig, w int) float64 {
 	// historical default — tool_deps.go's memoryIndexCap).
 	indexTokens := cache.TokensOf(memoryIndexCap)
 
+	// Workspace note (issue #142): its actual token cost, counted the same
+	// way the turn sends it — the dormancy math must account for every zone A
+	// component.
+	wsTokens := cs.workspaceTokens()
+
 	// Tail: one turn right at the resolved high watermark — DemoteBatch's own
 	// ceiling immediately before it fires and drains to the low watermark.
 	high, _ := cs.ws.GetWatermarks()
@@ -77,7 +82,7 @@ func worstCaseFillRatio(t *testing.T, cfg ContextConfig, w int) float64 {
 		cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: 2, Tokens: high})
 	}
 
-	total := cache.TokensOf(len(sys)) + cache.TokensOf(len(cs.renderOutlineBlock())) + indexTokens + cs.ws.TailTokens()
+	total := cache.TokensOf(len(sys)) + cache.TokensOf(len(cs.renderOutlineBlock())) + indexTokens + wsTokens + cs.ws.TailTokens()
 	return float64(total) / float64(w)
 }
 

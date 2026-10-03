@@ -51,6 +51,127 @@ func TestReadFileRange(t *testing.T) {
 	}
 }
 
+// TestReadFileDirectoryReturnsListing covers issue #142 step 2: read_file on a
+// DIRECTORY must not dead-end with a bare "is a directory" os.ReadFile error.
+// Instead it returns a bounded, ls-like listing (directories marked with a
+// trailing "/") plus a note that read_file targets a FILE and that
+// outline(path) goes deeper. The cases pin each behavior the step calls for.
+func TestReadFileDirectoryReturnsListing(t *testing.T) {
+	dir := t.TempDir()
+	// Fixture: two subdirectories and two files.
+	if err := os.Mkdir(filepath.Join(dir, "subdir_a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "subdir_b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		target    string // path read_file is asked for
+		wantErr   bool
+		wantIn    []string // substrings that must appear in the output
+		notIn     []string // substrings that must NOT appear
+		wantNoErr bool
+	}{
+		{
+			name:      "directory yields a listing, not the is-a-directory error",
+			target:    dir,
+			wantNoErr: true,
+			wantIn: []string{
+				"alpha.go",
+				"beta.txt",
+				"subdir_a/",
+				"subdir_b/",
+				"is a directory, not a file",
+				"read_file reads a FILE",
+				"outline(",
+			},
+			// The old dead-end error must be gone: a bare "is a directory"
+			// os.ReadFile error is the thing this step removes.
+			notIn: []string{"read " + dir + ": " + "readdir"},
+		},
+		{
+			name:      "subdirectory also yields a listing",
+			target:    filepath.Join(dir, "subdir_a"),
+			wantNoErr: true,
+			wantIn: []string{
+				"is a directory, not a file",
+				"outline(",
+			},
+		},
+		{
+			name:    "a regular file is still read, not listed",
+			target:  filepath.Join(dir, "alpha.go"),
+			wantErr: false,
+			wantIn:  []string{"package main"},
+			notIn:   []string{"is a directory, not a file"},
+		},
+		{
+			name:    "a missing path still errors",
+			target:  filepath.Join(dir, "does_not_exist.go"),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, tt.target)}}
+			out, err := readFile(tc, headlessDeps{})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, sub := range tt.wantIn {
+				if !strings.Contains(out, sub) {
+					t.Errorf("output missing %q; got:\n%s", sub, out)
+				}
+			}
+			for _, sub := range tt.notIn {
+				if strings.Contains(out, sub) {
+					t.Errorf("output should not contain %q; got:\n%s", sub, out)
+				}
+			}
+		})
+	}
+}
+
+// TestReadFileDirectoryListingIsBounded covers the cap: a directory with more
+// children than the listing cap returns only the first cap entries plus a
+// "… +N more" elision, so a huge directory can't blow up the context.
+func TestReadFileDirectoryListingIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	const n = 250 // > cap (200)
+	for i := 0; i < n; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d.txt", i)), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, dir)}}
+	out, err := readFile(tc, headlessDeps{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The first child is listed…
+	if !strings.Contains(out, "f000.txt") {
+		t.Errorf("expected the first child in the listing; got:\n%s", out)
+	}
+	// …and the elision note reports how many more were cut.
+	if !strings.Contains(out, "+50 more") {
+		t.Errorf("expected a \"+50 more\" elision for %d children past the cap; got:\n%s", n-200, out)
+	}
+}
+
 // TestReadFileTooLargeNonGoGetsSkeleton proves the too-large redirect is
 // language-agnostic: a big Python file gets outline.Render's regex-tier
 // skeleton (real "def "-headed sections), not the old Go-only gate's flat

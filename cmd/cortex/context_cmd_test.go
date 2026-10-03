@@ -317,8 +317,10 @@ func TestCacheHeadlineLineFreshSession(t *testing.T) {
 
 // TestGridLegendLinesOmitEmptyComponents covers the per-row omission rule
 // directly against gridLegendLines, independent of the full report: with
-// only a system prompt populated and the window sized to exactly match it
-// (no free space left over either), the system row is the only one shown.
+// only a system prompt and the workspace note populated (the note rides
+// every turn, issue #142) and the window sized to exactly match both (no
+// free space left over either), the system and workspace rows are the only
+// ones shown.
 func TestGridLegendLinesOmitEmptyComponents(t *testing.T) {
 	cs := &CortexSession{
 		Request: &AgentRequest{
@@ -326,14 +328,17 @@ func TestGridLegendLinesOmitEmptyComponents(t *testing.T) {
 			Messages: []Message{{Role: RoleSystem, Content: "a system prompt with some content"}},
 		},
 	}
-	cs.Window = cs.systemPromptTokens()
+	cs.Window = cs.systemPromptTokens() + cs.workspaceTokens()
 
 	lines := cs.gridLegendLines()
-	if len(lines) != 1 {
-		t.Fatalf("gridLegendLines() = %d lines, want 1 (system only); got: %v", len(lines), lines)
+	if len(lines) != 2 {
+		t.Fatalf("gridLegendLines() = %d lines, want 2 (system + workspace); got: %v", len(lines), lines)
 	}
 	if !strings.Contains(lines[0], "system") {
 		t.Errorf("gridLegendLines()[0] = %q, want the system row", lines[0])
+	}
+	if !strings.Contains(lines[1], "workspace") {
+		t.Errorf("gridLegendLines()[1] = %q, want the workspace row", lines[1])
 	}
 }
 

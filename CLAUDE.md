@@ -173,6 +173,13 @@ the model-driven memory tools
   Study's read set plus `write_file`/`edit_file`/`bash`, depth cap 1, Risky
   shell treated as Blocked inside it. Runs as the coder's current model by
   default (optional per-call `model` arg); config gate `tools.enable_agent`.
+- The built-in system prompt carries a locate-first working-style principle
+  (issue #142), spliced into the `# How you work` block and mirrored here
+  verbatim (a drift tripwire, same pattern as the debugging principle under
+  Constraints → Testing):
+
+  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers.
+
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton.
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it

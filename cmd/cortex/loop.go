@@ -222,6 +222,15 @@ func stuckHint(class string) string {
 		return "Harness note: that edit is a no-op — old_string already equals new_string, so the change is most likely ALREADY APPLIED. Stop editing this region: read_file to confirm, then report what you changed. Do not re-issue the edit."
 	case strings.Contains(class, "old_string") && strings.Contains(class, "not found"):
 		return "Harness note: edit_file can't find your old_string — it must match the file EXACTLY. Re-read the span and copy the literal current text, or use a larger unique snippet."
+	case strings.Contains(class, "does not exist"):
+		// Issue #142: the model keeps hitting paths that don't exist — the
+		// classic path-guessing loop (foreign absolute paths, made-up names).
+		// Each read_file/grep/outline already returns an oriented not-found
+		// error pointing at outline/grep, but a model repeating it is the
+		// exact thrash this detector exists for; the redirect names the off-
+		// ramp: stop guessing, orient from the workspace root, then target
+		// real paths.
+		return "Harness note: that path does not exist — do not guess paths. Outline or grep the workspace root (or an existing parent) to see what is actually there, then work only from paths those tools returned. Do not re-issue the same path."
 	default:
 		return "Harness note: the same tool error keeps recurring and you are not making progress. Stop and report what you did and what is blocking you."
 	}
