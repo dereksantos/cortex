@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -134,6 +135,45 @@ func (cs *CortexSession) Workdir() string {
 		return cs.workspace.Root
 	}
 	return ""
+}
+
+// ProjectCommands implements tools.ProjectCommands: the resolved command set
+// (discovered from the workspace's manifests, overridden by config and
+// AGENTS.md) that the write_file/edit_file post-edit hook runs. It is the
+// value cs.projectCommands, computed once at construction / project
+// targeting — a session that never resolved a project (or one with no
+// recognized manifest) returns the zero Commands, so the hook is a no-op.
+func (cs *CortexSession) ProjectCommands() projectcmd.Commands {
+	return cs.projectCommands
+}
+
+// WorkspaceTrusted implements tools.WorkspaceTrust (issue #129's trust
+// gate — the ONLY gate for the post-edit hook): whether THIS workspace's
+// root is on the operator's USER-level trust list. On an untrusted
+// workspace the hook runs nothing. The config consulted is cs.Config —
+// the MERGED config, whose Project.Trusted is the user-level list
+// (mergeProject drops the project-level copy), so a repository's own
+// .cortex/config.json can never put its own workspace on the trust list.
+// A session with no resolved workspace or no config is untrusted: the
+// safe default.
+func (cs *CortexSession) WorkspaceTrusted() bool {
+	if cs == nil || cs.workspace == nil || cs.Config == nil {
+		return false
+	}
+	return cs.Config.WorkspaceTrusted(cs.workspace.Root)
+}
+
+// HookState implements tools.HookStateProvider: the session-scoped state
+// of the post-edit hook (the "hook inactive on an untrusted workspace"
+// note fires once per session — see tools.PostEditHookState). The state
+// lives on the session, so "once per session" is exactly that: the REPL's
+// session, a served session, or a loop firing, each with their own. A nil
+// state (a session that implements the capability but never allocated
+// state — every hand-built test session) is a no-op: the hook has no
+// per-session slot to announce into, so the untrusted note is not
+// surfaced.
+func (cs *CortexSession) HookState() *tools.PostEditHookState {
+	return cs.hookState
 }
 
 // citationRe parses the outline citation coordinate: @session/<id>#m<start>-<end>,

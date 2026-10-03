@@ -606,6 +606,17 @@ func printTestReceipt(receipt string) {
 	}
 }
 
+// printLintReceipt prints a turn's "lint: …" receipt (issue #129 piece 3,
+// the turn-end lint pass) to the REPL at the turn boundary — the turn's
+// lint findings, the same fact the model saw in the finalize round and the
+// journal carries. A no-op for the empty receipt (a clean turn: no findings
+// and no extra round, by the pass's contract).
+func printLintReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(withColor(receipt, yellow))
+	}
+}
+
 // printBackendError prints a turn's recovered provider-error notice (issue
 // #117) to the REPL at the turn boundary — after the anchor is stopped and
 // stdout restored — so a mid-turn 500 the loop recovered from is reported where

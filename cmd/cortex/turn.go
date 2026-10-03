@@ -63,6 +63,17 @@ type TurnResult struct {
 	// TestReceipt (turn's finalize hook), so the model's final answer
 	// accounts for the leftover debug too.
 	DebugReceipt string
+	// LintReceipt is the harness's own "lint: …" receipt for this turn
+	// (issue #129 piece 3, turn_lint.go): non-empty when the turn-end lint
+	// pass (the project's lint, run ONCE over the turn's distinct touched
+	// files, "all" mode + trusted workspace only) found problems or hit
+	// the turn's lint budget. It rides the result the same way
+	// TestReceipt does, so the CALLER of Turn can surface it to a human
+	// (REPL, headless `cortex turn`) — the journal capture records it but
+	// reaches no one reading the turn. It is surfaced to the model in the
+	// same finalize round as TestReceipt (turn's finalize hook), so the
+	// model can fix findings while it still can.
+	LintReceipt string
 	// LastError is the provider error this turn recovered from (issue #117):
 	// non-nil exactly when StopReason == "error-recovered" (a mid-turn send
 	// failed after progress, and the turn finalized from what it had — so
@@ -120,8 +131,15 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// paths return before it — turn.go's early returns). Dropping it here, at
 	// the START of every turn, guarantees a turn's receipt only ever diffs
 	// against that turn's own before-side; the 32-file cap can't fill up
-	// across turns either.
+	// across turns either. Issue #129 piece 3: the same drop clears the
+	// turn-end lint pass's touched-file list and re-arms its total budget
+	// for the new turn (lintTouchedFiles never carry over — a turn lints
+	// exactly the files IT touched).
 	cs.testwatchDrop()
+	// Arm the turn-end lint pass's budget for this turn (piece 3): 0 means
+	// "not configured by NewCortexSession" — runTurnLint falls back to the
+	// default 60s, so hand-built test sessions stay functional.
+	cs.turnLinter.budgetSec = cs.Config.toolLimits().TurnLintBudgetSec
 	// Issue #169: drop any stale per-turn same-action ledger from a prior
 	// turn that never reached its end (error or interrupt paths). cs.turnNo
 	// is already stamped to a new value above, so a fresh map starts each
@@ -246,7 +264,27 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// turn removed and the model's final answer addresses it. An empty
 	// receipt (no test file touched, or nothing test-relevant lost) returns
 	// "" and the answer is left untouched.
-	ts.FinalizeHook = cs.testwatchFinalizeNote
+	// Issue #129 piece 3: the SAME finalize hook is the turn-end lint pass's
+	// delivery (turn_lint.go): the pass runs the project's lint once over
+	// the turn's distinct touched files ("all" mode + trusted only), and a
+	// non-empty receipt returns the note the model's final answer accounts
+	// for — the findings ride the engine's tools-withheld round, appended to
+	// the turn's answer, exactly like the test-loss receipt. The two facts
+	// join when both are present; either alone gets its own framing; both
+	// empty (the common case) leave the answer untouched with no extra
+	// round.
+	ts.FinalizeHook = func() string {
+		testNote := cs.testwatchFinalizeNote()
+		lintNote := cs.turnLintAtFinalize(ctx)
+		switch {
+		case testNote == "":
+			return lintNote
+		case lintNote == "":
+			return testNote
+		default:
+			return testNote + "\n\n" + lintNote
+		}
+	}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
@@ -361,13 +399,20 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// re-derives it (cheap, idempotent) for the journal record.
 	// Issue #154: the "leftover debug" receipt is computed and surfaced the
 	// same way — TurnResult.DebugReceipt.
+	// Issue #129 piece 3: the "lint: …" receipt was already computed at the
+	// clean-finalize point (turnLintAtFinalize stored it on the session —
+	// the finalize hook is where the pass runs, the moment every touched
+	// file is settled); on the error/interrupt path (no finalize happened)
+	// cs.lintReceipt is empty and the pass is simply skipped. Turn it into
+	// the result the same way as the other receipts.
+	lintReceipt := cs.lintReceipt
 	testReceipt := cs.testwatchTestsReceipt()
 	debugReceipt := cs.testwatchDebugReceipt()
 	if err != nil {
 		if pf := pendingFailureOf(err); pf != nil {
 			cs.journalModelFailure(pf, err)
 		}
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt}, err
 	}
 
 	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
@@ -376,7 +421,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// a turn demotion never touched the view is identical to the wire copy.
 	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)))
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LastError: stats.LastError}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from

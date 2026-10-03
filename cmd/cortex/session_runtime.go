@@ -233,6 +233,20 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 			outcome += " | " + receipt
 		}
 	}
+	// Issue #129 piece 3: a "lint: …" line — the harness's own view of the
+	// turn-end lint pass (turn_lint.go: the project's lint run once over the
+	// turn's distinct touched files, "all" mode + trusted only). It rides
+	// the SAME capture summary (a third fact, joined by " | "), is
+	// surfaced on TurnResult.LintReceipt (turn.go), and reached the model in
+	// the same finalize round (turn.go's FinalizeHook) — three surfaces, one
+	// fact. Best-effort: a turn with no findings adds nothing.
+	if receipt := cs.lintReceipt; receipt != "" {
+		if outcome == "" {
+			outcome = receipt
+		} else {
+			outcome += " | " + receipt
+		}
+	}
 	summary := userMsg
 	if outcome != "" {
 		summary += "\n[" + outcome + "]"

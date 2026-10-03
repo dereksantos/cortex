@@ -156,6 +156,9 @@ func runTurnCLI(args []string) {
 			if res.TestReceipt != "" {
 				out["tests_changed"] = res.TestReceipt
 			}
+			if res.LintReceipt != "" {
+				out["lint"] = res.LintReceipt
+			}
 			// Issue #117: a turn that recovered from a mid-turn provider
 			// failure succeeded, so err is nil and the failure was otherwise
 			// lost behind the finalize answer — carry it under "backend_error"
@@ -187,6 +190,12 @@ func runTurnCLI(args []string) {
 			// under "tests_changed" above.
 			if res.TestReceipt != "" {
 				fmt.Fprintln(os.Stderr, res.TestReceipt)
+			}
+			// Issue #129 piece 3: the turn-end lint receipt rides the same
+			// stderr surface ("lint: …"), and the --json path carries it under
+			// "lint" above.
+			if res.LintReceipt != "" {
+				fmt.Fprintln(os.Stderr, res.LintReceipt)
 			}
 			// Issue #117: a turn that recovered from a mid-turn provider
 			// failure SUCCEEDED (turnErr is nil), so without this the backend's

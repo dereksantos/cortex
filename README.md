@@ -391,6 +391,12 @@ cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopb
 cortex scan [--json] [--root <path>] [--register]
                                   scan configured roots and list discovered projects
 cortex project <add|list|remove>    manage the project registry
+cortex project trust <add|remove|list>
+                                  manage the per-workspace trust list (the
+                                  post-edit hook's only gate; user config only)
+cortex project commands [--json] [--project <name>]
+                                  show the resolved format/lint/test/build
+                                  commands (discovery + declarations)
 cortex discord                      run the Discord adapter
 cortex study-eval                   run the Study acceptance gate
 cortex model [--json]                catalog code/study role bindings + what
@@ -413,6 +419,7 @@ helper, and writing table-driven tests):
 | `/clear` | Start a fresh session. |
 | `/sessions` | List persisted session IDs. |
 | `/model [name]` | Show role bindings or switch the coding model for this session. |
+| `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
 
 Durable memory is model-driven rather than a slash command. Ask naturally to

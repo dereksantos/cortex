@@ -13,11 +13,44 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/testguard"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
+
+// resolveProjectCommands computes a workspace's resolved command set
+// (issue #129): discovery from the root's manifests, with the config's
+// project.commands declarations and the root's RESOLVED instruction
+// file's `## Commands` section overriding it field-by-field (config >
+// instruction file > discovery). The instruction file is resolved the
+// same way the system prompt's project-instructions seed resolves it
+// (#152): the first of AGENTS.md, CLAUDE.md, .github/copilot-instructions.md
+// present at the root (no concatenation), read with the same size cap
+// (readInstructions) — so a repo whose instructions live in CLAUDE.md
+// still has its declared commands picked up. It is the ONE parsing path
+// for the `## Commands` declaration: read from the workspace root
+// directly, so the hook works for a CWD-implicit project with no config
+// file. It never fails: an undetectable root or unreadable manifest
+// degrades to an empty set, which the post-edit hook treats as "no hook".
+func resolveProjectCommands(root string, cfg *Config) projectcmd.Commands {
+	discovered, err := projectcmd.Discover(root)
+	if err != nil {
+		return projectcmd.Commands{}
+	}
+	declared := projectcmd.Declared{}
+	if cfg != nil {
+		declared = cfg.DeclaredProjectCommands()
+	}
+	// The `## Commands` section is read from the RESOLVED instruction file
+	// (workspaceInstructions, #152's resolution); the file's name becomes
+	// the Source label for any declaration that wins, so the report shows
+	// where it came from. No file → no declarations (Resolve gets "").
+	agentsPath, instructions := workspaceInstructions(root)
+	agents := projectcmd.ParseAgentsCommands(instructions)
+	return projectcmd.Resolve(discovered, declared, agents, fileLabel(root, agentsPath))
+}
 
 type CortexArgs []string
 
@@ -75,9 +108,23 @@ type CortexSession struct {
 	deadModels map[string]modelErrClass
 	// healList is the healing ladder's catalog fetch, injectable for tests;
 	// nil means liveOpenRouterListModels (the production default).
-	healList      listModelsFn
-	Config        *Config
-	workspace     *Workspace
+	healList  listModelsFn
+	Config    *Config
+	workspace *Workspace
+	// projectCommands is the resolved project command set (issue #129) —
+	// discovery from the workspace's manifests, overridden by the config's
+	// project.commands declarations and the resolved instruction file's
+	// `## Commands` section. Computed once at session construction /
+	// project targeting; nil-safety means an empty value (no manifest, no
+	// declarations) is a no-op hook.
+	projectCommands projectcmd.Commands
+	// hookState is the session-scoped state of the post-edit hook
+	// (issue #129): the "workspace not trusted" note fires once per
+	// session, and the session is the unit that owns that flag AND the
+	// current mode (tools.PostEditHookState; a REPL /hook command lowers
+	// it in place via SetMode — it never raises above the process
+	// ceiling installed below from the resolved config).
+	hookState     *tools.PostEditHookState
 	deleteRoot    string
 	allowDelete   bool
 	quiet         bool
@@ -179,6 +226,32 @@ type CortexSession struct {
 	// snapshotted and never gets a false "scratch file left behind" receipt
 	// on every turn that runs bash. Dropped with the snapshot (testwatchDrop).
 	testwatchScratchBefore map[string]bool
+
+	// turnLinter is the turn-end lint pass's (issue #129 piece 3) per-turn
+	// state: the DISTINCT files this turn's write_file/edit_file calls
+	// touched (workdir-resolved paths, first-touch order — the same keys
+	// touchFile uses, normalized), and the turn's total lint budget
+	// (project.turn_lint_budget_sec, 0 = the default 60s) as a deadline.
+	// Armed by lintTouchedPath (the coder dispatcher, before each mutating
+	// call), read by turnLintAtFinalize at the clean-finalize point (the
+	// turn's FinalizeHook, alongside the #141 test-loss receipt), and
+	// dropped with the snapshot (testwatchDrop). Lint moved off the per-
+	// edit hook because clippy/eslint are slow and noisy: format stays
+	// per-edit, lint runs once per turn over the distinct touched files.
+	// Nil outside a turn; budgetSec 0 means "not armed by NewCortexSession"
+	// (hand-built test sessions use the default budget).
+	turnLinter struct {
+		touched   []string
+		budgetSec int
+	}
+	// lintReceipt is this turn's "lint: …" receipt (issue #129 piece 3):
+	// computed at the clean-finalize point by turnLintAtFinalize (stored
+	// there because the pass must run BEFORE the model's final answer, so
+	// the model can fix findings) and read by turn.go into
+	// TurnResult.LintReceipt (the REPL / `cortex turn` print it) and by
+	// captureTurn (the journal record shows it). "" between turns (dropped
+	// with the snapshot).
+	lintReceipt string
 
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to
@@ -310,6 +383,7 @@ func NewCortexSession() *CortexSession {
 	instructionBytesCap = cfg.instructionBytesCap()
 	configurePrompt(cfg)
 	tools.Configure(cfg.toolLimits())
+	tools.SetHookCeiling(cfg.postEditHookMode())
 	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 	openRouterPreflightTimeout = cfg.preflightTimeout()
 	labelTickInterval = cfg.tickerInterval()
@@ -384,16 +458,18 @@ func NewCortexSession() *CortexSession {
 	}
 
 	cs := &CortexSession{
-		Args:         &args,
-		Request:      req,
-		Config:       cfg,
-		workspace:    workspace,
-		Window:       code.Window,
-		Study:        study,
-		Fleet:        fleet,
-		deleteRoot:   deleteRoot,
-		allowDelete:  allowDelete,
-		sessionStart: time.Now(),
+		Args:            &args,
+		Request:         req,
+		Config:          cfg,
+		workspace:       workspace,
+		Window:          code.Window,
+		Study:           study,
+		Fleet:           fleet,
+		deleteRoot:      deleteRoot,
+		allowDelete:     allowDelete,
+		projectCommands: resolveProjectCommands(workspace.Root, cfg),
+		hookState:       &tools.PostEditHookState{},
+		sessionStart:    time.Now(),
 	}
 	// Issue #119: the workspace is now resolved and every command that goes
 	// through this constructor (REPL, turn, study, learn, serve, discord,
@@ -414,6 +490,33 @@ func NewCortexSession() *CortexSession {
 	// its own check as defense-in-depth against a hallucinated tool name.
 	cs.Request.Tools = filterEnabledTools(cs.Request.Tools, cs.IsToolEnabled)
 	return cs
+}
+
+// SetHookMode lowers the session's post-edit hook mode in place (issue #129
+// piece 2): a REPL /hook command is its sole caller. It is monotone-down;
+// the process ceiling (SetHookCeiling, installed at session construction
+// from the resolved config) is folded in at read time by EffectiveHookMode,
+// so a session can never operate in a mode more permissive than the one
+// the operator configured; the agent has no setter at all.
+func (cs *CortexSession) SetHookMode(m tools.HookMode) {
+	if cs.hookState != nil {
+		cs.hookState.SetMode(m)
+	}
+}
+
+// hookModeName renders the session's current EFFECTIVE hook mode (the
+// /hook command's current-value display; the more-restrictive of the
+// session mode and the process ceiling, where larger is more restrictive —
+// off > format > all).
+func (cs *CortexSession) hookModeName() string {
+	switch tools.EffectiveHookMode(cs.hookState) {
+	case tools.HookModeOff:
+		return "off"
+	case tools.HookModeFormat:
+		return "format"
+	default:
+		return "all"
+	}
 }
 
 // IsToolEnabled reports whether a context window tool is enabled via config.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/loops"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/internal/userhome"
@@ -477,6 +478,16 @@ type Config struct {
 	// authors (docs/configuration.md's `attribution.*` section): a commit
 	// trailer, and a PR-body footer the system prompt asks the agent to add.
 	Attribution AttributionConfig `json:"attribution"`
+
+	// Project holds project-scoped declarations (issue #129). Commands
+	// declares the project's own format/lint/test/build commands and
+	// OVERRIDES discovery from manifest files, field by field — see
+	// internal/projectcmd.Resolve. A `## Commands` section in the repo's
+	// RESOLVED instruction file (AGENTS.md, then CLAUDE.md, then
+	// .github/copilot-instructions.md — the same file the system prompt's
+	// seed loads, #152) declares the same keys and sits below this one
+	// (config beats instruction file beats discovery).
+	Project ProjectConfig `json:"project"`
 }
 
 // AttributionConfig collects configurable attribution markers for Cortex-authored
@@ -497,6 +508,133 @@ type AttributionConfig struct {
 	// IncludeModel controls "<model>" substitution in the commit trailer.
 	// Nil means true; false strips " (<model>)" from the template.
 	IncludeModel *bool `json:"include_model"`
+}
+
+// ProjectConfig declares project-level command overrides (issue #129).
+// Every key optional: a field that is absent leaves that role to
+// discovery (or to the AGENTS.md declaration below it).
+type ProjectConfig struct {
+	// Commands maps role ("format", "lint", "test", "build") to the
+	// shell command line for that role. A command containing "{file}"
+	// is per-file: the caller substitutes the file it just touched; a
+	// command containing "{dir}" is per-package: the caller substitutes
+	// the file's package directory. Unknown keys are ignored.
+	Commands map[string]string `json:"commands"`
+	// Trusted is the per-workspace trust list (issue #129's trust gate):
+	// workspace root directories the OPERATOR has decided are trusted — the
+	// gate for the post-edit hook (on an untrusted workspace it runs
+	// nothing). It is a USER decision — read from the USER-level config
+	// only: this field is INERT on the merged config's read path (the
+	// accessor TrustedList always reads the user file directly), and
+	// mergeConfig ignores the project-level (over) copy, so a repository
+	// can never set trust for itself: the project's own .cortex/config.json,
+	// and anything else the repo ships (AGENTS.md has no such key), cannot
+	// put a workspace on its own trust list. Absent or empty means no
+	// workspace is trusted — the safe default.
+	Trusted []string `json:"trusted"`
+	// CommandTimeoutSec is the per-command budget for the post-edit hook's
+	// format/lint runs (issue #129 piece 2) — seconds, 0 = the historical
+	// 10s (Config.toolLimits resolves it into the tools'
+	// HookCommandBudgetSec). A slow formatter is cut off here, and
+	// the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
+	// out after 10s").
+	CommandTimeoutSec int `json:"command_timeout_sec"`
+	// TurnLintBudgetSec is the TOTAL budget for the turn-end lint pass
+	// (issue #129 piece 3) — seconds, 0 = the default 60s (Config.toolLimits
+	// resolves it into the tools' TurnLintBudgetSec). Lint runs once per
+	// turn over the turn's distinct touched files (not per edit, where
+	// clippy/eslint are slow and noisy), and the whole pass shares this
+	// budget: a slow linter is cut off at the budget and the receipt says
+	// so.
+	TurnLintBudgetSec int `json:"turn_lint_budget_sec"`
+}
+
+// DeclaredProjectCommands projects the config's declared commands onto
+// projectcmd's typed shape: unknown role keys are dropped, blank values
+// ignored, so the declaration semantics live in one place
+// (projectcmd.Declared).
+func (c *Config) DeclaredProjectCommands() projectcmd.Declared {
+	out := projectcmd.Declared{}
+	if c == nil {
+		return out
+	}
+	for key, cmd := range c.Project.Commands {
+		trimmed := strings.TrimSpace(cmd)
+		if trimmed == "" {
+			continue // a blank value is a declaration of nothing
+		}
+		if role := projectcmd.Role(strings.ToLower(strings.TrimSpace(key))); projectcmd.RoleKnown(role) {
+			out[role] = trimmed
+		}
+	}
+	return out
+}
+
+// WorkspaceTrusted reports whether the workspace rooted at root is on the
+// USER's trust list (issue #129's gate for the post-edit hook: on an
+// untrusted workspace the hook runs nothing). The authoritative source is the user-level config file read
+// DIRECTLY (trustFromUserConfig), so the repo-claim vector cannot exist in
+// the first place: a project's own .cortex/config.json is never on the read
+// path, regardless of what the merged config carries — the repo is the
+// untrusted party and cannot mark itself trusted. (The merged config's
+// Project.Trusted is the same user-level list, since mergeProject drops the
+// project-level copy.) Matching is by absolute, slash-normalized
+// path (symlinks resolved when possible, so a home directory reached via a
+// symlink still matches the entry the operator typed), with an exact
+// string compare as the last resort. An empty root or a nil/untrusted config
+// returns false — untrusted is the safe default.
+func (c *Config) WorkspaceTrusted(root string) bool {
+	if c == nil || root == "" {
+		return false
+	}
+	want := normalizeTrustPath(root)
+	for _, e := range c.TrustedList() {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if e == root { // fast path: the entry is already identical
+			return true
+		}
+		if normalizeTrustPath(e) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TrustedList returns the trust list in effect for this config: ALWAYS the
+// USER-level config file's project.trusted, read DIRECTLY
+// (trustFromUserConfig). This accessor never reads the in-memory
+// Project.Trusted field: it is authoritative for nothing, because a
+// merged config that was built from an ABSENT or MALFORMED user config
+// carries the repo's claim in that field (loadMergedConfig's fallback) —
+// and the repository is the untrusted party, so the direct user read is
+// the only source (for the absent/malformed user cases it is exactly
+// "no entries": untrusted).
+func (c *Config) TrustedList() []string {
+	return trustFromUserConfig(userConfigPath())
+}
+
+// normalizeTrustPath canonicalizes a workspace path for trust matching:
+// absolute and symlinks resolved (EvalSymlinks — /home/alias and the real
+// directory must compare equal), with a trailing slash removed (an operator
+// may type a root with a trailing slash; the workspace root is stored
+// without one). filepath.Clean is NOT used: it drops the trailing slash,
+// and an exact string compare against the entry is the first compare tried
+// anyway — Clean would make a typed trailing-slash entry never match. A
+// path that cannot be canonicalized (it doesn't exist yet, or an error
+// mid-resolution) falls back to abs + trailing-slash trim: still a fair
+// compare, just without symlink resolution.
+func normalizeTrustPath(p string) string {
+	base := strings.TrimSuffix(p, "/")
+	if abs, err := filepath.Abs(base); err == nil {
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			return real
+		}
+		return strings.TrimSuffix(abs, "/")
+	}
+	return base
 }
 
 // SkillsConfig collects Agent Skills discovery tunables
@@ -540,6 +678,16 @@ type ToolConfig struct {
 	// nil-means-enabled Enable* fields above, which gate already-shipped
 	// tools rather than a new default-off behavior.
 	EnableEffortEscalation *bool `json:"enable_effort_escalation"`
+
+	// PostEditHook is the post-edit hook's MODE (issue #129 piece 2):
+	// "off" | "format" | "all" — "" (absent) resolves to the default "all".
+	// It turns the hook down or off when formatters are slow or the run
+	// wants it quieter; an operator can LOWER it (the REPL's /hook, the
+	// per-call `hook: "skip"`) but nothing RAISES it above this, and trust
+	// is never affected. Precedence: the CORTEX_POST_EDIT_HOOK env var (same
+	// values), then the project config, then the user config — resolved once
+	// at session construction (Config.postEditHookMode).
+	PostEditHook string `json:"post_edit_hook"`
 
 	// CurationBudgetTokens / MaxToolOutput / OutlineDefaultBudget override
 	// internal/tools' same-named constants (0 = today's value).
@@ -959,6 +1107,9 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	return spec
 }
 
+// findUp walks upward from the process CWD looking for rel (a name or a
+// relative path like ".cortex/config.json") and returns the first
+// existing match, or "" when the filesystem root is reached.
 func findUp(rel string) string {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -1109,6 +1260,15 @@ func LoadConfig() *Config {
 	return loadMergedConfig(userConfigPath(), findConfigPath())
 }
 
+// loadMergedConfig layers user config under project config
+// (field-by-field; a missing file is an absent layer). The instruction
+// file's `## Commands` declaration is NOT read here — it is parsed at
+// resolution time (session_core.go's resolveProjectCommands, from the
+// root's RESOLVED instruction file: AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md — the same file the system prompt's
+// project-instructions seed loads, #152), so there is exactly one parsing
+// path for it (issue #129): config commands beat instruction-file commands,
+// which beat discovery.
 func loadMergedConfig(userPath, projectPath string) *Config {
 	user := readConfigFile(userPath)
 	project := readConfigFile(projectPath)
@@ -1120,6 +1280,34 @@ func loadMergedConfig(userPath, projectPath string) *Config {
 	default:
 		return mergeConfig(user, project)
 	}
+}
+
+// trustFromUserConfig reads the trust list straight from the USER-level
+// config — the layer a repository can never write (issue #129's trust
+// gate). It deliberately does NOT go through loadMergedConfig/readConfigFile:
+// those treat a malformed file as "absent" and fall back to the layer below
+// (the project's own config), and loadMergedConfig with no user config at
+// all returns the project config verbatim — either fallback would let a
+// repo shipping a .cortex/config.json with its own root in project.trusted
+// mark itself trusted. A user config that is missing or unreadable yields
+// no entries (the safe default: nothing trusted). A malformed user config
+// yields a warning and no entries: it CANNOT degrade into the repo's list,
+// and the repo list is never read — the operator who broke their user
+// config is not silently untrusted-and-then-retrusted by the repo.
+func trustFromUserConfig(userPath string) []string {
+	if userPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		return nil
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "cortex: %s: ignoring malformed config: %v\n", userPath, err)
+		return nil
+	}
+	return cfg.Project.Trusted
 }
 
 func readConfigFile(path string) *Config {
@@ -1299,7 +1487,35 @@ func mergeConfig(base, over *Config) *Config {
 	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
 	out.Skills = mergeSkills(base.Skills, over.Skills)
 	out.Attribution = mergeAttribution(base.Attribution, over.Attribution)
+	out.Project = mergeProject(base.Project, over.Project)
 	return &out
+}
+
+// mergeProject threads project-level declarations over user-level ones,
+// field-by-field like every other section: a key the project config
+// names wins (a blank value still shadows the user-level key for that
+// role), keys it doesn't name inherit. DeclaredProjectCommands then
+// reads blanks as "not declared".
+//
+// EXCEPT project.trusted: it is a USER decision (issue #129) and the
+// project-level (over) copy is ignored — the repository is the untrusted
+// party and must not be able to mark itself trusted. Only the user-level
+// config's list survives the merge.
+func mergeProject(base, over ProjectConfig) ProjectConfig {
+	out := base
+	if len(over.Commands) > 0 {
+		cmds := map[string]string{}
+		for k, v := range base.Commands {
+			cmds[k] = v
+		}
+		for k, v := range over.Commands {
+			cmds[k] = v
+		}
+		out.Commands = cmds
+	}
+	out.CommandTimeoutSec = mergeIntField(base.CommandTimeoutSec, over.CommandTimeoutSec)
+	out.Trusted = base.Trusted
+	return out
 }
 
 // mergeIntField overrides base with over when over is non-zero — the shared
@@ -1630,6 +1846,26 @@ func (c *Config) maxToolIterations() int {
 	return resolveInt(c.Limits.MaxToolIterations, maxToolIterations)
 }
 
+// postEditHookMode resolves the post-edit hook's MODE (issue #129 piece 2):
+// off | format | all. Precedence: the CORTEX_POST_EDIT_HOOK env var (same
+// values) — env wins because it is per-process, the way every other
+// CORTEX_* override does — then the merged config's tools.post_edit_hook
+// (project config over user config, like every other field), then the
+// default all. An unrecognized value resolves to the SAFE off (a typo must
+// never enable a hook the operator did not name). Resolved once at session
+// construction (NewCortexSession) and installed as the process-wide
+// ceiling via tools.SetHookCeiling; a REPL /hook command may then lower the
+// session below it but never raise it above it.
+func (c *Config) postEditHookMode() tools.HookMode {
+	if v, ok := os.LookupEnv("CORTEX_POST_EDIT_HOOK"); ok && v != "" {
+		return tools.ParseHookMode(v)
+	}
+	if c == nil {
+		return tools.HookModeAll
+	}
+	return tools.ParseHookMode(c.Tools.PostEditHook)
+}
+
 func (c *Config) instructionBytesCap() int {
 	if c == nil {
 		return maxInstructionBytes
@@ -1795,6 +2031,8 @@ func (c *Config) toolLimits() tools.Limits {
 		FetchMaxBodyBytes:    resolveInt(c.Tools.FetchURL.MaxBodyBytes, def.FetchMaxBodyBytes),
 		DefaultSearchMax:     resolveInt(c.Tools.WebSearch.DefaultMaxResults, def.DefaultSearchMax),
 		MaximumSearchMax:     resolveInt(c.Tools.WebSearch.MaximumMaxResults, def.MaximumSearchMax),
+		HookCommandBudgetSec: resolveInt(c.Project.CommandTimeoutSec, def.HookCommandBudgetSec),
+		TurnLintBudgetSec:    resolveInt(c.Project.TurnLintBudgetSec, def.TurnLintBudgetSec),
 	}
 }
 

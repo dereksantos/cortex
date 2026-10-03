@@ -100,12 +100,16 @@ Three capabilities distinguish it:
 | `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19) |
 | `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
 | `cortex project <add\|list\|remove>` | Manage the project registry |
+| `cortex project trust <add\|remove\|list>` | Manage the per-workspace trust list (the post-edit hook's only gate; user config only) |
+| `cortex project commands [--json] [--project <name>]` | Show the project's resolved format/lint/test/build commands (discovery + declarations; `--json` for the machine-readable shape) |
 | `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
 REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
-`/model [name]`, `/plan <task>`, `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
+`/model [name]`, `/plan <task>`, `/hook off|format|all` (turns the post-edit
+hook down or off for this session — monotone-down, never raises it; bare
+`/hook` shows the current mode), `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
 commands are the `input ==` checks inside the REPL's input loop (`for {`).
 `/help` lists the commands; `/context`
@@ -173,6 +177,27 @@ the model-driven memory tools
   redirects to `study`; large Go files return a declaration skeleton.
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits.
+- After `write_file`/`edit_file` lands, a post-edit hook runs the project's
+  own format on the file just touched — it is FORMAT-ONLY. Lint moved to
+  the turn END: in mode "all" on a trusted workspace it runs once per turn
+  over the distinct `write_file`/`edit_file` paths (including the `agent`
+  subagent's, minus files deleted since) — one run per file for `{file}`,
+  one per distinct package dir for `{dir}` — under the turn's total lint
+  budget (`project.turn_lint_budget_sec`, default 60s); findings reach the
+  model in a tools-withheld finalize round and appear in the REPL, in
+  `cortex turn` stderr + its `lint` JSON field, and in the journal.
+  Workspace trust (the user config's `project.trusted`, set via
+  `cortex project trust`) is the ONLY gate: on an untrusted workspace it
+  runs nothing (one-line "hook inactive" note on the session's first
+  edit), on a trusted one it runs the applicable per-file format command
+  as a shell-free argv (templates with shell syntax are skipped with a
+  note), each with a 10s budget — and appends a note (what ran, what it
+  reported) to the result; the note never fails the edit. Commands are
+  declared in `project.commands` or the `## Commands` section of the
+  resolved instruction file (AGENTS.md → CLAUDE.md →
+  .github/copilot-instructions.md; docs/configuration.md); `cortex
+  project commands` shows each command's source and when it runs
+  (per-edit / turn-end / never / inactive).
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked.

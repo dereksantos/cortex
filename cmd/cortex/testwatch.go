@@ -689,12 +689,20 @@ func (cs *CortexSession) testwatchFinalizeNote() string {
 // unconditionally at the START of every turn (turn.go) so a stale before-
 // side from an earlier turn that never reached captureTurn (an error or
 // interrupt path returns before it) can't leak into the next turn's
-// receipt — and neither budget can fill up across turns.
+// receipt — and neither budget can fill up across turns. Issue #129 piece
+// 3: the same drop clears the turn-end lint pass's touched-file list and
+// its stored receipt (the new turn's turn.go re-arms the budget), so a
+// turn lints exactly the files IT touched.
 func (cs *CortexSession) testwatchDrop() {
 	cs.testwatch = nil
 	cs.testwatchBash = nil
 	cs.testwatchBashArmed = false
 	cs.testwatchScratchBefore = nil
+	cs.turnLinter = struct {
+		touched   []string
+		budgetSec int
+	}{}
+	cs.lintReceipt = ""
 }
 
 // pluralize renders "1 test definition" / "3 test definitions".
