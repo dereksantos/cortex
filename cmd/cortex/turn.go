@@ -131,10 +131,28 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// the oldest turns into the outline zone (docs/context-architecture.md).
 	// Labels count demoted turns monotonically (folds shrink cs.outline, so
 	// its length regresses and cannot number entries).
+	//
+	// Issue #171: a demoted span's wire copy may hold one-line in-turn stubs
+	// (applyInTurnDemotion mutated it before the send). The outline entry must
+	// label the ORIGINAL results — an "Error: …" result is [err], not [ok] —
+	// so every span is read through turnOriginalSpan, bounded to the span
+	// [span.Start, span.End): for spans demotion never touched the view is
+	// identical to the wire copy; for stubbed spans it restores each original
+	// from cs.inTurnOriginals. Bounding matters — the stubs' map is keyed by
+	// absolute index and still holds earlier turns' entries, and an unbounded
+	// view would let a later turn's tool calls and reply leak into this
+	// span's entry. The span's entries are then dropped, because this span is
+	// now permanently in the outline: its outline entry has read its
+	// originals, and the log will only grow from here (any later rewrite —
+	// Compact, /clear, resume — clears the map wholesale, below).
 	batch := cs.ws.DemoteBatch()
 	for i, span := range batch {
 		ordinal := cs.ws.Demoted() - len(batch) + i + 1
-		cs.outline = append(cs.outline, turnOutlineEntry(ordinal, span, cs.Request.Messages[span.Start:span.End], cs.SessionID))
+		entry := turnOutlineEntry(ordinal, span, cs.turnOriginalSpan(cs.Request, span.Start, span.End), cs.SessionID)
+		for k := span.Start; k < span.End; k++ {
+			delete(cs.inTurnOriginals, k)
+		}
+		cs.outline = append(cs.outline, entry)
 	}
 	cs.foldOutlineIfNeeded(ctx)
 	if len(cs.outline) > 0 || cs.outlineFolded != "" {
@@ -203,6 +221,17 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		maxIter = maxIterOverride
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
+	// Issue #171: in-turn demotion. Before each main-loop send, shrink the
+	// current turn's accumulated tool results (oldest first, keepRecent stay
+	// verbatim, drain to the low watermark) so a long turn cannot overflow the
+	// window before the next request is built. The hook mutates req in place
+	// (applyInTurnDemotion); under budget it is a byte-for-byte no-op. turnStart
+	// bounds the hook to this turn's own messages — earlier (already demoted
+	// to the outline) turns must not be re-stubbed. Subagent callers build
+	// their own Toolset without this hook, so only the coder turn gets it.
+	ts.BeforeSend = func(req *AgentRequest) {
+		cs.applyInTurnDemotion(req, turnStart)
+	}
 	// Issue #141: the model must account for test removals it made. The
 	// receipt is computed at the clean-finalize point (runLoop calls
 	// ts.FinalizeHook exactly when the model answers with no tool calls,
@@ -253,7 +282,19 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		cs.transcriptNote(reasoningFallbackNote())
 	}
 
-	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	// senderOverride, when non-nil, replaces the coder's round-trip sender
+	// (the network-backed coderSender) inside the healing ladder. It is a
+	// TEST-ONLY seam — no production code sets it — that lets a test drive
+	// the REAL turn path (DemoteBatch, BeforeSend's in-turn demotion, the
+	// outline entry, captureTurn) with a scripted model, zero network (the
+	// same pattern healList is injectable for tests). The ladder stays around
+	// its inner sender: a scripted turn never fails a send, so the heal path
+	// never fires and the seam is byte-for-byte the script.
+	send := cs.coderSender()
+	if cs.senderOverride != nil {
+		send = cs.senderOverride
+	}
+	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, send), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	// Issue #117: settle exactly ONE journal record per failed send — the
 	// receipt rides the send-scoped marker on the error (heal.go's
@@ -323,8 +364,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt}, err
 	}
 
-	turnMsgs := cs.Request.Messages[turnStart:]
-	cs.captureTurn(input, turnMsgs)
+	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
+	// lines) must be built from the ORIGINAL tool results, not the one-line
+	// wire stubs applyInTurnDemotion left in cs.Request.Messages (item 5); for
+	// a turn demotion never touched the view is identical to the wire copy.
+	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)))
 
 	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LastError: stats.LastError}, nil
 }
