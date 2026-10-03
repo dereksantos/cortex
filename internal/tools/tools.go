@@ -522,10 +522,12 @@ var EditFile = newTool(FunctionEditFile,
 		"replace_all is set. Prefer this over write_file for changes to an existing "+
 		"file. To make several changes at once, pass an `edits` array — they apply "+
 		"in order and atomically (all succeed or the file is left untouched). The "+
-		"result reports lines removed/added and warns when an edit removes more "+
-		"lines than it adds, so review it to confirm nothing was meant to stay; "+
-		"on a failure, the error names the first match's line (ambiguity) or the "+
-		"closest line in the file (not found).",
+		"result reports lines removed/added, warns when an edit removes more "+
+		"lines than it adds, and includes the current changed region (line- "+
+		"numbered) so your view of the file stays in sync; on a failure, the "+
+		"error lists the line numbers of every match (ambiguity) or the current "+
+		"content of the closest region in the file (not found) so you can "+
+		"correct the edit without a separate read.",
 	objectSchema(map[string]any{
 		"path":        stringProp("Path to the file to edit."),
 		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
@@ -1465,7 +1467,13 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if multi {
 		editsNoun = countNoun(len(edits), "edit")
 	}
-	result := resultWithWarning(editResultMessage(a.Path, editsNoun, countNoun(total, "replacement"), string(data), content), warn)
+	// Issue #173: the model's view of the file is stale after every edit
+	// (earlier edits in the same session changed it). Return a bounded
+	// snippet of the current changed region so the model's next edit anchors
+	// on the file's actual content, not the view it held before this call.
+	msg := editResultMessage(a.Path, editsNoun, countNoun(total, "replacement"), string(data), content)
+	msg += changedRegionSnippet(string(data), content)
+	result := resultWithWarning(msg, warn)
 	// Post-edit hook (issue #129): run the project's format/lint on the file
 	// just edited. Never fails the edit — it only appends a note. The note
 	// goes last: the tool's own observations about the change it applied
@@ -1497,9 +1505,85 @@ func editResultMessage(path, editsNoun, replNoun, before, after string) string {
 	}
 	msg := fmt.Sprintf("edited %s (%s, %s)", path, summary, delta)
 	if removed > added && removed >= 2 {
-		msg += fmt.Sprintf("; WARNING: removed %d lines and added %d — verify this was intended and re-read the edited region with read_file to confirm nothing was meant to stay", removed, added)
+		msg += fmt.Sprintf("; WARNING: removed %d lines and added %d — re-read the edited region below (or with read_file) to confirm nothing was meant to stay", removed, added)
 	}
 	return msg
+}
+
+// changedRegionSnippet renders the current content of the changed region of a
+// landed edit as a bounded, line-numbered snippet — the model-facing "your
+// file now looks like this" receipt that keeps the model's view of the file in
+// sync after an edit (#173). The snippet shows the changed lines plus a little
+// context on each side, each with its line number in the NEW file (the state
+// the model will edit next against). Returns "" when there is no changed
+// region to show (e.g. an empty replacement that removed the whole file).
+func changedRegionSnippet(before, after string) string {
+	if before == after {
+		return ""
+	}
+	rows := diffRows(splitLines(before), splitLines(after))
+	// Find the range of rows that are changed ('+' or '-').
+	first, last := -1, -1
+	for i, r := range rows {
+		if r.op == '+' || r.op == '-' {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		return ""
+	}
+	// Include up to 2 lines of context on each side.
+	ctx := 2
+	lo := first - ctx
+	if lo < 0 {
+		lo = 0
+	}
+	hi := last + ctx
+	if hi >= len(rows) {
+		hi = len(rows) - 1
+	}
+	// Cap the total snippet at 12 lines.
+	const maxLines = 12
+	if hi-lo+1 > maxLines {
+		// Center the window on the changed region.
+		mid := (first + last) / 2
+		lo = mid - maxLines/2
+		if lo < 0 {
+			lo = 0
+		}
+		hi = lo + maxLines - 1
+		if hi >= len(rows) {
+			hi = len(rows) - 1
+			lo = hi - maxLines + 1
+			if lo < 0 {
+				lo = 0
+			}
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\nCurrent changed region:")
+	for i := lo; i <= hi; i++ {
+		r := rows[i]
+		var marker string
+		var lineNum int
+		switch r.op {
+		case '+':
+			marker, lineNum = ">", r.new
+		case '-':
+			marker, lineNum = "-", r.old
+		default:
+			marker, lineNum = " ", r.new
+		}
+		line := strings.TrimSuffix(r.text, "\n")
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		fmt.Fprintf(&b, "\n  %s%d: %s", marker, lineNum, line)
+	}
+	return b.String()
 }
 
 // lineDelta returns the number of lines removed and added going from before to
@@ -1594,12 +1678,11 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 			return strings.ReplaceAll(content, old, new), n, nil
 		}
 		if n > 1 {
-			// Ambiguous: name where it first lands so the model can add the
-			// surrounding context that disambiguates, or set replace_all. The
-			// nearMissHint (closest-line) doesn't help here — the text IS in
-			// the file, the model needs to see its first position to anchor.
-			firstLine := 1 + strings.Count(content[:strings.Index(content, old)], "\n")
-			return "", 0, fmt.Errorf("old_string found %d times (first at line %d); add surrounding context to make it unique, or set replace_all", n, firstLine)
+			// Ambiguous: list every occurrence's line so the model can see
+			// exactly where each one is and add surrounding context to
+			// disambiguate (or set replace_all).
+			lines := matchLineNumbers(content, old, n)
+			return "", 0, fmt.Errorf("old_string found %d times (at lines %s); add surrounding context to make it unique, or set replace_all", n, lines)
 		}
 		return strings.Replace(content, old, new, 1), 1, nil
 	}
@@ -1629,7 +1712,11 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 			continue
 		}
 		if !replaceAll && len(starts) > 1 {
-			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace) (first at line %d); add context or set replace_all", len(starts), starts[0]+1)
+			lines := make([]int, len(starts))
+			for i, s := range starts {
+				lines[i] = s + 1
+			}
+			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace) (at lines %s); add context or set replace_all", len(starts), intListComma(lines))
 		}
 		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
 	}
@@ -1740,9 +1827,13 @@ func leadingWS(s string) string {
 	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
 }
 
-// nearMissHint points the model at the file line most similar (by word overlap)
-// to old's first meaningful line, so a failed match is fixable in one retry
-// instead of looping. Returns "" when nothing is similar enough.
+// nearMissHint returns the current content of the file region closest (by word
+// overlap) to old's first meaningful line, so a failed edit is self-correcting:
+// the model can see what is actually in the file around that line and craft a
+// corrected old_string without a separate read_file call. The snippet shows at
+// most 3 lines of context (the closest line plus one above and below, clipped
+// at the file's edges), each with its line number. Returns "" when nothing is
+// similar enough.
 func nearMissHint(fileLines, oldLines []string) string {
 	target := ""
 	for _, l := range oldLines {
@@ -1768,11 +1859,29 @@ func nearMissHint(fileLines, oldLines []string) string {
 	if bestIdx < 0 || bestScore < 0.5 {
 		return ""
 	}
-	line := strings.TrimSpace(strings.TrimSuffix(fileLines[bestIdx], "\n"))
-	if len(line) > 80 {
-		line = line[:80] + "…"
+	// Render at most 3 lines of context around the closest line.
+	start := bestIdx - 1
+	if start < 0 {
+		start = 0
 	}
-	return fmt.Sprintf(" — closest is line %d: %q (re-read the file if it changed)", bestIdx+1, line)
+	end := bestIdx + 2
+	if end > len(fileLines) {
+		end = len(fileLines)
+	}
+	var b strings.Builder
+	b.WriteString(" — closest region (re-read the file if it changed):")
+	for i := start; i < end; i++ {
+		line := strings.TrimSpace(strings.TrimSuffix(fileLines[i], "\n"))
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		marker := " "
+		if i == bestIdx {
+			marker = ">"
+		}
+		fmt.Fprintf(&b, "\n  %s%d: %s", marker, i+1, line)
+	}
+	return b.String()
 }
 
 // wordSet splits text into a set of lowercased alphanumeric tokens.
@@ -1797,6 +1906,45 @@ func jaccard(a, b map[string]bool) float64 {
 		}
 	}
 	return float64(inter) / float64(len(a)+len(b)-inter)
+}
+
+// matchLineNumbers returns the 1-based line numbers of the first max occurrences
+// of needle in content, joined by ", ". The cap keeps a high-count ambiguity
+// error bounded (the model sees enough to pick a disambiguating context).
+func matchLineNumbers(content, needle string, max int) string {
+	var lines []int
+	pos := 0
+	for i := 0; i < max; i++ {
+		idx := strings.Index(content[pos:], needle)
+		if idx < 0 {
+			break
+		}
+		line := 1 + strings.Count(content[:pos+idx], "\n")
+		lines = append(lines, line)
+		pos += idx + len(needle)
+	}
+	if len(lines) == 0 {
+		return "?"
+	}
+	return intListComma(lines)
+}
+
+// intListComma renders "a, b, c, …" from a slice of ints, capping at 10 entries
+// with a trailing "…" when the slice is longer.
+func intListComma(lines []int) string {
+	if len(lines) > 10 {
+		return strings.Join(intsToStrings(lines[:10]), ", ") + ", …"
+	}
+	return strings.Join(intsToStrings(lines), ", ")
+}
+
+// intsToStrings converts []int to []string of decimal representations.
+func intsToStrings(lines []int) []string {
+	out := make([]string, len(lines))
+	for i, n := range lines {
+		out[i] = fmt.Sprintf("%d", n)
+	}
+	return out
 }
 
 // --- remove_path --------------------------------------------------------

@@ -11,15 +11,17 @@ import (
 
 // TestEditFileDeclarationDocumentsResultAndFailureNotes proves the edit_file
 // tool description tells the model about the net line change / net-deletion
-// warning in the result and the first-match / closest-line guidance in failures
-// — so the prose can't silently regress from the behavior below it.
+// warning, the post-edit changed region, and the all-match-lines /
+// closest-region guidance in failures — so the prose can't silently regress
+// from the behavior below it.
 func TestEditFileDeclarationDocumentsResultAndFailureNotes(t *testing.T) {
 	desc := EditFile.Function.Description
 	for _, sub := range []string{
 		"lines removed/added",
 		"removes more lines than it adds",
-		"first match's line",
-		"closest line in the file",
+		"current changed region",
+		"line numbers of every match",
+		"closest region in the file",
 	} {
 		if !strings.Contains(desc, sub) {
 			t.Errorf("edit_file description should mention %q; got:\n%s", sub, desc)
@@ -135,6 +137,67 @@ func TestEditFileValidStillApplies(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "return 2") {
 		t.Errorf("edit did not land; file now: %q", string(data))
+	}
+	if !strings.Contains(out, "Current changed region:") {
+		t.Errorf("successful edit should include the changed-region snippet; got: %q", out)
+	}
+}
+
+// TestEditFileResultIncludesChangedRegion proves a successful edit's result
+// carries a bounded, line-numbered snippet of the current changed region so
+// the model's view of the file stays in sync (#173).
+func TestEditFileResultIncludesChangedRegion(t *testing.T) {
+	cases := []struct {
+		name    string
+		before  string
+		old     string
+		new     string
+		wantSub []string // substrings the result MUST contain
+	}{
+		{
+			name:    "in-place change shows the new line with its line number",
+			before:  "package main\nfunc f() int { return 1 }\n",
+			old:     "return 1",
+			new:     "return 2",
+			wantSub: []string{"Current changed region:", "2: func f() int { return 2 }"},
+		},
+		{
+			name:    "multi-line replacement shows all new lines",
+			before:  "package main\nfunc a() {}\n",
+			old:     "func a() {}",
+			new:     "func a() int { return 1 }\nfunc b() {}",
+			wantSub: []string{"Current changed region:", "2: func a() int { return 1 }", "3: func b() {}"},
+		},
+		{
+			name:    "deletion shows the removed line with a dash marker",
+			before:  "package main\nline one\nline two\nline three\n",
+			old:     "line two\n",
+			new:     "",
+			wantSub: []string{"Current changed region:", "-3: line two"},
+		},
+		{
+			name:    "context lines appear without a marker",
+			before:  "package main\nfunc f() int {\n\treturn 1\n}\n",
+			old:     "return 1",
+			new:     "return 2",
+			wantSub: []string{"Current changed region:", "1: package main", "2: func f() int {"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := seedEditFile(t, "f.go", tc.before)
+			out, err := Execute(context.Background(), editArgs(t, map[string]any{
+				"path": path, "old_string": tc.old, "new_string": tc.new,
+			}), headlessDeps{})
+			if err != nil {
+				t.Fatalf("edit_file: %v", err)
+			}
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(out, sub) {
+					t.Errorf("result missing %q; got: %q", sub, out)
+				}
+			}
+		})
 	}
 }
 
@@ -265,7 +328,7 @@ func TestEditFileAmbiguousExactMatchPointsAtFirstOccurrence(t *testing.T) {
 		t.Fatalf("ambiguous exact match should error, got none")
 	}
 	got := err.Error()
-	for _, sub := range []string{"found 2 times", "first at line 2", "replace_all"} {
+	for _, sub := range []string{"found 2 times", "at lines 2, 4", "replace_all"} {
 		if !strings.Contains(got, sub) {
 			t.Errorf("error should contain %q; got: %q", sub, got)
 		}
@@ -290,7 +353,7 @@ func TestEditFileAmbiguousTolerantMatchPointsAtFirstOccurrence(t *testing.T) {
 		t.Fatalf("ambiguous tolerant match should error, got none")
 	}
 	got := err.Error()
-	for _, sub := range []string{"matches 2 places", "first at line 2", "replace_all"} {
+	for _, sub := range []string{"matches 2 places", "at lines 2, 4", "replace_all"} {
 		if !strings.Contains(got, sub) {
 			t.Errorf("error should contain %q; got: %q", sub, got)
 		}
@@ -298,9 +361,10 @@ func TestEditFileAmbiguousTolerantMatchPointsAtFirstOccurrence(t *testing.T) {
 }
 
 // TestEditFileNotFoundCarriesClosestLineHint proves a guessed anchor (never
-// read, text that isn't in the file) comes back with the closest-line hint from
-// the tolerant path, so the model is pointed at what's actually in the file.
-// See #153.
+// read, text that isn't in the file) comes back with the closest-region hint
+// from the tolerant path, so the model can see the current file content around
+// the best-matching line and correct the edit without a separate read_file
+// call. See #153, #173.
 func TestEditFileNotFoundCarriesClosestLineHint(t *testing.T) {
 	before := "package main\nfunc Chdir(root string) {}\n"
 	path := seedEditFile(t, "f.go", before)
@@ -316,8 +380,63 @@ func TestEditFileNotFoundCarriesClosestLineHint(t *testing.T) {
 	if !strings.Contains(got, "not found") {
 		t.Errorf("error should say not found; got: %q", got)
 	}
-	if !strings.Contains(got, "closest is line 2") {
-		t.Errorf("error should point at the closest real line; got: %q", got)
+	if !strings.Contains(got, "closest region") {
+		t.Errorf("error should carry the closest-region hint; got: %q", got)
+	}
+	if !strings.Contains(got, "  >2: func Chdir(root string) {}") {
+		t.Errorf("error should point at line 2; got: %q", got)
+	}
+}
+
+// TestEditFileTolerantMatchPreservesFileLineContent locks in a tier-2
+// (whitespace-insensitive) tolerant match where the model's old_string and
+// the file line disagree on leading whitespace: the replacement must land
+// re-indented to the file's own indentation, not clipped to the model's.
+func TestEditFileTolerantMatchPreservesFileLineContent(t *testing.T) {
+	cases := []struct {
+		name   string
+		before string
+		old    string
+		new    string
+		want   string // the exact line expected in the file after the edit
+	}{
+		{
+			// Tab-indented line; the model's old_string omits the tab and the
+			// trailing brace. The replacement must land on the file's own line
+			// with the file's tab preserved.
+			name:   "tab-indented line with model's old_string missing tab",
+			before: "package main\nfunc f() {\n\treturnStart\n\treturn 1\n}\n",
+			old:    "returnStart",
+			new:    "returnStart() {",
+			want:   "\treturnStart() {\n",
+		},
+		{
+			// Space-indented line; the model's old_string uses a tab. The
+			// replacement must land with the file's own space indentation.
+			name:   "space-indented line with model's old_string using a tab",
+			before: "package main\n  returnStart\n",
+			old:    "\treturnStart",
+			new:    "\treturnStart() {",
+			want:   "  returnStart() {\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := seedEditFile(t, "f.go", tc.before)
+			out, err := Execute(context.Background(), editArgs(t, map[string]any{
+				"path": path, "old_string": tc.old, "new_string": tc.new,
+			}), headlessDeps{})
+			if err != nil {
+				t.Fatalf("tier-2 tolerant match should land the edit: %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if !strings.Contains(string(data), tc.want) {
+				t.Errorf("file line was mangled by the tolerant match; got: %q (result: %q)", string(data), out)
+			}
+		})
 	}
 }
 

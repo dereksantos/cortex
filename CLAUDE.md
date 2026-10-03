@@ -176,7 +176,13 @@ the model-driven memory tools
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton.
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
-  over `write_file` for edits.
+  over `write_file` for edits. Failure results are self-correcting: an
+  ambiguous match lists every occurrence's line number, a not-found match
+  carries a bounded snippet of the closest region in the file (line-numbered,
+  so the model can anchor on actual content without a separate read). A
+  successful result appends the current changed region (added lines marked
+  `>`, removed `-`, context unmarked, capped at 12 lines) so the model's view
+  of the file stays in sync (#173).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
