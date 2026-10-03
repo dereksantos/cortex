@@ -158,6 +158,11 @@ type PlanRunResult struct {
 	// a plan run surfaces test loss to the REPL and `cortex turn --plan`
 	// exactly as a single turn does. Empty when no turn lost a test.
 	TestReceipt string
+	// LintReceipt carries every executed turn's "lint: …" receipt (issue
+	// #129 piece 3's TurnResult.LintReceipt), one per line in run order, so
+	// a plan run surfaces turn-end lint findings to the REPL and
+	// `cortex turn --plan` exactly as a single turn does.
+	LintReceipt string
 }
 
 // addReceipt appends one turn's "tests changed" receipt (issue #141) to the
@@ -170,6 +175,17 @@ func (r *PlanRunResult) addReceipt(receipt string) {
 		r.TestReceipt += "\n"
 	}
 	r.TestReceipt += receipt
+}
+
+// addLintReceipt is addReceipt for the turn-end lint receipts (piece 3).
+func (r *PlanRunResult) addLintReceipt(receipt string) {
+	if receipt == "" {
+		return
+	}
+	if r.LintReceipt != "" {
+		r.LintReceipt += "\n"
+	}
+	r.LintReceipt += receipt
 }
 
 // TurnWithPlan runs the plan-then-execute path for a multi-part task:
@@ -196,9 +212,13 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out Pla
 	turn := func(input string) (TurnResult, error) {
 		res, turnErr := cs.Turn(ctx, input)
 		receipts.addReceipt(res.TestReceipt)
+		receipts.addLintReceipt(res.LintReceipt)
 		return res, turnErr
 	}
-	defer func() { out.TestReceipt = receipts.TestReceipt }()
+	defer func() {
+		out.TestReceipt = receipts.TestReceipt
+		out.LintReceipt = receipts.LintReceipt
+	}()
 
 	// --- 1. Planning turn -----------------------------------------------
 	// Withhold the session's tools for exactly the planning round-trip so

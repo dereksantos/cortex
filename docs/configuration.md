@@ -3,7 +3,8 @@
 The one page for configuring `cortex`: where config lives, what a minimal
 setup looks like, what the zero-config default does, every `tools.*` gate
 and numeric cap, every `models.<role>`/`subagents`/`limits`/`network`/
-`serve`/`repl`/`discord`/`skills` field, and every environment variable that
+`serve`/`repl`/`discord`/`skills`/`project` field, and every environment
+variable that
 changes behavior. Everything below is verified against `cmd/cortex/config.go` and
 the code that reads each setting — no aspirational fields. Every field on
 this page is optional; a config that never mentions a section behaves
@@ -591,6 +592,170 @@ Loop firings record whether the commit they made carried the trailer, as
 `attributed` on the `loop.run` journal event (omitted when false or when the
 firing made no commit). Commits from `cortex change commit`, Discord
 checkpoints and the `bash` tool are not journaled with an attribution flag.
+
+## Project commands, post-edit hook and workspace trust
+
+Cortex discovers each project's own `format`/`lint`/`test`/`build` commands
+from its manifests, and runs them after edits — but only in a workspace you
+have trusted. This section is the single reference for that whole feature:
+how the commands are found, when each runs, the trust gate, the mode switch,
+and the budgets. The config keys involved live under `project`:
+
+```json
+{
+  "project": {
+    "commands": {
+      "format": "custom-fmt -w {file}",
+      "test": "go test -race ./..."
+    },
+    "trusted": ["/home/u/real-repo"]
+  }
+}
+```
+
+`commands`: keys are the four command roles `format`, `lint`, `test`,
+`build`; each value is the shell command line for that role. Unknown
+keys and blank values are ignored.
+
+`trusted`: the workspace trust list (documented with the post-edit hook
+below) — USER config only, managed with `cortex project trust`.
+
+A command carrying the `{file}` placeholder is per-file: the post-edit hook
+(below) substitutes the file just written. A command carrying `{dir}` is
+per-package: the hook substitutes the file's `"./"`-prefixed package
+directory, relative to the project root (`"./"` for a root-level file) —
+the correct unit for cross-file tools (`go vet` type-checks a whole
+package, so `go vet {dir}` never reports spurious `undefined:` for a symbol
+defined in a sibling file). Commands without either placeholder apply to the
+whole project and are reported but never auto-run per edit.
+
+The same keys can be declared under a `## Commands` section of the
+RESOLVED instruction file — the same file, resolved the same way, as the
+system prompt's [Project instructions](#project-instructions-seeded-from-the-repo)
+section: priority-ordered, first match wins (`AGENTS.md`, then
+`CLAUDE.md`, then `.github/copilot-instructions.md`), capped at
+`limits.max_instruction_bytes`.
+
+```markdown
+## Commands
+
+- format: custom-fmt -w {file}
+- lint: golangci-lint run
+```
+
+Only list items shaped `- <role>: <command>` in the LAST `## Commands`
+section are read (roles case-insensitive, limited to the four roles);
+the rest of the file is untouched. Precedence is field-by-field:
+**config.json beats the instruction file, which beats discovery** — the
+manifests
+(`go.mod` → `gofmt -w {file}` / `go vet {dir}` / `go test ./...` /
+`go build ./...`; `package.json` scripts — reported as their runnable npm
+form, `npm run <script>` (or the bare `npm test` for the test script),
+because a script body like `tsc -p tsconfig.json` only runs inside npm,
+which puts node_modules/.bin on PATH and runs pre/post hooks — or
+prettier/eslint deps; `pyproject.toml`'s `[tool.ruff]`/`[tool.black]` +
+pytest; `Cargo.toml`; make targets named format/lint/test/build). Resolution happens once per
+session in `resolveProjectCommands` (`cmd/cortex/session_core.go`), which
+reads the resolved instruction file at the workspace root directly — the
+single parsing path for that section — and labels the source with the
+file's name (e.g. `CLAUDE.md`). A user-level `project.commands` entry
+beats an instruction-file declaration for the same role, like every other
+field-by-field merge.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `command_timeout_sec` | 10 | Per-command budget (seconds) for each hook run: the per-edit format and each turn-end lint run (capped at the time left in `turn_lint_budget_sec`). A slow formatter or linter is cut off here and the note/receipt reports the elapsed time. |
+| `turn_lint_budget_sec` | 60 | TOTAL wall-clock budget (seconds) for the turn-end lint pass. It caps the whole pass at once: a lint run that has not started when the budget is spent is not run, and a run in progress is cut off at the budget (the deadline travels into the run). A slow linter is reported as a budget hit in the receipt, not as a per-file timeout. |
+
+**The post-edit hook.** After `write_file`/`edit_file` lands, the session
+runs the project's format command on the file just touched, so an
+unformatted file never reaches review. It is FORMAT-ONLY: lint is slow and
+noisy per edit (clippy, eslint), so it is not run per edit. Instead, on a
+TRUSTED workspace in `"all"` mode, lint runs ONCE at the turn end, over the
+distinct files the turn touched (the `write_file`/`edit_file` paths,
+including the `agent` subagent's, minus any the turn deleted since) —
+one run per file for a `{file}` lint, one run per distinct package dir for
+a `{dir}` lint. Findings reach the model in one more tools-withheld
+(finalize) round, and appear in the REPL, in `cortex turn`'s stderr and its
+`lint` JSON field, and in the turn's journal capture.
+
+**The mode switch.** `tools.post_edit_hook` controls how much the hook
+does: `"off"` (nothing runs), `"format"` (only the per-file format command
+per edit — lint is skipped), or `"all"` (default: the per-file format
+command per edit, plus the turn-end lint pass over the turn's touched
+files). Precedence: the
+`CORTEX_POST_EDIT_HOOK` env var (same values), then the project config's
+`tools.post_edit_hook`, then the user config's, then the default `"all"`.
+An operator can lower it (the REPL's `/hook` command, the per-call
+`hook: "skip"` argument on `write_file`/`edit_file`) but nothing RAISES it
+above the configured ceiling — an agent can skip one call, never enable a
+mode. Trust is never affected by the mode.
+
+**Workspace trust is the ONLY gate.** Trust is a persisted,
+per-workspace, USER-level decision: the user config's `project.trusted`
+list (below), set with `cortex project trust`. It is read ONLY from the
+user-level config — the repository's own `.cortex/config.json` is never
+on the read path, so a repo can never mark itself trusted (the merge
+drops the project-level `project.trusted` copy; `mergeProject`).
+Default: no entry, untrusted. On an UNTRUSTED workspace the hook runs
+NOTHING: a trusted repo may use repo-local binaries
+(`./node_modules/.bin/eslint`, `./bin/fmt`) of any language, so there is
+no per-tool allowlist to run — the trust decision authorizes running
+what the repo configures. The first edit of a session on an untrusted
+workspace gets a one-line "post-edit hook inactive" note (later edits
+stay silent); a trusted workspace gets no note.
+
+On a TRUSTED workspace, the per-edit format command runs when it applies:
+the command must be per-file (a whole-project format has no argument to
+substitute per edit) and applicable to the file's extension (a manifest-set
+like gofmt's `.go`; a declaration or script with no recognized toolchain
+applies to all files). It runs as a plain argv — the template is split once
+and `{file}`/`{dir}` are each substituted as a single argument AFTER the
+split, exec'd directly with no shell, so a path is always one inert
+argument. A template containing shell syntax (pipe, chain, redirect,
+command substitution, subshell, or newline) cannot run without a shell and
+is skipped with a note — its intent is unexpressible, not dangerous. The
+format command gets the per-command budget (default 10s); a timeout or a
+non-zero exit is folded into the tool result as a note (capped at 2000 bytes
+of output), appended after the tool's own observations about the change
+(`edit_file`'s line delta and removal warning, and the large-deletion note
+either tool adds). The hook never fails the edit — the result of the write
+stands regardless.
+
+**`project.trusted` — the workspace trust list.** A list of workspace
+root directories the operator has decided are trusted — the only gate
+for the post-edit hook (above). Lives in the USER config only; managed
+with:
+
+```
+cortex project trust add <root>     # trust a workspace root (idempotent)
+cortex project trust remove <root>  # untrust it (errors if not listed)
+cortex project trust list           # show the trusted roots
+```
+
+Editing round-trips the whole user config, so a trust edit never
+clobbers other settings (unknown top-level keys are preserved). Absent
+or empty means no workspace is trusted — the safe default.
+
+**Inspecting the resolved set.** `cortex project commands` prints the
+resolved format/lint/test/build commands, one per line (or a JSON document
+with `--json`), each carrying `role`, `command`, `source` — the manifest
+name when discovered, `config.json` when declared in `project.commands`, or
+the instruction file's name (`AGENTS.md`, `CLAUDE.md`,
+`.github/copilot-instructions.md`) when declared in its `## Commands`
+section — and `when`: when the post-edit hook runs this command NOW, for
+this workspace and session. `when` is one of: `per-edit` (a per-file
+format command, trusted workspace, hook mode format or all), `turn-end`
+(a lint with `{file}`/`{dir}`, trusted workspace, hook mode all), `never`
+(the test and build roles, or a whole-project format/lint — the hook never
+auto-runs those), `inactive: workspace untrusted` (nothing runs on an
+untrusted workspace), or `inactive: hook mode <mode>` (a trusted workspace
+whose hook mode would not run this role now). `when` is computed from the
+user-config trust list and the effective hook mode (the `CORTEX_POST_EDIT_HOOK`
+env var, then the config's `tools.post_edit_hook`, then the default `all`).
+`--project <name>` targets a registered project (from the registry) instead
+of the CWD-derived workspace root — the same pair the hook uses in a
+session.
 
 ## Validation
 

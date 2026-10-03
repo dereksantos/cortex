@@ -252,6 +252,7 @@ var helpLines = []string{
 	"/clear             reset the conversation and start a fresh session",
 	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
+	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
 }
 
@@ -278,6 +279,7 @@ var usageLines = []string{
 	"cortex serve [--port <n>]                 local HTTP/SSE adapter for the web UI",
 	"cortex scan [--json] [--root <path>]      scan configured roots for projects",
 	"cortex project <add|list|remove>          manage the project registry",
+	"cortex project trust <add|remove|list>    manage the per-workspace trust list (the post-edit hook's only gate)",
 	"cortex discord                            Discord adapter (DISCORD_BOT_TOKEN)",
 	"cortex model [--json]                     show model role bindings and what's served",
 	"cortex study-eval                         study acceptance test",
@@ -656,6 +658,7 @@ func main() {
 			// changed" receipt; the plan run carries them (TurnWithPlan) so
 			// a /plan run reports test loss exactly like a single turn.
 			printTestReceipt(plan.TestReceipt)
+			printLintReceipt(plan.LintReceipt)
 			afterTurn(session, planErr)
 			continue
 		}
@@ -708,6 +711,29 @@ func main() {
 			continue
 		}
 
+		// /hook off|format|all turns the post-edit hook down or off for the
+		// current session (issue #129 piece 2). A bare /hook prints the
+		// current (effective) mode; a valid value lowers the session's mode
+		// in place (SetMode is monotone-down, and the process ceiling is
+		// folded in at read time, so nothing here can raise it above the
+		// configured mode, and trust is never affected). An UNRECOGNIZED
+		// value prints usage and the current mode and lowers nothing:
+		// ParseHookMode maps unknown values to off, and a typo must never
+		// silently disable the operator's hook.
+		if input == "/hook" || strings.HasPrefix(input, "/hook ") {
+			val := strings.TrimSpace(strings.TrimPrefix(input, "/hook"))
+			switch val {
+			case "":
+				fmt.Println("post-edit hook: " + session.hookModeName())
+			case "off", "format", "all":
+				session.SetHookMode(tools.ParseHookMode(val))
+				fmt.Println("post-edit hook -> " + session.hookModeName())
+			default:
+				fmt.Printf("usage: /hook off|format|all (post-edit hook: %s)\n", session.hookModeName())
+			}
+			continue
+		}
+
 		// M1.7: if a first-run greeting just asked where the user's code
 		// lives, this is that answer — capture and persist it before running
 		// the turn normally (the reply still gets an ordinary response too).
@@ -750,6 +776,10 @@ func main() {
 		// human gets it here, in the terminal, on the turn that produced it —
 		// the loss is reported where a reviewer would look.
 		printTestReceipt(res.TestReceipt)
+		// Issue #129 piece 3: the turn-end lint receipt rides the same
+		// turn-boundary surface — the findings the model saw in the finalize
+		// round reach the human in the terminal too.
+		printLintReceipt(res.LintReceipt)
 		// Issue #117: a turn that recovered from a mid-turn provider failure
 		// SUCCEEDED (err is nil), so the backend's status/body was otherwise
 		// lost behind the reply — one dim line, secrets redacted. afterTurn is

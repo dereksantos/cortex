@@ -256,6 +256,185 @@ func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 }
 func (headlessDeps) AttributionCommit() string { return "" }
 
+// HookMode is the post-edit hook's mode switch (issue #129 piece 2):
+// off | format | all. "all" (the default, the zero value) runs the
+// per-file format AND the per-package lint; "format" runs format only;
+// "off" runs nothing. The ordering is deliberate — the numeric value IS
+// the restrictiveness, so a monotone-down "lower" is a plain comparison
+// (toward a LARGER value) and the effective mode is the MORE
+// restrictive of (ceiling, session) — larger wins (moreRestrictive). A
+// /hook command (or a per-call `hook: "skip"`) may LOWER a session
+// toward off, but nothing RAISES it: an operator turns a slow hook down
+// or off, and a mode the operator never configured (less restrictive than
+// the ceiling) is unreachable.
+type HookMode int
+
+const (
+	HookModeAll    HookMode = iota // format + per-file/per-package lint (default)
+	HookModeFormat                 // format only, no lint
+	HookModeOff                    // nothing runs
+)
+
+// hookMode is the package-internal spelling of HookMode (the REPL /hook
+// command and every other internal call site can use either).
+type hookMode = HookMode
+
+// ParseHookMode maps a mode value (config field, env var, REPL command) to
+// its mode; the empty string is the "absent" sentinel that resolves to the
+// default (all), and an unrecognized value is the safe off — a typo must
+// never ENABLE a hook the operator did not name.
+func ParseHookMode(s string) HookMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "all":
+		return HookModeAll
+	case "format":
+		return HookModeFormat
+	case "off":
+		return HookModeOff
+	}
+	return HookModeOff
+}
+
+// activeCeiling is the process-wide configured ceiling. cmd/cortex installs
+// it once per process (SetHookCeiling, from the resolved config); tests that
+// pin the resolution install/restore it around the call, the way the Limits
+// tests save/restore the package vars.
+var activeCeiling = HookModeAll
+
+// SetHookCeiling installs the process-wide mode ceiling (cmd/cortex calls it
+// once at session construction, after resolving env > project > user).
+func SetHookCeiling(m HookMode) { activeCeiling = m }
+
+// PostEditHookState is the session-scoped state of the post-edit hook
+// (issue #129): the once-per-session "hook inactive: workspace not
+// trusted" note flag AND the session-mode — where a /hook command has
+// lowered the session below its configured ceiling (all→format→off only;
+// it never raises, see PostEditHookState.SetMode). A session (a
+// *CortexSession in cmd/cortex) is the unit of both "once per session" and
+// "the current mode": the note fires on the first write/edit of a session
+// on an untrusted workspace and stays quiet afterwards, and /hook off takes
+// effect from the next write/edit of that same session. The flag is marked
+// consumed only when the note is actually emitted, so a session that gets
+// trusted mid-session announces nothing after the flip. It is a POINTER
+// behind the HookState capability so the state mutates in place on the
+// session that owns it — and so a test's value-passed deps copies all
+// share the same session state.
+type PostEditHookState struct {
+	inactiveAnnounced bool
+	mode              hookMode // the session's current mode (HookModeAll = untouched)
+}
+
+// SetMode lowers the session-mode to m (all→format→off only): a REPL /hook
+// command is its sole caller, and it is a monotone-down setter — an attempt
+// to raise is a no-op (an operator turns the hook DOWN or off, never up).
+// It does NOT clamp against the process-wide ceiling (SetHookCeiling):
+// effectiveMode folds the ceiling in at read time, so a session can hold a
+// mode the operator never configured — the effective mode is still
+// capped, but a ceiling that is RAISED later (a future reload) does not
+// silently re-widen a session the operator explicitly turned down. The
+// agent has NO setter: it can only skip one call (effectiveHookMode),
+// and nothing here touches trust.
+func (s *PostEditHookState) SetMode(m HookMode) {
+	if s == nil || m <= s.mode {
+		return
+	}
+	s.mode = m
+}
+
+// SessionMode is the current session-mode (all when the state is nil — a
+// caller with no session has no /hook to lower it from).
+func (s *PostEditHookState) SessionMode() HookMode {
+	if s == nil {
+		return HookModeAll
+	}
+	return s.mode
+}
+
+// inactiveNoteDue reports whether the "hook inactive" note may still be
+// announced for this session (the once-per-session flag: false once it has
+// been). It is non-consuming and never announces anything itself — the
+// caller marks it consumed only when the note is actually emitted, so a
+// trusted workspace (which never emits the note) and a command-less edit
+// (which never reaches the note) do not burn the session's one slot. It
+// is the ONLY cross-call state the hook keeps: the rest of the hook is
+// stateless per edit.
+func (s *PostEditHookState) inactiveNoteDue() bool {
+	return !s.inactiveAnnounced
+}
+
+// announceInactive marks the one-time note as announced. Called only from
+// the untrusted branch of runProjectCommandHook, after the note has been
+// produced and is about to be appended to the tool result.
+func (s *PostEditHookState) announceInactive() {
+	s.inactiveAnnounced = true
+}
+
+// moreRestrictive is the LARGER of two modes — the mode that runs LESS
+// (off=2 > format=1 > all=0, so larger is more restrictive). Every
+// "fold in the more restrictive" site (the ceiling, a /hook lowering, a
+// per-call skip) goes through this one comparison.
+func moreRestrictive(a, b HookMode) HookMode {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+// effectiveMode is the hook mode a session operates in: the
+// more-restrictive of the configured ceiling and the session's current
+// mode. Both together are monotone-down from the config — nothing here
+// can raise.
+func effectiveMode(sessionMode HookMode) HookMode {
+	return moreRestrictive(sessionMode, activeCeiling)
+}
+
+// EffectiveHookMode is the hook mode the session with this state operates
+// in (the more-restrictive of the session-mode and the process-wide
+// configured ceiling; nil state = a caller without a session, so just the
+// ceiling). The REPL's /hook display and a session's hook behavior must
+// agree on this value.
+func EffectiveHookMode(state *PostEditHookState) HookMode {
+	return effectiveMode(state.SessionMode())
+}
+
+// effectiveHookMode is the hook mode for THIS tool call: the session's
+// effective mode, further lowered to off when the call itself carries
+// `hook: "skip"` (the per-call opt-out — the agent lowers for one write/edit,
+// never raises, and nothing here touches trust). state nil = a caller
+// without a session: the ceiling directly.
+func effectiveHookMode(state *PostEditHookState, skip bool) HookMode {
+	m := EffectiveHookMode(state)
+	if skip && m != HookModeOff {
+		m = HookModeOff
+	}
+	return m
+}
+
+// hookStateOf extracts the session's post-edit hook state from deps (the
+// PostEditHookState: the "hook inactive" flag AND the session-mode a /hook
+// command lowers in place), or nil when the capability is absent (every
+// existing implementor that hasn't adopted it): such a caller has no session
+// to announce the untrusted note for and no session to lower for, so its
+// mode is the bare ceiling (min(ceiling, all) = ceiling) and the note is not
+// surfaced.
+func hookStateOf(deps ToolDeps) *PostEditHookState {
+	state, ok := deps.(HookStateProvider)
+	if !ok {
+		return nil
+	}
+	return state.HookState()
+}
+
+// HookStateProvider is the OPTIONAL ToolDeps capability that exposes the
+// session's post-edit hook state (see PostEditHookState). It is asserted
+// dynamically by hookStateOf, so every existing ToolDeps implementor is
+// untouched; a session that doesn't implement it has no per-session
+// announcement (the hook's untrusted note is a per-session observation,
+// and a stateless caller has no session to announce it for).
+type HookStateProvider interface {
+	HookState() *PostEditHookState
+}
+
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
 	FunctionReadFile     = "read_file"
@@ -330,6 +509,7 @@ var WriteFile = newTool(FunctionWriteFile,
 	objectSchema(map[string]any{
 		"path":    stringProp("Path to the file to write."),
 		"content": stringProp("The full contents to write to the file."),
+		"hook":    stringProp("Optional: \"skip\" skips the post-edit format/lint hook for this call only (never raises it, never affects trust)."),
 	}, "path", "content"))
 
 // EditFile is the edit_file tool declaration: exact-match (whitespace-
@@ -353,6 +533,7 @@ var EditFile = newTool(FunctionEditFile,
 		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
 		"new_string":  stringProp("Replacement text (single edit). May be empty to delete old_string."),
 		"replace_all": boolProp("Replace every occurrence instead of requiring a unique match. Default false."),
+		"hook":        stringProp("Optional: \"skip\" skips the post-edit format/lint hook for this call only (never raises it, never affects trust)."),
 		"edits": map[string]any{
 			"type":        "array",
 			"description": "Optional: multiple edits applied in order, atomically. When set, the top-level old_string/new_string are ignored.",
@@ -679,9 +860,9 @@ func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, erro
 	case FunctionReadFile:
 		return readFile(tc, deps)
 	case FunctionWriteFile:
-		return writeFile(tc, deps)
+		return writeFile(ctx, tc, deps)
 	case FunctionEditFile:
-		return editFile(tc, deps)
+		return editFile(ctx, tc, deps)
 	case FunctionOutline:
 		return outlineTool(tc, deps)
 	case FunctionGrep:
@@ -1095,7 +1276,7 @@ func fileSkeleton(path string) string {
 
 // --- write_file ---------------------------------------------------------
 
-func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
+func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -1104,6 +1285,11 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// hook: "skip" opts OUT of the post-edit hook for this call only — the
+	// agent lowers it, never raises it (the mode ceiling is unaffected), and
+	// it never touches trust.
+	hookArg, _ := tc.StringArg("hook")
+	hookSkip := strings.TrimSpace(hookArg) == "skip"
 	printToolAction(deps, fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
@@ -1124,7 +1310,19 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if diffable {
 		printFileDiff(deps, before, content)
 	}
-	return resultWithWarning(fmt.Sprintf("wrote %d bytes to %s", len(content), path), largeDeletionWarning(warnBefore, content)), nil
+	result := resultWithWarning(fmt.Sprintf("wrote %d bytes to %s", len(content), path), largeDeletionWarning(warnBefore, content))
+	// Post-edit hook (issue #129): run the project's format/lint on the file
+	// just written. Never fails the write — it only appends a note. The note
+	// goes last: the tool's own observation about the change it applied (the
+	// #141 large-deletion NOTE) comes first, then what the project's commands
+	// said about the result. Trust is the hard gate (an untrusted workspace
+	// runs nothing and, once per session, says so) and the mode (config /
+	// env / /hook, plus this call's `hook: "skip"`) turns it down or off.
+	hookState := hookStateOf(deps)
+	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookState, effectiveHookMode(hookState, hookSkip)); note != "" {
+		result += "\n" + note
+	}
+	return result, nil
 }
 
 // deleteWarnBefore reads a file's current content solely for the #141
@@ -1187,13 +1385,17 @@ type editOp struct {
 // whitespace-tolerant (so a model that mis-indents old_string still lands the
 // edit). replace_all relaxes uniqueness for renames; an `edits` array applies
 // several changes atomically — if any fails the file is left untouched.
-func editFile(tc ToolCall, deps ToolDeps) (string, error) {
+func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	var a struct {
 		Path       string   `json:"path"`
 		OldString  string   `json:"old_string"`
 		NewString  string   `json:"new_string"`
 		ReplaceAll bool     `json:"replace_all"`
 		Edits      []editOp `json:"edits"`
+		// Hook opts OUT of the post-edit hook for this call only (`"skip"`);
+		// the agent lowers it, never raises it — the mode ceiling is untouched,
+		// as is trust.
+		Hook string `json:"hook"`
 	}
 	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
 		if err := json.Unmarshal([]byte(s), &a); err != nil {
@@ -1203,6 +1405,7 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if a.Path == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	hookSkip := strings.TrimSpace(a.Hook) == "skip"
 
 	edits := a.Edits
 	multi := len(edits) > 0
@@ -1260,21 +1463,30 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// just as a diff on a terminal a headless run has. Both sides are already
 	// in memory here, so the check costs nothing.
 	warn := largeDeletionWarning(string(data), content)
+	editsNoun := ""
+	if multi {
+		editsNoun = countNoun(len(edits), "edit")
+	}
 	// Issue #173: the model's view of the file is stale after every edit
 	// (earlier edits in the same session changed it). Return a bounded
 	// snippet of the current changed region so the model's next edit anchors
 	// on the file's actual content, not the view it held before this call.
-	region := changedRegionSnippet(string(data), content)
-	var msg string
-	if multi {
-		msg = editResultMessage(a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement"), string(data), content)
-	} else {
-		msg = editResultMessage(a.Path, "", countNoun(total, "replacement"), string(data), content)
+	msg := editResultMessage(a.Path, editsNoun, countNoun(total, "replacement"), string(data), content)
+	msg += changedRegionSnippet(string(data), content)
+	result := resultWithWarning(msg, warn)
+	// Post-edit hook (issue #129): run the project's format/lint on the file
+	// just edited. Never fails the edit — it only appends a note. The note
+	// goes last: the tool's own observations about the change it applied
+	// (the #153 line delta and removal WARNING, then the #141 large-deletion
+	// NOTE) come first, then what the project's commands said about the
+	// result. Trust is the hard gate (an untrusted workspace runs nothing and,
+	// once per session, says so) and the mode (config / env / /hook, plus this
+	// call's `hook: "skip"`) turns it down or off.
+	hookState := hookStateOf(deps)
+	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookState, effectiveHookMode(hookState, hookSkip)); note != "" {
+		result += "\n" + note
 	}
-	if region != "" {
-		msg += region
-	}
-	return resultWithWarning(msg, warn), nil
+	return result, nil
 }
 
 // editResultMessage renders the model-facing result for a landed edit. Beyond

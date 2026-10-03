@@ -37,6 +37,21 @@ type Limits struct {
 
 	DefaultSearchMax int
 	MaximumSearchMax int
+
+	// HookCommandBudgetSec is the per-command budget for the post-edit
+	// hook's format/lint runs (project.command_timeout_sec, issue #129
+	// piece 2) — seconds, 0 = the historical 10s. A slow formatter is
+	// cut off here, and the hook's note reports how long it ran ("gofmt
+	// 0.2s", "eslint timed out after 10s").
+	HookCommandBudgetSec int
+
+	// TurnLintBudgetSec is the TOTAL budget for the turn-end lint pass
+	// (RunTurnEndLint, issue #129 piece 3) — seconds, 0 = the default 60s
+	// (project.turn_lint_budget_sec). Lint moved off the per-edit hook
+	// because clippy/eslint are slow and noisy; one pass per turn over the
+	// turn's distinct touched files gets a single total budget here, and a
+	// linter that runs past it is cut off and the receipt says so.
+	TurnLintBudgetSec int
 }
 
 // DefaultLimits reproduces today's hardcoded constants exactly.
@@ -60,6 +75,9 @@ func DefaultLimits() Limits {
 
 		DefaultSearchMax: defaultSearchMax,
 		MaximumSearchMax: maximumSearchMax,
+
+		HookCommandBudgetSec: defaultHookCommandBudgetSec,
+		TurnLintBudgetSec:    defaultTurnLintBudgetSec,
 	}
 }
 
@@ -89,6 +107,8 @@ func Configure(l Limits) {
 		FetchMaxBodyBytes:    orDefault(l.FetchMaxBodyBytes, def.FetchMaxBodyBytes),
 		DefaultSearchMax:     orDefault(l.DefaultSearchMax, def.DefaultSearchMax),
 		MaximumSearchMax:     orDefault(l.MaximumSearchMax, def.MaximumSearchMax),
+		HookCommandBudgetSec: orDefault(l.HookCommandBudgetSec, def.HookCommandBudgetSec),
+		TurnLintBudgetSec:    orDefault(l.TurnLintBudgetSec, def.TurnLintBudgetSec),
 	}
 	fetchHTTPClient = newSafeHTTPClient()
 }
@@ -105,3 +125,14 @@ func orDefault(v, def int) int {
 	}
 	return def
 }
+
+// defaultHookCommandBudgetSec is the post-edit hook's per-command budget in
+// seconds (project.command_timeout_sec, issue #129 piece 2) — the historical
+// 10s that formatBudget used to hardcode.
+const defaultHookCommandBudgetSec = 10
+
+// defaultTurnLintBudgetSec is the turn-end lint pass's TOTAL budget in
+// seconds (project.turn_lint_budget_sec, issue #129 piece 3) — the 60s
+// total per turn that several lint runs share; a slow linter is cut off at
+// the budget and the receipt says so.
+const defaultTurnLintBudgetSec = 60
