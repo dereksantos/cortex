@@ -86,6 +86,13 @@ type TurnResult struct {
 	// prints it dim, both via the shared backendErrorLine (status from
 	// errStatus, message redacted).
 	LastError error
+	// Redactions is the number of secret patterns masked while this turn's
+	// messages were persisted to the on-disk transcript (issue #103). It
+	// counts exactly the in-flight turn (reset at turn start in turn.go), so
+	// a caller can see how much was redacted before the turn's text ever hit
+	// disk. The live in-memory messages are NOT redacted — only what is
+	// persisted is — so this is the only place the count is visible.
+	Redactions int
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -121,6 +128,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
 	defer func() { cs.turnNo = 0 }()
+	// Issue #103: reset the per-turn redaction counter so it counts exactly
+	// this in-flight turn's persisted messages (writeTranscript folds each
+	// message's masked patterns in as they hit the transcript); carried on
+	// TurnResult.Redactions before the turn returns.
+	cs.redactions = 0
 
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
@@ -409,6 +421,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.costUSD += stats.Cost
 	cs.LastPromptTokens = stats.LastPromptTokens
 	cs.LastCachedTokens = stats.LastCachedTokens
+	// Issue #103: fold this turn's per-turn redaction count (cs.redactions,
+	// reset at turn start and counting exactly the in-flight turn) into the
+	// session-cumulative total so the session summary and the eval journal
+	// report the session-wide total, while TurnResult.Redactions still carries
+	// the per-turn figure. Settled on every path (including error/interrupt),
+	// exactly like turns/tokens above.
+	cs.redactionsTotal += cs.redactions
 	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
 	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
 	// self-dev driver — can print it to a human. Compute it here, after
@@ -431,7 +450,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		if pf := pendingFailureOf(err); pf != nil {
 			cs.journalModelFailure(pf, err)
 		}
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Redactions: cs.redactions}, err
 	}
 
 	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
@@ -440,7 +459,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// a turn demotion never touched the view is identical to the wire copy.
 	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)))
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError, Redactions: cs.redactions}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from
