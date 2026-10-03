@@ -138,7 +138,9 @@ func TestParsePlan(t *testing.T) {
 // the planning turn is demoted out of the window. The check is on the
 // PRINCIPLE, not on recipe phrases: the principle says confirm the problem
 // exists before fixing it, and that a reported problem that doesn't
-// reproduce is finished by reporting it with the evidence.
+// reproduce is finished by reporting it with the evidence. It ALSO carries
+// the no-repro output-shape convention (noReproMarker) that turns that
+// principle's "saying so" into words noReproNote can recognize.
 func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
 	got := planStepPrompt("reproduce and fix the flaky test", 2, 4, "reproduce the bug, then fix it", nil)
 	// The exact two-line shape the existing end-to-end tests assert on.
@@ -155,6 +157,19 @@ func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(got), "confirm a problem exists before fixing") {
 		t.Errorf("planStepPrompt does not state the verify-before-fix principle (confirm before fix):\n%s", got)
+	}
+	// THE connect-through point (issue #178): the step prompt carries the
+	// no-repro output-shape convention, so a real model that concludes the
+	// bug doesn't reproduce writes it in the shape noReproNote recognizes.
+	if !strings.Contains(got, noReproMarker) {
+		t.Errorf("planStepPrompt does not carry the no-repro output-shape convention (noReproMarker):\n%s", got)
+	}
+	// And the convention and the probe agree on the same phrase: the marker
+	// the model is told to use is the prefix noReproNote anchors on, so a
+	// reply that follows the convention is recognized (round-2 review: the
+	// probe was unreachable for a real model before this).
+	if got := noReproNote("Not reproduced: go test ./... passes"); got != "Not reproduced: go test ./... passes" {
+		t.Errorf("noReproNote did not recognize a reply that follows the %q convention: got %q", noReproMarker, got)
 	}
 }
 
@@ -208,6 +223,12 @@ func TestNoReproNote(t *testing.T) {
 		{name: "a done step's reply with no no-repro verdict yields no note", reply: "Done — the fix is in and the tests pass.", want: ""},
 		{name: "empty reply", reply: "", want: ""},
 		{name: "whitespace reply", reply: "   \n", want: ""},
+		// The marker convention the step prompt tells the model to follow
+		// (noReproMarker): a reply that BEGINS with the capitalized
+		// "Not reproduced:" verdict is the real-model case the probe must
+		// recognize — the case-insensitive, line-anchored match handles the
+		// capital N.
+		{name: "the marker convention a step prompt instructs (capitalized lead)", reply: "Not reproduced: the reported crash does not occur — `go test -race ./...` passes on the current code.", want: "Not reproduced: the reported crash does not occur — `go test -race ./...` passes on the current code."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -226,7 +247,6 @@ func TestNoReproNote(t *testing.T) {
 // so it checks the real bytes a turn carries, not just the instruction
 // constant. The check is on the PRINCIPLE (verify-before-fix + honest
 // no-repro outcome), not on the recipe phrases a procedural rule would use.
-
 func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 	root := t.TempDir()
 	backend := newPlanTestBackend(t,
@@ -244,24 +264,26 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 		t.Fatalf("recorded prompts = %d, want 3 (one planning + two step)", len(users))
 	}
 
-	// (a) table: which prompt, and the principle it must carry.
+	// (a) table: which prompt, and what it must carry.
 	// verifyBeforeFixPrinciple is the SAME const the base system prompt
 	// carries (prompt.go), so both planning and step turns see the identical
-	// wording.
+	// wording; noReproMarker (the output-shape convention) rides in BOTH
+	// prompts too, so the probe's "not reproduced" anchor has a real-model
+	// counterpart.
 	tests := []struct {
 		name     string
 		prompt   string
 		contains []string
 	}{
 		{
-			name:     "planning prompt carries the verify-before-fix principle",
+			name:     "planning prompt carries the verify-before-fix principle and the no-repro marker",
 			prompt:   users[0],
-			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
+			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing", noReproMarker},
 		},
 		{
-			name:     "step prompt carries the original task and the principle",
+			name:     "step prompt carries the original task, the principle, and the no-repro marker",
 			prompt:   users[1],
-			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
+			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", noReproMarker},
 		},
 	}
 	for _, tt := range tests {

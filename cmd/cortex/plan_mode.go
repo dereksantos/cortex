@@ -63,6 +63,18 @@ const planStepCap = 6
 // the whole thing (#150: "unparseable, which falls back to a single turn").
 const planStepFloor = 2
 
+// noReproMarker is the output-shape convention a no-repro step reply must
+// follow (issue #178). The principle (prompt.go's verifyBeforeFixPrinciple)
+// says a reported problem that doesn't reproduce is finished by SAYING so
+// with the evidence — but it does not name the words to say. This marker is
+// those words: the planning instruction and each step prompt (planStepPrompt)
+// tell the model to lead such a reply with "Not reproduced:" + the evidence,
+// and noReproNote anchors on the same words. The principle tells the model
+// WHAT to conclude; this convention tells it HOW to write that conclusion
+// down so the note survives into the per-step report and the later steps'
+// prompts — one phrase, three places, no procedure.
+const noReproMarker = `If this step's outcome is that the reported problem does not reproduce, begin your reply with "Not reproduced:" followed by the evidence (the command you ran and what it showed).`
+
 // planModeInstruction is the planning turn's prompt. It fixes the output
 // shape parsePlan relies on: bare "N. text" lines, one per step, 2–6 of
 // them. It asks for no tool use and no prose beyond the list so the reply
@@ -90,7 +102,8 @@ Rules:
 - One line per step, starting at 1; nothing before the list, nothing after.
 - No prose, no headings, no bullet markers — only "N. step" lines.
 - Do not use any tools; just output the numbered list.
-- ` + verifyBeforeFixPrinciple + ``
+- ` + verifyBeforeFixPrinciple + `
+- ` + noReproMarker + ``
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -446,15 +459,17 @@ func interruptPlan(stepResults []StepResult, steps []string, i int, err error) (
 // line carries instead of a bare "done" (or a "check passed" that would bury
 // the verification outcome).
 //
-// The probe is ANCHORED to the verdict the principle points at: a line that
-// starts with "not reproduced" (case-insensitive), the phrasing a no-repro
-// report leads with. Anchoring to the line start (rather than any substring
+// The probe is ANCHORED to the verdict the convention points at: a line that
+// starts with "not reproduced" (case-insensitive), the phrasing noReproMarker
+// (in the planning instruction and each step prompt) tells the model to lead
+// a no-repro reply with — so a real model's verdict, whatever the evidence,
+// is recognized. Anchoring to the line start (rather than any substring
 // match on "not reproduce") keeps a reply that merely ECHOES prompt or plan
 // wording — "if the bug does not reproduce …", "I could not reproduce it at
 // first, then reproduced it with -race" — from being misread as a no-repro
-// verdict. A no-repro reply that states its verdict some other way is simply
-// not flagged: the report line then falls back to the check summary, which
-// is honest about what was verified.
+// verdict. A no-repro reply that states its verdict some other way (the
+// model skipped the convention) is simply not flagged: the report line then
+// falls back to the check summary, which is honest about what was verified.
 func noReproNote(reply string) string {
 	trimmed := strings.TrimSpace(reply)
 	if trimmed == "" {
@@ -476,6 +491,12 @@ func noReproNote(reply string) string {
 // step's tools are present here (unlike the planning turn), so the model can
 // and should run the test or command that confirms the problem.
 //
+// It also carries the no-repro output-shape convention (noReproMarker): the
+// principle says a non-reproducing problem is finished by saying so with the
+// evidence, but doesn't name the words — the marker tells the model to lead
+// such a reply with "Not reproduced:" so noReproNote recognizes the verdict
+// and carries it into the report and the later steps' prompts.
+//
 // earlierNotes are the DONE steps' notes in order (skipped when empty): an
 // earlier step's no-repro note (issue #178) must reach a later step, so a
 // "fix it" step knows the bug never reproduced instead of running blind and
@@ -483,8 +504,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)
