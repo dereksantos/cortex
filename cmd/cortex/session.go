@@ -461,11 +461,31 @@ func (cs *CortexSession) writeSessionState() {
 		return
 	}
 	high, low := cs.ws.GetWatermarks()
+	// Issue #103: the state snapshot persists outline text (User, Actions,
+	// ReplyHead — built from live, unredacted messages in demote.go) and the
+	// folded digest (summarizer output over that text) into the same session
+	// file. Redact REDACTED COPIES of each field — the live cs.outline and
+	// cs.outlineFolded stay verbatim (the outline block rides the model's
+	// context this turn, so masking the live copy would blind the model to a
+	// value it still uses), and the counts are NOT folded into
+	// cs.redactions: the per-turn counter counts secrets masked while THIS
+	// turn's messages hit the transcript, and the snapshot is a periodic
+	// restatement of turns already counted when their messages were written.
+	outline := make([]cache.OutlineEntry, len(cs.outline))
+	for i, e := range cs.outline {
+		e.User, _ = redact.Redact(e.User)
+		e.ReplyHead, _ = redact.Redact(e.ReplyHead)
+		e.Actions = make([]string, len(e.Actions))
+		for j, a := range e.Actions {
+			e.Actions[j], _ = redact.Redact(a)
+		}
+		outline[i] = e
+	}
+	folded, _ := redact.Redact(cs.outlineFolded)
 	cs.writeEntry(sessionEntry{Kind: kindState, State: &sessionState{
 		Version: stateVersion, Base: cs.ws.Base(), Frontier: cs.ws.Demoted(),
 		TotalTurns: cs.ws.TotalTurns(), HighWatermark: high, LowWatermark: low,
-		LastTurn: cs.turns, Outline: append([]cache.OutlineEntry(nil), cs.outline...),
-		OutlineFolded: cs.outlineFolded,
+		LastTurn: cs.turns, Outline: outline, OutlineFolded: folded,
 	}})
 }
 

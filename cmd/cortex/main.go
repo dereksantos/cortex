@@ -789,7 +789,7 @@ func main() {
 		// Issue #103: a turn whose persisted messages carried a secret reports
 		// how much was masked (dim provenance, not an alarm) — the same
 		// per-turn count the journal capture's metadata and TurnResult carry.
-		printRedactions(res.Redactions)
+		printRedactions(os.Stdout, res.Redactions)
 		afterTurn(session, err)
 	}
 

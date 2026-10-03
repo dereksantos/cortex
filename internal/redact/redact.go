@@ -48,20 +48,23 @@ var awsSecretRe = regexp.MustCompile(
 // value is either a quoted run of any length (quotedValueBranch), or a BARE
 // run of at least 8 non-quote/non-whitespace chars whose FIRST char is in
 // valueStartClasses — that length + first-char guard is what keeps
-// API_MODE=fast and the like from being masked (TestRedact_Assignment_FalsePositives).
+// API_MODE=fast and the like from being masked
+// (TestRedact_Assignment_FalsePositives).
 //
 // The first-char class deliberately EXCLUDES `[` (the start of an already-
-// applied [REDACTED:…] marker) and letters (so a value that is itself a
-// prefixed key, like sk-…, is left for the more specific key patterns to
-// kind). Excluding `[` is what makes Redact idempotent: a value an earlier,
-// more specific pattern already masked to a bare marker is not re-matched
-// (and re-kinded) by this broad class (TestRedact_Idempotent).
-
-// valueStartClasses is the first-char class for a BARE (unquoted) assignment
-// value in assignmentRe — see the comment above assignmentRe for why it
-// excludes `[` (idempotency) and letters (letting prefixed keys through to
-// their own patterns).
-const valueStartClasses = `@#%^&*!~+./:;,-0-9_`
+// applied [REDACTED:…] marker): that is what makes Redact idempotent — a
+// value an earlier, more specific pattern already masked to a bare marker is
+// not re-matched (and re-kinded) by this broad class
+// (TestRedact_Idempotent). Letters are now ADMITTED (they were excluded
+// before issue #103's review): a bare value that starts with sk-/ghp_/AKIA is
+// consumed by the more specific key patterns that run BEFORE this one —
+// pattern order makes their span a bare [REDACTED:…] marker by the time this
+// class applies, and the marker's leading `[` is still excluded, so admitting
+// letters only catches the bare .env secrets this class exists for
+// (DB_PASSWORD=hunter2secret, GITHUB_TOKEN=abcdefgh…, TestRedact_MultiLine).
+// Quotes stay excluded: a quoted value is claimed by quotedValueBranch
+// instead.
+const valueStartClasses = `@#%^&*!~+./:;,-0-9_A-Za-z`
 const quotedValueBranch = `('[^'\n]+'|"[^"\n]+")`
 
 var assignmentRe = regexp.MustCompile(
@@ -145,7 +148,10 @@ var patterns = []pattern{
 	},
 	// General KEY=/TOKEN=/SECRET=… assignment values (see assignmentRe).
 	// Runs LAST: it is the broadest class, so it only ever claims values no
-	// earlier, more specific pattern consumed.
+	// earlier, more specific pattern consumed — a value that IS itself a
+	// prefixed key (sk-…, ghp_…, AKIA…) is already a bare [REDACTED:…]
+	// marker by the time this class applies, and the marker's leading `[`
+	// is outside the bare-value first-char class.
 	{
 		re:    assignmentRe,
 		apply: keepName(KindAssignment, assignmentRe),

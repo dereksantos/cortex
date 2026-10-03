@@ -63,6 +63,22 @@ func TestRedact(t *testing.T) {
 			wantCount: 1,
 		},
 		{
+			name: "bare assignment, letter-led value masked (issue #103's .env case)",
+			in:   "GITHUB_TOKEN=abcdefgh12345678",
+			want: "GITHUB_TOKEN=" + marker(KindAssignment),
+			// the 16-char bare value starts with a letter; the assignment
+			// class must claim it (a prefixed key like sk-… would already be
+			// a marker by the time this class runs, so letters are safe to
+			// admit here)
+			wantCount: 1,
+		},
+		{
+			name:      "bare assignment, letter-led hyphenated value masked",
+			in:        "SECRET_KEY=django-insecure-xyz",
+			want:      "SECRET_KEY=" + marker(KindAssignment),
+			wantCount: 1,
+		},
+		{
 			name:      "PEM private key block",
 			in:        "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7\n-----END RSA PRIVATE KEY-----",
 			want:      marker(KindPEM),
@@ -233,15 +249,14 @@ func TestRedact_Idempotent(t *testing.T) {
 func TestRedact_MultiLine(t *testing.T) {
 	in := "before\nexport DB_PASSWORD=hunter2secret\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\nafter"
 	got, n := Redact(in)
-	// The PEM block is masked as a whole; DB_PASSWORD's 13-char value starts
-	// with a letter (the valueStartClasses guard excludes letters so prefixed
-	// keys like sk-… are left for the key patterns), so the assignment class
-	// leaves it alone here — only the PEM is redacted.
-	want := "before\nexport DB_PASSWORD=hunter2secret\n" + marker(KindPEM) + "\nafter"
+	// The PEM block is masked as a whole; DB_PASSWORD's 13-char bare value
+	// starts with a letter and IS masked by the assignment class — a bare
+	// letter-led value is exactly the .env secret issue #103 describes.
+	want := "before\nexport DB_PASSWORD=" + marker(KindAssignment) + "\n" + marker(KindPEM) + "\nafter"
 	if got != want {
 		t.Errorf("Redact() = %q\nwant       %q", got, want)
 	}
-	if n != 1 {
-		t.Errorf("Redact() count = %d, want 1", n)
+	if n != 2 {
+		t.Errorf("Redact() count = %d, want 2", n)
 	}
 }

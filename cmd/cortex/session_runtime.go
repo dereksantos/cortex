@@ -253,9 +253,21 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		summary += "\n[" + outcome + "]"
 	}
 	if answer != "" {
+		// Issue #103: redact the answer BEFORE truncating it — a secret cut
+		// below its minimum match length by the excerpt cap would otherwise
+		// persist partly unmasked. Redact-then-truncate can only ever lose
+		// the TAIL of a match (the head is intact, and for a fixed-length
+		// key like sk-… that leaves no usable prefix). The truncation
+		// marker is kept for untruncated answers only; a long answer that
+		// was already cut by the cap does not stack a second ellipsis onto
+		// the marker.
+		answer, _ = redact.Redact(answer)
 		cap := cs.Config.captureExcerptCapChars()
 		if len(answer) > cap {
-			answer = answer[:cap] + "…"
+			answer = answer[:cap]
+			if !strings.HasSuffix(answer, "…") {
+				answer += "…"
+			}
 		}
 		summary += "\n→ " + answer
 	}
@@ -268,9 +280,16 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 	// same journal), and it is a distinct surface from the transcript's
 	// per-message redaction (session.go's writeTranscript): the live in-memory
 	// turnMsgs are left verbatim, so the model can still use a value this turn
-	// — only what is persisted here is masked.
-	redactedUserPrompt, _ := redact.Redact(userMsg)
-	redactedSummary, _ := redact.Redact(summary)
+	// — only what is persisted here is masked. The counts are folded into
+	// cs.redactions so they ride the turn's reported figure (TurnResult.Redactions
+	// and the "redactions" metadata below) — the capture is the journal's OWN
+	// masking, on top of the transcript's, so the figure a human sees (the
+	// REPL/headless notice) and the one the journal records cover the journal
+	// too, as docs/journal.md's invariant says.
+	redactedUserPrompt, n := redact.Redact(userMsg)
+	cs.redactions += n
+	redactedSummary, n2 := redact.Redact(summary)
+	cs.redactions += n2
 	if err := cs.capturer.CaptureEvent(&events.Event{
 		Source:     events.SourceGeneric,
 		EventType:  events.EventToolUse,

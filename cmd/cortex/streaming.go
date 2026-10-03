@@ -629,15 +629,19 @@ func printBackendError(err error) {
 	}
 }
 
-// printRedactions prints a turn's secret-redaction count (issue #103) to the
-// REPL at the turn boundary — the number of secret patterns masked while the
-// turn's messages hit the transcript/journal/memory, carried on
+// printRedactions prints a turn's secret-redaction count (issue #103) to w at
+// the turn boundary — the number of secret patterns masked while the turn's
+// messages hit the transcript/journal/memory, carried on
 // TurnResult.Redactions. It is a dim, non-alarm note (not a warning): the turn
 // SUCCEEDED, this is just provenance that a secret the agent read did not reach
 // disk. No-op for a zero count (the common case: nothing persisted a secret).
-func printRedactions(n int) {
+// The caller picks the sink: the REPL passes stdout (a turn-boundary note
+// belongs in the scrollback with every other one), the headless `cortex turn`
+// driver passes stderr — issue #118's contract that headless stdout is the
+// answer only (TestTurnCLIReportsOnStderr).
+func printRedactions(w io.Writer, n int) {
 	if n > 0 {
-		fmt.Println(withColor(fmt.Sprintf("%d secret pattern(s) redacted from the transcript, journal, and memory this turn", n), gray))
+		fmt.Fprintln(w, withColor(fmt.Sprintf("%d secret pattern(s) redacted from the transcript, journal, and memory this turn", n), gray))
 	}
 }
 

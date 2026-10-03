@@ -211,10 +211,12 @@ func runTurnCLI(args []string) {
 				fmt.Fprintln(os.Stderr, backendErrorLine(res.LastError))
 			}
 			// Issue #103: a turn whose persisted messages carried a secret
-			// reports how much was masked on stderr (dim provenance, not an
-			// alarm), like the test/lint receipts above; the --json path carries
-			// the same count under "redactions".
-			printRedactions(res.Redactions)
+			// reports how much was masked on STDERR (dim provenance, not an
+			// alarm), like the test/lint receipts above — never stdout, so
+			// issue #118's answer-only contract holds even when a turn masked
+			// a secret; the --json path carries the same count under
+			// "redactions".
+			printRedactions(os.Stderr, res.Redactions)
 			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
 		}
 		if turnErr != nil {
