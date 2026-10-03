@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -430,4 +431,99 @@ func TestForcedFinalizeE2ECleanFinalize(t *testing.T) {
 			t.Fatalf("unexpected forced-finalize framing on the wire: %q (clean finalize)", m.Content)
 		}
 	}
+}
+
+// TestForcedFinalizeNoteShape is the issue #161 review fix for the
+// forced-finalize note's shape: the note must carry ONE framing and ONE
+// restatement ask (wrapping an already-framed receipt in a second "before
+// you …" framing doubled both for the model), and its lead-in must name the
+// bound that actually forced the finish — a token-budget stop must not claim
+// "the tool-call limit" (the hook receives the run's stats, so the stop
+// reason is known).
+func TestForcedFinalizeNoteShape(t *testing.T) {
+	// One scripted session per subtest: the helper t.Chdir's into its own
+	// temp dir, so the scratch file (and every relative write in these
+	// subtests) must be created AFTER the helper returns, or it lands in the
+	// parent test's dir and the scans (which read from the session's workdir)
+	// see nothing.
+	newScratchSession := func(t *testing.T) *CortexSession {
+		t.Helper()
+		cs := forcedFinalizeScriptedSession(t, []*AgentResponse{answerResp("partial work")})
+		if err := os.WriteFile("zz_debug_tmp.go", []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rel := "zz_debug_tmp.go"
+		cs.testwatch = map[string]*testwatchSnapshot{rel: {abs: filepath.Join(cs.Workdir(), rel), display: rel, before: "", created: true}}
+		return cs
+	}
+
+	t.Run("max-iter: single framing, single restate ask, names the tool-call limit", func(t *testing.T) {
+		// Scratch file left behind → the note is non-empty (leftover-debug
+		// receipt).
+		cs := newScratchSession(t)
+		note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: "max-iter"})
+		if note == "" {
+			t.Fatal("forced-finalize note is empty, want the leftover-debug receipt")
+		}
+		// Exactly ONE framing and exactly ONE restatement ask: the note is
+		// built from the raw receipts, not wrapped in a second framing around
+		// an already-framed note.
+		for _, phrase := range []string{
+			"Before you answer: the harness detected that this turn ",
+			"Restate your complete final answer",
+		} {
+			if n := strings.Count(note, phrase); n != 1 {
+				t.Errorf("note contains %q %d times, want exactly 1:\n%s", phrase, n, note)
+			}
+		}
+		// The lead-in names the bound that actually forced the finish: a
+		// max-iter stop names the tool-call limit, and no "Before you finish"
+		// framing (the clean-finalize receipt's lead-in) rides the note.
+		if !strings.Contains(note, "cut this turn off at the tool-call limit") {
+			t.Errorf("note = %q, want the tool-call-limit lead-in (max-iter stop)", note)
+		}
+		if strings.Contains(note, "Before you finish") {
+			t.Errorf("note = %q, must not carry a second \"Before you finish\" framing", note)
+		}
+	})
+
+	t.Run("token-budget: names the token budget, not the tool-call limit", func(t *testing.T) {
+		cs := newScratchSession(t)
+		note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: "token-budget"})
+		if note == "" {
+			t.Fatal("forced-finalize note is empty, want the leftover-debug receipt")
+		}
+		if !strings.Contains(note, "cut this turn off at the token budget") {
+			t.Errorf("note = %q, want the token-budget lead-in (token-budget stop)", note)
+		}
+		if strings.Contains(note, "tool-call limit") {
+			t.Errorf("note = %q, must not name the tool-call limit for a token-budget stop", note)
+		}
+		if n := strings.Count(note, "Restate your complete final answer"); n != 1 {
+			t.Errorf("note contains the restatement ask %d times, want exactly 1:\n%s", n, note)
+		}
+	})
+
+	t.Run("other bounds: generic lead-in, never a false cause", func(t *testing.T) {
+		cs := newScratchSession(t)
+		for _, stop := range []string{"read-budget", "no-progress", "stuck", "deadline", "error-recovered"} {
+			note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: stop})
+			if note == "" {
+				t.Fatalf("stop %s: forced-finalize note is empty", stop)
+			}
+			if strings.Contains(note, "tool-call limit") || strings.Contains(note, "token budget") {
+				t.Errorf("stop %s: note names a specific bound that did not fire: %q", stop, note)
+			}
+			if n := strings.Count(note, "Restate your complete final answer"); n != 1 {
+				t.Errorf("stop %s: restatement ask appears %d times, want 1", stop, n)
+			}
+		}
+	})
+
+	t.Run("nothing to report: empty note, answer untouched", func(t *testing.T) {
+		cs := forcedFinalizeScriptedSession(t, []*AgentResponse{answerResp("clean")})
+		if note := cs.forcedFinalizeNote(context.Background(), loopStats{StopReason: "max-iter"}); note != "" {
+			t.Fatalf("note = %q, want empty (nothing to report)", note)
+		}
+	})
 }

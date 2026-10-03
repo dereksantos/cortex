@@ -291,18 +291,21 @@ func TestForcedFinalizeHookSeam(t *testing.T) {
 	})
 }
 
-// capRun drives runLoop with a scripted model that issues one DISTINCT
-// tool call per round (readCall, so the no-progress and stuck guards never
-// fire), then finalizes with answer if the loop is still running when the
-// script runs out of tool rounds. It returns the run's stop reason and the
-// messages appended. maxIter is the tool-call cap under test.
-// capRun drives runLoop with a scripted model that issues one DISTINCT
-// tool call per round (readCall, so the no-progress and stuck guards never
-// fire), then finalizes with answer if the loop is still running when the
-// script runs out of tool rounds. It returns the run's stop reason, the
-// content (the turn's final answer), and the messages appended. maxIter is
-// the tool-call cap under test.
-func capRun(t *testing.T, toolRounds int, maxIter int, answer string) (string, string, []Message) {
+// capRunOptsSpec is the scenario one capRunOpts drives: toolRounds DISTINCT
+// tool-call rounds (readCall, so the no-progress and stuck guards never
+// fire), a MaxIter cap, an optional read budget, and the answer the scripted
+// model gives once the tool rounds run out (the clean finalize) or the cap
+// forces one.
+type capRunOptsSpec struct {
+	toolRounds int
+	maxIter    int
+	readBudget int // 0 = none
+	answer     string
+}
+
+// capRunOpts drives runLoop against that spec and returns the run's stop
+// reason, the content (the turn's final answer), and the messages appended.
+func capRunOpts(t *testing.T, spec capRunOptsSpec) (string, string, []Message) {
 	t.Helper()
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	var msgs []Message
@@ -312,23 +315,33 @@ func capRun(t *testing.T, toolRounds int, maxIter int, answer string) (string, s
 	}
 	var round int
 	send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
-		if round < toolRounds {
+		if round < spec.toolRounds {
 			id := "c" + ritoa(round)
 			round++
 			return fakeResp("", []ToolCall{readCall(id, "f"+ritoa(round)+".go")}, 10, 4), false, nil
 		}
-		return fakeResp(answer, nil, 5, 5), false, nil
+		return fakeResp(spec.answer, nil, 5, 5), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
 		return "OBS for " + call.Function.Arguments
 	})
+	b := Bounds{MaxTokens: 100, MaxIter: spec.maxIter}
+	if spec.readBudget > 0 {
+		b.ReadBudgetBytes = spec.readBudget
+	}
 	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-		Bounds{MaxTokens: 100, MaxIter: maxIter}, nil, appendMsg, nil)
+		b, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
 	return stats.StopReason, content, msgs
+}
+
+// capRun is the read-budget-less shorthand over capRunOpts.
+func capRun(t *testing.T, toolRounds int, maxIter int, answer string) (string, string, []Message) {
+	t.Helper()
+	return capRunOpts(t, capRunOptsSpec{toolRounds: toolRounds, maxIter: maxIter, answer: answer})
 }
 
 // harnessNotes returns the RoleUser "Harness note: …" messages a run
@@ -362,10 +375,18 @@ func capWarningAt(notes []string) int {
 // tests honest) — so the cap no longer arrives without warning. The no-op
 // cases are pinned too: a run that never crosses the threshold, a clean
 // finalize before it, and a cap below the threshold.
+//
+// Every expected count is derived from the loop's arithmetic: the loop runs
+// `for i := 0; i < MaxIter; i++` (round i is the (i+1)-th round), so with
+// MaxIter = 100 the model that issues tool calls on rounds i = 0..99 gets the
+// warning first on round i = 90 — the tool-call rounds it can still spend,
+// this batch plus the ones after it, are remaining = MaxIter - i = 10 — and
+// rounds 90..99 are exactly ten: the stated count equals the number of tool
+// rounds the model actually still gets.
 func TestCapApproachingWarning(t *testing.T) {
 	t.Run("fires once with the right remaining count", func(t *testing.T) {
-		// 92 tool rounds on a 100-round cap: the warning fires at i=91
-		// (remaining = 100-91+1 = 10, the first round where remaining <= 10),
+		// 92 tool rounds on a 100-round cap: the warning fires at i=90
+		// (remaining = 100-90 = 10, the first round where remaining <= 10),
 		// then the model finalizes at i=92.
 		stop, _, msgs := capRun(t, 92, 100, "wrapped up")
 		if stop != "clean-finalize" {
@@ -391,21 +412,23 @@ func TestCapApproachingWarning(t *testing.T) {
 
 	t.Run("fires only at the threshold, not before", func(t *testing.T) {
 		// 89 tool rounds on a 100-round cap: the last tool round is i=88,
-		// remaining = 100-88+1 = 13 > 10 — still past the threshold, so no
-		// warning fires; the model finalizes without one.
+		// remaining = 100-88 = 12 > 10 — still past the threshold, so no
+		// warning fires; the model finalizes at i=89 without one.
 		stop, _, msgs := capRun(t, 89, 100, "done quietly")
 		if stop != "clean-finalize" {
 			t.Fatalf("stop = %q, want clean-finalize", stop)
 		}
 		if notes := harnessNotes(msgs); len(notes) != 0 {
-			t.Fatalf("harness notes = %v, want none (remaining 11 is past the warning threshold)", notes)
+			t.Fatalf("harness notes = %v, want none (remaining 12 is past the warning threshold)", notes)
 		}
 	})
 
 	t.Run("fires once even when many rounds remain after", func(t *testing.T) {
-		// 98 tool rounds on a 100-round cap: the warning fires at i=91
-		// (remaining 10) and NOT again at i=92…99 (remaining 9…2) —
-		// the "10 remaining" count is the one the model gets (once per turn).
+		// 98 tool rounds on a 100-round cap: the warning fires at i=90
+		// (remaining 10) and NOT again at i=91…97 (remaining 9…3) —
+		// the "10 remaining" count is the one the model gets (once per turn),
+		// and it is the count that equals the rounds the model actually still
+		// gets when the warning lands (rounds 90..99 are exactly ten).
 		stop, _, msgs := capRun(t, 98, 100, "finished close to the cap")
 		if stop != "clean-finalize" {
 			t.Fatalf("stop = %q, want clean-finalize", stop)
@@ -420,9 +443,11 @@ func TestCapApproachingWarning(t *testing.T) {
 	})
 
 	t.Run("fires on the round that then forces finalize", func(t *testing.T) {
-		// 100 tool rounds on a 100-round cap: the warning fires at i=91
-		// (remaining 10), the loop exhausts the cap, and the forced finalize
-		// runs — the warning did its job, the model was told.
+		// 100 tool rounds on a 100-round cap: the warning fires at i=90
+		// (remaining 10 — rounds 90..99 are exactly ten), the loop exhausts
+		// the cap at i=99, the last of the ten rounds the count promised, and
+		// the forced finalize runs — the warning did its job, the model was
+		// told, and it was cut off only at the round the count named.
 		stop, _, msgs := capRun(t, 100, 100, "forced")
 		if stop != "max-iter" {
 			t.Fatalf("stop = %q, want max-iter", stop)

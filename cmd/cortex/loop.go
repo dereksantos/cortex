@@ -253,23 +253,30 @@ const noProgressNudge = "Harness note: that tool call was byte-identical to the 
 
 // toolCapWarningRounds is the distance-to-the-cap at which runLoop starts
 // warning the model (issue #161): on the first tool round where the number of
-// rounds still available (the in-flight batch + the ones after it) falls to
-// this threshold, one "Harness note" tells the turn how many tool calls
-// remain and asks it to wrap up or clean up (remove debug prints, delete
-// scratch files, leave tests passing or failing-honest) before the cap forces
-// a tools-withheld finalize. Without the warning, the cap arrives silently
-// mid-exploration and the forced answer hands in unfinished work — the
-// incident #161 names. A run with MaxIter at or below the threshold gets no
-// warning (it would be every round); a turn that ends with a clean finalize
-// before the threshold never crosses it; it fires at most once per turn.
+// rounds the model can still spend on tool calls — the in-flight batch
+// (round i of the loop, the (i+1)-th round) plus the ones after it
+// (remaining = MaxIter - i) — falls to this threshold, one "Harness note"
+// tells the turn how many tool-call rounds it still gets and asks it to wrap up
+// or clean up (remove debug prints, delete scratch files, leave tests passing
+// or failing-honest) before the cap forces a tools-withheld finalize. Without
+// the warning, the cap arrives silently mid-exploration and the forced answer
+// hands in unfinished work — the incident #161 names. On a 100-round cap the
+// loop runs i = 0..99, so the warning lands at i = 90 (remaining = 100-90 = 10)
+// saying "10 remaining", and the rounds left (90..99) are exactly ten — a model
+// that keeps calling tools gets precisely the rounds the count promised, never
+// cut off before. A run with MaxIter at or below the threshold gets no warning
+// (it would be every round); a turn that ends with a clean finalize before the
+// threshold never crosses it; it fires at most once per turn.
 const toolCapWarningRounds = 10
 
 // toolCapWarning is the cap-approaching note itself. The remaining count is
 // the tool-call rounds still available INCLUDING the one whose tool calls are
-// being dispatched when the warning fires (MaxIter - i + 1), so on a 100-round
-// cap the warning names "10 remaining" at i=91 — this batch plus the next nine
-// — and the cap, if the model keeps asking, lands at round 100 exactly as the
-// count promised.
+// being dispatched when the warning fires (remaining = MaxIter - i: round i is
+// the (i+1)-th round of a loop that runs i = 0 .. MaxIter-1, so it plus the
+// rounds after it are MaxIter - i). On a 100-round cap the warning names
+// "10 remaining" at i=90 — this batch plus the next nine — and a model that
+// keeps calling tools gets exactly those ten rounds: the cap, if it doesn't
+// wrap up, lands at round 100 exactly as the count promised.
 func toolCapWarning(remaining int) string {
 	return "Harness note: you have " + strconv.Itoa(remaining) + " tool-call round(s) left before the per-turn tool-call limit forces a final answer. Wrap up: finish the work you are on, or clean up what you leave behind — remove debug prints you added, delete scratch files you created, and make sure the project's tests pass (or state plainly which ones fail and why) — so your final answer is not handed in mid-exploration with unfinished work behind it."
 }
@@ -674,25 +681,24 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			jitter = true
 		}
 		// Cap-approaching warning (issue #161): the model asked for tool calls
-		// with at most toolCapWarningRounds left INCLUDING the in-flight batch
-		// (remaining = MaxIter - i + 1), so the next round it asks in (if it
-		// doesn't clean up and finish first) would be a forced finalize — tell
-		// it the remaining count and ask it to wrap up or clean up (remove
-		// debug prints, delete scratch files, leave tests honest) BEFORE the
-		// cap decides for it. remaining counts the in-flight batch as one of
-		// the rounds still available (MaxIter - i + 1), so the first warning
-		// lands the moment the distance to the cap falls to the threshold: on
-		// a 100-round cap, at i=91 the model hears "10 remaining" (this batch
-		// + the next nine) and the cap, if it keeps asking, is exactly the
-		// round it names. Injected after the tool results, like the stuck hint
-		// and the no-progress nudge: the API requires tool results to follow
-		// the assistant message before any user turn, and the model still
-		// gets this batch's output before hearing the warning. Once per turn
-		// (capWarned); a MaxIter at or below the threshold never fires it (it
-		// would be every round); a clean finalize before the threshold never
-		// reaches this point.
+		// with at most toolCapWarningRounds left INCLUDING the in-flight batch:
+		// round i is the (i+1)-th round of the i = 0 .. MaxIter-1 loop, so the
+		// rounds the model can still spend on tool calls — this batch plus the
+		// ones after it — are remaining = MaxIter - i. Tell it the count and ask
+		// it to wrap up or clean up (remove debug prints, delete scratch
+		// files, leave tests honest) BEFORE the cap decides for it, so the
+		// rounds it is told it still has are exactly the rounds it actually
+		// gets (on a 100-round cap: at i=90 the model hears "10 remaining",
+		// rounds 90..99 are exactly ten, and if it keeps asking the cap lands
+		// on round 99, the last of them). Injected after the tool results, like
+		// the stuck hint and the no-progress nudge: the API requires tool
+		// results to follow the assistant message before any user turn, and the
+		// model still gets this batch's output before hearing the warning. Once
+		// per turn (capWarned); a MaxIter at or below the threshold never fires
+		// it (it would be every round); a clean finalize before the threshold
+		// never reaches this point.
 		if !capWarned && b.MaxIter > toolCapWarningRounds {
-			if remaining := b.MaxIter - i + 1; remaining <= toolCapWarningRounds {
+			if remaining := b.MaxIter - i; remaining <= toolCapWarningRounds {
 				appendMsg(Message{Role: RoleUser, Content: toolCapWarning(remaining)})
 				capWarned = true
 			}

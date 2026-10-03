@@ -282,7 +282,7 @@ default to today's hardcoded value.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. |
+| `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. When the cap is above 10, the model gets one wrap-up note 10 tool-call rounds before the cap (counting the in-flight batch, so the count names exactly the rounds it still gets), and after a bound-forced finalize the turn gets one more tools-withheld round appending the leftover-debug / test-loss and turn-end-lint accounting to the answer (issue #161). |
 | `max_instruction_bytes` | 16384 | Truncation cap on the seeded project-instructions file (the first present, in priority order, of `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` — see "Project instructions" below). An over-cap file is cut at this size and marked `...[<file> truncated]`. |
 | `memory_index_cap_chars` | 4000 | Truncation cap on the injected PROJECT-tier memory-note index. |
 | `user_memory_index_cap_chars` | 1500 | Truncation cap on the injected USER-tier memory-note index (`~/.cortex/memory`, shared across every project on the machine) — independent of `memory_index_cap_chars`; the user tier renders first, above it, in the turn-start injection. See `docs/cross-source-learning.md` piece 1. |

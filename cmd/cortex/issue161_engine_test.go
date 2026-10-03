@@ -20,12 +20,13 @@
 // whether the seam fired, how many cap-warnings appeared on the wire, the
 // expected content, and the expected hook stop reason).
 //
-// The existing TestForcedFinalizeHookSeam / TestCapApproachingWarning /
-// TestForcedFinalizeOtherExits in forced_finalize_test.go remain as the
-// detailed per-subtest locks; this file adds the TABLE-DRIVEN pins the
-// issue calls for, covering the stop reasons those tests don't reach
-// (no-progress, read-budget) and locking the once-per-turn / absent-on-clean
-// / absent-below-threshold invariants in a single pass.
+// The cap-warning table here is the single place the warning's contract is
+// locked — including the remaining-count arithmetic (see TestCapWarningTable
+// for the derivation from the loop's `for i := 0; i < MaxIter; i++`):
+// once-per-turn / absent-on-clean / absent-below-threshold / other-bound-first
+// are all rows of that table. The per-subtest locks in forced_finalize_test.go
+// (TestForcedFinalizeHookSeam) cover the seam's transcript and tools-
+// restoration clauses, which the table doesn't inspect.
 
 package main
 
@@ -285,6 +286,7 @@ type capWarningCase struct {
 	name          string
 	toolRounds    int
 	maxIter       int
+	readBudget    int // 0 = none; when set, ReadBudgetBytes bounds the run
 	wantStop      string
 	wantWarnings  int // how many cap warnings on the wire
 	wantRemaining int // the remaining count the warning names (0 = absent)
@@ -294,9 +296,24 @@ type capWarningCase struct {
 // table-driven: fires once with the right remaining count, absent below the
 // threshold, absent on a clean finalize before the threshold, and once per
 // turn even when many rounds remain after the first crossing.
+//
+// Every expected count is derived from the loop's arithmetic, not fitted to
+// it: the loop runs `for i := 0; i < MaxIter; i++` (round i is the (i+1)-th
+// round), so on a round whose tool calls are dispatched the tool-call rounds
+// the model can still spend — this batch plus the ones after it — are
+// remaining = MaxIter - i, and the warning fires on the first tool round with
+// remaining <= toolCapWarningRounds, naming that count. A model that issues
+// tool calls on rounds i = 0..toolRounds-1 therefore first hears the count
+// for the round i = min(toolRounds, MaxIter) - toolCapWarningRounds — and the
+// rows below only fire when that round exists (toolRounds +
+// toolCapWarningRounds >= MaxIter: a run that finalizes before it is crossed
+// gets no note, the "absent on a clean finalize" row).
 func TestCapWarningTable(t *testing.T) {
 	cases := []capWarningCase{
 		{
+			// toolRounds 92 < MaxIter 100: first crossing at i = 100-10 = 90,
+			// names 10; rounds 90..99 are exactly ten — the count names exactly
+			// the rounds the model still gets. Finalizes at i = 92, clean.
 			name:          "fires once with the right remaining count",
 			toolRounds:    92,
 			maxIter:       100,
@@ -305,6 +322,8 @@ func TestCapWarningTable(t *testing.T) {
 			wantRemaining: 10,
 		},
 		{
+			// Same first crossing (i = 90, names 10) — and no re-fire at
+			// i = 91..97 (9..3 remaining, once per turn).
 			name:          "fires once even when many rounds remain after",
 			toolRounds:    98,
 			maxIter:       100,
@@ -313,6 +332,9 @@ func TestCapWarningTable(t *testing.T) {
 			wantRemaining: 10,
 		},
 		{
+			// toolRounds 100 == MaxIter 100: warning at i = 90 (names 10), the
+			// loop exhausts the cap at i = 99 — the last of the ten rounds the
+			// count promised — and the forced finalize runs.
 			name:          "fires on the round that then forces finalize",
 			toolRounds:    100,
 			maxIter:       100,
@@ -321,6 +343,23 @@ func TestCapWarningTable(t *testing.T) {
 			wantRemaining: 10,
 		},
 		{
+			// toolRounds 57 < MaxIter 60: first crossing at i = 60-10 = 50, names
+			// 10 (not some boundary value at the cap — the warning fires at the
+			// moment remaining first falls to the threshold, whatever MaxIter is).
+			// The script runs out of tool rounds at i = 56, so the run ends with
+			// a clean finalize (the loop's i < MaxIter guard is never the
+			// stopper — capRun finalizes once the script runs out).
+			name:          "names the remaining count for any cap, not just 100",
+			toolRounds:    57,
+			maxIter:       60,
+			wantStop:      "clean-finalize",
+			wantWarnings:  1,
+			wantRemaining: 10,
+		},
+		{
+			// MaxIter == toolCapWarningRounds: every round is within 10 of the
+			// cap, so the warning is suppressed (it would be every round); the
+			// cap still forces finalize.
 			name:          "absent when MaxIter is at the threshold",
 			toolRounds:    10,
 			maxIter:       10,
@@ -337,6 +376,7 @@ func TestCapWarningTable(t *testing.T) {
 			wantRemaining: 0,
 		},
 		{
+			// Finalizes at i = 5, remaining 95 — well before the crossing.
 			name:          "absent on a clean finalize before the threshold",
 			toolRounds:    5,
 			maxIter:       100,
@@ -345,6 +385,9 @@ func TestCapWarningTable(t *testing.T) {
 			wantRemaining: 0,
 		},
 		{
+			// Last tool round is i = 89: remaining = 100-89 = 11, one round
+			// past the threshold — no warning; the model finalizes at i = 90
+			// before the loop could cross it.
 			name:          "absent just past the threshold",
 			toolRounds:    89,
 			maxIter:       100,
@@ -352,11 +395,28 @@ func TestCapWarningTable(t *testing.T) {
 			wantWarnings:  0,
 			wantRemaining: 0,
 		},
+		{
+			// The warning is independent of which bound ends the run: the
+			// read-budget trips right after the first tool round (obs > budget),
+			// long before any crossing — no note.
+			name:          "absent when another bound trips first",
+			toolRounds:    1,
+			maxIter:       100,
+			readBudget:    1,
+			wantStop:      "read-budget",
+			wantWarnings:  0,
+			wantRemaining: 0,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stop, _, msgs := capRun(t, tc.toolRounds, tc.maxIter, "done")
+			stop, _, msgs := capRunOpts(t, capRunOptsSpec{
+				toolRounds: tc.toolRounds,
+				maxIter:    tc.maxIter,
+				readBudget: tc.readBudget,
+				answer:     "done",
+			})
 			if stop != tc.wantStop {
 				t.Fatalf("stop = %q, want %q", stop, tc.wantStop)
 			}
