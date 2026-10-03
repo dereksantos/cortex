@@ -285,6 +285,50 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 			return testNote + "\n\n" + lintNote
 		}
 	}
+	// Issue #161: a bound-forced finish (max-iter, token-budget, read-budget,
+	// no-progress, stuck, deadline, error-recovered) skips the clean-finalize
+	// path where FinalizeHook runs — the turn never answered with no tool
+	// calls, so the testwatch and turn-end-lint receipts would vanish exactly
+	// when the work is most likely unfinished. OnForcedFinalize reuses the
+	// SAME receipt functions (testwatchFinalizeNote, turnLintAtFinalize) but
+	// wraps them in forced-finishing framing: the harness detected leftover
+	// debug/scratch files and lint findings the turn never accounted for
+	// because it was cut off at the cap. An empty note (nothing to report)
+	// leaves the forced answer untouched, byte for byte — the common case.
+	ts.OnForcedFinalize = func(loopStats) string {
+		testNote := cs.testwatchFinalizeNote()
+		lintNote := cs.turnLintAtFinalize(ctx)
+		if testNote == "" && lintNote == "" {
+			return ""
+		}
+		var b strings.Builder
+		b.WriteString("The harness cut this turn off at the tool-call limit before you finished — the work is likely incomplete. ")
+		b.WriteString("Before you answer: the harness detected that this turn ")
+		testLine := cs.testwatchTestsReceipt()
+		debugLine := cs.testwatchDebugReceipt()
+		switch {
+		case testLine != "" && debugLine != "":
+			b.WriteString("removed or substantially shrank one or more of the project's test files AND left leftover debug prints / scratch files behind — ")
+		case testLine != "":
+			b.WriteString("removed or substantially shrank one or more of the project's test files — ")
+		case debugLine != "":
+			b.WriteString("left leftover debug prints in production files and/or scratch files in the workspace — ")
+		default:
+			// Neither testwatch line is present, so the note is lint-only.
+			b.WriteString("has unresolved lint findings — ")
+		}
+		if testNote != "" {
+			b.WriteString(testNote)
+		}
+		if lintNote != "" {
+			if testNote != "" {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(lintNote)
+		}
+		b.WriteString(" Restate your complete final answer: first your summary of what you changed and why, then plainly account for every item above — which tests you removed or shrank, which debug prints you added, which scratch files you left behind, and for each lint finding state it and what would fix it. Unfinished work left unreported is a worse failure than a partial answer that names what is missing.")
+		return b.String()
+	}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
