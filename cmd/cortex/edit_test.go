@@ -159,7 +159,7 @@ func TestEditFileNearMissHint(t *testing.T) {
 	if !strings.Contains(err.Error(), "closest region") {
 		t.Errorf("error %q should carry the closest-region hint", err)
 	}
-	if !strings.Contains(err.Error(), "1:") {
+	if !strings.Contains(err.Error(), "  >1: ") {
 		t.Errorf("error %q should point at line 1", err)
 	}
 }

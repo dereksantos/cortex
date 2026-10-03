@@ -353,7 +353,7 @@ func TestEditFileAmbiguousTolerantMatchPointsAtFirstOccurrence(t *testing.T) {
 		t.Fatalf("ambiguous tolerant match should error, got none")
 	}
 	got := err.Error()
-	for _, sub := range []string{"matches 2 places", "at lines 1, 3", "replace_all"} {
+	for _, sub := range []string{"matches 2 places", "at lines 2, 4", "replace_all"} {
 		if !strings.Contains(got, sub) {
 			t.Errorf("error should contain %q; got: %q", sub, got)
 		}
@@ -383,17 +383,15 @@ func TestEditFileNotFoundCarriesClosestLineHint(t *testing.T) {
 	if !strings.Contains(got, "closest region") {
 		t.Errorf("error should carry the closest-region hint; got: %q", got)
 	}
-	if !strings.Contains(got, "2:") {
+	if !strings.Contains(got, "  >2: func Chdir(root string) {}") {
 		t.Errorf("error should point at line 2; got: %q", got)
 	}
 }
 
-// TestEditFileTolerantMatchPreservesFileLineContent reproduces the #173
-// 'urnStart' incident: a tab-indented file line ("\treturnStart") where the
-// model's old_string omits the tab and the trailing brace. Under tier 2
-// (whitespace-insensitive) matching the window matched, and the replacement
-// must re-indent the model's new_string to the file's own tab — not clip the
-// file's line to the model's (tab-less) indentation.
+// TestEditFileTolerantMatchPreservesFileLineContent locks in a tier-2
+// (whitespace-insensitive) tolerant match where the model's old_string and
+// the file line disagree on leading whitespace: the replacement must land
+// re-indented to the file's own indentation, not clipped to the model's.
 func TestEditFileTolerantMatchPreservesFileLineContent(t *testing.T) {
 	cases := []struct {
 		name   string

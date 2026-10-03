@@ -1489,37 +1489,31 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 	if k == 0 || k > len(fileLines) {
 		return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
 	}
-	// Tier 1 (trailing-whitespace-insensitive) is tried first, then tier 2
-	// (leading-and-trailing). The first tier with ANY candidate is the one
-	// used — a tier-1 candidate never falls through to a tier-2 one, so a
-	// line that differs only in leading whitespace (e.g. a tab the model
-	// omitted from old_string) still matches under tier 2.
-	var starts []int
 	for tier := 1; tier <= 2; tier++ {
+		var starts []int
 		for i := 0; i+k <= len(fileLines); i++ {
 			if windowMatches(fileLines[i:i+k], oldLines, tier) {
 				starts = append(starts, i)
 			}
 		}
-		if len(starts) > 0 {
-			break
+		if len(starts) == 0 {
+			continue
 		}
+		if !replaceAll && len(starts) > 1 {
+			lines := make([]int, len(starts))
+			for i, s := range starts {
+				lines[i] = s + 1
+			}
+			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace) (at lines %s); add context or set replace_all", len(starts), intListComma(lines))
+		}
+		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
 	}
-	if len(starts) == 0 {
-		return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
-	}
-	if !replaceAll && len(starts) > 1 {
-		return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace) (at lines %s); add context or set replace_all", len(starts), intListComma(starts))
-	}
-	return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
+	return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
 }
 
 // windowMatches reports whether a run of file lines equals the old block under
 // the given tolerance tier.
 func windowMatches(win, old []string, tier int) bool {
-	if len(win) != len(old) {
-		return false
-	}
 	for j := range old {
 		if lineKey(win[j], tier) != lineKey(old[j], tier) {
 			return false
