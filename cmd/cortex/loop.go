@@ -71,6 +71,18 @@ type Toolset struct {
 	Dispatch        AgentDispatcher
 	BeforeBatch     func()
 	AfterToolResult func()
+	// BeforeSend, when non-nil, is called once per iteration of the main
+	// tool-call loop, immediately before send.Send — the seam where the
+	// in-turn demotion policy (issue #171) shrinks this turn's accumulated
+	// tool results before the next request is built. The hook receives the
+	// request about to be sent and may mutate it (the coder wires it to swap
+	// over-budget tool-result messages for recall-citable stubs); it must NOT
+	// send or otherwise perform a model round-trip. nil = today's behavior,
+	// byte for byte. The finalize and salvage sends (finalizeLoop and the
+	// salvage/reasoning-fallback re-asks) are deliberately NOT wired — the
+	// turn has already answered or is being recovered, and there the wire
+	// already carries the demoted stubs from the main loop's hook.
+	BeforeSend func(*AgentRequest)
 	// Finalize selects the forced-finalize closing (see FinalizeStyle). Zero
 	// value = FinalizeSubagent, so subagent callers need no change.
 	Finalize FinalizeStyle
@@ -137,6 +149,18 @@ type loopStats struct {
 	Iterations               int    // model rounds consumed
 	StopReason               string // clean-finalize|salvaged-finalize|empty-finalize|max-iter|read-budget|no-progress|deadline|error
 	FinalizeForced           bool   // answered because a bound dragged finalize out
+
+	// LastError is the provider error the run recovered from when
+	// StopReason == "error-recovered" (a mid-loop send failed after progress,
+	// and the run finalized from what it had). nil on every other outcome —
+	// the unrecovered "error" stop returns the error itself to the caller.
+	// Carried so the caller (turn.go) can record it instead of the failure
+	// vanishing behind the finalize answer (issue #117): turn() journals it
+	// (a model.recovered_error entry — the recovered kind, distinct from the
+	// unrecovered model.failure the healing ladder journals) + logs it
+	// (cortex.log), and TurnResult.LastError lets the CLI/REPL print the
+	// one-line "backend error: <status> <message>" notice.
+	LastError error
 
 	Outlines  int
 	Greps     int
@@ -337,6 +361,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			}
 			jitter = false
 		}
+		// In-turn demotion seam (issue #171): before the request is sent this
+		// round, give the harness a chance to shrink the turn's accumulated tool
+		// results. nil (subagents, tests, every non-coder caller) skips this and
+		// the request goes out byte-for-byte as today. The finalize and salvage
+		// sends are deliberately not wired — see the BeforeSend field doc.
+		if ts.BeforeSend != nil {
+			ts.BeforeSend(req)
+		}
 		res, _, err := send.Send(ctx, req)
 		req.Temperature = baseTemp // one-shot: restore so the rest of the turn stays deterministic
 		if restoreEffort != nil {
@@ -350,6 +382,10 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			// is sidestepped). Abort only on the first round or a real cancellation.
 			if i > 0 && ctx.Err() == nil {
 				stop = "error-recovered"
+				// Carry the failing send's error to the caller: the run still
+				// finalizes, so the error otherwise vanishes behind the
+				// finalize answer — the caller logs it and prints it (issue #117).
+				stats.LastError = err
 				break
 			}
 			stats.StopReason = "error"
@@ -980,8 +1016,13 @@ func printCoderProse(msg Message) {
 // coderDispatcher executes one coder tool call: the activity spinner + Execute
 // against the full session, refusing nothing (the coder is granted every tool).
 // A canceled ctx short-circuits with an interrupted observation, matching the
-// old runToolCalls per-call behavior.
+// old runToolCalls per-call behavior. testerDispatcherOverride (CortexSession's
+// test-only seam, session_core.go) can replace it entirely for tests that drive
+// the REAL turn path with scripted tool results instead of real file access.
 func (cs *CortexSession) coderDispatcher() AgentDispatcher {
+	if cs.coderDispatcherOverride != nil {
+		return cs.coderDispatcherOverride()
+	}
 	return DispatchFunc(func(ctx context.Context, call ToolCall) string {
 		if ctx.Err() != nil {
 			return "Error: interrupted by user before this tool ran"

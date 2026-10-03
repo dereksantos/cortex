@@ -396,7 +396,9 @@ read per-session from the live `*CortexSession`'s config.
   "context": {
     "tail_high_fraction": 0.5,
     "tail_drain_fraction": 0.333,
-    "outline_fraction": 0.125
+    "outline_fraction": 0.125,
+    "in_turn_demotion": true,
+    "in_turn_keep_recent": 6
   }
 }
 ```
@@ -406,6 +408,8 @@ read per-session from the live `*CortexSession`'s config.
 | `tail_high_fraction` | 0.5 (W/2) | Fraction of the window at which the hydrated tail (zone B) triggers demotion — `docs/context-architecture.md`'s high watermark. |
 | `tail_drain_fraction` | 1/3 ≈ 0.333 (W/3) | Fraction of the window demotion drains the tail down to — the low watermark. Also gates `recall`'s output size (`tool_deps.go`). |
 | `outline_fraction` | 0.125 (W/8) | Fraction of the window the demoted-turn outline (zone A) may grow to before it folds via the summarizer. |
+| `in_turn_demotion` | `true` | Gate for **in-turn demotion** (issue #171): before each main-loop send, if the current turn's accumulated tool results have outgrown the high watermark, the oldest are swapped for one-line recall-citable stubs in the wire copy only. **Absent/`null` means enabled** — an availability kill-switch, matching the `tools.enable_context_*`/`enable_web` precedent that an absent key must not disable a shipped capability. `false` turns the whole in-turn path off (byte-for-byte today's behavior). |
+| `in_turn_keep_recent` | 6 | How many of the turn's most-recent tool results always stay verbatim under in-turn demotion — even over budget, the newest few are what the model is actively working from. An explicit value `<= 0` is rejected at load; absent/`null` means the default (6). |
 
 **These are eval-verified defaults** — `cmd/cortex/context_eval_test.go`'s
 deterministic Δ suite and the live fleet eval
@@ -427,7 +431,7 @@ value exactly" is the whole point of the defaults above. Float math (
 configured (`cmd/cortex/config.go`'s `tailHighWatermark`/
 `tailDrainWatermark`/`outlineBudget`).
 
-**The safety inequality**, enforced at load time whenever ANY field in this
+**The safety inequality**, enforced at load time whenever ANY fraction in this
 section is explicitly set (an absent `context` section skips validation
 entirely):
 
@@ -456,6 +460,14 @@ skipped check. A rejection names the inequality and the offending numbers,
 e.g. `context: tail_high_fraction (0.7000) + outline_fraction (0.2000) +
 prefix_headroom (0.1600, system prompt + memory index slack) = 1.0600
 exceeds the compact trigger (0.8000) — …`.
+
+The two in-turn demotion fields are **independent** of the fraction group:
+`in_turn_demotion` is a plain availability flag (no range to validate), and
+`in_turn_keep_recent` is validated on its own — an explicit value `<= 0` is
+rejected at load with `context.in_turn_keep_recent must be a positive
+integer (…)` — even when no fraction in the section is set (a config that
+names only `in_turn_keep_recent` is still checked). Behavior is documented in
+`docs/context-architecture.md`'s in-turn demotion section.
 
 ## `skills.*` — Agent Skills discovery
 

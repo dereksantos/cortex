@@ -52,7 +52,10 @@ func applyProjectByName(cs *CortexSession, reg registry.Registry, name string) e
 	if err != nil {
 		return fmt.Errorf("failed to build workspace for project %q: %w", name, err)
 	}
-	cs.workspace = ws
+	// Issue #119: re-targeting re-runs the self-ignore guard for the
+	// project's root (SetWorkspace — workspace.go), because the CWD-root
+	// guard NewCortexSession ran earlier may not cover this repo.
+	cs.SetWorkspace(ws)
 	cs.deleteRoot = ws.Root
 	// Re-resolve the project command set (issue #129) against the new root —
 	// discovery and the AGENTS.md `## Commands` section belong to the project

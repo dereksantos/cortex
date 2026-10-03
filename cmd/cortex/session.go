@@ -119,6 +119,13 @@ func (cs *CortexSession) StartTranscript() {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
+	// Issue #119: the .cortex/ dir now exists (it holds transcripts, journal,
+	// history, memory) and could be swept up by a routine `git add -A`;
+	// self-ignore it right now — see gitignore_self.go for the full entry
+	// point coverage (every entry point is also covered when its workspace is
+	// first resolved, in NewCortexSession). Best-effort and silent unless it
+	// actually wrote the self-ignore.
+	cs.ensureSelfGitignore()
 	base := time.Now().Format("20060102-150405")
 	id := base
 	var f *os.File
@@ -140,9 +147,20 @@ func (cs *CortexSession) StartTranscript() {
 	}
 }
 
-// showLoadedContext prints a human-readable summary of what context was loaded.
-// Call this right after ResumeTranscript to make the loaded session visible.
-func (cs *CortexSession) showLoadedContext(id string) {
+// loadedContextBanner builds the human-readable summary of what context a
+// resumed session loaded: the demoted/hydrated turn counts, the message
+// count, and the session's id with its age. Pure over the session's loaded
+// state (plus the sessions dir, for the newest session's mtime). color=true
+// wraps the labels in ANSI (interactive REPL); color=false is the plain
+// form `cortex turn --session` prints to stderr for headless drivers
+// (issue #118) — stdout is the answer only, never diagnostics, so the
+// headless path stays machine-clean no matter what NO_COLOR or the TTY
+// say.
+func (cs *CortexSession) loadedContextBanner(id string, color bool) string {
+	col := func(v, c string) string { return v }
+	if color {
+		col = withColor
+	}
 	dir := cs.SessionsDir()
 
 	// Get session info for display
@@ -165,34 +183,66 @@ func (cs *CortexSession) showLoadedContext(id string) {
 	// Build context summary
 	msgCount := len(cs.Request.Messages)
 
+	var b strings.Builder
+
 	// Only show demotion info if we have turns (not a fresh session)
 	if totalTurns > 0 {
-		fmt.Printf("%s  %d turns (%d demoted, %d hydrated tail)\n",
-			withColor("context:", green),
+		fmt.Fprintf(&b, "%s  %d turns (%d demoted, %d hydrated tail)\n",
+			col("context:", green),
 			totalTurns, demotedTurns, hydratedTurns)
 	}
 
 	// Show message count
-	fmt.Printf("%s  %d messages\n",
-		withColor("messages:", green),
+	fmt.Fprintf(&b, "%s  %d messages\n",
+		col("messages:", green),
 		msgCount)
 
 	// Show session age if available
 	if info.ModTime.IsZero() {
-		fmt.Printf("%s  %s\n",
-			withColor("session:", gray),
-			withColor(id, cyan))
+		fmt.Fprintf(&b, "%s  %s\n",
+			col("session:", gray),
+			col(id, cyan))
 	} else {
 		age := relTime(info.ModTime)
-		fmt.Printf("%s  %s (%s old)\n",
-			withColor("session:", gray),
-			withColor(id, cyan),
-			withColor(age, gray))
+		fmt.Fprintf(&b, "%s  %s (%s old)\n",
+			col("session:", gray),
+			col(id, cyan),
+			col(age, gray))
 	}
+	return b.String()
+}
+
+// showLoadedContext prints a human-readable summary of what context was
+// loaded, colored (the interactive REPL path). Call this right after
+// ResumeTranscript to make the loaded session visible. Diagnostics — not
+// conversation — so it goes to stderr, keeping stdout free for the turn's
+// answer (issue #118).
+func (cs *CortexSession) showLoadedContext(id string) {
+	cs.printLoadedContextBanner(id, true)
+}
+
+// headlessLoadedContextBanner prints the resume banner in its plain, never-
+// colored form to stderr — `cortex turn --session`'s diagnostic (issue
+// #118): headless drivers read stdout as the answer, so the banner goes to
+// stderr, and a non-TTY/NO_COLOR pipe never gets ANSI escapes.
+func (cs *CortexSession) headlessLoadedContextBanner(id string) {
+	cs.printLoadedContextBanner(id, false)
+}
+
+// printLoadedContextBanner is the single stderr writer both banner forms
+// share (issue #118): the colored REPL form and the plain headless form
+// differ only in the color flag they pass to loadedContextBanner.
+func (cs *CortexSession) printLoadedContextBanner(id string, color bool) {
+	fmt.Fprint(os.Stderr, cs.loadedContextBanner(id, color))
 }
 
 func (cs *CortexSession) ResumeTranscript(id string) error {
 	dir := cs.SessionsDir()
+	// Issue #119: the workspace's .cortex/ dir already holds the session
+	// being reopened, so cover it here too — NewCortexSession covers the
+	// CLI paths, this seam covers hand-built sessions (tests and future
+	// callers) resuming into an existing workspace. See gitignore_self.go.
+	cs.ensureSelfGitignore()
 	if id == "" {
 		var err error
 		if id, err = latestSessionID(dir); err != nil {
@@ -217,6 +267,9 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 	cs.ws, cs.turns = cs.replayWorkingSet(msgs, turns)
 	cs.outline = nil
 	cs.outlineFolded = ""
+	// The transcript is replaced, so the absolute indices inTurnOriginals is
+	// keyed by no longer refer to this log (issue #171): clear it.
+	cs.inTurnOriginals = nil
 	if state != nil {
 		// A process can stop after appending part of a turn but before its state
 		// checkpoint. In that case the latest checkpoint is stale: replay the
@@ -520,6 +573,10 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	cs.ws, _ = cs.replayWorkingSet(cs.Request.Messages, append([]int{0, 0}, keptTurns...))
 	cs.outline = nil
 	cs.outlineFolded = ""
+	// The message log was rewritten (older turns replaced by the digest), so
+	// the absolute indices inTurnOriginals is keyed by no longer refer to it
+	// (issue #171): clear it.
+	cs.inTurnOriginals = nil
 	cs.Request.OutlineBlock = ""
 	cs.Request.PrefixEnd = cs.ws.Base()
 	cs.Request.TailFrom = cs.ws.FrontierMsg()
@@ -569,6 +626,9 @@ func (cs *CortexSession) Clear() {
 	cs.ws = cs.newWorkingSet(1)
 	cs.outline = nil
 	cs.outlineFolded = ""
+	// The message log was replaced, so the absolute indices inTurnOriginals
+	// is keyed by no longer refer to it (issue #171): clear it.
+	cs.inTurnOriginals = nil
 	cs.Request.OutlineBlock = ""
 	cs.Request.PrefixEnd = 0
 	cs.Request.TailFrom = 0

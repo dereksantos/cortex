@@ -179,6 +179,34 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	cs.tokensOut += stats.OutputTokens
 	cs.reasoningTokens += stats.ReasoningTokens
 	cs.costUSD += stats.Cost
+	// Issue #117: settle exactly ONE journal record per failed send, scoped to
+	// the send — the receipt rides the send-scoped marker on the error
+	// (heal.go's pendingFailure, via healJournaledError), NOT a session-wide
+	// flag, so a subagent's healed-then-failed send can neither consume nor
+	// clobber the coder's own receipt (a later recovered coder error in the
+	// same turn still gets its model.recovered_error entry). Two outcomes,
+	// same rule as the coder turn (turn.go):
+	//
+	//   - error-recovered (stats.LastError != nil, err == nil): the subagent
+	//     finalized from what it had, so the record is model.recovered_error —
+	//     the same receipt the coder turn settles, with the subagent's role.
+	//   - a real error (err != nil, unrecovered): the record is model.failure
+	//     — settled HERE from the send-scoped receipt, the healing ladder no
+	//     longer journals it on the fly (heal.go no longer writes it directly).
+	if stats.StopReason == "error-recovered" && stats.LastError != nil {
+		// req.Model is the model the subagent's own request ran on — NOT
+		// cs.Request.Model (the CODER's model, which a subagent call never
+		// touches — the old code's misattribution). reportRecoverableError
+		// refines it to the model whose send FIRST failed via the send-scoped
+		// receipt when one is present (a failed ladder walk leaves req.Model
+		// at the last candidate tried).
+		cs.reportRecoverableError(sa.Role, req.Model, stats.LastError)
+	}
+	if err != nil {
+		if pf := pendingFailureOf(err); pf != nil {
+			cs.journalModelFailure(pf, err)
+		}
+	}
 	return digest, stats, err
 }
 

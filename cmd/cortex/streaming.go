@@ -617,6 +617,18 @@ func printLintReceipt(receipt string) {
 	}
 }
 
+// printBackendError prints a turn's recovered provider-error notice (issue
+// #117) to the REPL at the turn boundary — after the anchor is stopped and
+// stdout restored — so a mid-turn 500 the loop recovered from is reported where
+// the person reviewing the turn looks, dim (a recovery note, not an error: the
+// turn SUCCEEDED). No-op for a nil err (a clean or unrecovered turn — the
+// latter already printed by afterTurn).
+func printBackendError(err error) {
+	if line := backendErrorLine(err); line != "" {
+		fmt.Println(withColor(line, gray))
+	}
+}
+
 // afterTurn is the REPL's post-turn safety net, shared by the normal single
 // turn and the /plan (multi-turn) path so the two stay in sync. It reacts to
 // the error of a just-completed turn (or plan run):

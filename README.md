@@ -380,8 +380,10 @@ per-call `model` argument pins another. See
 cortex                            interactive REPL
 cortex --version | cortex version   print the version and exit
 cortex resume [id]                  resume a session; defaults to latest
+                                  (its resume banner goes to stderr)
 cortex turn [--session id] [--plan] [--json] <input...>
-                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn)
+                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn);
+                                  --session's resume banner and the session id go to stderr — stdout is the answer only
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex learn [--project <name>]     run one background learning pass over the journal
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
@@ -458,7 +460,10 @@ across this file, `CLAUDE.md`, and itself.
 
 Cortex is local-first, not local-only: using a hosted model sends prompts and
 selected tool results to that provider. Runtime state remains inspectable under
-`.cortex/` and is excluded from git by default.
+`.cortex/` and is excluded from git: in a git workspace, the first session
+writes a self-contained `.cortex/.gitignore` (a lone `*`) so transcripts,
+journal segments, and memory are never swept up by `git add -A` — without
+touching the user's own `.gitignore` (#119).
 
 - Shell commands are classified as **Safe**, **Risky**, or **Blocked**. Risky
   commands require interactive approval and are refused in headless sessions.

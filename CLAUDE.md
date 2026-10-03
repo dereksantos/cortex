@@ -92,8 +92,8 @@ Three capabilities distinguish it:
 | Command | Purpose |
 |---|---|
 | `cortex` | Interactive REPL (default) |
-| `cortex resume [id]` | Resume a prior session (default: latest) |
-| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); session id → stderr |
+| `cortex resume [id]` | Resume a prior session (default: latest); its resume banner goes to stderr (issue #118) |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118) |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
@@ -267,8 +267,9 @@ is canonical; storage is regeneratable from it. Per-segment flock makes
 capture cross-process safe. See [`docs/journal.md`](docs/journal.md).
 Invariants still enforced: **local-only by default**
 (`journal.AssertLocalOnly` is a code-review tripwire for outbound paths),
-**`.cortex/` in `.gitignore`**, **jq-readable plain JSONL**, closed
-segments gzippable.
+**`.cortex/` is gitignored** (self-ignoring — a session in a git workspace
+writes a lone-`*` `.cortex/.gitignore` rather than editing the user's file,
+#119), **jq-readable plain JSONL**, closed segments gzippable.
 
 ## Go patterns
 

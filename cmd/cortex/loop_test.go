@@ -282,6 +282,15 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 		if content != "recovered answer" || stats.StopReason != "error-recovered" {
 			t.Errorf("content=%q stop=%q, want recovered/error-recovered", content, stats.StopReason)
 		}
+		// Issue #117: the recovered run carries the failing send's error, so
+		// the caller can log and print it instead of it vanishing behind the
+		// finalize answer.
+		if stats.LastError == nil {
+			t.Fatal("LastError = nil on an error-recovered run, want the failing send's error")
+		}
+		if stats.LastError != errFake {
+			t.Errorf("LastError = %v, want the failing send's error (%v)", stats.LastError, errFake)
+		}
 	})
 	t.Run("first-send error aborts", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
@@ -293,6 +302,54 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 			Bounds{MaxTokens: 100, MaxIter: 100}, nil, func(m Message) { req.Messages = append(req.Messages, m) }, nil)
 		if err == nil || stats.StopReason != "error" {
 			t.Errorf("a first-send failure must abort: err=%v stop=%q", err, stats.StopReason)
+		}
+		// Issue #117: an UNRECOVERED failure returns the error itself and
+		// carries nothing on LastError — the recovered path is the only
+		// writer of that field.
+		if stats.LastError != nil {
+			t.Errorf("LastError = %v on an unrecovered abort, want nil (the error is returned, not carried)", stats.LastError)
+		}
+	})
+	t.Run("recovered run's finalize prompt carries the error", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		var recorded []Message
+		appendMsg := func(m Message) {
+			req.Messages = append(req.Messages, m)
+			recorded = append(recorded, m)
+		}
+		var round int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil { // the finalize round (tools withheld) succeeds
+				return fakeResp("recovered answer", nil, 1, 1), false, nil
+			}
+			defer func() { round++ }()
+			if round == 0 {
+				return fakeResp("", []ToolCall{readCall("c", "x")}, 1, 1), false, nil
+			}
+			return nil, false, errFake // the second tool-call round fails
+		})
+		disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
+		_, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("mid-loop error should finalize, not abort: %v", err)
+		}
+		if stats.StopReason != "error-recovered" || stats.LastError == nil {
+			t.Fatalf("stop=%q lasterr=%v, want error-recovered with the error carried", stats.StopReason, stats.LastError)
+		}
+		// The finalize prompt names the CAUSE of the stop ("a backend error
+		// that interrupted the run") — what today's finalizePromptFor does —
+		// while the engine carries the provider error ITSELF on stats.LastError
+		// (above) so the caller can log and print the status and body. That
+		// separation is the fix: the model's framing stays cause-neutral, the
+		// diagnoseable detail rides the stats, not the prompt.
+		last := lastUserMessage(t, recorded)
+		if !strings.Contains(last, "a backend error that interrupted the run") {
+			t.Errorf("finalize prompt %q does not name the cause", last)
+		}
+		if strings.Contains(last, errFake.Error()) {
+			t.Errorf("finalize prompt %q carries the raw provider error; it must stay cause-neutral (the detail rides stats.LastError)", last)
 		}
 	})
 }

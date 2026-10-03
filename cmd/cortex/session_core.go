@@ -186,6 +186,36 @@ type CortexSession struct {
 	testwatchBash      map[string]testguard.Baseline
 	testwatchBashArmed bool
 
+	// inTurnOriginals records, per absolute message index, the ORIGINAL
+	// content of every tool result applyInTurnDemotion stubbed on the wire
+	// copy (indemote.go). Turn-end consumers — the turn-end
+	// outline entry (turnOutlineEntry) and the journal capture (captureTurn)
+	// — read through turnOriginalSpan instead of the mutated wire copy, so
+	// they see the original result (an [err] label, the true content for
+	// web_search/fetch_url artifacts), never the one-line stub (issue #171
+	// item 5). Entries live until their OWNING turn is demoted — turn.go
+	// deletes a span's entries when it builds that span's outline entry,
+	// because DemoteBatch usually drains a turn several turns after it ran,
+	// not at the next turn's start — and the map is cleared wholesale
+	// wherever the message log is rewritten (Compact, /clear, ResumeTranscript),
+	// because the absolute indices shift there. The transcript already holds
+	// every original losslessly; this is the in-session in-memory half.
+	// Pure in-memory cache: never written to session state, so nothing
+	// persists it.
+	inTurnOriginals map[int]string
+	// senderOverride, when non-nil, replaces the coder's round-trip sender
+	// (the network-backed coderSender) inside the healing ladder — a TEST-ONLY
+	// seam (no production code sets it) that lets a test drive the REAL turn
+	// path with a scripted model and zero network (the same pattern healList
+	// is injectable for tests).
+	senderOverride Sender
+	// coderDispatcherOverride, when non-nil, replaces coderDispatcher() (loop.go)
+	// — the tool-call dispatcher the coder's Toolset is built with (turn.go).
+	// TEST-ONLY seam (no production code sets it) for the same class of test
+	// as senderOverride: drive the REAL turn path with scripted tool results
+	// instead of real file access. Both are nil in every production session.
+	coderDispatcherOverride func() AgentDispatcher
+
 	// testwatchScratchBefore is the leftover-debug arm's (issue #154)
 	// PRE-bash baseline of scratch-named paths: the set of workdir-relative
 	// scratch-named files that EXISTED before this turn's first bash call.
@@ -228,6 +258,15 @@ type CortexSession struct {
 	// MaybeCaptureScanRoots (scanroots.go) treats that reply as the
 	// answer to "where does your code live" and persists it.
 	awaitingScanRootsReply bool
+
+	// sameActionBlocked is the per-turn same-action ledger (issue #169):
+	// the set of effect classes (shellrisk.EffectClass) that were Blocked
+	// in the current turn, keyed by cs.turnNo so it resets automatically
+	// when the turn advances. A later command in the same class is
+	// refused before it is even classified — a mechanical block against
+	// routing around an earlier block with a same-effect variant. Nil
+	// outside a turn.
+	sameActionBlocked map[string]bool
 
 	sessionStart    time.Time
 	turns           int
@@ -432,6 +471,15 @@ func NewCortexSession() *CortexSession {
 		hookState:       &tools.PostEditHookState{},
 		sessionStart:    time.Now(),
 	}
+	// Issue #119: the workspace is now resolved and every command that goes
+	// through this constructor (REPL, turn, study, learn, serve, discord,
+	// loop, study-eval) will write under its .cortex/ — journal, memory, the
+	// learn cursor — often without ever opening a transcript (study/learn
+	// never call StartTranscript). Self-ignore the dir now, before the first
+	// write could leak it; a later re-target (--project / serve / loop
+	// firings, via applyProjectByName) runs the same guard for its (possibly
+	// different) root. See gitignore_self.go.
+	cs.SetWorkspace(workspace)
 	cs.ws = cs.newWorkingSet(1)
 	// Strip declarations for every IsToolEnabled-gated tool that config
 	// disabled — scan_landscape, web_search/fetch_url, agent, context_* — so

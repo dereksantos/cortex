@@ -224,7 +224,7 @@ func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool
 	case shellrisk.Blocked:
 		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
 	default: // Risky — no interactive approver in a headless context.
-		return fmt.Sprintf("blocked (risk: %s). No interactive approval is available in this session — re-issue a safer command, or ask the user to run it.", v.Reason), false
+		return shellrisk.BlockedMessage(v.Reason), false
 	}
 }
 func (headlessDeps) AllowDelete() (string, bool) { return "", false }

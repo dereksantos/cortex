@@ -885,6 +885,20 @@ type ContextConfig struct {
 	TailHighFraction  *float64 `json:"tail_high_fraction"`
 	TailDrainFraction *float64 `json:"tail_drain_fraction"`
 	OutlineFraction   *float64 `json:"outline_fraction"`
+	// InTurnDemotion gates in-turn demotion (issue #171): before each main-loop
+	// send, if the current turn's accumulated tool results have outgrown the
+	// high watermark, the oldest are swapped for one-line recall-citable stubs
+	// in the wire copy only (the transcript keeps the originals). Nil means
+	// ENABLED — an availability kill-switch, matching the EnableContext* and
+	// EnableWeb precedent that an absent config key must not disable a shipped
+	// capability.
+	InTurnDemotion *bool `json:"in_turn_demotion"`
+	// InTurnKeepRecent sets how many of the turn's most-recent tool results
+	// always stay verbatim under in-turn demotion (issue #171) — even over
+	// budget, the newest few are what the model is actively working from. Nil
+	// means the default (inTurnKeepRecentDefault, 6); a non-nil value ≤ 0 is
+	// rejected by validateContextConfig.
+	InTurnKeepRecent *int `json:"in_turn_keep_recent"`
 }
 
 // defaultTailHighFraction / defaultTailDrainFraction / defaultOutlineFraction
@@ -930,6 +944,13 @@ const contextPrefixHeadroom = 0.16
 // below, so a config that sets only tail_high_fraction still gets checked
 // against the DEFAULT drain and outline fractions, not skipped.
 func validateContextConfig(c ContextConfig) error {
+	// in_turn_keep_recent is independent of the fraction group, so it is
+	// validated up front — a config that sets ONLY in_turn_keep_recent (no
+	// fractions) must still be checked, so this guard runs before the
+	// "all fractions unset → done" early return below.
+	if c.InTurnKeepRecent != nil && *c.InTurnKeepRecent <= 0 {
+		return fmt.Errorf("context.in_turn_keep_recent must be a positive integer (how many of the turn's newest tool results stay verbatim), got %d", *c.InTurnKeepRecent)
+	}
 	if c.TailHighFraction == nil && c.TailDrainFraction == nil && c.OutlineFraction == nil {
 		return nil
 	}
@@ -982,6 +1003,31 @@ func (c *Config) scanEnabled() bool {
 		return true
 	}
 	return *c.Tools.EnableScan
+}
+
+// inTurnDemotionEnabled reports whether in-turn demotion (issue #171) is on.
+// Default enabled: a nil/absent context.in_turn_demotion key keeps the shipped
+// capability (the EnableContext*/EnableWeb availability-kill-switch precedent).
+func (c *Config) inTurnDemotionEnabled() bool {
+	if c == nil || c.Context.InTurnDemotion == nil {
+		return true
+	}
+	return *c.Context.InTurnDemotion
+}
+
+// inTurnKeepRecentDefault is the count of the turn's most-recent tool results
+// that always stay verbatim under in-turn demotion (issue #171) when
+// context.in_turn_keep_recent is absent.
+const inTurnKeepRecentDefault = 6
+
+// inTurnKeepRecent resolves the in-turn keep-recent count (issue #171): an
+// explicit context.in_turn_keep_recent wins, else the default (6). A nil config
+// or nil field returns the default — same posture as inTurnDemotionEnabled.
+func (c *Config) inTurnKeepRecent() int {
+	if c == nil || c.Context.InTurnKeepRecent == nil {
+		return inTurnKeepRecentDefault
+	}
+	return *c.Context.InTurnKeepRecent
 }
 
 func (c *Config) backendEndpoint() string {
@@ -1591,6 +1637,12 @@ func mergeContext(base, over ContextConfig) ContextConfig {
 	}
 	if over.OutlineFraction != nil {
 		out.OutlineFraction = over.OutlineFraction
+	}
+	if over.InTurnDemotion != nil {
+		out.InTurnDemotion = over.InTurnDemotion
+	}
+	if over.InTurnKeepRecent != nil {
+		out.InTurnKeepRecent = over.InTurnKeepRecent
 	}
 	return out
 }

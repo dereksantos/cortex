@@ -780,6 +780,12 @@ func main() {
 		// turn-boundary surface — the findings the model saw in the finalize
 		// round reach the human in the terminal too.
 		printLintReceipt(res.LintReceipt)
+		// Issue #117: a turn that recovered from a mid-turn provider failure
+		// SUCCEEDED (err is nil), so the backend's status/body was otherwise
+		// lost behind the reply — one dim line, secrets redacted. afterTurn is
+		// the safety net for the UNRECOVERED case (err != nil), already
+		// handled there; this is the recovered case, its sibling.
+		printBackendError(res.LastError)
 		afterTurn(session, err)
 	}
 
