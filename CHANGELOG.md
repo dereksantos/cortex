@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Journaled commit attribution (#146): a new machine-level `attribution`
+  writer-class (`attribution.commit`, `~/.cortex/journal/attribution/`) records
+  every `git commit` the harness sees and whether it carried the attribution
+  trailer — the `bash` tool's backstop, `cortex change commit`, and the Discord
+  WIP checkpoint. Each commit gets an intent event naming what the backstop
+  decided (`added`, `already_present`, `skipped_unparseable`, `skipped_amend`,
+  `skipped_stdin`, `disabled`) and, once the commit lands, a verified event with
+  its SHA and whether `git log -1` actually finds the trailer, so compliance is
+  measured rather than assumed. Writes are local and best-effort.
 - Self-ignoring `.cortex/` in git workspaces (#119): the first session in a
   workspace that is inside a git repository writes a self-contained
   `.cortex/.gitignore` (a lone `*`) so session transcripts, journal segments,

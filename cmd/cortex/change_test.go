@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/journal"
 )
 
 // TestCommitChangeWithAttribution exercises commitChangeWithAttribution in a
@@ -54,6 +56,9 @@ func TestCommitChangeWithAttribution(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The attribution receipt this commit writes is a machine-level
+			// journal event; keep it out of the real ~/.cortex.
+			t.Setenv("CORTEX_HOME", t.TempDir())
 			tmpDir := t.TempDir()
 			// Initialize git repo
 			gitCmd(t, tmpDir, "init")
@@ -95,8 +100,104 @@ func TestCommitChangeWithAttribution(t *testing.T) {
 			if trailerCount != tt.wantTrailerCount {
 				t.Errorf("trailer count = %d, want %d. Output:\n%s", trailerCount, tt.wantTrailerCount, output)
 			}
+
+			// And the receipt the commit wrote says the same thing the repo
+			// says (issue #146): one event, verified, naming the trailer or
+			// recording that attribution was off.
+			events := readAttributionEvents(t)
+			if len(events) != 1 {
+				t.Fatalf("attribution events = %d, want exactly 1: %+v", len(events), events)
+			}
+			got := events[0]
+			wantOutcome := journal.AttributionOutcomeAdded
+			if !tt.wantAttributed {
+				wantOutcome = journal.AttributionOutcomeDisabled
+			}
+			if got.Outcome != wantOutcome {
+				t.Errorf("outcome = %q, want %q", got.Outcome, wantOutcome)
+			}
+			if !got.Verified {
+				t.Error("receipt not marked verified, want the post-commit read-back")
+			}
+			if got.SHA == "" {
+				t.Error("receipt has no SHA")
+			}
+			full, err := gitCmdOutput(t, tmpDir, "rev-parse", "HEAD")
+			if err != nil {
+				t.Fatalf("git rev-parse: %v", err)
+			}
+			if got.SHA != full {
+				t.Errorf("receipt SHA = %q, want HEAD %q", got.SHA, full)
+			}
+			if got.TrailerPresent != tt.wantAttributed {
+				t.Errorf("TrailerPresent = %v, want %v", got.TrailerPresent, tt.wantAttributed)
+			}
+			if got.Project != tmpDir {
+				t.Errorf("Project = %q, want %q", got.Project, tmpDir)
+			}
+			if !strings.HasPrefix(got.Command, "cortex change commit ") {
+				t.Errorf("Command = %q, want it to name the CLI path", got.Command)
+			}
 		})
 	}
+}
+
+// TestChangeCommitRefusalsJournalNothing pins the other half of the contract:
+// a commit that never happened writes no receipt. A refusal reason already
+// reaches the caller, and an entry with a SHA the repository doesn't have
+// would be worse than no entry at all.
+func TestChangeCommitRefusalsJournalNothing(t *testing.T) {
+	tests := []struct {
+		name    string
+		branch  string // "" leaves HEAD where init put it (not a change branch)
+		message string
+	}{
+		{
+			name:    "not on a change branch",
+			message: "fix: something",
+		},
+		{
+			name:    "nothing to commit",
+			branch:  "cortex/test",
+			message: "fix: something",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CORTEX_HOME", t.TempDir())
+			tmpDir := t.TempDir()
+			gitCmd(t, tmpDir, "init")
+			gitCmd(t, tmpDir, "config", "user.name", "Test User")
+			gitCmd(t, tmpDir, "config", "user.email", "test@example.com")
+			filePath := filepath.Join(tmpDir, "test.txt")
+			if err := os.WriteFile(filePath, []byte("initial"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, tmpDir, "add", "test.txt")
+			gitCmd(t, tmpDir, "commit", "-m", "initial")
+			if tt.branch != "" {
+				gitCmd(t, tmpDir, "checkout", "-b", tt.branch)
+			}
+
+			if _, _, err := commitChangeWithAttribution(tmpDir, tt.message, nil); err == nil {
+				t.Fatal("commitChangeWithAttribution succeeded, want a refusal")
+			}
+			if events := readAttributionEvents(t); len(events) != 0 {
+				t.Errorf("attribution events = %+v, want none for a commit that did not happen", events)
+			}
+		})
+	}
+}
+
+// readAttributionEvents reads the machine-level attribution journal the
+// isolated CORTEX_HOME holds, oldest first.
+func readAttributionEvents(t *testing.T) []journal.AttributionCommitPayload {
+	t.Helper()
+	got, _, err := journal.LatestAttributionCommits()
+	if err != nil {
+		t.Fatalf("LatestAttributionCommits: %v", err)
+	}
+	return got
 }
 
 func countTrailers(message, key string) int {

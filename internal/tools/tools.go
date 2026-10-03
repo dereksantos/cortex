@@ -155,7 +155,7 @@ type Quieter interface {
 }
 
 // AttributionProvider exposes the commit-attribution trailer for the bash
-// tool's git-commit backstop (maybeAddAttributionTrailer). The provider
+// tool's git-commit backstop (classifyAttribution). The provider
 // resolves it fully itself (the code role's resolved model included) —
 // AttributionCommit returns "" when attribution is disabled or no commit
 // trailer is configured.
@@ -1887,7 +1887,15 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// gate must classify (and a confirm prompt must show) the command that
 	// will actually run, not a pre-rewrite version of it. A commit it could
 	// not safely rewrite gets attributionNote appended to its result instead.
-	command, attributionNote := maybeAddAttributionTrailer(command, deps)
+	// The decision itself is journaled (issue #146) so compliance is measured:
+	// the intent goes down here, before the gate, so a command that never runs
+	// (refused) still records why it was left alone — and nothing is written at
+	// all for a command that isn't a git commit.
+	command, attributionNote, attributionOutcome := classifyAttribution(command, deps)
+	journalAttributionIntent(deps, command, attributionOutcome)
+	// attributionTrailer is what a verified receipt must find in the commit
+	// message; "" (attribution off) means there is no fact to verify.
+	attributionTrailer := deps.AttributionCommit()
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
 	// reads the reason plainly and adapts.
@@ -1906,10 +1914,13 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// keeps this safe now that a command is no longer a single inert binary.
 	// The command runs in the session's workdir when one is anchored — a
 	// serve/loop-hosted session's shell must act in ITS project, not wherever
-	// the hosting process was started (workdir.go).
+	// the hosting process was started (workdir.go). runDir is that same
+	// directory ("" = the process CWD) kept for the post-run attribution
+	// verification, which must read the repository the commit landed in.
+	runDir := workdirOf(deps)
 	shellCmd := exec.CommandContext(ctx, "bash", "-c", command)
-	if wd := workdirOf(deps); wd != "" {
-		shellCmd.Dir = wd
+	if runDir != "" {
+		shellCmd.Dir = runDir
 	}
 	out, runErr := shellCmd.CombinedOutput()
 	result := string(out)
@@ -1937,7 +1948,18 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 			return "(no matches)", nil
 		}
 		result += "\n[exit error: " + runErr.Error() + "]"
+		// A failed command made no commit (or not one to be proud of): the
+		// intent receipt stands alone, with no verified fact behind it.
+		if attributionNote != "" {
+			result += "\n" + attributionNote
+		}
+		return result, nil
 	}
+	// The command succeeded: read the repository back and journal the FACT of
+	// the commit it landed — SHA and whether the trailer is really in the
+	// message — rather than trusting the rewrite. No-op unless deps journal
+	// and the working directory has a commit to read (issue #146).
+	journalAttributionVerified(runDir, attributionTrailer, command, attributionOutcome, deps)
 	if attributionNote != "" {
 		result += "\n" + attributionNote
 	}
