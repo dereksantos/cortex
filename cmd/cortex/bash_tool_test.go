@@ -124,8 +124,13 @@ func TestBashShellSyntax(t *testing.T) {
 		if strings.Contains(got, "nested\n") {
 			t.Errorf("subagent-depth risky command should not run: %q", got)
 		}
-		if !strings.Contains(strings.ToLower(got), "no interactive approval") {
-			t.Errorf("expected the headless-blocked message, got %q", got)
+		// The blocked message is the shared reworded shape from
+		// shellrisk.BlockedMessage (issue #169) — "this action is not
+		// permitted in this session. Don't retry it with a different command
+		// that has the same effect…" — not the old "no interactive approval"
+		// wording.
+		if !strings.Contains(got, "this action is not permitted in this session") {
+			t.Errorf("expected the shared blocked message, got %q", got)
 		}
 	})
 
@@ -239,9 +244,9 @@ func TestBashHonorsQuotedArgs(t *testing.T) {
 	}
 }
 
-// grep's exit 1 means "no matches" — a content-free result, not a failure.
-// It must read as such, not as a bare "[exit error: exit status 1]" the model
-// can't distinguish from a broken command.
+// TestBashGrepNoMatch pins grep's exit-1 no-match result: it must read as a
+// content-free result, not a bare exit error the model can't distinguish
+// from a broken command.
 func TestBashGrepNoMatch(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -258,5 +263,170 @@ func TestBashGrepNoMatch(t *testing.T) {
 	}
 	if strings.Contains(got, "exit error") {
 		t.Errorf("grep no-match should not surface as an exit error: %q", got)
+	}
+}
+
+// TestSameActionLedger pins the per-turn same-action gate (issue #169):
+// once a command in an effect class is Blocked in a turn, a later command
+// in the same class is refused before classification, an unrelated Safe
+// command still runs, and the ledger resets on a new turn.
+//
+// The stub classifyShell returns Risky for every git-history-write and
+// hook-disabling command (so the first is blocked by the risk gate,
+// recording its effect class in the ledger) but Safe for everything else
+// (so an unrelated command still runs). Every later same-class command is
+// refused by the ledger — not re-classified — and carries the same-action
+// refusal; the first block of each class carries the shared risk message.
+func TestSameActionLedger(t *testing.T) {
+	// Risky for the two tracked effect classes and for the network-access
+	// control (curl), Safe for the rest — this mirrors the real gate's shape
+	// for the commands the scenarios use (git history writes and hook-
+	// disabling flags are Risky; curl is gray-zone Risky; `ls`/`git status`
+	// are read-only Safe) and lets one stub drive every scenario.
+	stub := func(_ context.Context, command string) (shellrisk.Level, string, error) {
+		if shellrisk.EffectClass(command) != "" {
+			return shellrisk.Risky, "test: always risky", nil
+		}
+		if strings.Contains(command, "curl") {
+			return shellrisk.Risky, "test: network access", nil
+		}
+		return shellrisk.Safe, "test: safe", nil
+	}
+
+	// step is one command in a scenario, with the expected gate outcome.
+	type step struct {
+		command string
+		wantRun bool // true → gateShell returns ok=true (command may run)
+		// wantMarker is the substring the blocked message must contain.
+		// "" for a run. For a blocked command it distinguishes the shared
+		// risk-blocked message ("blocked (risk:") from the same-action
+		// refusal ("same action").
+		wantMarker string
+	}
+
+	scenarios := []struct {
+		name  string
+		steps []step
+	}{
+		{
+			name: "first blocked commit lets same-class variants through as Blocked in the same turn",
+			steps: []step{
+				{command: "git commit -m x", wantRun: false, wantMarker: "blocked (risk:"},
+				{command: "git commit-tree HEAD", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git commit --amend", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// The issue's exact workaround: after a blocked commit, the hook-
+				// disabling variants (a DIFFERENT class, one barred group) are
+				// refused by the ledger too — not re-classified.
+				{command: "git commit --no-verify -m x", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git -c core.hooksPath=/tmp/x commit -m x", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git update-ref refs/heads/main abc123", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git reset --hard HEAD~1", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// A Risky command in a DIFFERENT class (no tracked effect class
+				// — network access) is not in the ledger; it is blocked by the
+				// risk gate with the shared message, not the same-action refusal.
+				{command: "curl http://example.com", wantRun: false, wantMarker: "blocked (risk:"},
+			},
+		},
+		{
+			name: "hook-disabling flag is refused by the risk gate, then the class is recorded",
+			steps: []step{
+				{command: "git commit --no-verify -m x", wantRun: false, wantMarker: "blocked (risk:"},
+				// A later --no-verify variant (different subcommand) is in the
+				// same hook-disabling class → refused by the ledger.
+				{command: "git push --no-verify origin", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// The barred group runs both ways: a blocked hook-disabling
+				// command also bars a PLAIN same-effect history write, so a
+				// re-worded `git commit` can't re-enter the classifier.
+				{command: "git commit -m y", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+			},
+		},
+		{
+			name: "unrelated Safe command still runs after a block in the same turn",
+			steps: []step{
+				{command: "git commit -m x", wantRun: false, wantMarker: "blocked (risk:"},
+				{command: "ls", wantRun: true, wantMarker: ""},
+				{command: "git status", wantRun: true, wantMarker: ""},
+				// A same-class command after the Safe interlude is still refused.
+				{command: "git commit --amend", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+			},
+		},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			cs := &CortexSession{classifyShell: stub, quiet: true, turnNo: 1}
+			for i, s := range sc.steps {
+				msg, ok := cs.gateShell(context.Background(), s.command)
+				if ok != s.wantRun {
+					t.Errorf("step %d (%q): ok = %v, want %v", i, s.command, ok, s.wantRun)
+				}
+				if !s.wantRun && !strings.Contains(msg, s.wantMarker) {
+					t.Errorf("step %d (%q): blocked message %q does not contain %q", i, s.command, msg, s.wantMarker)
+				}
+			}
+		})
+	}
+}
+
+// TestSameActionLedger_ResetsOnNewTurn pins the ledger's turn scoping
+// (issue #169): a block recorded in turn N does not leak into turn N+1. The
+// turn's lifecycle stamps cs.turnNo at entry (turn.go) and clears it on exit;
+// the ledger is keyed on turnNo and reset at turn start, so the same command
+// that was blocked in one turn may be re-evaluated by the risk gate in the
+// next (it is refused again by the gate, but NOT by the stale ledger).
+func TestSameActionLedger_ResetsOnNewTurn(t *testing.T) {
+	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		return shellrisk.Risky, "test: always risky", nil
+	}
+	cs := &CortexSession{classifyShell: stubRisky, quiet: true}
+
+	// Turn 1: block a git commit; its effect class lands in the ledger.
+	cs.turnNo = 1
+	cs.sameActionBlocked = nil // turn-start reset (turn.go)
+	msg, ok := cs.gateShell(context.Background(), "git commit -m x")
+	if ok {
+		t.Fatalf("turn 1: git commit should be blocked by the risk gate")
+	}
+	if !strings.Contains(msg, "blocked (risk:") {
+		t.Errorf("turn 1: first block should carry the shared risk message, got %q", msg)
+	}
+	// A same-class variant in turn 1 is refused by the ledger.
+	msg, ok = cs.gateShell(context.Background(), "git commit --amend")
+	if ok {
+		t.Fatalf("turn 1: git commit --amend should be blocked")
+	}
+	if !strings.Contains(msg, "same action as an earlier blocked command in this turn") {
+		t.Errorf("turn 1: same-class variant should carry the same-action refusal, got %q", msg)
+	}
+
+	// Turn 2: a fresh turnNo + reset. The same command is re-evaluated by
+	// the risk gate — blocked again by the gate (not the stale ledger).
+	cs.turnNo = 2
+	cs.sameActionBlocked = nil // turn-start reset (turn.go)
+	msg, ok = cs.gateShell(context.Background(), "git commit -m x")
+	if ok {
+		t.Fatalf("turn 2: git commit should be blocked by the risk gate")
+	}
+	if strings.Contains(msg, "same action as an earlier blocked command in this turn") {
+		t.Errorf("turn 2: stale ledger leaked across turns; message %q carries the same-action refusal", msg)
+	}
+	if !strings.Contains(msg, "blocked (risk:") {
+		t.Errorf("turn 2: first block of the turn should carry the shared risk message, got %q", msg)
+	}
+
+	// Between turns (turnNo == 0) the ledger is inert: no same-action
+	// refusal. A record made between turns is also dropped, not stored —
+	// but only if the ledger map itself was cleared (turn.go's turn-start
+	// reset sets it to nil); a stale non-nil map from a prior turn must not
+	// receive a record while turnNo == 0. We model the reset by setting
+	// sameActionBlocked = nil, exactly as turn.go does at turn start.
+	cs.turnNo = 0
+	cs.sameActionBlocked = nil // turn.go's turn-start reset
+	if cs.sameActionBlockedInTurn(shellrisk.EffectGitHistoryWrite) {
+		t.Errorf("ledger must be inert between turns (turnNo == 0)")
+	}
+	cs.recordSameActionBlock("git commit -m x")
+	if len(cs.sameActionBlocked) != 0 {
+		t.Errorf("recordSameActionBlock between turns must drop, not store: %v", cs.sameActionBlocked)
 	}
 }

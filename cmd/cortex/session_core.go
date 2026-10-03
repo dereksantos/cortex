@@ -186,6 +186,15 @@ type CortexSession struct {
 	// answer to "where does your code live" and persists it.
 	awaitingScanRootsReply bool
 
+	// sameActionBlocked is the per-turn same-action ledger (issue #169):
+	// the set of effect classes (shellrisk.EffectClass) that were Blocked
+	// in the current turn, keyed by cs.turnNo so it resets automatically
+	// when the turn advances. A later command in the same class is
+	// refused before it is even classified — a mechanical block against
+	// routing around an earlier block with a same-effect variant. Nil
+	// outside a turn.
+	sameActionBlocked map[string]bool
+
 	sessionStart    time.Time
 	turns           int
 	turnNo          int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)

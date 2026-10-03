@@ -132,12 +132,12 @@ func TestAgentToolEndToEnd(t *testing.T) {
 	subagentFinalWire := wires[2]
 	var sawBlocked bool
 	for _, m := range subagentFinalWire {
-		if m.Role == RoleTool && strings.Contains(strings.ToLower(m.Content), "no interactive approval") {
+		if m.Role == RoleTool && strings.Contains(m.Content, "this action is not permitted in this session") {
 			sawBlocked = true
 		}
 	}
 	if !sawBlocked {
-		t.Errorf("subagent's own wire did not carry the headless-blocked bash result: %+v", subagentFinalWire)
+		t.Errorf("subagent's own wire did not carry the shared blocked bash result (shellrisk.BlockedMessage): %+v", subagentFinalWire)
 	}
 
 	// The subagent's digest must land back on the coder's OWN turn as a tool

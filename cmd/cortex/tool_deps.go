@@ -429,6 +429,17 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 }
 
 func (cs *CortexSession) gateShell(ctx context.Context, command string) (string, bool) {
+	// Per-turn same-action gate (issue #169): if this command's effect
+	// class was already Blocked in the current turn, refuse it before
+	// classification. This is the mechanical backstop to the reworded
+	// blocked message — a model that re-issues a same-effect variant
+	// (e.g. `git commit-tree` after a blocked `git commit`, or
+	// `--no-verify` after a blocked `git commit`) is refused without
+	// reaching the risk gate, and the refusal names the class so it
+	// knows what is barred.
+	if cls := shellrisk.EffectClass(command); cls != "" && cs.sameActionBlockedInTurn(cls) {
+		return shellrisk.SameActionBlockedMessage(cls), false
+	}
 	var fn shellrisk.ClassifyFn
 	if cs != nil {
 		fn = cs.classifyShell
@@ -443,13 +454,20 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	case shellrisk.Safe:
 		return "", true
 	case shellrisk.Blocked:
+		cs.recordSameActionBlock(command)
 		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
 	default:
-		blocked := fmt.Sprintf("blocked (risk: %s). No interactive approval is available in this session — re-issue a safer command, or ask the user to run it.", v.Reason)
+		// The single shared source for the reworded blocked message
+		// (internal/shellrisk.BlockedMessage, issue #169): a Risky command with
+		// no interactive approver, a Risky command inside a subagent, and a
+		// Risky command whose approver timed out all read identically to the
+		// model.
+		blocked := shellrisk.BlockedMessage(v.Reason)
 		// A subagent (depth >= 1) has no human operator mid-loop — Risky is
 		// treated as Blocked, same as a headless session. Only the coder's own
 		// top-level bash call (depth 0) gets an interactive approval path.
 		if subagentDepth(ctx) != 0 || cs == nil {
+			cs.recordSameActionBlock(command)
 			return blocked, false
 		}
 		if !cs.quiet && cs.confirmRisky != nil {
@@ -457,6 +475,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			if cs.confirmRisky(q) {
 				return "", true
 			}
+			cs.recordSameActionBlock(command)
 			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
 		}
 		// approveRisky is Discord's non-terminal-but-human-present approval
@@ -469,10 +488,60 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 				return "", true
 			}
 			if timedOut {
+				cs.recordSameActionBlock(command)
 				return blocked, false
 			}
+			cs.recordSameActionBlock(command)
 			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
 		}
+		cs.recordSameActionBlock(command)
 		return blocked, false
+	}
+}
+
+// sameActionBlockedInTurn reports whether effectClass was already Blocked
+// in the current turn (issue #169). The check spans the command's WHOLE
+// barred group (shellrisk.EffectClasses): a blocked `git commit` bars
+// `git commit --no-verify` too — the hook-disabling variant is a same-
+// effect spelling of the same route-around — so the two git classes act as
+// one group for the ledger. Outside a turn (cs.turnNo == 0) the ledger is
+// inert: the gate still runs, but nothing is refused on the same-action
+// rule.
+func (cs *CortexSession) sameActionBlockedInTurn(effectClass string) bool {
+	if cs == nil || cs.turnNo == 0 {
+		return false
+	}
+	for _, c := range shellrisk.EffectClasses(effectClass) {
+		if cs.sameActionBlocked[c] {
+			return true
+		}
+	}
+	return false
+}
+
+// recordSameActionBlock records command's effect class in the per-turn
+// same-action ledger (issue #169), so a later same-effect command is
+// refused before classification. The record spans the command's WHOLE
+// barred group (shellrisk.EffectClasses) — a blocked `git commit` records
+// BOTH git-history-write and hook-disabling, so the issue's commit →
+// --no-verify / -c core.hooksPath=… sequence is refused by the ledger, not
+// re-classified. Commands with no effect class (the common case — most
+// commands are not in a tracked class) are no-ops. Outside a turn
+// (cs.turnNo == 0) the record is dropped: there is no current turn to
+// attach it to, and a stale record from a prior turn must not leak into the
+// next one.
+func (cs *CortexSession) recordSameActionBlock(command string) {
+	if cs == nil || cs.turnNo == 0 {
+		return
+	}
+	classes := shellrisk.EffectClasses(shellrisk.EffectClass(command))
+	if len(classes) == 0 {
+		return
+	}
+	if cs.sameActionBlocked == nil {
+		cs.sameActionBlocked = make(map[string]bool)
+	}
+	for _, cls := range classes {
+		cs.sameActionBlocked[cls] = true
 	}
 }
