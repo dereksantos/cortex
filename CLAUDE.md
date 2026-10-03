@@ -294,6 +294,8 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 
 Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
 
+Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
+
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,
 and the test suite green.

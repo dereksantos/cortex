@@ -29,6 +29,8 @@ Update the docs. When behavior changes, the documentation that describes it chan
 
 Test integrity. Removing or changing an existing test to make a failing build pass is a decision, not an implementation detail: if you did it, state it plainly in your summary — what you removed or changed and why — so the person reviewing can judge whether the loss is acceptable. A green build that quietly deleted the failing test is not a fix.
 
+` + failingTestPrinciple + `
+
 ` + debugWorkingStylePrinciple + `
 
 Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
@@ -58,6 +60,15 @@ const debugWorkingStylePrinciple = "Debug carefully. Check every error in test a
 // self-dev loop's own ordinary step turns, which never go through
 // TurnWithPlan's prompts (the scenario in #178).
 const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. When a reported problem doesn't reproduce, saying so with the evidence is the finished result; a fix for a problem you haven't observed is not."
+
+// failingTestPrinciple is the issue #177 failing-test working-style principle
+// — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT
+// same text (the docs describe the guidance the model actually receives, so
+// the two can't drift apart; see TestFailingTestPrincipleMirroredInClaudeMD).
+// It is spliced into SystemPrompt right after "Test integrity" (see the
+// ` + failingTestPrinciple + ` above), keeping it in the "# How you work"
+// block, before debugWorkingStylePrinciple.
+const failingTestPrinciple = "Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification."
 
 // memoryPromptSection is the full memory guidance — the four bullets plus the
 // outline/recall paragraph — appended to the system prompt only when there's
