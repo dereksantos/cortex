@@ -8,6 +8,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -167,5 +169,88 @@ func TestCaptureTurnWritesWebArtifacts(t *testing.T) {
 	rendered := formatLearnEntry(cs.SessionsDir(), entries[len(entries)-1])
 	if !strings.Contains(rendered, "searched:") {
 		t.Errorf("formatLearnEntry output = %q, want the searched: segment preserved", rendered)
+	}
+}
+
+// TestCaptureTurnRedactsSecretsFromJournal (issue #103): a secret that
+// surfaces in a tool's OUTPUT (and in the user's prompt) must reach the
+// on-disk journal ONLY as [REDACTED:…], never verbatim. This is the journal
+// surface — distinct from the transcript's per-message redaction
+// (session.go's writeTranscript): captureTurn is the single choke point every
+// loop capture flows through (loop.run and cortex learn's replay both read
+// this same journal), so masking it here covers both. The live in-memory
+// turnMsgs are left verbatim (the model can still use the value this turn);
+// only what is persisted is masked. We read the event back through
+// scanCaptureWindow — the SAME reader Learn itself uses — and additionally
+// scan the raw JSONL, so a secret can't hide in a field Learn doesn't read.
+func TestCaptureTurnRedactsSecretsFromJournal(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := newMemSession(t)
+	if cs.capturer == nil {
+		t.Fatal("session has no capturer wired")
+	}
+
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	turnMsgs := []Message{
+		{Role: RoleUser, Content: "what is my key?"},
+		webSearchCall("c1", "how to rotate an api key"),
+		toolResult("c1", "1. Rotate keys\n   your current key is "+secret),
+		{Role: "assistant", Content: "here is your key: " + secret},
+	}
+	cs.captureTurn("here is the key: "+secret, turnMsgs)
+	if cs.captures == 0 {
+		t.Fatal("captureTurn recorded no event")
+	}
+
+	// Learn's own read path (scanCaptureWindow) sees the secret ONLY redacted.
+	entries, _, err := scanCaptureWindow(cs)
+	if err != nil {
+		t.Fatalf("scanCaptureWindow: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no capture entries on disk")
+	}
+	last := entries[len(entries)-1]
+	if strings.Contains(last.Result, secret) {
+		t.Errorf("captured entry.Result still contains the verbatim secret — issue #103 requires it redacted before the journal write")
+	}
+	if strings.Contains(last.Prompt, secret) {
+		t.Errorf("captured entry.Prompt still contains the verbatim secret — the user prompt must be redacted too")
+	}
+	if !strings.Contains(last.Result, "[REDACTED:") {
+		t.Errorf("captured entry.Result = %q, want at least one [REDACTED:...] marker (the tool result and the answer both carried the secret)", last.Result)
+	}
+	if !strings.Contains(last.Prompt, "[REDACTED:") {
+		t.Errorf("captured entry.Prompt = %q, want a [REDACTED:...] marker for the redacted user prompt", last.Prompt)
+	}
+
+	// Raw JSONL scan: no secret may survive in ANY persisted field, including
+	// ones Learn's reader doesn't touch (Metadata, Context, etc.).
+	dir := filepath.Join(cs.ContextDir(), "journal", "capture")
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	for _, path := range matches {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading journal %s: %v", path, err)
+		}
+		if strings.Contains(string(b), secret) {
+			t.Errorf("journal file %s still contains the verbatim secret", path)
+		}
+	}
+	if len(matches) == 0 {
+		t.Fatal("no capture journal file found — the event was not persisted")
+	}
+
+	// The live in-memory turnMsgs are untouched: the model can still use the
+	// value this turn, so it must still hold the verbatim secret.
+	liveHasSecret := false
+	for _, m := range turnMsgs {
+		if strings.Contains(m.Content, secret) {
+			liveHasSecret = true
+			break
+		}
+	}
+	if !liveHasSecret {
+		t.Errorf("live in-memory turnMsgs lost the secret — only the persisted event should be redacted")
 	}
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/fslock"
+	"github.com/dereksantos/cortex/internal/redact"
 )
 
 const (
@@ -420,7 +421,39 @@ func (cs *CortexSession) writeEntry(e sessionEntry) {
 }
 
 func (cs *CortexSession) writeTranscript(m Message) {
-	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: m})
+	// Issue #103: redact the OUTGOING message (content + every tool-call's
+	// arguments + any tool result) before it is persisted, so a secret the
+	// agent read or printed never reaches the on-disk transcript. A deep copy
+	// is redacted — the live in-memory Request.Messages (and the message
+	// m is a copy of) is left verbatim so the model can still use the value
+	// this turn. The number of patterns masked is folded into cs.redactions,
+	// reset per turn (turn.go) and carried on TurnResult.
+	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: cs.redactedMessage(m)})
+}
+
+// redactedMessage returns a deep copy of m with its secret patterns masked
+// (issue #103), folding the count of masked patterns into cs.redactions. The
+// input m is not mutated — callers rely on the live in-memory message staying
+// verbatim for the current turn. Content is masked, and every tool call's
+// arguments are masked on the copy so they reach the transcript redacted.
+func (cs *CortexSession) redactedMessage(m Message) Message {
+	r := Message{
+		Role:       m.Role,
+		ToolCallID: m.ToolCallID,
+		Content:    m.Content,
+	}
+	redacted, n := redact.Redact(m.Content)
+	r.Content = redacted
+	cs.redactions += n
+	if m.ToolCalls != nil {
+		r.ToolCalls = make([]ToolCall, len(m.ToolCalls))
+		for i, c := range m.ToolCalls {
+			c.Function.Arguments, n = redact.Redact(c.Function.Arguments)
+			cs.redactions += n
+			r.ToolCalls[i] = c
+		}
+	}
+	return r
 }
 
 func (cs *CortexSession) writeSessionState() {

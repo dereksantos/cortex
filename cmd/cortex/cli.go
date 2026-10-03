@@ -167,6 +167,12 @@ func runTurnCLI(args []string) {
 			if res.LastError != nil {
 				out["backend_error"] = backendErrorLine(res.LastError)
 			}
+			// Issue #103: the per-turn secret-redaction count rides --json
+			// ("redactions") so a driver parsing the output sees how much was
+			// masked before the turn's text hit disk, like tests_changed above.
+			if res.Redactions > 0 {
+				out["redactions"] = res.Redactions
+			}
 			if turnErr != nil {
 				out["error"] = turnErr.Error()
 				out["interrupted"] = res.Interrupted
@@ -204,6 +210,11 @@ func runTurnCLI(args []string) {
 			if res.LastError != nil {
 				fmt.Fprintln(os.Stderr, backendErrorLine(res.LastError))
 			}
+			// Issue #103: a turn whose persisted messages carried a secret
+			// reports how much was masked on stderr (dim provenance, not an
+			// alarm), like the test/lint receipts above; the --json path carries
+			// the same count under "redactions".
+			printRedactions(res.Redactions)
 			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
 		}
 		if turnErr != nil {
