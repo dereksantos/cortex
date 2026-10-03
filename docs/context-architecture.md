@@ -129,6 +129,8 @@ with a permanent per-turn break from the index fold.
 │ │   t3 · …            ◀── grows ONLY at its own tail        │ │
 │ ├───────────────────────────────────────────────────────────┤ │
 │ │ [user]    MEMORY INDEX          changes on memory_write   │ │
+│ ├───────────────────────────────────────────────────────────┤ │
+│ │ [user]    SKILLS INDEX + WORKSPACE NOTE                   │ │
 │ └───────────────────────────────────────────────────────────┘ │
 ├───────────────────────────────────────────────────────────────┤
 │ ZONE B — HYDRATED TAIL (volatile, low-wm ≈ W/3 … high ≈ W/2)  │
@@ -142,7 +144,11 @@ with a permanent per-turn break from the index fold.
 
 - **Zone A only ever grows at its own tail.** Steady state, the LCP covers the
   system prompt, the entire outline so far, and the index — the bulk of a long
-  session.
+  session. The zone-A tail also carries the skills index and, on every turn,
+  the one-line **workspace note** (the absolute workspace root,
+  `workspaceNote` in `cmd/cortex/tool_deps.go` — issue #142's "stop guessing
+  foreign paths" line): static for the session's life, so it never breaks the
+  prefix cache by itself.
 - **Zone B is the working set** in `working-memory.md`'s sense: the last n
   turns the model actually needs verbatim, bounded by a token budget. It
   re-prefills only when zone A grew (a demotion batch or a memory write) —

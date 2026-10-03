@@ -991,7 +991,15 @@ func outlineTool(tc ToolCall, deps ToolDeps) (string, error) {
 		budget = n
 	}
 	printToolAction(deps, fmt.Sprintf("outline(%s)", path))
-	return outline.Render(resolveWorkdir(deps, path), budget)
+	fsPath := resolveWorkdir(deps, path)
+	text, err := outline.Render(fsPath, budget)
+	if err != nil && os.IsNotExist(err) {
+		// A missing path isn't a dead end (issue #142): point at outline/grep,
+		// state the workspace root when the given path is absolute or outside
+		// it, and offer nearby existing candidates.
+		return "", pathNotFoundError(path, fsPath, workdirRootForErrors(deps))
+	}
+	return text, err
 }
 
 // --- subagent tools (study, and future inheritors reflect/dream) --------
@@ -1165,6 +1173,17 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
 	fsPath := resolveWorkdir(deps, path)
+	// A directory is not a read: os.ReadFile would return a bare "is a
+	// directory" error that dead-ends the model (issue #142 — the same
+	// path-guessing family as the workspace note). Return a bounded listing
+	// instead (like outline does for a directory) plus a "use outline/
+	// read_file on a file" note so the model can orient and target a file
+	// rather than dead-ending on the error. Checked BEFORE the ranged-read
+	// branch below, so a directory with start/end gets the listing too.
+	if info, statErr := os.Stat(fsPath); statErr == nil && info.IsDir() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → directory", path))
+		return directoryListing(path, fsPath), nil
+	}
 	// Ranged read: exact 1-indexed lines, bypassing the size gate (a range is
 	// bounded). This is the navigator's precise pull — project_index/study hands
 	// back a line span, and read_file(path, start, end) reads exactly it.
@@ -1173,7 +1192,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 		if !hasEnd || end < start {
 			end = start + active.DefaultRangeLines - 1
 		}
-		return readRange(deps, fsPath, start, end)
+		return readRange(deps, path, fsPath, start, end)
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
@@ -1202,23 +1221,66 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	printToolAction(deps, fmt.Sprintf("read_file(%s)", path))
 	data, err := os.ReadFile(fsPath)
 	if err != nil {
+		// A missing file isn't a dead end (issue #142): point the model at
+		// outline/grep, state the real workspace root when the given path is
+		// absolute or outside it, and offer nearby existing candidates.
+		if os.IsNotExist(err) {
+			return "", pathNotFoundError(path, fsPath, workdirRootForErrors(deps))
+		}
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// directoryListing is the read_file response for a directory (issue #142): a
+// bounded, ls-like listing — every direct child's name (directories marked with
+// a trailing "/") — followed by a note that this is a directory, that
+// read_file targets a FILE, and that outline(path) gives a deeper structural
+// map when the flat listing isn't enough. The listing is bounded so a huge
+// directory can't blow up the context; beyond the cap the rest are elided with
+// a "grep/outline" pointer.
+func directoryListing(display, fsPath string) string {
+	const cap = 200
+	ents, err := os.ReadDir(fsPath)
+	var b strings.Builder
+	if err != nil {
+		// stat said directory but ReadDir failed (permissions, race) — the
+		// same error a direct read would hit; don't pretend there's a listing.
+		return fmt.Sprintf("%s is a directory, not a file. read_file reads a FILE; to list or map it, use outline(%q) or bash `ls %s`. (ReadDir error: %v)", display, display, display, err)
+	}
+	shown := 0
+	for _, e := range ents {
+		if shown >= cap {
+			fmt.Fprintf(&b, "… +%d more — outline(%q) or grep for the rest\n", len(ents)-shown, display)
+			break
+		}
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		b.WriteString(name)
+		b.WriteByte('\n')
+		shown++
+	}
+	return fmt.Sprintf("%s is a directory, not a file — read_file reads a FILE. Its contents:\n\n%s\nTo go deeper, outline(%q) for a structural map, or read_file on one of the files above.", display, strings.TrimRight(b.String(), "\n"), display)
 }
 
 // readRange returns lines [start,end] (1-indexed, inclusive) of a file, capped
 // at MaxRangeLines. The output carries a "@path:start-end" header so the model
 // sees exactly which lines it got (and a truncation note when the request was
 // clamped). Lines beyond EOF are silently dropped — asking past the end yields
-// what exists, not an error.
-func readRange(deps ToolDeps, path string, start, end int) (string, error) {
+// what exists, not an error. display is the model-visible path (used in the
+// header and the not-found error); fsPath is the resolved path actually read.
+func readRange(deps ToolDeps, display, fsPath string, start, end int) (string, error) {
 	if end-start+1 > active.MaxRangeLines {
 		end = start + active.MaxRangeLines - 1
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(fsPath)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		if os.IsNotExist(err) {
+			return "", pathNotFoundError(display, fsPath, workdirRootForErrors(deps))
+		}
+		return "", fmt.Errorf("read %s: %w", display, err)
 	}
 	lines := strings.Split(string(data), "\n")
 	// A file ending in "\n" splits to a trailing "" that isn't a real line; drop
@@ -1227,13 +1289,13 @@ func readRange(deps ToolDeps, path string, start, end int) (string, error) {
 		lines = lines[:n-1]
 	}
 	if start > len(lines) {
-		return "", fmt.Errorf("%s has %d lines; start %d is past the end", path, len(lines), start)
+		return "", fmt.Errorf("%s has %d lines; start %d is past the end", display, len(lines), start)
 	}
 	hi := end
 	if hi > len(lines) {
 		hi = len(lines)
 	}
-	printToolAction(deps, fmt.Sprintf("read_file(%s:%d-%d)", path, start, hi))
+	printToolAction(deps, fmt.Sprintf("read_file(%s:%d-%d)", display, start, hi))
 	body := strings.Join(lines[start-1:hi], "\n")
 	// Byte ceiling: the line clamp alone doesn't bound a span of VERY long lines
 	// (minified JSON, journal JSONL — ~2.6 KB/line), which could return hundreds of
@@ -1249,7 +1311,7 @@ func readRange(deps ToolDeps, path string, start, end int) (string, error) {
 		body = body[:cut]
 		note = fmt.Sprintf("\n… [truncated at %d bytes — lines here are very long; grep for the specific text you need]", maxReadBytes)
 	}
-	return fmt.Sprintf("@%s:%d-%d\n%s%s", path, start, hi, body, note), nil
+	return fmt.Sprintf("@%s:%d-%d\n%s%s", display, start, hi, body, note), nil
 }
 
 // defaultMaxReadBytes is the per-read byte ceiling — a span of very long

@@ -168,14 +168,15 @@ func TestStudySubagentSeedExcludesSkillsIndex(t *testing.T) {
 
 // TestContextReportShowsSkillsIndexLineOnlyWhenNonEmpty covers the /context
 // zone-A integration: the skills legend row (glyphSkills, "skills") appears
-// only when the note is non-empty, and headTokens() folds its token cost in.
+// only when the note is non-empty, and headTokens() folds its token cost in
+// (alongside the workspace note's, issue #142).
 func TestContextReportShowsSkillsIndexLineOnlyWhenNonEmpty(t *testing.T) {
 	emptyDir := t.TempDir()
 	cs := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{emptyDir}}}, Request: CortexArgs{}.Request()}
 	if strings.Contains(cs.contextReport(), "skills") {
 		t.Error("contextReport() should not mention \"skills\" when no skills are discovered")
 	}
-	if got := cs.headTokens(); got != cs.systemPromptTokens()+cs.outlineTokens()+cs.memoryIndexTokens() {
+	if got := cs.headTokens(); got != cs.systemPromptTokens()+cs.outlineTokens()+cs.memoryIndexTokens()+cs.workspaceTokens() {
 		t.Errorf("headTokens() = %d with no skills, want it to equal the sum without a skills contribution", got)
 	}
 
@@ -189,7 +190,7 @@ func TestContextReportShowsSkillsIndexLineOnlyWhenNonEmpty(t *testing.T) {
 	if !strings.Contains(report, "1 skills") {
 		t.Errorf("contextReport() = %q, want the skill count (1 skills) in the detail column", report)
 	}
-	if got, want := cs2.headTokens(), cs2.systemPromptTokens()+cs2.outlineTokens()+cs2.memoryIndexTokens()+cs2.skillsIndexTokens(); got != want {
+	if got, want := cs2.headTokens(), cs2.systemPromptTokens()+cs2.outlineTokens()+cs2.memoryIndexTokens()+cs2.skillsIndexTokens()+cs2.workspaceTokens(); got != want {
 		t.Errorf("headTokens() = %d, want %d (skills index token cost folded in)", got, want)
 	}
 }

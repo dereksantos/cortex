@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -250,6 +252,127 @@ func TestTurnDemotesOldTurnsToOutline(t *testing.T) {
 	}
 	if cs.Request.TailFrom <= 1 {
 		t.Errorf("TailFrom = %d, want > 1 after demotion", cs.Request.TailFrom)
+	}
+}
+
+// --- Workspace note (issue #142) -------------------------------------------
+
+// TestTurnInjectsWorkspaceNote is issue #142's step-1 acceptance test: every
+// coder turn must carry a one-line workspace note in the ephemeral wire slot
+// stating the ABSOLUTE workspace root and that all tool paths are relative
+// to it — so the model stops guessing foreign absolute paths (/testbed,
+// /go/src/..., cd /Users/...) and anchoring on remembered layouts. The note
+// is injected for EVERY turn (unlike the memory index, which is gated on
+// notes existing), because a fresh session's first tool calls are exactly
+// where path guessing bites; it rides the slot alongside the memory/skills
+// indexes, LAST (the indexes are content that can change, the note is one
+// static line for the session's life).
+func TestTurnInjectsWorkspaceNote(t *testing.T) {
+	root := t.TempDir() // the workspace root
+	cwd := t.TempDir()  // the CWD — deliberately DIFFERENT from the root, so a
+	// Root-vs-CWD precedence mix-up would state the wrong root.
+	t.Chdir(cwd)
+
+	// The wire check records whether SOME request carried the note (the
+	// per-subtest assertions below pin WHICH root it states). The canned
+	// response is written on EVERY call — success included — so the turn
+	// runs against a realistic model reply, not an empty body.
+	var sawNote atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		for _, m := range req.Messages {
+			if strings.Contains(m.Content, "Workspace: ") {
+				sawNote.Store(true)
+				break
+			}
+		}
+		w.Write([]byte(`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}` + "\n" +
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n" +
+			`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}` + "\n"))
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name      string
+		workspace *Workspace
+		wantRoot  string
+	}{
+		{
+			name:      "explicit workspace root takes precedence over the CWD",
+			workspace: &Workspace{Root: root, Explicit: true},
+			wantRoot:  root,
+		},
+		{
+			name:      "CWD-derived workspace states the CWD root",
+			workspace: &Workspace{Root: cwd},
+			wantRoot:  cwd,
+		},
+		{
+			name:      "no workspace falls back to the CWD",
+			workspace: nil,
+			wantRoot:  cwd,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			quickRetries(t)
+			sawNote.Store(false)
+			cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+				Messages: []Message{{Role: RoleSystem, Content: "s"}}},
+				workspace: tt.workspace}
+			if _, err := cs.Turn(context.Background(), "hi"); err != nil {
+				t.Fatalf("turn: %v", err)
+			}
+			// The wire check above (the server saw the note in a request) is
+			// the proof it was present while the loop ran — the turn clears
+			// the slot afterwards.
+			if !sawNote.Load() {
+				t.Fatalf("no request carried a workspace note; want one stating %q", tt.wantRoot)
+			}
+			if cs.Request.EphemeralSystem != "" {
+				t.Errorf("EphemeralSystem = %q after the turn, want cleared", cs.Request.EphemeralSystem)
+			}
+			if cs.workspaceNote() == "" {
+				t.Errorf("workspaceNote() = %q, want a note for root %q", cs.workspaceNote(), tt.wantRoot)
+			}
+			if !strings.Contains(cs.workspaceNote(), "Workspace: "+tt.wantRoot) {
+				t.Errorf("workspaceNote() = %q, want it to state the absolute root %q", cs.workspaceNote(), tt.wantRoot)
+			}
+			if !strings.Contains(cs.workspaceNote(), "relative to it") {
+				t.Errorf("workspaceNote() = %q, want it to say tool paths are relative to the root", cs.workspaceNote())
+			}
+		})
+	}
+}
+
+// TestWorkspaceNoteNotLeakedToSubagent is the coder-only guarantee for the
+// workspace note: subagent requests (Study/Learn/Agent) are built from their
+// own static System + seed and must never carry the coder's ephemeral-slot
+// notes — the note must not leak into a subagent's context the way the
+// memory/skills indexes already don't (TestStudySubagentSeedExcludesSkillsIndex).
+func TestWorkspaceNoteNotLeakedToSubagent(t *testing.T) {
+	root := t.TempDir()
+	cs := &CortexSession{
+		workspace: &Workspace{Root: root, Explicit: true},
+		Study:     ModelSpec{Model: "study-m", Endpoint: "http://study.example"},
+	}
+	// Sanity: the coder-side note would see the root.
+	if note := cs.workspaceNote(); !strings.Contains(note, "Workspace: "+root) {
+		t.Fatalf("sanity check failed: workspaceNote() = %q, want it to contain the root", note)
+	}
+	req := cs.subagentRequest(tools.Study, "study seed text")
+	if req.EphemeralSystem != "" {
+		t.Errorf("subagent request EphemeralSystem = %q, want \"\" (subagents never get the wire injection slot)", req.EphemeralSystem)
+	}
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content, "Workspace: "+root) {
+			t.Errorf("subagent request message (role %s) leaked the workspace note: %q", m.Role, m.Content)
+		}
 	}
 }
 
