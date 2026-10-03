@@ -342,3 +342,60 @@ func TestDebugPrincipleMirroredInClaudeMD(t *testing.T) {
 		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's debugging working-style principle verbatim (debugWorkingStylePrinciple) — the docs and the prompt have drifted apart")
 	}
 }
+
+// TestDefaultPromptEncodesFailingTestGuidance pins issue #177's content: when
+// a test the model did not write fails after its change, the built-in prompt
+// must tell the model to assume the code is wrong first, to check the expected
+// value against the test's own comments and setup before touching it, never to
+// change a pre-existing assertion just to make output it produced pass, and to
+// name any such change in the summary. (The loop in PR #176 edited a correct
+// assertion to match its own off-by-one output; this is the guidance that was
+// missing.) The check is on loose keywords — the principle, not the exact
+// wording — the same style as TestDefaultPromptEncodesTestIntegrity.
+func TestDefaultPromptEncodesFailingTestGuidance(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, keyword := range []string{
+		"assume your code is wrong", // code-first when a pre-existing test fails
+		"comments",                  // check the expected value against the test's own comments
+		"pre-existing",              // the thing that must not be edited casually
+		"never",                     // never just to make output you produced pass
+	} {
+		if !strings.Contains(lower, keyword) {
+			t.Errorf("built-in prompt no longer encodes the failing-test guidance (missing %q)", keyword)
+		}
+	}
+}
+
+// TestFailingTestPrinciplePosition pins where the issue #177 principle sits:
+// in the "# How you work" block, after the "Test integrity" paragraph (issue
+// #141's) and before the debugging principle (issue #154's) — a position
+// check, not a content check, mirroring TestDefaultPromptEncodesDebugWorkingStyle.
+func TestFailingTestPrinciplePosition(t *testing.T) {
+	i := strings.Index(SystemPrompt, failingTestPrinciple)
+	if i < 0 {
+		t.Fatal("the failing-test working-style principle is not in the built-in prompt")
+	}
+	if ti := strings.Index(SystemPrompt, "Test integrity."); ti < 0 || i < ti {
+		t.Error("the failing-test principle must sit after the \"Test integrity\" paragraph")
+	}
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the failing-test principle must sit before the debugging principle")
+	}
+	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the failing-test principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+}
+
+// TestFailingTestPrincipleMirroredInClaudeMD is the issue #177 consistency
+// tripwire, mirroring TestDebugPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints → Testing" section must carry the EXACT text the model
+// receives (failingTestPrinciple) so docs and prompt can't drift apart.
+func TestFailingTestPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	if !strings.Contains(string(data), failingTestPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's failing-test working-style principle verbatim (failingTestPrinciple) — the docs and the prompt have drifted apart")
+	}
+}

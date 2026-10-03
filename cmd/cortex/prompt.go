@@ -29,6 +29,8 @@ Update the docs. When behavior changes, the documentation that describes it chan
 
 Test integrity. Removing or changing an existing test to make a failing build pass is a decision, not an implementation detail: if you did it, state it plainly in your summary — what you removed or changed and why — so the person reviewing can judge whether the loss is acceptable. A green build that quietly deleted the failing test is not a fix.
 
+` + failingTestPrinciple + `
+
 ` + debugWorkingStylePrinciple + `
 
 Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
@@ -48,6 +50,15 @@ You have a persistent memory: named notes you've written in earlier sessions, ma
 // after "Test integrity" (see the ` + debugWorkingStylePrinciple + ` above),
 // keeping it in the "# How you work" block.
 const debugWorkingStylePrinciple = "Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code."
+
+// failingTestPrinciple is the issue #177 failing-test working-style principle
+// — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT
+// same text (the docs describe the guidance the model actually receives, so
+// the two can't drift apart; see TestFailingTestPrincipleMirroredInClaudeMD).
+// It is spliced into SystemPrompt right after "Test integrity" (see the
+// ` + failingTestPrinciple + ` above), keeping it in the "# How you work"
+// block, before debugWorkingStylePrinciple.
+const failingTestPrinciple = "Failing tests point at the code, not at themselves. When a test you did not write fails after your change, assume your code is wrong first; check the expected value against the test's own comments and setup before touching it. Change a pre-existing assertion only when the task itself requires the new behavior, never to make output you just produced pass, and name the changed assertion and its why in your summary."
 
 // memoryPromptSection is the full memory guidance — the four bullets plus the
 // outline/recall paragraph — appended to the system prompt only when there's
