@@ -1,24 +1,31 @@
 package main
 
-// indemote.go — the session-side wiring for in-turn demotion (issue #171).
+// indemote.go — the session-side wiring for in-turn demotion (issues #171,
+// #180).
 //
 // The pure selection policy lives in internal/cache (indemote.go):
-// cache.InTurnDemotionPolicy + cache.PlanInTurnDemotion decide WHICH tool
-// results to stub given a message list and a token estimator;
-// cache.InTurnStubContent renders the one-line stub. This file is the THIN
-// adapter that binds that policy to a live CortexSession:
+// cache.InTurnDemotionPolicy + cache.PlanInTurnDemotion (turn-only) and
+// cache.WholePromptBudget + cache.PlanWholePromptStubbing (whole-prompt,
+// issue #180) decide WHICH tool results to stub given a message list and a
+// token estimator; cache.InTurnStubContent renders the one-line stub. This
+// file is the THIN adapter that binds that policy to a live CortexSession:
 //
 //   - turnInTurnBudget() resolves the policy for the current window — the
 //     SAME high/low watermarks turn demotion uses (cs.Config's
 //     tailHighWatermark/tailDrainWatermark), enabled by context.in_turn_demotion
 //     (default on) and keepRecent (default 6).
-//   - applyInTurnDemotion(req, turnStart) runs the policy over the CURRENT
-//     turn's messages and, for each stubbed index, swaps req.Messages[i].Content
-//     for the one-line stub in place. Role and ToolCallID are preserved (the
-//     tool result still pairs with the assistant's tool call), and the
-//     transcript is NEVER touched — writeTranscript already recorded the
-//     original content, so recall(@session/<id>#m<i>-<i+1>) resolves the
-//     stubbed message to its full original output (see Recall, tool_deps.go).
+//   - applyInTurnDemotion(req, turnStart) runs the WHOLE-PROMPT policy over
+//     the full message list (prefix + previous turn + current turn) and, for
+//     each stubbed index, swaps req.Messages[i].Content for the one-line stub
+//     in place. The previous turn's span is [cs.ws.FrontierMsg(), turnStart)
+//     (the hydrated tail's newest span, which DemoteBatch never demotes);
+//     when cs.ws is nil or the span is empty (fresh session), the plan
+//     degrades to a turn-only plan over the current turn. Role and ToolCallID
+//     are preserved (the tool result still pairs with the assistant's tool
+//     call), and the transcript is NEVER touched — writeTranscript already
+//     recorded the original content, so
+//     recall(@session/<id>#m<i>-<i+1>) resolves the stubbed message to its
+//     full original output (see Recall, tool_deps.go).
 //
 // turn.go wires the hook:
 //
@@ -115,11 +122,21 @@ func activityLabelForCallID(msgs []Message, callID string) string {
 	return ""
 }
 
-// applyInTurnDemotion runs the in-turn policy over the current turn (the
-// messages from turnStart on) and, for each stubbed index, replaces
-// req.Messages[idx].Content with the one-line stub in place. It is the body of
-// the BeforeSend hook wired by turn(). Under budget (or disabled) it is a no-op
-// — the request goes out byte-for-byte as today.
+// applyInTurnDemotion runs the in-turn policy over the current turn AND the
+// previous turn (the hydrated tail's newest span) and, for each stubbed index,
+// replaces req.Messages[idx].Content with the one-line stub in place. It is the
+// body of the BeforeSend hook wired by turn(). Under budget (or disabled) it
+// is a no-op — the request goes out byte-for-byte as today.
+//
+// Issue #180: the policy now budgets the WHOLE prompt (prefix + tail + current
+// turn) against the high watermark, not the current turn alone. The previous
+// turn's span is [cs.ws.FrontierMsg(), turnStart) — the hydrated tail's newest
+// span, which DemoteBatch never demotes (it always keeps the most recent turn
+// hydrated). On resume that span comes back verbatim and can be large; the
+// whole-prompt plan stubs it after the current turn's candidates are exhausted.
+// When cs.ws is nil or the frontier span is empty (fresh session, no previous
+// turn), the plan degrades to a turn-only plan over the current turn —
+// byte-for-byte the same behavior as before.
 //
 // req is the live request slice runLoop re-sends each round; turning it into a
 // stubbed copy in place is what shrinks the next send. Only Content changes;
@@ -131,16 +148,14 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	if policy == nil {
 		return // in-turn demotion disabled → today's behavior, byte for byte
 	}
-	turn := req.Messages[turnStart:]
-	if len(turn) == 0 {
+	if turnStart >= len(req.Messages) {
 		return
 	}
-	// Map the turn's messages to the pure-policy shape and estimate each with
-	// the SAME chars/4 estimator turn-end demotion uses (estTurnTokens over a
-	// single message), so in-turn and turn-end demotion fire on consistent
-	// numbers.
-	msgs := make([]cache.Msg, len(turn))
-	for i, m := range turn {
+	// Map the WHOLE message list (not just the current turn) to the
+	// pure-policy shape, so the whole-prompt total includes the prefix
+	// (system, outline, older demoted turns) and the previous turn.
+	msgs := make([]cache.Msg, len(req.Messages))
+	for i, m := range req.Messages {
 		msgs[i] = inTurnMsg(m)
 	}
 	if cs.inTurnOriginals == nil {
@@ -164,11 +179,23 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 		// math tracks what actually shrinks (the Content swap).
 		return cache.TokensOf(len(m.Content) + len(m.ToolCallID))
 	}
-	stubbed := cache.PlanInTurnDemotion(msgs, estimator, *policy)
+	// Resolve the previous turn's span: [frontier, turnStart). When cs.ws is
+	// nil or the span is empty (frontier >= turnStart, i.e. no previous turn
+	// in the hydrated tail — a fresh session), the span is empty and the plan
+	// degrades to a turn-only plan over the current turn (byte-for-byte the
+	// same behavior as before #180).
+	prevStart, prevEnd := 0, turnStart
+	if cs.ws != nil {
+		frontier := cs.ws.FrontierMsg()
+		if frontier < turnStart {
+			prevStart, prevEnd = frontier, turnStart
+		}
+	}
+	budget := cache.WholePromptBudget{HighWM: policy.HighWM, LowWM: policy.LowWM}
+	stubbed := cache.PlanWholePromptStubbing(msgs, estimator, budget, policy.KeepRecent, prevStart, prevEnd)
 	for _, idx := range stubbed {
-		abs := turnStart + idx
-		m := &req.Messages[abs]
-		if _, seen := cs.inTurnOriginals[abs]; seen {
+		m := &req.Messages[idx]
+		if _, seen := cs.inTurnOriginals[idx]; seen {
 			continue // already recorded (a no-op re-stub of this index is impossible — the plan skips stubs — but the record is the source of truth either way)
 		}
 		// Record the ORIGINAL content before the swap: turn-end consumers
@@ -176,10 +203,10 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 		// the wire copy, so they see the original result, never the stub
 		// (issue #171 item 5). The transcript already holds it — this is the
 		// in-memory half.
-		cs.inTurnOriginals[abs] = m.Content
+		cs.inTurnOriginals[idx] = m.Content
 		label := activityLabelForCallID(req.Messages, m.ToolCallID)
 		m.Content = cache.InTurnStubContent(label, countLines(m.Content),
-			!isErrResult(m.Content), firstErrLine(m.Content), fmtCitation(cs.SessionID, abs))
+			!isErrResult(m.Content), firstErrLine(m.Content), fmtCitation(cs.SessionID, idx))
 	}
 }
 

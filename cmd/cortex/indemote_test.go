@@ -411,6 +411,232 @@ func TestApplyInTurnDemotionTwiceKeepsFirstStub(t *testing.T) {
 	}
 }
 
+// --- issue #180: whole-prompt in-turn demotion tests ---
+
+// indemoteSessionWithWS builds a session with a WorkingSet so the whole-prompt
+// plan can resolve the previous turn's span via cs.ws.FrontierMsg(). The
+// WorkingSet is initialized with the given base index (usually 1, the index
+// after the system message).
+func indemoteSessionWithWS(window int, base int) *CortexSession {
+	cs := &CortexSession{Window: window, SessionID: "test-session", Request: &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "sys"}}}}
+	cs.ws = cs.newWorkingSet(base)
+	return cs
+}
+
+// TestApplyInTurnDemotionSmallSessionUnchanged locks the byte-for-byte
+// guarantee for a small session: when the whole prompt is well under the high
+// watermark, nothing is stubbed — the request goes out untouched.
+func TestApplyInTurnDemotionSmallSessionUnchanged(t *testing.T) {
+	cs := indemoteSessionWithWS(120000, 1) // highWM 60000
+	turnStart := len(cs.Request.Messages)
+	// A modest turn: 4 results of 1000 chars ≈ 1000 tokens — well under 60000.
+	for i := 0; i < 4; i++ {
+		a, r := indemoteToolResult(i, 1000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+	before := cloneMessages(cs.Request.Messages)
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+	if !messagesEqual(cs.Request.Messages, before) {
+		t.Errorf("small session, the request was mutated; want byte-for-byte unchanged")
+	}
+}
+
+// TestApplyInTurnDemotionDisabledNothingStubbed locks that when
+// context.in_turn_demotion is false, applyInTurnDemotion is a complete no-op
+// even when the whole prompt is far over the high watermark.
+func TestApplyInTurnDemotionDisabledNothingStubbed(t *testing.T) {
+	cs := indemoteSessionWithWS(120000, 1) // highWM 60000
+	disabled := false
+	cs.Config = &Config{Context: ContextConfig{InTurnDemotion: &disabled}}
+	turnStart := len(cs.Request.Messages)
+	// 30 results of 12000 chars = 90000 tokens — far over the 60000 highWM.
+	for i := 0; i < 30; i++ {
+		a, r := indemoteToolResult(i, 12000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+	before := cloneMessages(cs.Request.Messages)
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+	if !messagesEqual(cs.Request.Messages, before) {
+		t.Errorf("in_turn_demotion:false, the request was mutated; want byte-for-byte unchanged (disabled = complete no-op)")
+	}
+}
+
+// TestApplyInTurnDemotionWholePromptEarlierTrigger locks the issue #180 fix:
+// the whole-prompt plan fires when the WHOLE prompt (prefix + tail + current
+// turn) exceeds the high watermark, even when the current turn ALONE is under
+// it. The previous turn's large tail pushes the total over; the turn-only
+// plan would see the current turn alone as under budget and do nothing.
+func TestApplyInTurnDemotionWholePromptEarlierTrigger(t *testing.T) {
+	cs := indemoteSessionWithWS(120000, 1) // highWM 60000, lowWM 40000, keepRecent 6
+	// Simulate a previous turn: 20 results of 12000 chars each = 60000 tokens.
+	// These are in the hydrated tail (the previous turn's span).
+	prevMsgs := []Message{}
+	for i := 0; i < 20; i++ {
+		a, r := indemoteToolResult(i, 12000)
+		prevMsgs = append(prevMsgs, a, r)
+	}
+	cs.Request.Messages = append(cs.Request.Messages, prevMsgs...)
+	// Register the previous turn in the WorkingSet so FrontierMsg() points to
+	// the start of the current turn.
+	cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: len(cs.Request.Messages)})
+
+	// Current turn: 4 results of 1000 chars ≈ 1000 tokens — well under 60000
+	// alone, but the whole prompt (60000 + 1000 + system) is over 60000.
+	turnStart := len(cs.Request.Messages)
+	for i := 0; i < 4; i++ {
+		a, r := indemoteToolResult(100+i, 1000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+
+	// The whole-prompt plan must have stubbed SOMETHING (the previous turn's
+	// large results, after the current turn's 4 candidates are exhausted —
+	// but with keepRecent 6 and only 4 current-turn results, all 4 are kept
+	// verbatim, so the stubs come from the previous turn).
+	stubbedInPrev := 0
+	for i := 1; i < turnStart; i++ {
+		if cs.Request.Messages[i].Role == RoleTool && strings.HasPrefix(cs.Request.Messages[i].Content, "[demoted:") {
+			stubbedInPrev++
+		}
+	}
+	if stubbedInPrev == 0 {
+		t.Fatal("no previous-turn results stubbed; the whole prompt is over highWM (prev 60000 + cur 1000) but the turn alone (1000) is under — the whole-prompt plan must have fired")
+	}
+}
+
+// TestApplyInTurnDemotionResumeLargeTail locks the resume scenario: after a
+// resume, the previous turn comes back verbatim in the hydrated tail and is
+// large. The whole-prompt plan stubs the previous turn's results (after the
+// current turn's candidates) to bring the prompt back under the low watermark.
+func TestApplyInTurnDemotionResumeLargeTail(t *testing.T) {
+	cs := indemoteSessionWithWS(120000, 1) // highWM 60000, lowWM 40000, keepRecent 6
+	// Previous turn (the hydrated tail): 20 results of 12000 chars = 60000 tokens.
+	prevMsgs := []Message{}
+	for i := 0; i < 20; i++ {
+		a, r := indemoteToolResult(i, 12000)
+		prevMsgs = append(prevMsgs, a, r)
+	}
+	cs.Request.Messages = append(cs.Request.Messages, prevMsgs...)
+	cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: len(cs.Request.Messages)})
+
+	// Current turn: 8 results of 10000 chars = 20000 tokens.
+	// Whole prompt: 60000 + 20000 + system ≈ 80000 > highWM 60000.
+	// Drain: 2 current-turn candidates (8 - keepRecent 6) × ~2500 tokens saved
+	// = ~5000 → still over. Then previous-turn candidates (14 of 20) × ~3000
+	// tokens saved → reaches lowWM 40000.
+	turnStart := len(cs.Request.Messages)
+	for i := 0; i < 8; i++ {
+		a, r := indemoteToolResult(100+i, 10000)
+		cs.Request.Messages = append(cs.Request.Messages, a, r)
+	}
+
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+
+	// The current turn's oldest results must be stubbed first (keepRecent 6
+	// keeps the newest 6 verbatim).
+	curToolIdx := []int{}
+	for i := turnStart; i < len(cs.Request.Messages); i++ {
+		if cs.Request.Messages[i].Role == RoleTool {
+			curToolIdx = append(curToolIdx, i)
+		}
+	}
+	// The first 2 current-turn results (8 - keepRecent 6 = 2 candidates) must
+	// be stubbed.
+	for j := 0; j < 2; j++ {
+		idx := curToolIdx[j]
+		if !strings.HasPrefix(cs.Request.Messages[idx].Content, "[demoted:") {
+			t.Errorf("current-turn result %d (index %d) not stubbed; the whole-prompt plan stubs current-turn oldest first", j, idx)
+		}
+	}
+	// The previous turn's oldest results must also be stubbed (after the
+	// current turn's candidates are exhausted).
+	prevStubbed := 0
+	for i := 1; i < turnStart; i++ {
+		if cs.Request.Messages[i].Role == RoleTool && strings.HasPrefix(cs.Request.Messages[i].Content, "[demoted:") {
+			prevStubbed++
+		}
+	}
+	if prevStubbed == 0 {
+		t.Errorf("no previous-turn results stubbed; the drain should continue into the previous turn after the current turn's candidates")
+	}
+}
+
+// TestApplyInTurnDemotionRecallStubbedPrevTurnResult locks that a stubbed
+// previous-turn result's recall citation resolves to the original content
+// (the transcript was written before the stub, so recall returns the
+// original, not the stub).
+func TestApplyInTurnDemotionRecallStubbedPrevTurnResult(t *testing.T) {
+	dir := t.TempDir()
+	ws, err := NewWorkspace(dir)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	if err := os.MkdirAll(ws.SessionsDir(), 0755); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
+	cs := &CortexSession{workspace: ws, Window: 120000, SessionID: "test-session", Request: &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "sys"}}}}
+	cs.ws = cs.newWorkingSet(1)
+	f, err := openTranscript(filepath.Join(ws.SessionsDir(), cs.SessionID+".jsonl"), os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	defer f.Close()
+	cs.transcript = f
+	cs.writeTranscript(cs.Request.Messages[0])
+
+	// Previous turn: 20 results of 12000 chars = 60000 tokens.
+	for i := 0; i < 20; i++ {
+		a, r := indemoteToolResult(i, 12000)
+		cs.Append(a)
+		cs.Append(r)
+	}
+	cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: len(cs.Request.Messages)})
+
+	// Current turn: 4 results of 1000 chars.
+	turnStart := len(cs.Request.Messages)
+	for i := 0; i < 4; i++ {
+		a, r := indemoteToolResult(100+i, 1000)
+		cs.Append(a)
+		cs.Append(r)
+	}
+
+	cs.applyInTurnDemotion(cs.Request, turnStart)
+
+	// Find a stubbed previous-turn result on the wire.
+	prevStubIdx := -1
+	prevStubOrig := ""
+	for i := 1; i < turnStart; i++ {
+		m := cs.Request.Messages[i]
+		if m.Role == RoleTool && strings.HasPrefix(m.Content, "[demoted:") {
+			prevStubIdx = i
+			prevStubOrig = cs.inTurnOriginals[i]
+			break
+		}
+	}
+	if prevStubIdx < 0 {
+		t.Fatal("no previous-turn result was stubbed; the test cannot exercise the recall path")
+	}
+	if prevStubOrig == "" {
+		t.Fatal("no original recorded for the stubbed previous-turn result")
+	}
+	// Recall the stub's citation: it must return the ORIGINAL content.
+	cite := fmtCitation(cs.SessionID, prevStubIdx)
+	if !strings.Contains(cs.Request.Messages[prevStubIdx].Content, "recall "+cite) {
+		t.Errorf("stub at index %d does not carry its citation %q", prevStubIdx, cite)
+	}
+	got, err := cs.Recall(cite)
+	if err != nil {
+		t.Fatalf("Recall(%s): %v", cite, err)
+	}
+	if strings.Contains(got, "[demoted:") {
+		t.Errorf("Recall of %s returned the STUB, not the original — the transcript must keep the original content", cite)
+	}
+	if !strings.Contains(got, prevStubOrig) {
+		t.Errorf("Recall of %s did not return the original content", cite)
+	}
+}
+
 // --- helpers ---
 
 // ritoa is int→string for citation/index formatting in fixtures (the

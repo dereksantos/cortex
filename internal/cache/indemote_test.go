@@ -41,6 +41,24 @@ func mkTurn(n, sizeChars int, tool string) ([]Msg, []int) {
 	return msgs, toolIdx
 }
 
+// sumEstimates totals the estimator over msgs — the whole-prompt estimate the
+// whole-prompt plan budgets against.
+func sumEstimates(msgs []Msg) int {
+	total := 0
+	for _, m := range msgs {
+		total += testMsgEstimator(m)
+	}
+	return total
+}
+
+// planWholePrompt is PlanWholePromptStubbing with the previous span empty
+// (previousStart == previousEnd == 0), so the current turn is the ENTIRE
+// message list. This is the "no previous turn" (fresh session) case: the
+// plan degrades to a turn-only plan over msgs.
+func planWholePrompt(msgs []Msg, budget WholePromptBudget, keepRecent int) []int {
+	return PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, 0, 0)
+}
+
 func TestPlanInTurnDemotion(t *testing.T) {
 	const sessionID = "20260701-143210"
 
@@ -283,6 +301,250 @@ func TestInTurnStubContent(t *testing.T) {
 		want := "[demoted: bash → 3 lines, error. recall " + citation + " for the full output]"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+}
+
+// TestPlanWholePromptStubbing covers the issue #180 variant: the budget is the
+// WHOLE prompt (prefix + hydrated tail + current turn), and the previous
+// turn's tool results become candidates once the current turn's are exhausted.
+// Layout everywhere: [system | previous turn | current turn], where the
+// previous turn is the most recent completed turn (the tail's newest span) and
+// the current turn ends at len(msgs).
+// TestPlanWholePromptStubbing covers the issue #180 variant: the budget is the
+// WHOLE prompt (prefix + hydrated tail + current turn), and the previous
+// turn's tool results become candidates once the current turn's are exhausted.
+// Layout everywhere: [system | previous turn | current turn], where the
+// previous turn is the most recent completed turn (the tail's newest span) and
+// the current turn ends at len(msgs).
+func TestPlanWholePromptStubbing(t *testing.T) {
+	const (
+		sessionID     = "20260701-143210"
+		highWM, lowWM = 65536, 43690
+		keepRecent    = 2
+	)
+	budget := WholePromptBudget{HighWM: highWM, LowWM: lowWM}
+	system := Msg{Role: "system", Content: strings.Repeat("y", 4000)}
+
+	t.Run("small session: under the high watermark, nothing stubbed", func(t *testing.T) {
+		prev, _ := mkTurn(2, 1000, "read_file")
+		cur, _ := mkTurn(2, 1000, "bash")
+		msgs := append(append([]Msg{system}, prev...), cur...)
+		prevEnd := 1 + len(prev)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, 1, prevEnd)
+		if len(stubbed) != 0 {
+			t.Errorf("stubbed %d indices, want 0 (whole prompt under budget)", len(stubbed))
+		}
+	})
+
+	t.Run("exactly at the high watermark: nothing stubbed", func(t *testing.T) {
+		build := func(size int) []Msg {
+			c, _ := mkTurn(1, size, "bash")
+			return append([]Msg{system}, c...)
+		}
+		base := sumEstimates(build(0))
+		// one result: content = size + "#0" = size+2 chars, est = (size+2)/4
+		// total = base + (size+2)/4 = highWM → size = 4*(highWM-base) - 2
+		// Adjust for floor division: use binary search for exactness.
+		size := 4*(highWM-base) - 2
+		for delta := 0; delta < 4; delta++ {
+			if sumEstimates(build(size+delta)) == highWM {
+				size += delta
+				break
+			}
+		}
+		if sumEstimates(build(size)) != highWM {
+			t.Fatalf("fixture: cannot land exactly on highWM (base %d)", base)
+		}
+		msgs := build(size)
+		if total := sumEstimates(msgs); total != highWM {
+			t.Fatalf("fixture estimate %d != highWM %d (base %d size %d)", total, highWM, base, size)
+		}
+		stubbed := planWholePrompt(msgs, budget, keepRecent)
+		if len(stubbed) != 0 {
+			t.Errorf("stubbed %d at exactly highWM; want 0 (fires only when strictly over)", len(stubbed))
+		}
+	})
+
+	t.Run("large tail: stubs earlier than turn-alone", func(t *testing.T) {
+		// prev: 16×8000 (~32k tok), cur: 8×18000 (~36k tok), sys ~1k.
+		// Whole: ~69k > highWM. Cur alone: ~36k < highWM. ✓
+		// Drain: 6 cur stubs (~18k saved) + 12 prev stubs (~24k saved) =
+		// ~42k saved → post ~27k < lowWM. ✓
+		prev, prevIdx := mkTurn(16, 8000, "read_file")
+		cur, curIdx := mkTurn(8, 18000, "bash")
+		msgs := append(append([]Msg{system}, prev...), cur...)
+		prevStart, prevEnd := 1, 1+len(prev)
+
+		if n := len(PlanInTurnDemotion(cur, testMsgEstimator, InTurnDemotionPolicy{HighWM: highWM, LowWM: lowWM, KeepRecent: keepRecent, SessionID: sessionID})); n != 0 {
+			t.Fatalf("fixture: cur alone stubbed %d; must be under highWM", n)
+		}
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd)
+		if len(stubbed) == 0 {
+			t.Fatal("nothing stubbed; whole prompt over highWM, turn alone under")
+		}
+		// Order: cur oldest-first (minus keepRecent), then prev oldest-first.
+		// curIdx is local to cur; offset by prevEnd for global index.
+		curCands := make([]int, len(curIdx)-keepRecent)
+		for i := range curCands {
+			curCands[i] = prevEnd + curIdx[i]
+		}
+		prevCands := make([]int, len(prevIdx)-keepRecent)
+		for i := range prevCands {
+			prevCands[i] = prevStart + prevIdx[i]
+		}
+		wantOrder := append(append([]int{}, curCands...), prevCands...)
+		for i := range stubbed {
+			if i >= len(wantOrder) {
+				t.Fatalf("stubbed %d, want ≤ %d", len(stubbed), len(wantOrder))
+			}
+			if stubbed[i] != wantOrder[i] {
+				t.Fatalf("stubbed[%d]=%d want %d", i, stubbed[i], wantOrder[i])
+			}
+		}
+		// keepRecent newest of cur must not be stubbed.
+		stubSet := map[int]bool{}
+		for _, idx := range stubbed {
+			stubSet[idx] = true
+		}
+		for k := 1; k <= keepRecent; k++ {
+			if stubSet[curIdx[len(curIdx)-k]] {
+				t.Errorf("cur's %d-th newest stubbed; keepRecent must stay", k)
+			}
+		}
+		apply := applyStubs(msgs, stubbed, testMsgEstimator, InTurnDemotionPolicy{SessionID: sessionID})
+		if total := sumEstimates(apply); total > lowWM {
+			t.Errorf("post-stub %d > lowWM %d", total, lowWM)
+		}
+	})
+
+	t.Run("previous turn stubbed only after current turn's candidates", func(t *testing.T) {
+		// prev: 16×20000 (~64k tok), cur: 3×20000 (~12k tok), sys ~1k.
+		// Whole: ~77k > highWM. Cur candidates: 2 (keepRecent 1).
+		// Drain: 2 cur stubs (~8k saved) + ~6 prev stubs (~24k saved) =
+		// ~32k saved → post ~45k. Slightly over lowWM. Use 20000 chars.
+		// Actually: 77k - 32k = 45k > 43690. Need more stubs.
+		// 2 cur + 8 prev = ~40k saved → post ~37k < lowWM. ✓
+		prev, prevIdx := mkTurn(16, 20000, "read_file")
+		cur, curIdx := mkTurn(3, 20000, "bash")
+		msgs := append(append([]Msg{{Role: "system", Content: strings.Repeat("y", 4000)}}, prev...), cur...)
+		prevStart, prevEnd := 1, 1+len(prev)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, 1, prevStart, prevEnd)
+		if len(stubbed) == 0 {
+			t.Fatal("nothing stubbed; whole prompt far over highWM")
+		}
+		// Order: cur's oldest stubbable first (keepRecent 1 excludes the
+		// newest), then prev's oldest stubbable (keepRecent 1 excludes the
+		// newest). curIdx is local to cur; offset by prevEnd for global.
+		curCands := make([]int, len(curIdx)-1)
+		for i := range curCands {
+			curCands[i] = prevEnd + curIdx[i]
+		}
+		prevCands := make([]int, len(prevIdx)-1)
+		for i := range prevCands {
+			prevCands[i] = prevStart + prevIdx[i]
+		}
+		want := append(append([]int{}, curCands...), prevCands...)
+		if len(stubbed) > len(want) {
+			t.Fatalf("stubbed %d, want ≤ %d (keepRecent 1 per span)", len(stubbed), len(want))
+		}
+		for i, idx := range stubbed {
+			if idx != want[i] {
+				t.Fatalf("stubbed[%d]=%d want %d (cur first, then prev oldest-first)", i, idx, want[i])
+			}
+		}
+		if len(stubbed) <= 2 {
+			t.Fatalf("only %d stubbed (all cur); prev must follow", len(stubbed))
+		}
+		stubSet := map[int]bool{}
+		for _, idx := range stubbed {
+			stubSet[idx] = true
+		}
+		if stubSet[prevIdx[len(prevIdx)-1]] {
+			t.Errorf("prev's newest (keepRecent) stubbed")
+		}
+		if stubSet[curIdx[2]] {
+			t.Errorf("cur's newest (keepRecent) stubbed")
+		}
+	})
+
+	t.Run("drain reaches the low watermark across both spans", func(t *testing.T) {
+		prev, _ := mkTurn(16, 20000, "read_file")
+		cur, _ := mkTurn(16, 20000, "bash")
+		msgs := append(append([]Msg{{Role: "system", Content: "sys"}}, prev...), cur...)
+		prevStart, prevEnd := 1, 1+len(prev)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd)
+		if len(stubbed) == 0 {
+			t.Fatal("nothing stubbed; whole prompt far over highWM")
+		}
+		apply := applyStubs(msgs, stubbed, testMsgEstimator, InTurnDemotionPolicy{SessionID: sessionID})
+		if total := sumEstimates(apply); total > lowWM {
+			t.Errorf("post-stub %d > lowWM %d; drain must reach lowWM", total, lowWM)
+		}
+	})
+
+	t.Run("already-stubbed results excluded but count toward total", func(t *testing.T) {
+		// prev: 20×20000 (~80k tok), cur: 2×20000 (~8k tok), sys ~1k.
+		// Whole: ~89k > highWM. The two oldest prev results are pre-stubbed.
+		// Cur candidates: 1 (keepRecent 1). Prev candidates: 18 (20 - 2 stubbed - 1 keepRecent).
+		// Drain: 1 cur stub (~4k saved) + ~6 prev stubs (~24k saved) = ~28k saved.
+		// Post: ~89k - 28k = ~61k. Still over lowWM. Need more stubs.
+		// 1 cur + 12 prev = ~52k saved → post ~37k < lowWM. ✓
+		prev, prevIdx := mkTurn(20, 20000, "read_file")
+		cur, _ := mkTurn(2, 20000, "bash")
+		msgs := append(append([]Msg{{Role: "system", Content: strings.Repeat("y", 4000)}}, prev...), cur...)
+		prevStart, prevEnd := 1, 1+len(prev)
+		// Stub the two oldest prev results (simulating a prior process).
+		// prevIdx is local to prev; offset by prevStart for global index.
+		gPrev0 := prevStart + prevIdx[0]
+		gPrev1 := prevStart + prevIdx[1]
+		msgs[gPrev0].Content = InTurnStubContent("read_file(a.go)", 240, false, "Error: exit 1", citationFor(msgs, gPrev0, sessionID))
+		msgs[gPrev1].Content = InTurnStubContent("read_file(b.go)", 12, true, "", citationFor(msgs, gPrev1, sessionID))
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, 1, prevStart, prevEnd)
+		if len(stubbed) == 0 {
+			t.Fatal("nothing stubbed; whole prompt over highWM (existing stubs count)")
+		}
+		for _, idx := range stubbed {
+			if idx == gPrev0 || idx == gPrev1 {
+				t.Errorf("already-stubbed result %d re-stubbed", idx)
+			}
+		}
+		// After cur's 1 candidate, next must be the next verbatim prev result.
+		gPrev2 := prevStart + prevIdx[2]
+		if len(stubbed) > 1 && stubbed[1] != gPrev2 {
+			t.Errorf("stubbed[1]=%d want %d (next verbatim prev)", stubbed[1], gPrev2)
+		}
+	})
+
+	t.Run("no previous span: degrades to turn-only plan", func(t *testing.T) {
+		// 30×20000 (~120k tok > highWM). Empty prev span (0,0).
+		msgs, toolIdx := mkTurn(30, 20000, "bash")
+		if n := len(PlanWholePromptStubbing(msgs, testMsgEstimator, WholePromptBudget{}, keepRecent, 0, 0)); n != 0 {
+			t.Fatalf("zero budget stubbed %d; must be 0", n)
+		}
+		stubbed := planWholePrompt(msgs, budget, keepRecent)
+		turnOnly := PlanInTurnDemotion(msgs, testMsgEstimator, InTurnDemotionPolicy{HighWM: highWM, LowWM: lowWM, KeepRecent: keepRecent, SessionID: sessionID})
+		if len(stubbed) != len(turnOnly) {
+			t.Fatalf("empty prev span stubbed %d, turn-only %d; must match", len(stubbed), len(turnOnly))
+		}
+		for i, idx := range stubbed {
+			if idx != turnOnly[i] {
+				t.Errorf("stubbed[%d]=%d want %d", i, idx, turnOnly[i])
+			}
+			if idx != toolIdx[i] {
+				t.Errorf("stubbed[%d]=%d want %d (oldest first)", i, idx, toolIdx[i])
+			}
+		}
+	})
+
+	t.Run("no stubbable results: nil even over budget", func(t *testing.T) {
+		prev, _ := mkTurn(2, 100000, "read_file")
+		cur, _ := mkTurn(2, 100000, "bash")
+		msgs := append(append([]Msg{{Role: "system", Content: "sys"}}, prev...), cur...)
+		prevStart, prevEnd := 1, 1+len(prev)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd)
+		if len(stubbed) != 0 {
+			t.Errorf("stubbed %d, want 0 (nothing older than keepRecent)", len(stubbed))
 		}
 	})
 }

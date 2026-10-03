@@ -168,3 +168,138 @@ func InTurnStubContent(toolLabel string, sizeLines int, ok bool, firstErrLine, c
 	b += "]"
 	return b
 }
+
+// WholePromptBudget is the whole-prompt in-turn demotion budget (issue #180).
+// HighWM/LowWM are the same hydrated-tail watermarks as InTurnDemotionPolicy
+// (the high watermark fires, the low watermark is the drain target); the
+// difference is what is measured against them: the ENTIRE prompt (prefix +
+// hydrated tail + the current turn), not the current turn alone.
+type WholePromptBudget struct {
+	HighWM int
+	LowWM  int
+}
+
+// PlanWholePromptStubbing returns the indices (into msgs) of the tool results
+// that should be stubbed, in oldest-first order. Empty (nil) means the prompt
+// is under the high watermark and nothing changes — byte for byte, as
+// required.
+//
+// Issue #180: PlanInTurnDemotion budgets the CURRENT TURN only, which has two
+// gaps. (1) On resume, the previous turn comes back verbatim in the hydrated
+// tail — DemoteBatch never demotes the most recent turn — and nothing ever
+// shrinks it before the next turn's first send. (2) A turn that STARTS with a
+// large tail in the prompt can grow by up to another high-watermark's worth
+// before the turn-only budget fires, which is past the window. This plan
+// closes both: it fires from the WHOLE prompt's estimated size (prefix + tail
+// + current turn) against HighWM, and drains oldest-first in two phases — the
+// current turn's stubbable tool results FIRST (keeping #172's selection order),
+// then the PREVIOUS turn's — until the projected whole-prompt estimate is at
+// or under LowWM or no candidates remain.
+//
+// msgs is the full message list; [previousStart, previousEnd) is the
+// previous turn's span (the most recent completed turn, the tail's newest
+// span) and [previousEnd, len(msgs)) the current turn; anything before
+// previousStart (system messages, outline block, older demoted turns) is
+// counted in the whole-prompt total but never stubbed. An empty previous
+// span (previousStart == previousEnd, i.e. no previous turn — a fresh
+// session) degrades exactly to a turn-only plan over msgs.
+//
+// It never stubs, per SPAN:
+//   - any message that is not role:"tool" (user messages and assistant
+//     messages stay verbatim, as in #172), or
+//   - the most recent keepRecent tool results of THAT span (the carve-out is
+//     per span, not global — the previous turn's newest results are protected
+//     independently of the current turn's), or
+//   - a tool result that an earlier send already stubbed (Content already
+//     carries InTurnStubPrefix). Stubs still count toward the total, so they
+//     contribute to the over-budget test.
+//
+// The estimate is recomputed after each stub (its content shrinks to the
+// short stub line), so the drain is measured against the real post-stub
+// size, not the pre-stub size.
+func PlanWholePromptStubbing(msgs []Msg, estimator func(Msg) int, budget WholePromptBudget, keepRecent, previousStart, previousEnd int) []int {
+	if budget.HighWM <= 0 || budget.LowWM <= 0 || len(msgs) == 0 {
+		return nil
+	}
+	// Clamp the spans into the message list.
+	if previousEnd > len(msgs) {
+		previousEnd = len(msgs)
+	}
+	if previousStart < 0 {
+		previousStart = 0
+	}
+	if previousStart > previousEnd {
+		previousStart, previousEnd = previousEnd, previousStart
+	}
+	currentStart := previousEnd
+
+	// The whole-prompt total: every message, including the prefix before
+	// previousStart (system, outline, older demoted turns).
+	total := 0
+	for _, m := range msgs {
+		total += estimator(m)
+	}
+	if total <= budget.HighWM {
+		return nil // whole prompt under budget: byte-for-byte unchanged
+	}
+
+	// Phase 1: the current turn's stubbable tool results, oldest-first, with
+	// the current turn's own keepRecent carve-out (its newest results stay
+	// verbatim).
+	var candidates []int
+	for i := currentStart; i < len(msgs); i++ {
+		if msgs[i].Role != "tool" {
+			continue
+		}
+		if strings.HasPrefix(msgs[i].Content, InTurnStubPrefix) {
+			continue // already stubbed — never re-stub the stub text
+		}
+		candidates = append(candidates, i)
+	}
+	if keepRecent < len(candidates) {
+		candidates = candidates[:len(candidates)-keepRecent]
+	} else {
+		candidates = nil
+	}
+
+	// Phase 2: the previous turn's, with the previous turn's own carve-out.
+	// This keeps #172's selection order: the current turn's oldest results
+	// always go first, the previous turn's only after.
+	var prevCands []int
+	for i := previousStart; i < previousEnd; i++ {
+		if msgs[i].Role != "tool" {
+			continue
+		}
+		if strings.HasPrefix(msgs[i].Content, InTurnStubPrefix) {
+			continue
+		}
+		prevCands = append(prevCands, i)
+	}
+	if keepRecent < len(prevCands) {
+		prevCands = prevCands[:len(prevCands)-keepRecent]
+	} else {
+		prevCands = nil
+	}
+	candidates = append(candidates, prevCands...)
+	if len(candidates) == 0 {
+		return nil // nothing old enough to stub (both spans within keepRecent)
+	}
+
+	stubbed := []int{}
+	// Stub oldest-first, re-measuring after each, until at or under LowWM or
+	// no candidates remain.
+	for _, i := range candidates {
+		if total <= budget.LowWM {
+			break
+		}
+		// Estimate the stub size: the same role/tool-call-id overhead plus the
+		// short stub content in place of the original. (SessionID is unknown
+		// to the pure policy; the citation the real stub carries is a few
+		// extra tokens, absorbed by the low-watermark margin.)
+		stubContent := InTurnStubContent(msgs[i].ToolName, 0, false, "", "")
+		total += estimator(Msg{Role: "tool", Content: stubContent, ToolCallID: msgs[i].ToolCallID, ToolName: msgs[i].ToolName})
+		total -= estimator(msgs[i])
+		stubbed = append(stubbed, i)
+	}
+	return stubbed
+}
