@@ -246,15 +246,15 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
 	// Issue #171 + #180: in-turn demotion. Before each main-loop send, shrink
-	// the whole prompt (previous turn + current turn, oldest first, keepRecent
+	// the whole prompt (hydrated tail + current turn, oldest first, keepRecent
 	// stay verbatim, drain to the low watermark) so a long turn — or a resumed
 	// session with a large hydrated tail — cannot overflow the window before
 	// the next request is built. The hook mutates req in place
 	// (applyInTurnDemotion); under budget it is a byte-for-byte no-op.
-	// turnStart bounds the current turn's span; the previous turn's span is
-	// [cs.ws.FrontierMsg(), turnStart) (the hydrated tail's newest span, which
-	// DemoteBatch never demotes). Subagent callers build their own Toolset
-	// without this hook, so only the coder turn gets it.
+	// turnStart bounds the current turn's span; the hydrated tail's span is
+	// [cs.ws.FrontierMsg(), turnStart) (which may span several turns).
+	// Subagent callers build their own Toolset without this hook, so only the
+	// coder turn gets it.
 	ts.BeforeSend = func(req *AgentRequest) {
 		cs.applyInTurnDemotion(req, turnStart)
 	}

@@ -123,20 +123,27 @@ func activityLabelForCallID(msgs []Message, callID string) string {
 }
 
 // applyInTurnDemotion runs the in-turn policy over the current turn AND the
-// previous turn (the hydrated tail's newest span) and, for each stubbed index,
+// hydrated tail (the tail's spans are never demoted by DemoteBatch, so the
+// span may hold several turns) and, for each stubbed index,
 // replaces req.Messages[idx].Content with the one-line stub in place. It is the
 // body of the BeforeSend hook wired by turn(). Under budget (or disabled) it
 // is a no-op — the request goes out byte-for-byte as today.
 //
-// Issue #180: the policy now budgets the WHOLE prompt (prefix + tail + current
-// turn) against the high watermark, not the current turn alone. The previous
-// turn's span is [cs.ws.FrontierMsg(), turnStart) — the hydrated tail's newest
-// span, which DemoteBatch never demotes (it always keeps the most recent turn
-// hydrated). On resume that span comes back verbatim and can be large; the
-// whole-prompt plan stubs it after the current turn's candidates are exhausted.
-// When cs.ws is nil or the frontier span is empty (fresh session, no previous
-// turn), the plan degrades to a turn-only plan over the current turn —
-// byte-for-byte the same behavior as before.
+// Issue #180: the policy now budgets the WHOLE prompt (wire prefix + hydrated
+// tail + current turn) against the high watermark, not the current turn alone.
+// Only what wireMessages actually sends is counted: the wire prefix
+// [0, PrefixEnd) and the tail+turn messages [TailFrom, len) are summed
+// directly, and the injected OutlineBlock and EphemeralSystem are added as a
+// precomputed fixed token count — the demoted region [PrefixEnd, TailFrom)
+// is NOT sent (the outline stands in for it) and is never counted. The
+// hydrated tail's span is [cs.ws.FrontierMsg(), turnStart); on resume it
+// comes back verbatim and can be large — the whole-prompt plan stubs it after
+// the current turn's candidates are exhausted. When cs.ws is nil or the span
+// is empty (fresh session, no hydrated tail), the plan degrades to a
+// turn-only plan over the current turn — byte-for-byte the same behavior as
+// before. Messages before the wire prefix (the compacted summary and other
+// pre-base content) are never stubbable: the fixed count carries their tokens,
+// not their contents.
 //
 // req is the live request slice runLoop re-sends each round; turning it into a
 // stubbed copy in place is what shrinks the next send. Only Content changes;
@@ -151,15 +158,40 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	if turnStart >= len(req.Messages) {
 		return
 	}
-	// Map the WHOLE message list (not just the current turn) to the
-	// pure-policy shape, so the whole-prompt total includes the prefix
-	// (system, outline, older demoted turns) and the previous turn.
-	msgs := make([]cache.Msg, len(req.Messages))
-	for i, m := range req.Messages {
-		msgs[i] = inTurnMsg(m)
-	}
 	if cs.inTurnOriginals == nil {
 		cs.inTurnOriginals = map[int]string{}
+	}
+	// The STUBBABLE region is exactly what wireMessages sends after the wire
+	// prefix: req.Messages[TailFrom:], clamped into [PrefixEnd, len) the same
+	// way composeWire does. The hydrated tail's span is [frontier, turnStart)
+	// inside it; when cs.ws is nil or the span is empty (fresh session — no
+	// hydrated tail yet), the span stays empty and the plan degrades to a
+	// turn-only plan over the current turn (byte-for-byte the same behavior
+	// as before #180). A frontier past turnStart (possible only if the log
+	// shrank mid-turn) degrades the same way: nothing before the current
+	// turn is stubbable — never the wire prefix.
+	prefixEnd := req.PrefixEnd
+	if prefixEnd < 1 {
+		prefixEnd = 1
+	}
+	if prefixEnd > len(req.Messages) {
+		prefixEnd = len(req.Messages)
+	}
+	tailFrom := req.TailFrom
+	if tailFrom < prefixEnd {
+		tailFrom = prefixEnd
+	}
+	if tailFrom > len(req.Messages) {
+		tailFrom = len(req.Messages)
+	}
+	if turnStart < tailFrom {
+		tailFrom = turnStart
+	}
+	prevStart, prevEnd := turnStart, turnStart // empty by default → turn-only
+	if cs.ws != nil {
+		if frontier := cs.ws.FrontierMsg(); frontier >= tailFrom && frontier < turnStart {
+			prevStart, prevEnd = frontier, turnStart
+		}
 	}
 	// Entries stay in the map until their OWNING turn is demoted (turn.go
 	// deletes them when it builds the demoted span's outline entry), NOT
@@ -172,30 +204,28 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	// ResumeTranscript), because the indices shift there. In the normal
 	// append-only flow it therefore holds at most one turn's worth of
 	// content per demotion cycle — bounded, no leak.
-	estimator := func(m cache.Msg) int {
-		// Mirror estTurnTokens: a tool result carries the tool-call-id overhead
-		// on the wire; assistant tool calls add name+args, but those are not in
-		// Content — keep the estimate to Content + tool-call-id so the drain
-		// math tracks what actually shrinks (the Content swap).
-		return cache.TokensOf(len(m.Content) + len(m.ToolCallID))
+	// Map ONLY the stubbable region (the hydrated tail + current turn) to the
+	// pure-policy shape; the policy's whole-prompt total is the precomputed
+	// fixed part (below) plus these, and the stubbed indices it returns are
+	// relative to this slice.
+	msgs := make([]cache.Msg, len(req.Messages)-tailFrom)
+	for i := range msgs {
+		msgs[i] = inTurnMsg(req.Messages[tailFrom+i])
 	}
-	// Resolve the previous turn's span: [frontier, turnStart). When cs.ws is
-	// nil or the span is empty (frontier >= turnStart, i.e. no previous turn
-	// in the hydrated tail — a fresh session), the span is empty and the plan
-	// degrades to a turn-only plan over the current turn (byte-for-byte the
-	// same behavior as before #180).
-	prevStart, prevEnd := 0, turnStart
-	if cs.ws != nil {
-		frontier := cs.ws.FrontierMsg()
-		if frontier < turnStart {
-			prevStart, prevEnd = frontier, turnStart
-		}
-	}
+	// The fixed part: the non-stubbable tokens that still go on the wire —
+	// the wire prefix [0, prefixEnd) plus the injected outline and ephemeral
+	// blocks. The demoted region [prefixEnd, tailFrom) is deliberately
+	// EXCLUDED: wireMessages sends it as the outline block, which is counted
+	// in the fixed part — counting the raw demoted messages on top of it
+	// would keep the total over the high watermark forever, whatever is
+	// actually sent.
+	fixed := wirePrefixEstimate(req, prefixEnd)
 	budget := cache.WholePromptBudget{HighWM: policy.HighWM, LowWM: policy.LowWM}
-	stubbed := cache.PlanWholePromptStubbing(msgs, estimator, budget, policy.KeepRecent, prevStart, prevEnd)
+	stubbed := cache.PlanWholePromptStubbing(msgs, inTurnEstimator, budget, policy.KeepRecent, prevStart-tailFrom, prevEnd-tailFrom, fixed)
 	for _, idx := range stubbed {
-		m := &req.Messages[idx]
-		if _, seen := cs.inTurnOriginals[idx]; seen {
+		abs := tailFrom + idx
+		m := &req.Messages[abs]
+		if _, seen := cs.inTurnOriginals[abs]; seen {
 			continue // already recorded (a no-op re-stub of this index is impossible — the plan skips stubs — but the record is the source of truth either way)
 		}
 		// Record the ORIGINAL content before the swap: turn-end consumers
@@ -203,11 +233,39 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 		// the wire copy, so they see the original result, never the stub
 		// (issue #171 item 5). The transcript already holds it — this is the
 		// in-memory half.
-		cs.inTurnOriginals[idx] = m.Content
+		cs.inTurnOriginals[abs] = m.Content
 		label := activityLabelForCallID(req.Messages, m.ToolCallID)
 		m.Content = cache.InTurnStubContent(label, countLines(m.Content),
-			!isErrResult(m.Content), firstErrLine(m.Content), fmtCitation(cs.SessionID, idx))
+			!isErrResult(m.Content), firstErrLine(m.Content), fmtCitation(cs.SessionID, abs))
 	}
+}
+
+// inTurnEstimator is the per-message token estimate the in-turn policy
+// reasons over: mirror estTurnTokens — a tool result carries the tool-call-id
+// overhead on the wire; assistant tool calls add name+args, but those are not
+// in Content — keep the estimate to Content + tool-call-id so the drain math
+// tracks what actually shrinks (the Content swap).
+func inTurnEstimator(m cache.Msg) int {
+	return cache.TokensOf(len(m.Content) + len(m.ToolCallID))
+}
+
+// wirePrefixEstimate is the whole-prompt estimate of the NON-STUBBABLE part
+// of the wire: the wire prefix [0, prefixEnd) (the system message and any
+// pre-base content) plus the injected OutlineBlock and EphemeralSystem. It is
+// the fixed token count applyInTurnDemotion passes to the pure policy, which
+// adds its per-message estimates for the stubbable region on top — the sum
+// tracks what wireMessages actually sends, with the demoted region
+// [prefixEnd, tailFrom) counted once (as the outline block), never twice.
+func wirePrefixEstimate(req *AgentRequest, prefixEnd int) int {
+	sum := 0
+	for _, m := range req.Messages[:prefixEnd] {
+		sum += len(m.Content)
+		for _, call := range m.ToolCalls {
+			sum += len(call.Function.Name) + len(call.Function.Arguments)
+		}
+	}
+	sum += len(req.OutlineBlock) + len(req.EphemeralSystem)
+	return cache.TokensOf(sum)
 }
 
 // turnOriginalSpan copies req.Messages[start:end] with the original content

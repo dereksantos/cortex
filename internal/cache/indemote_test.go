@@ -56,7 +56,7 @@ func sumEstimates(msgs []Msg) int {
 // message list. This is the "no previous turn" (fresh session) case: the
 // plan degrades to a turn-only plan over msgs.
 func planWholePrompt(msgs []Msg, budget WholePromptBudget, keepRecent int) []int {
-	return PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, 0, 0)
+	return PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, 0, 0, 0)
 }
 
 func TestPlanInTurnDemotion(t *testing.T) {
@@ -306,17 +306,11 @@ func TestInTurnStubContent(t *testing.T) {
 }
 
 // TestPlanWholePromptStubbing covers the issue #180 variant: the budget is the
-// WHOLE prompt (prefix + hydrated tail + current turn), and the previous
-// turn's tool results become candidates once the current turn's are exhausted.
-// Layout everywhere: [system | previous turn | current turn], where the
-// previous turn is the most recent completed turn (the tail's newest span) and
-// the current turn ends at len(msgs).
-// TestPlanWholePromptStubbing covers the issue #180 variant: the budget is the
-// WHOLE prompt (prefix + hydrated tail + current turn), and the previous
-// turn's tool results become candidates once the current turn's are exhausted.
-// Layout everywhere: [system | previous turn | current turn], where the
-// previous turn is the most recent completed turn (the tail's newest span) and
-// the current turn ends at len(msgs).
+// WHOLE prompt (fixed part + hydrated tail + current turn), and the hydrated
+// tail's tool results become candidates once the current turn's are exhausted.
+// Layout everywhere: [system | previous hydrated tail | current turn], where
+// the previous hydrated tail is the newest demotion-immune spans (possibly
+// several turns) and the current turn ends at len(msgs).
 func TestPlanWholePromptStubbing(t *testing.T) {
 	const (
 		sessionID     = "20260701-143210"
@@ -327,11 +321,16 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 	system := Msg{Role: "system", Content: strings.Repeat("y", 4000)}
 
 	t.Run("small session: under the high watermark, nothing stubbed", func(t *testing.T) {
+		// The system message (index 0) is not part of the stubbable region:
+		// in the session adapter it rides in the wire prefix (the fixed part).
+		// The previous hydrated tail is [1, prevEnd); the current turn is
+		// [prevEnd, len). fixed = 0 here — the wire prefix's tokens are the
+		// caller's precomputed fixed, not a member of msgs.
 		prev, _ := mkTurn(2, 1000, "read_file")
 		cur, _ := mkTurn(2, 1000, "bash")
 		msgs := append(append([]Msg{system}, prev...), cur...)
 		prevEnd := 1 + len(prev)
-		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, 1, prevEnd)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, 1, prevEnd, 0)
 		if len(stubbed) != 0 {
 			t.Errorf("stubbed %d indices, want 0 (whole prompt under budget)", len(stubbed))
 		}
@@ -379,7 +378,7 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 		if n := len(PlanInTurnDemotion(cur, testMsgEstimator, InTurnDemotionPolicy{HighWM: highWM, LowWM: lowWM, KeepRecent: keepRecent, SessionID: sessionID})); n != 0 {
 			t.Fatalf("fixture: cur alone stubbed %d; must be under highWM", n)
 		}
-		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd, 0)
 		if len(stubbed) == 0 {
 			t.Fatal("nothing stubbed; whole prompt over highWM, turn alone under")
 		}
@@ -429,7 +428,7 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 		cur, curIdx := mkTurn(3, 20000, "bash")
 		msgs := append(append([]Msg{{Role: "system", Content: strings.Repeat("y", 4000)}}, prev...), cur...)
 		prevStart, prevEnd := 1, 1+len(prev)
-		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, 1, prevStart, prevEnd)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, 1, prevStart, prevEnd, 0)
 		if len(stubbed) == 0 {
 			t.Fatal("nothing stubbed; whole prompt far over highWM")
 		}
@@ -473,7 +472,7 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 		cur, _ := mkTurn(16, 20000, "bash")
 		msgs := append(append([]Msg{{Role: "system", Content: "sys"}}, prev...), cur...)
 		prevStart, prevEnd := 1, 1+len(prev)
-		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd, 0)
 		if len(stubbed) == 0 {
 			t.Fatal("nothing stubbed; whole prompt far over highWM")
 		}
@@ -500,7 +499,7 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 		gPrev1 := prevStart + prevIdx[1]
 		msgs[gPrev0].Content = InTurnStubContent("read_file(a.go)", 240, false, "Error: exit 1", citationFor(msgs, gPrev0, sessionID))
 		msgs[gPrev1].Content = InTurnStubContent("read_file(b.go)", 12, true, "", citationFor(msgs, gPrev1, sessionID))
-		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, 1, prevStart, prevEnd)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, 1, prevStart, prevEnd, 0)
 		if len(stubbed) == 0 {
 			t.Fatal("nothing stubbed; whole prompt over highWM (existing stubs count)")
 		}
@@ -519,7 +518,7 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 	t.Run("no previous span: degrades to turn-only plan", func(t *testing.T) {
 		// 30×20000 (~120k tok > highWM). Empty prev span (0,0).
 		msgs, toolIdx := mkTurn(30, 20000, "bash")
-		if n := len(PlanWholePromptStubbing(msgs, testMsgEstimator, WholePromptBudget{}, keepRecent, 0, 0)); n != 0 {
+		if n := len(PlanWholePromptStubbing(msgs, testMsgEstimator, WholePromptBudget{}, keepRecent, 0, 0, 0)); n != 0 {
 			t.Fatalf("zero budget stubbed %d; must be 0", n)
 		}
 		stubbed := planWholePrompt(msgs, budget, keepRecent)
@@ -542,7 +541,7 @@ func TestPlanWholePromptStubbing(t *testing.T) {
 		cur, _ := mkTurn(2, 100000, "bash")
 		msgs := append(append([]Msg{{Role: "system", Content: "sys"}}, prev...), cur...)
 		prevStart, prevEnd := 1, 1+len(prev)
-		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd)
+		stubbed := PlanWholePromptStubbing(msgs, testMsgEstimator, budget, keepRecent, prevStart, prevEnd, 0)
 		if len(stubbed) != 0 {
 			t.Errorf("stubbed %d, want 0 (nothing older than keepRecent)", len(stubbed))
 		}

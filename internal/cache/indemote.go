@@ -185,30 +185,37 @@ type WholePromptBudget struct {
 // required.
 //
 // Issue #180: PlanInTurnDemotion budgets the CURRENT TURN only, which has two
-// gaps. (1) On resume, the previous turn comes back verbatim in the hydrated
-// tail — DemoteBatch never demotes the most recent turn — and nothing ever
-// shrinks it before the next turn's first send. (2) A turn that STARTS with a
-// large tail in the prompt can grow by up to another high-watermark's worth
-// before the turn-only budget fires, which is past the window. This plan
-// closes both: it fires from the WHOLE prompt's estimated size (prefix + tail
-// + current turn) against HighWM, and drains oldest-first in two phases — the
-// current turn's stubbable tool results FIRST (keeping #172's selection order),
-// then the PREVIOUS turn's — until the projected whole-prompt estimate is at
-// or under LowWM or no candidates remain.
+// gaps. (1) On resume, the hydrated tail comes back verbatim in the prompt —
+// DemoteBatch never demotes the newest turns — and nothing ever shrinks it
+// before the next turn's first send. (2) A turn that STARTS with a large tail
+// in the prompt can grow by up to another high-watermark's worth before the
+// turn-only budget fires, which is past the window. This plan closes both: it
+// fires from the WHOLE prompt's estimated size against HighWM, and drains
+// oldest-first in two phases — the current turn's stubbable tool results FIRST
+// (keeping #172's selection order), then the previous hydrated tail's — until
+// the projected whole-prompt estimate is at or under LowWM or no candidates
+// remain.
 //
-// msgs is the full message list; [previousStart, previousEnd) is the
-// previous turn's span (the most recent completed turn, the tail's newest
-// span) and [previousEnd, len(msgs)) the current turn; anything before
-// previousStart (system messages, outline block, older demoted turns) is
-// counted in the whole-prompt total but never stubbed. An empty previous
-// span (previousStart == previousEnd, i.e. no previous turn — a fresh
-// session) degrades exactly to a turn-only plan over msgs.
+// The whole-prompt estimate is fixed + the sum of estimator over msgs:
+// fixed is the caller's precomputed token count for the non-stubbable part of
+// the prompt that does NOT sit in msgs (the wire prefix and the injected
+// outline/ephemeral blocks), and msgs holds exactly the stubbable region —
+// the tail+turn messages — with absolute log offsets. The caller builds both
+// to match what wireMessages actually sends (the demoted region
+// [PrefixEnd, TailFrom) is NOT in msgs: it goes out as the outline block, so
+// counting it here would keep the total over HighWM forever, whatever is on
+// the wire).
+// [previousStart, previousEnd) is the previous hydrated tail's span within
+// msgs (the tail's spans are never demoted by DemoteBatch) and
+// [previousEnd, len(msgs)) the current turn; an empty previous span
+// (previousStart == previousEnd — no previous turn, a fresh session) degrades
+// exactly to a turn-only plan over msgs.
 //
 // It never stubs, per SPAN:
 //   - any message that is not role:"tool" (user messages and assistant
 //     messages stay verbatim, as in #172), or
 //   - the most recent keepRecent tool results of THAT span (the carve-out is
-//     per span, not global — the previous turn's newest results are protected
+//     per span, not global — the tail's newest results are protected
 //     independently of the current turn's), or
 //   - a tool result that an earlier send already stubbed (Content already
 //     carries InTurnStubPrefix). Stubs still count toward the total, so they
@@ -217,7 +224,7 @@ type WholePromptBudget struct {
 // The estimate is recomputed after each stub (its content shrinks to the
 // short stub line), so the drain is measured against the real post-stub
 // size, not the pre-stub size.
-func PlanWholePromptStubbing(msgs []Msg, estimator func(Msg) int, budget WholePromptBudget, keepRecent, previousStart, previousEnd int) []int {
+func PlanWholePromptStubbing(msgs []Msg, estimator func(Msg) int, budget WholePromptBudget, keepRecent, previousStart, previousEnd, fixed int) []int {
 	if budget.HighWM <= 0 || budget.LowWM <= 0 || len(msgs) == 0 {
 		return nil
 	}
@@ -233,9 +240,9 @@ func PlanWholePromptStubbing(msgs []Msg, estimator func(Msg) int, budget WholePr
 	}
 	currentStart := previousEnd
 
-	// The whole-prompt total: every message, including the prefix before
-	// previousStart (system, outline, older demoted turns).
-	total := 0
+	// The whole-prompt total: the non-stubbable fixed part (wire prefix +
+	// outline + ephemeral, absent from msgs) plus every stubbable message.
+	total := fixed
 	for _, m := range msgs {
 		total += estimator(m)
 	}
@@ -262,9 +269,9 @@ func PlanWholePromptStubbing(msgs []Msg, estimator func(Msg) int, budget WholePr
 		candidates = nil
 	}
 
-	// Phase 2: the previous turn's, with the previous turn's own carve-out.
+	// Phase 2: the previous hydrated tail's, with the tail's own carve-out.
 	// This keeps #172's selection order: the current turn's oldest results
-	// always go first, the previous turn's only after.
+	// always go first, the tail's only after.
 	var prevCands []int
 	for i := previousStart; i < previousEnd; i++ {
 		if msgs[i].Role != "tool" {
