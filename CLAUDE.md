@@ -294,7 +294,7 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 
 Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
 
-Failing tests point at the code, not at themselves. When a test you did not write fails after your change, assume your code is wrong first; check the expected value against the test's own comments and setup before touching it. Change a pre-existing assertion only when the task itself requires the new behavior, never to make output you just produced pass, and name the changed assertion and its why in your summary.
+Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,

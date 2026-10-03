@@ -343,26 +343,33 @@ func TestDebugPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 }
 
-// TestDefaultPromptEncodesFailingTestGuidance pins issue #177's content: when
-// a test the model did not write fails after its change, the built-in prompt
-// must tell the model to assume the code is wrong first, to check the expected
-// value against the test's own comments and setup before touching it, never to
-// change a pre-existing assertion just to make output it produced pass, and to
-// name any such change in the summary. (The loop in PR #176 edited a correct
-// assertion to match its own off-by-one output; this is the guidance that was
-// missing.) The check is on loose keywords — the principle, not the exact
-// wording — the same style as TestDefaultPromptEncodesTestIntegrity.
+// TestDefaultPromptEncodesFailingTestGuidance pins issue #177's content: the
+// built-in prompt must treat an existing test's expected value as evidence —
+// the burden of proof lands on a change that disagrees with it, and rewriting
+// an expectation to match output you just produced is not a fix. (The loop in
+// PR #176 edited a correct assertion to match its own off-by-one output; this
+// is the guidance that was missing.) Each keyword was checked against the
+// pre-#177 prompt (strings.Contains on SystemPrompt with the principle
+// removed) so it rides only on the new principle, and none leans on the
+// recipe wording the principle deliberately avoids — the same loose,
+// rewrite-tolerant style as TestDefaultPromptEncodesTestIntegrity.
 func TestDefaultPromptEncodesFailingTestGuidance(t *testing.T) {
 	lower := strings.ToLower(SystemPrompt)
-	for _, keyword := range []string{
-		"assume your code is wrong", // code-first when a pre-existing test fails
-		"comments",                  // check the expected value against the test's own comments
-		"pre-existing",              // the thing that must not be edited casually
-		"never",                     // never just to make output you produced pass
-	} {
-		if !strings.Contains(lower, keyword) {
-			t.Errorf("built-in prompt no longer encodes the failing-test guidance (missing %q)", keyword)
-		}
+	tests := []struct {
+		keyword string
+		intent  string
+	}{
+		{"expected value", "the expectation is the recorded decision the change must answer to"},
+		{"burden of proof", "when a test disagrees with your change, the change bears the proof"},
+		{"never a fix", "matching your own new output is never a fix"},
+		{"specification", "rewritten output becomes the spec — the failure mode to avoid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(lower, tt.keyword) {
+				t.Errorf("built-in prompt no longer encodes the failing-test guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+		})
 	}
 }
 

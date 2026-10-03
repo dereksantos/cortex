@@ -58,7 +58,7 @@ const debugWorkingStylePrinciple = "Debug carefully. Check every error in test a
 // It is spliced into SystemPrompt right after "Test integrity" (see the
 // ` + failingTestPrinciple + ` above), keeping it in the "# How you work"
 // block, before debugWorkingStylePrinciple.
-const failingTestPrinciple = "Failing tests point at the code, not at themselves. When a test you did not write fails after your change, assume your code is wrong first; check the expected value against the test's own comments and setup before touching it. Change a pre-existing assertion only when the task itself requires the new behavior, never to make output you just produced pass, and name the changed assertion and its why in your summary."
+const failingTestPrinciple = "Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification."
 
 // memoryPromptSection is the full memory guidance — the four bullets plus the
 // outline/recall paragraph — appended to the system prompt only when there's
