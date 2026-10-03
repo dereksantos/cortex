@@ -287,6 +287,23 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 			return testNote + "\n\n" + lintNote
 		}
 	}
+	// Issue #161: a bound-forced finish (max-iter, token-budget, read-budget,
+	// no-progress, stuck, deadline, error-recovered) skips the clean-finalize
+	// path where FinalizeHook runs — the turn never answered with no tool
+	// calls, so the testwatch and turn-end-lint receipts would vanish exactly
+	// when the work is most likely unfinished. OnForcedFinalize reuses the
+	// SAME raw receipt lines the clean-finalize path reads (the testwatch
+	// tests/debug lines via cs.testwatchReceipt, the raw turn-lint receipt
+	// via cs.runTurnLint) and gives them ONE forced-finishing lead-in that
+	// names the actual stop reason and a single restatement ask — never the
+	// clean-finalize framings ("Before you finish …") or a second
+	// restatement ask wrapped around an already-framed note (two "before you
+	// …" framings and two restatement asks in one message to a small
+	// model). An empty note (nothing to report) leaves the forced answer
+	// untouched, byte for byte — the common case.
+	ts.OnForcedFinalize = func(stats loopStats) string {
+		return cs.forcedFinalizeNote(ctx, stats)
+	}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
@@ -509,4 +526,75 @@ func (cs *CortexSession) reportRecoverableError(role, model string, cause error)
 	}
 	defer w.Close()
 	_, _ = w.Append(entry)
+}
+
+// forcedFinalizeNote is issue #161's bound-forced counterpart of the
+// FinalizeHook pairing (testwatchFinalizeNote + turnLintAtFinalize, the same
+// receipts cs.turn's FinalizeHook consults at the clean-finalize point): it
+// assembles the forced-finishing note from the RAW receipt lines — the
+// testwatch tests/debug lines via cs.testwatchReceipt, the raw turn-lint
+// receipt via cs.runTurnLint (NOT turnLintAtFinalize, whose "Before you
+// finish …" framing and restatement ask are the clean-finalize path's own
+// delivery wording and would double the framing here) — under ONE
+// forced-finishing lead-in that names the bound that actually forced the
+// finish (the stop reason the run's stats carry: "the tool-call limit" only
+// for max-iter, "the token budget" only for token-budget, a generic "a
+// harness bound" for every other stop reason — never a false cause), and a
+// single restatement ask covering whichever facts are present. So a small
+// model sees exactly one framing and one restate instruction, whichever way
+// the turn was cut off. "" (nothing to report) means the forced answer is
+// left untouched.
+func (cs *CortexSession) forcedFinalizeNote(ctx context.Context, stats loopStats) string {
+	testwatchNote := cs.testwatchReceipt()
+	// The RAW lint receipt, not turnLintAtFinalize's framed note: that
+	// framing ("Before you finish …") and its own restatement ask belong to
+	// the clean-finalize path and would double the framing here. runTurnLint
+	// also stores cs.lintReceipt, so TurnResult.LintReceipt stays populated
+	// on the forced path.
+	lintReceipt := cs.runTurnLint(ctx)
+	if testwatchNote == "" && lintReceipt == "" {
+		return ""
+	}
+	var b strings.Builder
+	switch stats.StopReason {
+	case "max-iter":
+		b.WriteString("The harness cut this turn off at the tool-call limit before you finished — the work is likely incomplete. ")
+	case "token-budget":
+		b.WriteString("The harness cut this turn off at the token budget before you finished — the work is likely incomplete. ")
+	default:
+		b.WriteString("The harness cut this turn off before you finished, at a harness bound — the work is likely incomplete. ")
+	}
+	// What the turn left behind: the raw testwatch lines (tests changed /
+	// leftover debug — the same receipt the journal carries) and/or the
+	// turn-end lint receipt. The lead-in is one: "Before you answer: the
+	// harness detected that this turn …", then the lines, then ONE
+	// restatement ask covering whichever facts are present.
+	testLine := cs.testwatchTestsReceipt()
+	debugLine := cs.testwatchDebugReceipt()
+	b.WriteString("Before you answer: the harness detected that this turn ")
+	switch {
+	case testLine != "" && debugLine != "":
+		b.WriteString("removed or substantially shrank one or more of the project's test files AND left leftover debug prints / scratch files behind — ")
+	case testLine != "":
+		b.WriteString("removed or substantially shrank one or more of the project's test files — ")
+	case debugLine != "":
+		b.WriteString("left leftover debug prints in production files and/or scratch files in the workspace — ")
+	default:
+		// Neither testwatch line is present, so the note is lint-only.
+		b.WriteString("has unresolved lint findings — ")
+	}
+	if testwatchNote != "" {
+		b.WriteString(testwatchNote)
+	}
+	if lintReceipt != "" {
+		if testwatchNote != "" {
+			b.WriteString("\n\n")
+		}
+		// Join the receipt without a forced ". ": it may already end in
+		// punctuation (a budget-hit line ends in ")"), and the restatement
+		// ask below carries its own sentence break.
+		b.WriteString(strings.TrimSuffix(lintReceipt, "."))
+	}
+	b.WriteString(". Restate your complete final answer: first your summary of what you changed and why, then plainly account for every item above — which tests you removed or shrank, which debug prints you added, which scratch files you left behind, and for each lint finding state it and what would fix it. Unfinished work left unreported is a worse failure than a partial answer that names what is missing.")
+	return b.String()
 }
