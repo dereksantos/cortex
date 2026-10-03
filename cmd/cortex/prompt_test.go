@@ -238,6 +238,55 @@ func TestMemorySectionForState(t *testing.T) {
 	}
 }
 
+// TestDefaultPromptEncodesVerifyBeforeFix pins the issue #178 principle in
+// the built-in SystemPrompt: the prompt must tell the model to confirm a
+// problem exists before fixing it, and that a reported problem that doesn't
+// reproduce is finished by reporting so with the evidence — not by a fix for
+// a problem that was never observed. The check is on the PRINCIPLE (the
+// verify-before-fix idea and the honest no-repro outcome), not exact
+// wording, so a future rewrite can rephrase without breaking this test as
+// long as the idea survives — the same loose style as
+// TestDefaultPromptEncodesTestIntegrity. It checks the built-in prompt
+// specifically: every turn sees it (REPL, headless, plan mode, and the
+// self-dev loop's ordinary step turns), so the principle lives here rather
+// than only in plan-mode prompts.
+func TestDefaultPromptEncodesVerifyBeforeFix(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, keyword := range []string{
+		"confirm",   // verify-before-fix: confirm the problem exists before fixing it
+		"reproduce", // the no-repro case: a reported problem that doesn't reproduce
+		"evidence",  // the no-repro outcome must carry evidence
+		"observed",  // a fix for a problem you haven't observed is not the finished result
+	} {
+		if !strings.Contains(lower, keyword) {
+			t.Errorf("built-in prompt no longer encodes the verify-before-fix principle (missing %q)", keyword)
+		}
+	}
+}
+
+// TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt pins issue #178's
+// delivery: the built-in SystemPrompt carries verifyBeforeFixPrinciple
+// VERBATIM, and the same const is restated in the planning instruction and
+// every step prompt (plan_mode.go), so a loop-driven ordinary turn, a plan
+// step, and the planning turn all see the identical principle text. The plan
+// mode const is checked here (not in plan_mode_test.go) because the point is
+// that the BASE prompt — which every turn, loop-driven or not, is seeded
+// with — carries the principle, not only the plan-mode prompts.
+func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
+	if i := strings.Index(SystemPrompt, verifyBeforeFixPrinciple); i < 0 {
+		t.Fatal("the built-in SystemPrompt does not carry the verify-before-fix principle verbatim")
+	} else if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the verify-before-fix principle must sit in the \"# How you work\" block (inside \"Verify first\"), before \"# How you communicate\"")
+	}
+	if !strings.Contains(planModeInstruction, verifyBeforeFixPrinciple) {
+		t.Error("planModeInstruction must restate the verify-before-fix principle (same const) for the planning turn")
+	}
+	// The step prompt restates it for each step turn (tools present) too.
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), verifyBeforeFixPrinciple) {
+		t.Error("planStepPrompt must restate the verify-before-fix principle (same const) for each step turn")
+	}
+}
+
 // The built-in prompt must encode the working-style preferences
 // (2026-07-20, extended 2026-09-28 by issue #148): verify-first, clarify
 // ambiguity with the user, delegation to subagents, simple communication,
