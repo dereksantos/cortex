@@ -352,7 +352,7 @@ per-call `model` argument pins another. See
 |---|---|
 | `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. |
 | `write_file` | Create or overwrite a file. |
-| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. |
+| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. Failures carry the match line numbers (ambiguous) or a closest-region snippet (not found); successes include the current changed region. |
 | `study` | Produce a goal-curated digest of a large file or directory. |
 | `agent` | Hand off one bounded implementation task (read, edit, verify via `bash`) to a subagent; unlike `study`, it can write files and run commands. |
 | `outline` | Map project/file structure without reading all contents. |
