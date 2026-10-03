@@ -997,7 +997,7 @@ func outlineTool(tc ToolCall, deps ToolDeps) (string, error) {
 		// A missing path isn't a dead end (issue #142): point at outline/grep,
 		// state the workspace root when the given path is absolute or outside
 		// it, and offer nearby existing candidates.
-		return "", pathNotFoundError(path, fsPath, workdirOf(deps))
+		return "", pathNotFoundError(path, fsPath, workdirRootForErrors(deps))
 	}
 	return text, err
 }
@@ -1173,6 +1173,17 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
 	fsPath := resolveWorkdir(deps, path)
+	// A directory is not a read: os.ReadFile would return a bare "is a
+	// directory" error that dead-ends the model (issue #142 — the same
+	// path-guessing family as the workspace note). Return a bounded listing
+	// instead (like outline does for a directory) plus a "use outline/
+	// read_file on a file" note so the model can orient and target a file
+	// rather than dead-ending on the error. Checked BEFORE the ranged-read
+	// branch below, so a directory with start/end gets the listing too.
+	if info, statErr := os.Stat(fsPath); statErr == nil && info.IsDir() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → directory", path))
+		return directoryListing(path, fsPath), nil
+	}
 	// Ranged read: exact 1-indexed lines, bypassing the size gate (a range is
 	// bounded). This is the navigator's precise pull — project_index/study hands
 	// back a line span, and read_file(path, start, end) reads exactly it.
@@ -1182,17 +1193,6 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 			end = start + active.DefaultRangeLines - 1
 		}
 		return readRange(deps, path, fsPath, start, end)
-	}
-	// A directory is not a read: os.ReadFile would return a bare "is a
-	// directory" error that dead-ends the model (issue #142 — the same
-	// path-guessing family as the workspace note). Return a bounded listing
-	// instead (like outline does for a directory) plus a "use outline/
-	// read_file on a file" note so the model can orient and target a file
-	// rather than dead-ending on the error. A ranged read on a directory is
-	// handled above (it reads the (non-existent) file and errors there).
-	if info, statErr := os.Stat(fsPath); statErr == nil && info.IsDir() {
-		printToolAction(deps, fmt.Sprintf("read_file(%s) → directory", path))
-		return directoryListing(path, fsPath), nil
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
@@ -1225,7 +1225,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 		// outline/grep, state the real workspace root when the given path is
 		// absolute or outside it, and offer nearby existing candidates.
 		if os.IsNotExist(err) {
-			return "", pathNotFoundError(path, fsPath, workdirOf(deps))
+			return "", pathNotFoundError(path, fsPath, workdirRootForErrors(deps))
 		}
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
@@ -1278,7 +1278,7 @@ func readRange(deps ToolDeps, display, fsPath string, start, end int) (string, e
 	data, err := os.ReadFile(fsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", pathNotFoundError(display, fsPath, workdirOf(deps))
+			return "", pathNotFoundError(display, fsPath, workdirRootForErrors(deps))
 		}
 		return "", fmt.Errorf("read %s: %w", display, err)
 	}

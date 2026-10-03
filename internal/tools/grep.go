@@ -74,7 +74,7 @@ func grep(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// so the not-found branch only fires for an explicit bad path.
 	fsRoot := resolveWorkdir(deps, root)
 	if _, err := os.Stat(fsRoot); err != nil && os.IsNotExist(err) {
-		return "", pathNotFoundError(root, fsRoot, workdirOf(deps))
+		return "", pathNotFoundError(root, fsRoot, workdirRootForErrors(deps))
 	}
 	return grepFiles(ctx, fsRoot, re, active.GrepMaxHits)
 }

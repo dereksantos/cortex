@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -267,9 +268,16 @@ func TestTurnDemotesOldTurnsToOutline(t *testing.T) {
 // indexes, LAST (the indexes are content that can change, the note is one
 // static line for the session's life).
 func TestTurnInjectsWorkspaceNote(t *testing.T) {
-	root := t.TempDir()
-	t.Chdir(root)
+	root := t.TempDir() // the workspace root
+	cwd := t.TempDir()  // the CWD — deliberately DIFFERENT from the root, so a
+	// Root-vs-CWD precedence mix-up would state the wrong root.
+	t.Chdir(cwd)
 
+	// The wire check records whether SOME request carried the note (the
+	// per-subtest assertions below pin WHICH root it states). The canned
+	// response is written on EVERY call — success included — so the turn
+	// runs against a realistic model reply, not an empty body.
+	var sawNote atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []Message `json:"messages"`
@@ -278,11 +286,11 @@ func TestTurnInjectsWorkspaceNote(t *testing.T) {
 			t.Errorf("decoding request: %v", err)
 		}
 		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "Workspace: "+root) {
-				return
+			if strings.Contains(m.Content, "Workspace: ") {
+				sawNote.Store(true)
+				break
 			}
 		}
-		t.Errorf("no request message carries the workspace note for root %q", root)
 		w.Write([]byte(`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}` + "\n" +
 			`{"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n" +
 			`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}` + "\n"))
@@ -295,33 +303,37 @@ func TestTurnInjectsWorkspaceNote(t *testing.T) {
 		wantRoot  string
 	}{
 		{
-			name:      "explicit workspace root is stated",
+			name:      "explicit workspace root takes precedence over the CWD",
 			workspace: &Workspace{Root: root, Explicit: true},
 			wantRoot:  root,
 		},
 		{
 			name:      "CWD-derived workspace states the CWD root",
-			workspace: &Workspace{Root: root},
-			wantRoot:  root,
+			workspace: &Workspace{Root: cwd},
+			wantRoot:  cwd,
 		},
 		{
 			name:      "no workspace falls back to the CWD",
 			workspace: nil,
-			wantRoot:  root,
+			wantRoot:  cwd,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			quickRetries(t)
+			sawNote.Store(false)
 			cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
 				Messages: []Message{{Role: RoleSystem, Content: "s"}}},
 				workspace: tt.workspace}
 			if _, err := cs.Turn(context.Background(), "hi"); err != nil {
 				t.Fatalf("turn: %v", err)
 			}
-			// The turn cleared the slot after runLoop — the wire check above
-			// (the server saw the note in every request) is the proof it was
-			// present while the loop ran.
+			// The wire check above (the server saw the note in a request) is
+			// the proof it was present while the loop ran — the turn clears
+			// the slot afterwards.
+			if !sawNote.Load() {
+				t.Fatalf("no request carried a workspace note; want one stating %q", tt.wantRoot)
+			}
 			if cs.Request.EphemeralSystem != "" {
 				t.Errorf("EphemeralSystem = %q after the turn, want cleared", cs.Request.EphemeralSystem)
 			}

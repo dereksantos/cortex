@@ -229,7 +229,8 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		memNote = section + "\n\n" + memNote
 	}
 	note := memNote
-	if skillsNote := cs.skillsIndexNote(); skillsNote != "" {
+	skillsNote := cs.skillsIndexNote()
+	if skillsNote != "" {
 		if note != "" {
 			note += "\n\n"
 		}
@@ -242,9 +243,12 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		note += wsNote
 	}
 	cs.Request.EphemeralSystem = note
-	if note != "" {
+	// Count only the memory/skills part as an "injection": the workspace note
+	// rides the same slot but is static for the session's life — counting it
+	// would make "memory injections" grow by one on every single turn.
+	if memNote != "" || skillsNote != "" {
 		cs.injections++
-		cs.injectedChars += len(note)
+		cs.injectedChars += len(memNote) + len(skillsNote)
 	}
 
 	maxTok := cs.Request.MaxTokens

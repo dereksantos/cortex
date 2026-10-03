@@ -75,6 +75,7 @@ func TestReadFileDirectoryReturnsListing(t *testing.T) {
 	tests := []struct {
 		name      string
 		target    string // path read_file is asked for
+		start     int    // ranged read: 0 = no start arg
 		wantErr   bool
 		wantIn    []string // substrings that must appear in the output
 		notIn     []string // substrings that must NOT appear
@@ -96,6 +97,20 @@ func TestReadFileDirectoryReturnsListing(t *testing.T) {
 			// The old dead-end error must be gone: a bare "is a directory"
 			// os.ReadFile error is the thing this step removes.
 			notIn: []string{"read " + dir + ": " + "readdir"},
+		},
+		{
+			name:      "ranged read on a directory yields the listing, not the is-a-directory error",
+			target:    dir,
+			start:     1,
+			wantNoErr: true,
+			wantIn: []string{
+				"alpha.go",
+				"is a directory, not a file",
+				"outline(",
+			},
+			// The pre-fix path: readRange's os.ReadFile on a directory
+			// returned the bare "read <dir>: is a directory" error.
+			notIn: []string{"read " + dir + ":"},
 		},
 		{
 			name:      "subdirectory also yields a listing",
@@ -121,7 +136,12 @@ func TestReadFileDirectoryReturnsListing(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, tt.target)}}
+			args := fmt.Sprintf(`{"path":%q`, tt.target)
+			if tt.start > 0 {
+				args += fmt.Sprintf(`,"start":%d`, tt.start)
+			}
+			args += "}"
+			tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: args}}
 			out, err := readFile(tc, headlessDeps{})
 			if tt.wantErr {
 				if err == nil {

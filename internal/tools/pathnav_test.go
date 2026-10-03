@@ -21,7 +21,9 @@ import (
 //     walk-up same-basename form when the parent doesn't exist),
 //
 // across all three tools so the shared helper is pinned at every seam that
-// consumes it.
+// consumes it. The first case also runs through headlessDeps (no Workdir):
+// the CWD-rooted default REPL / cortex turn path, where the stated root
+// falls back to the process CWD.
 func TestPathNotFoundError(t *testing.T) {
 	wd := t.TempDir() // the workspace root
 	t.Chdir(wd)
@@ -78,6 +80,17 @@ func TestPathNotFoundError(t *testing.T) {
 			// A relative path inside the workdir must NOT repeat the root —
 			// the model already knows it's relative; the root is noise.
 			notIn: []string{"workspace root is"},
+		},
+		{
+			name:    "read_file: no workdir (CWD session) states the CWD root for an absolute guess",
+			tool:    "read",
+			args:    readFileCall("/no/such/root/missing.go"),
+			wantErr: true,
+			wantIn: []string{
+				"does not exist",
+				"workspace root is",
+				wd, // the process CWD — headlessDeps has no Workdir()
+			},
 		},
 		{
 			name:    "read_file: absolute missing file states the workspace root",
@@ -159,16 +172,24 @@ func TestPathNotFoundError(t *testing.T) {
 			},
 		},
 	}
+	// CWD-rooted deps (the default REPL / cortex turn): no Workdir, so the
+	// not-found root must fall back to the process CWD (t.Chdir(wd) above).
+	cwdDeps := headlessDeps{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var err error
+			useCWD := tt.name == "read_file: no workdir (CWD session) states the CWD root for an absolute guess"
+			var d ToolDeps = deps
+			if useCWD {
+				d = cwdDeps
+			}
 			switch tt.tool {
 			case "read":
-				_, err = readFile(tt.args, deps)
+				_, err = readFile(tt.args, d)
 			case "grep":
-				_, err = grep(context.Background(), tt.args, deps)
+				_, err = grep(context.Background(), tt.args, d)
 			case "outline":
-				_, err = outlineTool(tt.args, deps)
+				_, err = outlineTool(tt.args, d)
 			default:
 				t.Fatalf("unknown tool %q", tt.tool)
 			}

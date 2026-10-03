@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -33,6 +34,23 @@ func workdirOf(deps ToolDeps) string {
 		return ""
 	}
 	return strings.TrimSpace(w.Workdir())
+}
+
+// workdirRootForErrors reports the workspace root a not-found error states
+// (issue #142): deps' anchored workdir when present, else the process CWD —
+// the workspace every CWD-rooted session (the default REPL, cortex turn)
+// resolves relative to. "" only when neither is resolvable. Kept separate
+// from resolveWorkdir on purpose: this one falls back to the CWD (error
+// MESSAGES name the root), while filesystem resolution must stay CWD-relative
+// when no workdir is set.
+func workdirRootForErrors(deps ToolDeps) string {
+	if wd := workdirOf(deps); wd != "" {
+		return wd
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
 }
 
 // resolveWorkdir returns path anchored to deps' workdir when path is
