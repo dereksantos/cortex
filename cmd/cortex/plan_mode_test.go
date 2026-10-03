@@ -267,18 +267,19 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 	// (a) table: which prompt, and what it must carry.
 	// verifyBeforeFixPrinciple is the SAME const the base system prompt
 	// carries (prompt.go), so both planning and step turns see the identical
-	// wording; noReproMarker (the output-shape convention) rides in BOTH
-	// prompts too, so the probe's "not reproduced" anchor has a real-model
-	// counterpart.
+	// wording; noReproMarker (the output-shape convention) rides in the STEP
+	// prompts only — the planning turn has no step, no tools, and its
+	// output-shape rules forbid anything before the list, so the marker must
+	// NOT be there (it would break parsePlan).
 	tests := []struct {
 		name     string
 		prompt   string
 		contains []string
 	}{
 		{
-			name:     "planning prompt carries the verify-before-fix principle and the no-repro marker",
+			name:     "planning prompt carries the verify-before-fix principle",
 			prompt:   users[0],
-			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing", noReproMarker},
+			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
 		},
 		{
 			name:     "step prompt carries the original task, the principle, and the no-repro marker",
@@ -298,6 +299,16 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// The no-repro marker must NOT be in the PLANNING prompt: the planning
+	// turn has no step and no tools, and its output-shape rules ("nothing
+	// before the list") contradict a reply led by "Not reproduced:" — a
+	// model that followed the marker there would produce an unparseable plan
+	// and a silent fallback to a single turn. The marker belongs only in the
+	// step prompts.
+	if strings.Contains(users[0], noReproMarker) {
+		t.Errorf("planning prompt must NOT carry the no-repro marker (it has no step, no tools, and a strict output shape):\n%s", users[0])
 	}
 }
 

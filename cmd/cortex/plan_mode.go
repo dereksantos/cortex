@@ -67,12 +67,21 @@ const planStepFloor = 2
 // follow (issue #178). The principle (prompt.go's verifyBeforeFixPrinciple)
 // says a reported problem that doesn't reproduce is finished by SAYING so
 // with the evidence — but it does not name the words to say. This marker is
-// those words: the planning instruction and each step prompt (planStepPrompt)
-// tell the model to lead such a reply with "Not reproduced:" + the evidence,
-// and noReproNote anchors on the same words. The principle tells the model
-// WHAT to conclude; this convention tells it HOW to write that conclusion
-// down so the note survives into the per-step report and the later steps'
-// prompts — one phrase, three places, no procedure.
+// those words: each step prompt (planStepPrompt) tells the model to lead such
+// a reply with "Not reproduced:" + the evidence, and noReproNote anchors on
+// the same words. The principle tells the model WHAT to conclude; this
+// convention tells it HOW to write that conclusion down so the note survives
+// into the per-step report and the later steps' prompts — one phrase, two
+// places (each step prompt and the probe), no procedure.
+//
+// The marker belongs only in the step prompts, NOT in the planning
+// instruction: the planning turn has no "step", cannot run tools, and its
+// output-shape rules ("nothing before the list") contradict a reply led by
+// "Not reproduced:" — a model that followed the marker there would produce a
+// plan parsePlan cannot parse, and the run would silently fall back to a
+// single turn. The planning prompt's verifyBeforeFixPrinciple line is enough
+// to shape the plan; the output convention only means something on a step
+// turn that has tools.
 const noReproMarker = `If this step's outcome is that the reported problem does not reproduce, begin your reply with "Not reproduced:" followed by the evidence (the command you ran and what it showed).`
 
 // planModeInstruction is the planning turn's prompt. It fixes the output
@@ -102,8 +111,7 @@ Rules:
 - One line per step, starting at 1; nothing before the list, nothing after.
 - No prose, no headings, no bullet markers — only "N. step" lines.
 - Do not use any tools; just output the numbered list.
-- ` + verifyBeforeFixPrinciple + `
-- ` + noReproMarker + ``
+- ` + verifyBeforeFixPrinciple + ``
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -461,8 +469,7 @@ func interruptPlan(stepResults []StepResult, steps []string, i int, err error) (
 //
 // The probe is ANCHORED to the verdict the convention points at: a line that
 // starts with "not reproduced" (case-insensitive), the phrasing noReproMarker
-// (in the planning instruction and each step prompt) tells the model to lead
-// a no-repro reply with — so a real model's verdict, whatever the evidence,
+// (in each step prompt) tells the model to lead a no-repro reply with — so a real model's verdict, whatever the evidence,
 // is recognized. Anchoring to the line start (rather than any substring
 // match on "not reproduce") keeps a reply that merely ECHOES prompt or plan
 // wording — "if the bug does not reproduce …", "I could not reproduce it at
