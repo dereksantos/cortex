@@ -453,7 +453,10 @@ across this file, `CLAUDE.md`, and itself.
 
 Cortex is local-first, not local-only: using a hosted model sends prompts and
 selected tool results to that provider. Runtime state remains inspectable under
-`.cortex/` and is excluded from git by default.
+`.cortex/` and is excluded from git: in a git workspace, the first session
+writes a self-contained `.cortex/.gitignore` (a lone `*`) so transcripts,
+journal segments, and memory are never swept up by `git add -A` — without
+touching the user's own `.gitignore` (#119).
 
 - Shell commands are classified as **Safe**, **Risky**, or **Blocked**. Risky
   commands require interactive approval and are refused in headless sessions.

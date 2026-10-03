@@ -69,6 +69,21 @@ func WorkspaceFromCWD() *Workspace {
 // resolve today).
 func (w *Workspace) ContextDir() string { return filepath.Join(w.Root, ".cortex") }
 
+// SetWorkspace is the single seam every workspace (re-)assignment goes
+// through: it stores ws and then self-ignores the workspace's .cortex/ in
+// git (issue #119, ensureSelfGitignore — gitignore_self.go), so a workspace
+// can never be live on a session without the guard having run for its root.
+// Production paths are exactly two: NewCortexSession (session_core.go,
+// first workspace) and applyProjectByName (project_workspace.go, the
+// --project / serve / loop-firing re-target). Hand-built test sessions that
+// assign cs.workspace directly are covered by the StartTranscript /
+// ResumeTranscript call sites instead. Best-effort: the guard never fails
+// the assignment.
+func (cs *CortexSession) SetWorkspace(ws *Workspace) {
+	cs.workspace = ws
+	cs.ensureSelfGitignore()
+}
+
 // SessionsDir is the workspace's session transcript directory.
 func (w *Workspace) SessionsDir() string { return filepath.Join(w.ContextDir(), "sessions") }
 

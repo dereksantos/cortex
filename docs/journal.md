@@ -164,7 +164,12 @@ This is the eval primitive that makes auto-tuning mechanical: you can ask "would
 
 ## Operational invariants
 
-- **`.cortex/` is gitignored.** Always. `cortex init` warns if not.
+- **`.cortex/` is gitignored.** Always. When a session starts in a workspace
+  that is inside a git repository and `.cortex/` is not already ignored, Cortex
+  writes a self-contained `.cortex/.gitignore` (a lone `*`) so the directory
+  excludes itself from git — never editing the user's own `.gitignore` (#119).
+  A one-line `note:` to stderr announces the write; a repeat session (or an
+  already-ignored workspace) is a silent no-op.
 - **No remote upload by default.** CLI refuses to send journal contents anywhere. Opt-in flag required, explicit per command.
 - **JSONL stays grep/jq-readable.** No binary framing, no encryption-by-default. The user can read what Cortex is recording.
 - **Capture is host-process-independent.** The capture path appends to its segment regardless of what else is running — there is no daemon for it to depend on today (see the historical note above).

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Self-ignoring `.cortex/` in git workspaces (#119): the first session in a
+  workspace that is inside a git repository writes a self-contained
+  `.cortex/.gitignore` (a lone `*`) so session transcripts, journal segments,
+  history, and memory are excluded from git without editing the user's own
+  `.gitignore`. A one-line `note:` to stderr announces the write; a repeat
+  session, a non-git workspace, an already-ignored `.cortex/`, or a missing
+  git binary is a silent no-op. This closes the leak where a routine
+  `git add -A && git commit` published transcripts that could carry secrets
+  captured from tool output (#103).
+
 ## [0.3.0] - 2026-08-07 — the Cortex slimdown
 
 First published release: the earlier `0.1.0` and `0.2.0-alpha` sections
