@@ -425,12 +425,12 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// reset at turn start and counting exactly the in-flight turn) into the
 	// session-cumulative total so the session summary and the eval journal
 	// report the session-wide total, while TurnResult.Redactions still carries
-	// the per-turn figure. It is folded AFTER captureTurn on the success path
+	// the per-turn figure. On the success path it is folded AFTER captureTurn
 	// (captureTurn adds the capture's own masking counts to cs.redactions, so
 	// the fold must see them — the session summary records the same total
-	// the journal metadata does, docs/journal.md), and BEFORE the
-	// unrecovered-error return on the error path (a failed turn still
-	// reports what it redacted before it died).
+	// the journal metadata does, docs/journal.md); on the error path it is
+	// folded BEFORE the unrecovered-error return, so a failed turn still
+	// reports what it redacted before it died.
 	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
 	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
 	// self-dev driver — can print it to a human. Compute it here, after
@@ -453,6 +453,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		if pf := pendingFailureOf(err); pf != nil {
 			cs.journalModelFailure(pf, err)
 		}
+		// Issue #103: fold on the error path too — the turn's messages were
+		// already persisted and counted before the failure, so the session
+		// total includes what a failed turn redacted (captureTurn never runs
+		// here, so cs.redactions is exact at this point).
+		cs.redactionsTotal += cs.redactions
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Redactions: cs.redactions}, err
 	}
 

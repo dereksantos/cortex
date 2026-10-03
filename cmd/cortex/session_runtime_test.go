@@ -402,11 +402,12 @@ func TestTranscriptStateAndNotesRedactSecrets(t *testing.T) {
 // TestTurnCLIStdoutContractWithRedactions (issue #103, review fix 3): a
 // `cortex turn` whose persisted messages carry a secret must keep issue
 // #118's answer-only stdout contract — stdout holds ONLY the verbatim reply,
-// and the redaction notice goes to stderr. runTurnCLI's non-json branch is
-// the surface under test, replayed verbatim on test writers (os.Stdout/
-// os.Stderr are *os.File globals Go won't let us swap for buffers): the
-// notice is handed printRedactions with the STDERR writer — a regression
-// back to stdout (the original fmt.Println bug) fails the assertions below.
+// and the redaction notice goes to stderr. The turn is driven end-to-end
+// (a real send against an SSE stub, so the reply's own masking is real),
+// then its reporting goes through cli.go's reportTurnText — the SAME code
+// runTurnCLI's non-JSON branch calls — with two buffers, so a regression in
+// cli.go's routing (e.g. the redaction notice handed the stdout writer
+// instead of stderr) fails this test.
 func TestTurnCLIStdoutContractWithRedactions(t *testing.T) {
 	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
 	bodyAnswer := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":"the key is %s"}}]}`, secret)
@@ -449,25 +450,13 @@ func TestTurnCLIStdoutContractWithRedactions(t *testing.T) {
 		t.Fatalf("fixture: TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried the secret)", res.Redactions)
 	}
 
-	// The non-json branch of runTurnCLI (cli.go), verbatim on test writers:
-	// the reply → stdout, the receipts → stderr, the redaction notice on
-	// STDERR (printRedactions with the stderr writer — the #118 fix under
-	// test), then the session id. os.Stdout/os.Stderr are the *os.File
-	// globals Go won't let us swap for buffers, so the contract is proven
-	// the same way cli.go proves it: every non-answer surface writes to a
-	// distinct writer, and printRedactions takes the stderr one — a
-	// regression that hands printRedactions the stdout writer (the original
-	// fmt.Println → stdout bug) fails the stderr assertion below.
+	// The non-json branch of runTurnCLI, via the SAME helper it calls
+	// (reportTurnText, cli.go) on test writers — the redaction notice must
+	// land on stderr (printRedactions is handed the stderr writer there — the
+	// #118 fix under test); a regression that hands it the stdout writer
+	// (the original fmt.Println → stdout bug) fails the assertions below.
 	var outBuf, errBuf bytes.Buffer
-	fmt.Fprintln(&outBuf, res.Reply)
-	if res.TestReceipt != "" {
-		fmt.Fprintln(&errBuf, res.TestReceipt)
-	}
-	if res.LintReceipt != "" {
-		fmt.Fprintln(&errBuf, res.LintReceipt)
-	}
-	printRedactions(&errBuf, res.Redactions)
-	fmt.Fprintf(&errBuf, "session: %s\n", cs.SessionID)
+	reportTurnText(&outBuf, &errBuf, err, res, cs.SessionID)
 
 	stdout, stderr := outBuf.String(), errBuf.String()
 	if stdout != res.Reply+"\n" {

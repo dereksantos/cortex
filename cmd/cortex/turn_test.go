@@ -1908,3 +1908,49 @@ func TestTurnRedactionCountRecordedAndReported(t *testing.T) {
 		t.Errorf("the turn's journal capture does not record redactions=%d in its metadata — the count must ride the capture", turnRedactions)
 	}
 }
+
+// TestFailedTurnRedactionsFoldedIntoSessionTotal (issue #103, review fix 3): a
+// turn that FAILS after its redacted messages were already persisted to the
+// transcript must still fold its per-turn count (TurnResult.Redactions) into
+// the session-cumulative total (cs.redactionsTotal) — the fold's move to the
+// success path (after captureTurn) must not have dropped it from the error
+// path. The turn is driven through the real path with the test-only
+// senderOverride seam: the user's message (carrying a secret) is persisted —
+// and masked — at append time, before the first send, and the scripted
+// sender's first send fails, so runLoop returns the unrecovered error and
+// turn's err != nil branch runs. No transcript is opened (as in a test
+// without StartTranscript), so only that user message is counted —
+// cs.redactions at the error return is exactly the user message's masking.
+func TestFailedTurnRedactionsFoldedIntoSessionTotal(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m",
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.Config = &Config{}
+	cs.senderOverride = SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		return nil, false, fmt.Errorf("backend down (503)")
+	})
+
+	res, turnErr := cs.Turn(context.Background(), "print my key "+secret)
+	if turnErr == nil {
+		t.Fatal("turn should fail (the scripted first send errors and nothing is recovered)")
+	}
+	if res.Redactions <= 0 {
+		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the user message carried the secret and was persisted before the failure)", res.Redactions)
+	}
+	// The session total must include the failed turn's redactions: on this
+	// single-turn session it equals the turn's own per-turn count.
+	if cs.redactionsTotal != res.Redactions {
+		t.Errorf("cs.redactionsTotal = %d, want %d (the failed turn's TurnResult.Redactions — a failed turn's persisted messages still count)", cs.redactionsTotal, res.Redactions)
+	}
+	// And the session summary (the user-facing surface for the total)
+	// reflects it.
+	if !strings.Contains(cs.sessionSummary(), fmt.Sprintf("%d secrets redacted", res.Redactions)) {
+		t.Errorf("sessionSummary = %q, want the failed turn's redaction total surfaced", cs.sessionSummary())
+	}
+}

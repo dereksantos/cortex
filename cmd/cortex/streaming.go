@@ -638,7 +638,8 @@ func printBackendError(err error) {
 // The caller picks the sink: the REPL passes stdout (a turn-boundary note
 // belongs in the scrollback with every other one), the headless `cortex turn`
 // driver passes stderr — issue #118's contract that headless stdout is the
-// answer only (TestTurnCLIReportsOnStderr).
+// answer only (TestTurnCLIStdoutContractWithRedactions locks the stderr
+// routing for the redaction notice specifically).
 func printRedactions(w io.Writer, n int) {
 	if n > 0 {
 		fmt.Fprintln(w, withColor(fmt.Sprintf("%d secret pattern(s) redacted from the transcript, journal, and memory this turn", n), gray))

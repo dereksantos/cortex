@@ -180,44 +180,7 @@ func runTurnCLI(args []string) {
 			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
 		} else {
-			if turnErr != nil {
-				fmt.Fprintf(os.Stderr, "turn error: %v\n", turnErr)
-				if d := diagnoseModelError(turnErr); d != "" {
-					fmt.Fprintln(os.Stderr, d)
-				}
-			}
-			if res.Reply != "" {
-				fmt.Println(res.Reply)
-			}
-			// Issue #141: a turn that removed or shrank tests reports it on
-			// stderr — the reply is the model's prose, and the receipt is a
-			// harness-level fact the caller (a human, or a self-dev driver
-			// parsing stderr) must see. The --json path carries the same fact
-			// under "tests_changed" above.
-			if res.TestReceipt != "" {
-				fmt.Fprintln(os.Stderr, res.TestReceipt)
-			}
-			// Issue #129 piece 3: the turn-end lint receipt rides the same
-			// stderr surface ("lint: …"), and the --json path carries it under
-			// "lint" above.
-			if res.LintReceipt != "" {
-				fmt.Fprintln(os.Stderr, res.LintReceipt)
-			}
-			// Issue #117: a turn that recovered from a mid-turn provider
-			// failure SUCCEEDED (turnErr is nil), so without this the backend's
-			// status/body would vanish behind the reply — one line on stderr,
-			// secrets redacted, exactly like the REPL's dim notice.
-			if res.LastError != nil {
-				fmt.Fprintln(os.Stderr, backendErrorLine(res.LastError))
-			}
-			// Issue #103: a turn whose persisted messages carried a secret
-			// reports how much was masked on STDERR (dim provenance, not an
-			// alarm), like the test/lint receipts above — never stdout, so
-			// issue #118's answer-only contract holds even when a turn masked
-			// a secret; the --json path carries the same count under
-			// "redactions".
-			printRedactions(os.Stderr, res.Redactions)
-			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
+			reportTurnText(os.Stdout, os.Stderr, turnErr, res, session.SessionID)
 		}
 		if turnErr != nil {
 			return 1
@@ -227,6 +190,40 @@ func runTurnCLI(args []string) {
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
+}
+
+// reportTurnText is runTurnCLI's non-JSON reporting: it splits the turn's
+// output between the two headless streams so issue #118's answer-only stdout
+// contract holds — stdout carries ONLY the reply (or nothing, on an error-
+// only turn), while every harness-level fact goes to stderr: the turn error
+// (and its diagnosis), the test-removal receipt (issue #141), the turn-end
+// lint receipt (issue #129 piece 3), the recovered backend-error notice
+// (issue #117), and the secret-redaction notice (issue #103 — dim provenance,
+// never an alarm; the --json path carries the same count under
+// "redactions"). runTurnCLI calls it with os.Stdout/os.Stderr; the writers are
+// parameters so the contract is testable with buffers (the test in
+// session_runtime_test.go drives this helper, not a copy of its logic).
+func reportTurnText(stdout, stderr io.Writer, turnErr error, res TurnResult, sessionID string) {
+	if turnErr != nil {
+		fmt.Fprintf(stderr, "turn error: %v\n", turnErr)
+		if d := diagnoseModelError(turnErr); d != "" {
+			fmt.Fprintln(stderr, d)
+		}
+	}
+	if res.Reply != "" {
+		fmt.Fprintln(stdout, res.Reply)
+	}
+	if res.TestReceipt != "" {
+		fmt.Fprintln(stderr, res.TestReceipt)
+	}
+	if res.LintReceipt != "" {
+		fmt.Fprintln(stderr, res.LintReceipt)
+	}
+	if res.LastError != nil {
+		fmt.Fprintln(stderr, backendErrorLine(res.LastError))
+	}
+	printRedactions(stderr, res.Redactions)
+	fmt.Fprintf(stderr, "session: %s\n", sessionID)
 }
 
 // backendErrorLine is the one-line, secrets-redacted human-facing notice for a
