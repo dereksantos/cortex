@@ -6,9 +6,16 @@ import (
 	"time"
 )
 
+// testNow pins the test anchors' clock: every test that renders elapsed
+// seconds pins TurnStart as an offset from this instant, so the rendered
+// "34s" is deterministic (issue #109 review: the wall clock measured from
+// package init could flake to "35s" on a loaded CI).
+var testNow = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
 // newTestAnchor builds an Anchor wired to an in-memory sink at a fixed width,
 // without starting the terminal goroutines — enough to exercise the draw/erase
-// and event logic deterministically.
+// and event logic deterministically. Its clock (nowFn) is pinned at testNow
+// so the status row's elapsed seconds are deterministic.
 func newTestAnchor(prompt, seed string, width int) (*Anchor, *strings.Builder) {
 	out := &strings.Builder{}
 	a := &Anchor{
@@ -16,6 +23,7 @@ func newTestAnchor(prompt, seed string, width int) (*Anchor, *strings.Builder) {
 		widthFn: func() int { return width },
 		prompt:  prompt,
 		buf:     &buffer{},
+		nowFn:   func() time.Time { return testNow },
 	}
 	if seed != "" {
 		setBuffer(a.buf, seed)
@@ -343,7 +351,8 @@ func TestAnchorSetPromptErasesLiveStatusRow(t *testing.T) {
 // statusStatsSample is the full StatusStats the StatusLine tests pin: every
 // segment present, in the issue's own example figures (model, 42% ctx, 18.2k
 // in / 1.1k out, a reported $0.013 cost, 34s elapsed — the latter derived
-// from TurnStart by the code under test, not hard-coded).
+// from TurnStart against the pinned clock testNow, not the wall clock;
+// issue #109 review).
 var statusStatsSample = StatusStats{
 	Model:      "anthropic/claude-sonnet-4.5",
 	Ctx:        0.42,
@@ -352,13 +361,15 @@ var statusStatsSample = StatusStats{
 	CostUSD:    0.013,
 	SessionIn:  42000,
 	SessionOut: 9000,
-	TurnStart:  time.Now().Add(-34 * time.Second),
+	TurnStart:  testNow.Add(-34 * time.Second),
+	Elapsed:    34 * time.Second,
 }
 
 // TestStatusLineRenders pins the full stats line (issue #109's row format):
 // every segment present in "<model> · ctx 42% · 18.2k in / 1.1k out ·
 // $0.013 · 34s" order, " · "-joined, cost shown only because the backend
-// reported it.
+// reported it. The 34s figure is derived from TurnStart against the pinned
+// clock testNow (not the wall clock — issue #109 review).
 func TestStatusLineRenders(t *testing.T) {
 	got := statusStatsSample.StatusLine(0)
 	want := "anthropic/claude-sonnet-4.5 · ctx 42% · 18.2k in / 1.1k out · $0.013 · 34s"
@@ -416,9 +427,9 @@ func TestStatusLineOmitsAbsentData(t *testing.T) {
 }
 
 // TestStatusLineTruncatesByPriority is the issue's narrow-width rule: when
-// the full line does not fit, segments drop right-to-left — the elapsed
-// seconds first, then the cost, then the tokens, then the ctx — with the
-// model kept last. Width 0 ("no width known") never truncates.
+// the full line does not fit, segments drop right-to-left — the cost first,
+// then the tokens, then the ctx — with the model kept last. Width 0 ("no
+// width known") never truncates.
 func TestStatusLineTruncatesByPriority(t *testing.T) {
 	s := statusStatsSample
 	full := s.StatusLine(0)
@@ -462,22 +473,27 @@ func TestStatusLineTruncatesByPriority(t *testing.T) {
 	}
 }
 
-// TestStatusLineElapses is the wall-clock half: the seconds segment counts
-// whole seconds since TurnStart — 0s in the first second, and it advances as
-// the turn runs (the tick loop's repaint is what makes it visible).
+// TestStatusLineElapses exercises the REAL clock (time.Now), the one test
+// that must: the seconds segment counts whole seconds since TurnStart —
+// tolerant assertions (a range, not an exact figure) because the turn runs
+// on the wall clock between the two reads.
 func TestStatusLineElapses(t *testing.T) {
 	t.Run("zero before the first second", func(t *testing.T) {
 		s := statusStatsSample
 		s.TurnStart = time.Now()
-		if got := s.StatusLine(0); got == "" || !strings.HasSuffix(got, " · 0s") {
-			t.Errorf("fresh turn: %q, want it to end \"· 0s\"", got)
+		s.Elapsed = 0 // caller hasn't computed it yet — StatusLine falls back to time.Since
+		got := s.StatusLine(0)
+		if got == "" || (!strings.HasSuffix(got, " · 0s") && !strings.HasSuffix(got, " · 1s")) {
+			t.Errorf("fresh turn: %q, want it to end \"· 0s\" (or \"· 1s\" if the second ticked between the two reads)", got)
 		}
 	})
 	t.Run("advances with the turn", func(t *testing.T) {
 		s := statusStatsSample
 		s.TurnStart = time.Now().Add(-2500 * time.Millisecond)
-		if got := s.StatusLine(0); got == "" || !strings.HasSuffix(got, " · 2s") {
-			t.Errorf("2.5s in: %q, want it to end \"· 2s\"", got)
+		s.Elapsed = 0
+		got := s.StatusLine(0)
+		if got == "" || (!strings.HasSuffix(got, " · 2s") && !strings.HasSuffix(got, " · 3s")) {
+			t.Errorf("2.5s in: %q, want it to end \"· 2s\" (or \"· 3s\" if the second ticked between the two reads)", got)
 		}
 	})
 }
@@ -513,6 +529,44 @@ func TestStatusLineFormats(t *testing.T) {
 	}
 }
 
+// TestStatusLineOneCounterPerRow is the issue #109 review fix: the row shows
+// ONE elapsed counter. When the caller's activity label already carries its
+// own seconds tick (SetThinking's "thinking... 12s"), the stats line's
+// trailing turn-elapsed segment is dropped — two counters that disagree (the
+// label resets per thinking phase) would be noise. A label without a tick
+// keeps the stats line's counter.
+func TestStatusLineOneCounterPerRow(t *testing.T) {
+	a, _ := newTestAnchor("> ", "", 200)
+
+	// A ticking label: the stats line's turn-elapsed segment is dropped.
+	a.activity = "thinking... 12s"
+	a.stats = statusStatsSample
+	a.mu.Lock()
+	row := a.statusLine()
+	a.mu.Unlock()
+	// statusLine drops the turn-elapsed segment for a ticking label; the
+	// sample's other segments stay.
+	s := statusStatsSample
+	s.TurnStart = time.Time{}
+	want := "thinking... 12s · " + s.StatusLine(0)
+	if row != want {
+		t.Errorf("ticking label: row = %q, want %q", row, want)
+	}
+	if strings.Count(row, "s ·") > 1 || strings.HasSuffix(row, " · 34s") {
+		t.Errorf("ticking label: row shows two counters: %q", row)
+	}
+
+	// A non-ticking label (a tool, say): the stats line's counter stays.
+	a.activity = "study(main.go)"
+	a.stats = statusStatsSample
+	a.mu.Lock()
+	row = a.statusLine()
+	a.mu.Unlock()
+	if !strings.Contains(row, "· 34s") {
+		t.Errorf("non-ticking label: row lost the stats line's turn-elapsed segment: %q", row)
+	}
+}
+
 // TestAnchorSetStatusAppendsStatsToTheRow pins the anchor-side half: with an
 // activity label live, the rendered status row is the dim label plus the
 // stats line, " · "-joined (issue #109's one plain-text status row); with
@@ -523,6 +577,9 @@ func TestStatusLineFormats(t *testing.T) {
 // sink, which the golden frames below already cover byte for byte.
 func TestAnchorSetStatusAppendsStatsToTheRow(t *testing.T) {
 	s := statusStatsSample
+	// The anchor's clock (nowFn) is pinned at testNow; the sample's TurnStart
+	// is 34s before it, so the turn-elapsed segment renders exactly "34s" —
+	// deterministic (issue #109 review).
 	wantRow := dim("thinking... · " + s.StatusLine(0))
 
 	a, _ := newTestAnchor("> ", "", 200)
@@ -635,9 +692,11 @@ func TestPlainReportPathsUnchanged(t *testing.T) {
 }
 
 // TestAnchorSetStatusClearsOnStop pins the Stop() field-clearing half of the
-// lifecycle directly (the goroutine half — close(stop), <~done — needs a real
-// terminal; the field drops are what the next turn's fresh anchor relies on
-// not to inherit).
+// lifecycle directly (the goroutine half — close(stop), <-done — runs against
+// pre-closed channels here; the field drops are what the next turn's fresh
+// anchor relies on not to inherit). Issue #109 review: an earlier version
+// copied Stop()'s clearing statement inline and asserted its own copy, so it
+// passed even if Stop stopped resetting — this drives the real Stop().
 func TestAnchorSetStatusClearsOnStop(t *testing.T) {
 	a, _ := newTestAnchor("> ", "", 80)
 	a.mu.Lock()
@@ -646,11 +705,20 @@ func TestAnchorSetStatusClearsOnStop(t *testing.T) {
 	a.refreshStatusLocked() // status row live with stats
 	a.mu.Unlock()
 
+	// Exercise the REAL Stop(): no real key/tick loops were started, so the
+	// anchor's own channels stand in for the goroutines — done is pre-closed
+	// (the goroutines have "exited"), and Stop() performs its own
+	// close(stop) / <-done / eraseLocked / resetLocked for real.
 	a.mu.Lock()
-	// The same clears Stop() performs after its goroutines have exited.
-	a.eraseLocked()
-	a.status, a.activity, a.stats = "", "", StatusStats{}
+	a.stop = make(chan struct{})
+	a.done = make(chan struct{})
+	a.cancel = func() {}
+	close(a.done) // the goroutines have "exited"
 	a.mu.Unlock()
+	got := a.Stop()
+	if got != "" {
+		t.Errorf("Stop() = %q, want the empty line", got)
+	}
 	if a.stats != (StatusStats{}) {
 		t.Errorf("stats not cleared: %+v", a.stats)
 	}

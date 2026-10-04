@@ -131,33 +131,44 @@ func TestConfirmAskGolden(t *testing.T) {
 	}
 }
 
-// statusLabelStats is the label + stats the status-STATS goldens pin (issue
-// #109): the same 14-column thinking label the other row goldens use, with a
-// full StatusStats whose TurnStart is fixed (34s in the past), so the frame
-// is byte-stable for the snapshot — the elapsed counter is the only thing
-// that moves in production, and the goldens pin one instant of it.
+// statusStatsLabel is the activity label the stats goldens pin. It carries a
+// seconds tick on purpose: this is the production shape — the thinking
+// indicator's own elapsed-seconds tail (the "thinking... 34s" the row showed
+// before this change). Because the label ticks, statusLine drops the stats
+// line's own turn-elapsed segment (one counter per row, issue #109 review),
+// so the row shows exactly one "34s" — the label's.
 const statusStatsLabel = "thinking... 34s"
 
+// statusStatsGolden is the full StatusStats the stats goldens pin. TurnStart
+// is a fixed instant (34s before the pinned clock statusStatsClock, declared
+// below it), so the turn-elapsed segment renders exactly "34s" — deterministic
+// on any CI (issue #109 review: the wall clock measured from package init
+// could flake to "35s").
 var statusStatsGolden = StatusStats{
 	Model:     "anthropic/claude-sonnet-4.5",
 	Ctx:       0.42,
 	InTokens:  18200,
 	OutTokens: 1100,
 	CostUSD:   0.013,
-	TurnStart: time.Now().Add(-34 * time.Second),
+	TurnStart: time.Date(2026, 10, 1, 12, 0, 34, 0, time.UTC),
+	Elapsed:   34 * time.Second,
 }
+
+// statusStatsClock pins the anchor's clock for the stats goldens: fixed 34s
+// after statusStatsGolden's TurnStart, so the rendered "34s" is deterministic.
+var statusStatsClock = statusStatsGolden.TurnStart.Add(34 * time.Second)
 
 // statusStatsFrame builds an anchor at the given width with the stats label
 // and stats, runs the exact draw/erase/refresh sequence the real tick loop
 // performs for a stats-carrying status row (SetStatus, then a tick's
 // refreshStatusLocked), and returns the raw frame the terminal would receive.
-// The frame is deterministic except for the 34s figure's own second — the
-// label and the stats' elapsed figure both read from the same fixed
-// TurnStart, so a snapshot taken within the same second is byte-identical;
-// -update regenerates it.
+// The frame is deterministic: the anchor's clock (nowFn) is pinned at
+// statusStatsClock, so the turn-elapsed segment renders exactly "34s";
+// -update regenerates the file.
 func statusStatsFrame(width int) string {
 	out := &strings.Builder{}
-	a := &Anchor{out: out, widthFn: func() int { return width }, prompt: prompt, buf: &buffer{}}
+	a := &Anchor{out: out, widthFn: func() int { return width }, prompt: prompt, buf: &buffer{},
+		nowFn: func() time.Time { return statusStatsClock }}
 	a.mu.Lock()
 	a.drawLocked() // initial 1-row input line
 	a.activity = statusStatsLabel
@@ -171,10 +182,10 @@ func statusStatsFrame(width int) string {
 // TestStatusStatsGolden pins the issue #109 status row — label + "<model> ·
 // ctx 42% · 18.2k in / 1.1k out · $0.013 · 34s" — across the width axis. At
 // 200 columns the full line shows; at 80 the right-to-left priority trim
-// (elapsed → cost → tokens → ctx, model kept last) drops the tail; at 40 the
-// 14-column label leaves only the model for the stats side. Cost appears in
-// every frame because this stats sample carries a backend-reported figure —
-// the no-cost case is covered by TestStatusLineOmitsAbsentData.
+// (cost → tokens → ctx, model kept last) drops the tail; at 40 the 11-column
+// label leaves only the model for the stats side. Cost appears in every frame
+// because this stats sample carries a backend-reported figure — the no-cost
+// case is covered by TestStatusLineOmitsAbsentData.
 func TestStatusStatsGolden(t *testing.T) {
 	for _, w := range lineWidths {
 		w := w
