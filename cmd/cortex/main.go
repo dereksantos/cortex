@@ -513,6 +513,7 @@ func main() {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
+			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
 			// Risky-command confirmation reads a y/N line from the editor. Tool
 			// calls run synchronously on this goroutine between ReadLine calls,
@@ -592,6 +593,13 @@ func main() {
 		if input == "" {
 			continue
 		}
+
+		// Issue #108: @path mentions are attached to the turn through the same
+		// size rules as read_file (small files inline, large files as an
+		// outline with a pointer to study). The attachment is prepended to the
+		// user's message so the model sees it in context; the mentions in the
+		// input are replaced by short markers.
+		input, mentionAttachment := processMentions(session.root(), input)
 
 		// Record for ↑/↓ and Ctrl-R recall — but not the session-enders, so a
 		// fresh prompt's first ↑ lands on real work, not "/quit".
@@ -752,6 +760,12 @@ func main() {
 		// The reply itself is printed by the coder sender (printCoderProse /
 		// the live stream), not here — the REPL owns only the turn-boundary
 		// receipt, display, and compaction.
+		// Issue #108: prepend the mention attachment (if any) to the turn's
+		// input so the model sees the file content (or outline) in context.
+		turnInput := input
+		if mentionAttachment != "" {
+			turnInput = mentionAttachment + "\n" + input
+		}
 		var (
 			err error
 			res TurnResult
@@ -760,14 +774,14 @@ func main() {
 		case editor != nil && anchoredInput():
 			// runAnchoredTurn runs its own Turn and returns its result, so the
 			// turn-boundary receipt below surfaces in this mode too.
-			typeAhead, res, err = runAnchoredTurn(session, editor, input, typeAhead)
+			typeAhead, res, err = runAnchoredTurn(session, editor, turnInput, typeAhead)
 		case editor != nil:
 			ctx, stop := editor.Interruptible(context.Background())
-			res, err = session.Turn(ctx, input)
+			res, err = session.Turn(ctx, turnInput)
 			typeAhead = stop()
 		default:
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-			res, err = session.Turn(ctx, input)
+			res, err = session.Turn(ctx, turnInput)
 			cancel()
 		}
 		// Issue #141: surface the "tests changed" receipt to the user before

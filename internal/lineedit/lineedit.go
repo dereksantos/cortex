@@ -20,11 +20,12 @@ var ErrInterrupted = errors.New("lineedit: interrupted")
 // Terminal owns a TTY in cbreak mode for an interactive session. Construct with
 // Open and always Close (it restores the prior terminal state).
 type Terminal struct {
-	in      *os.File
-	out     io.Writer
-	fd      int
-	old     *termState
-	history *History
+	in         *os.File
+	out        io.Writer
+	fd         int
+	old        *termState
+	history    *History
+	completers map[string]Completer // Tab-completion sources, nil = completion off
 
 	// mu guards the two pieces of terminal-wide state a background goroutine
 	// can observe: the live pinned prompt (so Inspect can park it instead of
@@ -37,6 +38,13 @@ type Terminal struct {
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
 func (t *Terminal) SetHistory(h *History) { t.history = h }
+
+// SetCompletion wires the Tab-completion sources (issue #108): slash commands,
+// the /model continuation, and @path mentions. Passing a nil map (or leaving
+// it unset) disables completion entirely — Tab then behaves like any other
+// unbound key (no state change), which is also exactly what the non-TTY path
+// does, since it never reaches ReadLine at all.
+func (t *Terminal) SetCompletion(c map[string]Completer) { t.completers = c }
 
 // AddHistory records a submitted line for recall. The caller chooses what to
 // record (e.g. skipping session-ending meta commands).
@@ -213,8 +221,26 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 	if prefill != "" {
 		setBuffer(buf, prefill)
 	}
-	redraw := func() { io.WriteString(t.out, renderLine(prompt, buf, t.width())) }
-	redraw()
+	// completion holds the live Tab-completion state (issue #108); nil means
+	// the completer map was never wired and Tab is inert.
+	var completion *Completions
+	if t.completers != nil {
+		completion = NewCompletions()
+	}
+	redraw := func(row string) {
+		io.WriteString(t.out, renderLine(prompt, buf, t.width()))
+		// The candidate row renders below the input row as a plain-text row
+		// (no popup box). renderLine parks the cursor at the end of the input
+		// row, so the row text lands on the next line, and a fresh input-row
+		// redraw (\r\033[K) clears it because the candidate row never exceeds
+		// the terminal width. A multi-line buffer collapses to a summary
+		// (renderSummary), which is itself a single row, so the invariant
+		// holds there too.
+		if row != "" {
+			io.WriteString(t.out, "\r\n"+truncate(row, t.width()))
+		}
+	}
+	redraw("")
 
 	// History navigation: hpos indexes into history; at history.Len() means the
 	// live draft (preserved so ↓ past the newest restores what was typed).
@@ -234,6 +260,18 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 			line := buf.string()
 			io.WriteString(t.out, "\r\n")
 			return line, nil // caller decides what to record (AddHistory)
+		case keyTab:
+			if completion == nil {
+				continue // no completer wired — Tab inserts nothing
+			}
+			cands := t.completionCandidates(buf.string(), buf.pos)
+			filled, pos, row := completion.Tab(buf.string(), buf.pos, func(l string, c int) []string {
+				return cands
+			})
+			setBuffer(buf, filled)
+			buf.pos = pos
+			redraw(row)
+			continue // the candidate row is drawn by redraw; skip the generic one
 		case keyUp:
 			if hpos == 0 {
 				continue
@@ -304,8 +342,32 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 		case keyUnknown, keyAbort, keyPageUp, keyPageDown:
 			continue // no state change → no redraw (paging belongs to the inspector)
 		}
-		redraw()
+		if completion != nil {
+			completion.Change() // any other key invalidates the candidate state
+		}
+		redraw("")
 	}
+}
+
+// completionCandidates merges every wired completer's candidates for the
+// current line+cursor. The fixed command set and the /model continuation are
+// both consulted (they never overlap: one fires only before the first space,
+// the other only after it), and the path completer fires anywhere an @word is.
+// The result is the list Tab cycles through, so a stable order is kept: the
+// sources are iterated in a fixed order and each source's list is left in its
+// own (already deterministic) order.
+func (t *Terminal) completionCandidates(line string, cursor int) []string {
+	var out []string
+	if c, ok := t.completers["slash"]; ok {
+		out = append(out, c.Candidates(line, cursor)...)
+	}
+	if c, ok := t.completers["model"]; ok {
+		out = append(out, c.Candidates(line, cursor)...)
+	}
+	if c, ok := t.completers["path"]; ok {
+		out = append(out, c.Candidates(line, cursor)...)
+	}
+	return out
 }
 
 // setBuffer replaces the line with s and parks the cursor at the end.
