@@ -2,7 +2,9 @@ package lineedit
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +37,12 @@ type Anchor struct {
 	cancel context.CancelFunc // cancels the turn ctx on ESC / Ctrl-C
 
 	activity string // status-row label; "" hides the row
+	stats    StatusStats
+	// nowFn is the elapsed-time source for the status row's TurnStart clock.
+	// time.Now in production (set in Start); tests pin a fixed instant so the
+	// rendered seconds are deterministic (issue #109: the exact "34s" goldens
+	// and tests used to read the wall clock measured from package init).
+	nowFn func() time.Time
 
 	confirm *confirmState // in-flight y/N question, served by the key loop
 	susp    *suspendState // in-flight inspector lease, served by the key loop
@@ -42,6 +50,12 @@ type Anchor struct {
 	stop chan struct{}
 	done chan struct{} // closed when both the key loop and ticker have exited
 }
+
+// secondsTickRe matches a trailing elapsed-seconds tick on the caller's
+// activity label (SetThinking's "thinking... 12s") so statusLine can drop
+// the stats line's own turn-elapsed segment — one counter per row
+// (issue #109 review).
+var secondsTickRe = regexp.MustCompile(`\d+s$`)
 
 // dim wraps s in the bright-black SGR so the status row reads as transient
 // metadata. lineedit keeps its own copy rather than importing the cmd/cortex
@@ -65,6 +79,7 @@ func (t *Terminal) Anchor(prompt, seed string) (*Anchor, context.Context) {
 		term:    t,
 		prompt:  prompt,
 		buf:     &buffer{},
+		nowFn:   time.Now,
 		cancel:  cancel,
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
@@ -330,8 +345,15 @@ func (a *Anchor) Stop() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.eraseLocked()
-	a.status, a.activity = "", ""
+	a.resetLocked()
 	return a.buf.string()
+}
+
+// resetLocked clears the status row's label and stats (and its rendered row)
+// so a fresh anchor never inherits them from a previous turn. Stop calls it as
+// part of the shutdown; tests exercise it directly. Must hold a.mu.
+func (a *Anchor) resetLocked() {
+	a.status, a.activity, a.stats = "", "", StatusStats{}
 }
 
 // keyLoop reads keystrokes and edits the pinned line live until Stop. The first
@@ -449,6 +471,194 @@ func (a *Anchor) applyEvent(ev keyEvent) {
 	a.refreshInputLocked()
 }
 
+// StatusStats carries the live figures the status row shows next to the
+// activity label (issue #109): model, context-window fill, this turn's
+// tokens, the session's cumulative tokens and cost, and the turn's start
+// time (for the elapsed seconds). The caller (cmd/cortex) owns populating it
+// from session state — lineedit stays session-free; this is the wire shape.
+//
+// CostUSD is the session CUMULATIVE cost, reported by the backend when it
+// reports cost (OpenRouter's usage accounting); zero means the backend never
+// reported a figure, and the row must then omit cost entirely — never
+// estimate it. Ctx is the context-window fill ratio (0..1+); <= 0 hides the
+// segment (no request yet, or window unknown).
+//
+// Elapsed is the turn's elapsed duration at the instant the caller computed
+// it. The anchor re-derives it from its own clock (nowFn; time.Now in
+// production, pinned in tests) on every render so the tick loop's repaint
+// keeps it fresh — the caller need not re-push stats between renders. A
+// zero Elapsed with a non-zero TurnStart means "not yet computed" (the
+// anchor derives it); a zero TurnStart with a non-zero Elapsed means "caller
+// owns the figure" (StatusLine uses it directly, so the pure method is
+// deterministic in tests — issue #109 review).
+//
+// All fields are read under the anchor's mutex (SetStatus), and the render
+// (statusLine) happens under it too, so no sync is needed here.
+type StatusStats struct {
+	Model      string  // the coding model's name, e.g. "anthropic/claude-..."
+	Ctx        float64 // context-window fill, 0..1+ (LastPromptTokens/window)
+	InTokens   int     // this turn's input tokens (the last request's prompt)
+	OutTokens  int     // this turn's output tokens (the last response's completion)
+	CostUSD    float64 // session cumulative cost, backend-reported; 0 = not reported
+	SessionIn  int     // session cumulative input tokens
+	SessionOut int     // session cumulative output tokens
+	TurnStart  time.Time
+	Elapsed    time.Duration
+}
+
+// StatusLine renders the stats segments for the status row at width w:
+// "<model> · ctx 42% · 18.2k in / 1.1k out · $0.013 · 34s" joined with
+// " · ", each segment omitted when its data is absent (no model, ctx <= 0,
+// zero turn tokens, no reported cost, zero turn start). The elapsed seconds
+// are whole seconds since TurnStart (0s before any has elapsed). The
+// turn-elapsed segment is the row's ONE counter: when the caller's activity
+// label already carries its own seconds tick (SetThinking's "thinking...
+// 12s"), statusLine (the anchor-side renderer) drops the segment so the row
+// shows a single, consistent number — the label and the stats line's
+// counters would disagree because the label resets per thinking phase
+// (issue #109 review).
+//
+// When the full line exceeds w columns it is trimmed segment by segment,
+// right to left, until it fits — the issue's priority order: the cost drops
+// first (least decision-relevant mid-turn), then the token counts, then the
+// context fill; the model and (the caller's) label are kept last.
+// w <= 0 means "no width known": the full line is returned untruncated (the
+// terminal-side truncation then applies).
+func (s StatusStats) StatusLine(width int) string {
+	var segs []string
+	if s.Model != "" {
+		segs = append(segs, s.Model)
+	}
+	if s.Ctx > 0 {
+		segs = append(segs, "ctx "+pct(s.Ctx))
+	}
+	if s.InTokens > 0 || s.OutTokens > 0 {
+		segs = append(segs, humanK(s.InTokens)+" in / "+humanK(s.OutTokens)+" out")
+	}
+	if s.CostUSD > 0 {
+		segs = append(segs, "$"+humanCost(s.CostUSD))
+	}
+	if !s.TurnStart.IsZero() {
+		d := s.Elapsed
+		if d <= 0 {
+			d = time.Since(s.TurnStart)
+		}
+		if d > 0 {
+			segs = append(segs, fmt.Sprintf("%ds", int(d.Seconds())))
+		} else {
+			segs = append(segs, "0s")
+		}
+	}
+	if len(segs) == 0 {
+		return ""
+	}
+	full := strings.Join(segs, " · ")
+	if width <= 0 || displayWidth(full) <= width {
+		return full
+	}
+	// The row is the dim label + " · " + full; the label is the caller's and
+	// must always fit, so trim the stats side to width minus the label's own
+	// cost — which this method can't see. The caller passes the width REMAINING
+	// after its label (see refreshStatusLocked), which keeps the math here
+	// label-free.
+	for len(segs) > 1 && displayWidth(strings.Join(segs, " · ")) > width {
+		segs = segs[:len(segs)-1]
+	}
+	line := strings.Join(segs, " · ")
+	if displayWidth(line) > width {
+		line = truncate(line, width)
+	}
+	return line
+}
+
+// pct renders a 0..1+ fill ratio as a whole percent, e.g. "42%" (values above
+// 100% are shown as-is — a window can be over the nominal size on resume).
+func pct(r float64) string {
+	return fmt.Sprintf("%d%%", int(r*100+0.5))
+}
+
+// humanK renders a token count compactly: 8200 -> "8.2k", 999 -> "999".
+// lineedit keeps its own copy rather than importing internal/loopui (loopui
+// already imports internal/tools; the copy is a few lines, the import is not).
+func humanK(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n >= 1_000_000 {
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1_000_000), ".0") + "M"
+	}
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1_000), ".0") + "k"
+}
+
+// humanCost renders a dollar cost like the REPL's "0.013" — three decimals
+// under a dollar, two above — with no "$" of its own (the caller prefixes it),
+// so "$0.013" reads as the issue's example does. 0 renders "0.000" and is
+// filtered out by StatusLine before reaching here (no reported cost = no
+// segment, never an estimate).
+func humanCost(c float64) string {
+	if c >= 1 {
+		return fmt.Sprintf("%.2f", c)
+	}
+	if c >= 0.01 {
+		return fmt.Sprintf("%.3f", c)
+	}
+	return fmt.Sprintf("%.4f", c)
+}
+
+// SetStatus publishes the live stats the status row appends to the activity
+// label, and repaints immediately. Pass a zero StatusStats to clear the row
+// back to label-only. Safe from any goroutine (the anchor's mutex guards the
+// write, as with every other setter in this file).
+func (a *Anchor) SetStatus(s StatusStats) {
+	a.mu.Lock()
+	a.stats = s
+	a.refreshStatusLocked()
+	a.mu.Unlock()
+}
+
+// statusLine renders the status row's full text: the caller's activity label
+// (e.g. "thinking... 3s" or a running tool) plus the stats line, " · "-joined
+// when both are present — the dim wrapper the terminal receives. The width
+// passed to StatusStats is the budget LEFT after the label (label width + the
+// 3-column " · " joiner), so label + stats never exceed the row width before
+// drawLocked's own truncate (which is a safety net for over-wide labels the
+// caller produced, not the trim policy — that lives in StatusLine).
+func (a *Anchor) statusLine() string {
+	if a.activity == "" {
+		return ""
+	}
+	// The elapsed-seconds segment is the only piece of the stats line that
+	// moves on its own (the label's own tick is the caller's); re-derive it
+	// from the anchor's clock (nowFn; time.Now in production, pinned in
+	// tests) on every render so the tick loop's repaint stays fresh without
+	// the caller re-pushing stats.
+	s := a.stats
+	if !s.TurnStart.IsZero() {
+		elapsed := time.Since(s.TurnStart)
+		if a.nowFn != nil {
+			elapsed = a.nowFn().Sub(s.TurnStart)
+		}
+		s.Elapsed = elapsed
+	}
+	// One counter per row (issue #109 review): when the label already
+	// carries its own seconds tick (SetThinking's "thinking... 12s"), the
+	// stats line's trailing turn-elapsed "34s" would show two counters that
+	// disagree (the label resets per thinking phase). Drop the turn-elapsed
+	// segment in that case; the label is the row's visible motion.
+	if secondsTickRe.MatchString(a.activity) {
+		s.TurnStart = time.Time{}
+	}
+	if s.StatusLine(0) == "" {
+		return a.activity
+	}
+	w := a.widthFn()
+	if w <= 0 {
+		return a.activity + " · " + s.StatusLine(0)
+	}
+	budget := w - displayWidth(a.activity) - displayWidth(" · ")
+	return a.activity + " · " + s.StatusLine(budget)
+}
+
 // tickLoop repaints the status row on a fixed cadence while an activity is
 // set, so an external caller's own elapsed-seconds label update (SetThinking)
 // shows up promptly even between explicit SetActivity calls.
@@ -470,11 +680,12 @@ func (a *Anchor) tickLoop() {
 }
 
 // refreshStatusLocked recomputes the status row text and redraws the block.
-// No glyph to cycle — the caller's own label text (e.g. "thinking... 3s") is
-// the only thing that changes between ticks.
+// No glyph to cycle — the caller's own label text (e.g. "thinking... 3s") and
+// the stats line's elapsed-seconds counter are the only things that change
+// between ticks.
 func (a *Anchor) refreshStatusLocked() {
 	if a.activity != "" {
-		a.status = dim(a.activity)
+		a.status = dim(a.statusLine())
 	} else {
 		a.status = ""
 	}

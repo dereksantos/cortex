@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // updateLineeditGoldens is the -update flag (issue #112): when set, lineGolden
@@ -126,6 +127,70 @@ func TestConfirmAskGolden(t *testing.T) {
 		w := w
 		t.Run(caseName(w), func(t *testing.T) {
 			lineGolden(t, "confirm_"+caseName(w), confirmFrame(w, "draft", confirmAsk))
+		})
+	}
+}
+
+// statusStatsLabel is the activity label the stats goldens pin. It carries a
+// seconds tick on purpose: this is the production shape — the thinking
+// indicator's own elapsed-seconds tail (the "thinking... 34s" the row showed
+// before this change). Because the label ticks, statusLine drops the stats
+// line's own turn-elapsed segment (one counter per row, issue #109 review),
+// so the row shows exactly one "34s" — the label's.
+const statusStatsLabel = "thinking... 34s"
+
+// statusStatsGolden is the full StatusStats the stats goldens pin. TurnStart
+// is a fixed instant (34s before the pinned clock statusStatsClock, declared
+// below it), so the turn-elapsed segment renders exactly "34s" — deterministic
+// on any CI (issue #109 review: the wall clock measured from package init
+// could flake to "35s").
+var statusStatsGolden = StatusStats{
+	Model:     "anthropic/claude-sonnet-4.5",
+	Ctx:       0.42,
+	InTokens:  18200,
+	OutTokens: 1100,
+	CostUSD:   0.013,
+	TurnStart: time.Date(2026, 10, 1, 12, 0, 34, 0, time.UTC),
+	Elapsed:   34 * time.Second,
+}
+
+// statusStatsClock pins the anchor's clock for the stats goldens: fixed 34s
+// after statusStatsGolden's TurnStart, so the rendered "34s" is deterministic.
+var statusStatsClock = statusStatsGolden.TurnStart.Add(34 * time.Second)
+
+// statusStatsFrame builds an anchor at the given width with the stats label
+// and stats, runs the exact draw/erase/refresh sequence the real tick loop
+// performs for a stats-carrying status row (SetStatus, then a tick's
+// refreshStatusLocked), and returns the raw frame the terminal would receive.
+// The frame is deterministic: the anchor's clock (nowFn) is pinned at
+// statusStatsClock, so the turn-elapsed segment renders exactly "34s";
+// -update regenerates the file.
+func statusStatsFrame(width int) string {
+	out := &strings.Builder{}
+	a := &Anchor{out: out, widthFn: func() int { return width }, prompt: prompt, buf: &buffer{},
+		nowFn: func() time.Time { return statusStatsClock }}
+	a.mu.Lock()
+	a.drawLocked() // initial 1-row input line
+	a.activity = statusStatsLabel
+	a.refreshStatusLocked()
+	a.stats = statusStatsGolden
+	a.refreshStatusLocked() // the tick: re-derives label + stats at width
+	a.mu.Unlock()
+	return out.String()
+}
+
+// TestStatusStatsGolden pins the issue #109 status row — label + "<model> ·
+// ctx 42% · 18.2k in / 1.1k out · $0.013 · 34s" — across the width axis. At
+// 200 columns the full line shows; at 80 the right-to-left priority trim
+// (cost → tokens → ctx, model kept last) drops the tail; at 40 the 11-column
+// label leaves only the model for the stats side. Cost appears in every frame
+// because this stats sample carries a backend-reported figure — the no-cost
+// case is covered by TestStatusLineOmitsAbsentData.
+func TestStatusStatsGolden(t *testing.T) {
+	for _, w := range lineWidths {
+		w := w
+		t.Run(caseName(w), func(t *testing.T) {
+			lineGolden(t, "status_stats_"+caseName(w), statusStatsFrame(w))
 		})
 	}
 }

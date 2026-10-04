@@ -120,8 +120,9 @@ commands are the `input ==` checks inside the REPL's input loop (`for {`).
 session's two-zone context window (docs/context-architecture.md) as a fixed
 8×16 glyph grid spanning the whole model window — one glyph per component
 (system prompt, outline, memory index, skills index, workspace note, hydrated
-tail, free space), a demote-watermark tick, and a legend — under a header and a
-prefix-cache health headline. On an interactive TTY that map opens in the
+tail, free space), a demote-watermark tick, and a legend — under a header
+(carrying the session's cumulative in/out tokens and, when reported, cost)
+and a prefix-cache health headline. On an interactive TTY that map opens in the
 **inspector** (`internal/lineedit/inspect.go`): an alternate-screen, scrollable
 view that restores the user's scrollback byte-for-byte on exit. The REPL stays
 scrollback-native by default; the inspector is the on-demand escape hatch for
@@ -157,10 +158,22 @@ The REPL is plain-text by decision (2026-07-19): no icon set (the old
 ❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
 actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s
 `printToolAction`); role lines are colored by their timestamp instead of a
-per-role icon (`cmd/cortex/display.go`'s `gutter`); the "thinking" indicator
-is a static label with only its elapsed-seconds tick moving (no animated
-spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and
-the anchored status row (`internal/lineedit/live.go`). Two things print
+per-role icon (`cmd/cortex/display.go`'s `gutter`); the plain spinner
+(`internal/loopui/spinner.go`) is a static label with only its
+elapsed-seconds tick moving (no animated spinner frames). The anchored
+status row (`internal/lineedit/live.go`, issue #109) appends live stats to
+the activity label, refreshed per model round-trip: the coding model's name,
+the context-window fill (`ctx %`), the last request's billed `in / out`
+tokens (the in side is the last request's prompt, the out side the last
+response's completion — both refreshed per request, so they pair the same
+turn, not two different turns), the session's cumulative cost — shown only
+when the backend actually reported one, never estimated — and the turn's
+elapsed seconds. The row shows ONE elapsed counter: when the activity label
+already carries its own seconds tick (the thinking indicator), the
+turn-elapsed segment is dropped so the row never shows two disagreeing
+counters. When the row exceeds the available width it trims right to left —
+cost drops first, then the token counts, then the context fill — with the
+model name kept last. Two things print
 *under* a tool line, both plain-text by the same rule (`+`/`-`,
 indentation, and color only — no connectors or box-drawing):
 `edit_file`/`write_file` render the change as a bounded unified diff

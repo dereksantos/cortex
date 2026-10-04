@@ -5,21 +5,55 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/lineedit"
 )
 
 func (cs *CortexSession) startActivity(label string) {
 	cs.setPhase(phaseThinking) // a running tool is busy time, same light as reasoning
 	if cs.live != nil {
 		cs.live.SetActivity(label)
+		cs.live.SetStatus(cs.statusStats()) // issue #109: refresh the row's live figures
 	}
 }
 
 func (cs *CortexSession) stopActivity() {
 	if cs.live != nil {
 		cs.live.SetActivity("")
+		cs.live.SetStatus(cs.statusStats()) // issue #109: refresh the row's live figures
+	}
+}
+
+// statusStats assembles the live status-row figures (issue #109) from the
+// session's own state — the wire shape lineedit.StatusStats defines. Model
+// is the coding model's name; Ctx is the context-window fill (LastPromptTokens
+// over the window, 0 before any request); the turn's in/out tokens are the
+// last request's billed prompt size and the last response's billed completion
+// size; CostUSD is the session's CUMULATIVE cost — shown only when the backend
+// actually reported one (costUSD > 0), never estimated; TurnStart is the
+// in-flight turn's start (zero outside a turn — the row's elapsed segment
+// hides itself); the session totals ride SessionIn/SessionOut.
+//
+// Every field is read on the calling goroutine, which owns the turn's
+// bookkeeping: turn() stamps turnStart and settles tokensIn/tokensOut/costUSD
+// on the turn's own goroutine, onStatusUpdate runs in that goroutine's loop
+// callback, and the activity transitions (startActivity/stopActivity, send)
+// all fire from it too. The one cross-goroutine read is runUnderAnchor's
+// initial push at anchor creation, which runs before fn (the turn) starts,
+// so the turn hasn't touched any of these fields yet.
+func (cs *CortexSession) statusStats() lineedit.StatusStats {
+	return lineedit.StatusStats{
+		Model:      cs.Request.Model,
+		Ctx:        cs.contextRatio(),
+		InTokens:   cs.LastPromptTokens,
+		OutTokens:  cs.LastOutputTokens,
+		CostUSD:    cs.costUSD,
+		SessionIn:  cs.tokensIn,
+		SessionOut: cs.tokensOut,
+		TurnStart:  cs.turnStart,
 	}
 }
 
@@ -136,6 +170,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
+	// Issue #109: stamp the in-flight turn's start — the status row's elapsed
+	// clock (statusStats's TurnStart). It stays set for the whole turn, so the
+	// row's "· 34s" counts up from here; a turn never clears it, and the next
+	// turn's entry overwrites it.
+	cs.turnStart = time.Now()
 
 	turnStart := len(cs.Request.Messages)
 	// Issue #141: clear any stale test-file before-snapshot carried over from
@@ -338,10 +377,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// the char/4 demotion estimate drifts from what the provider actually
 	// billed at any given moment mid-turn. See contextSample in session.go.
 	iter := 0
-	onStatusUpdate := func(lastPromptTokens, maxTokens int) {
+	onStatusUpdate := func(lastPromptTokens, lastOutputTokens, maxTokens int) {
 		iter++
 		// Update the session's token count for display
 		cs.LastPromptTokens = lastPromptTokens
+		cs.LastOutputTokens = lastOutputTokens
 		tailEstNow := 0
 		if cs.ws != nil {
 			tailEstNow = cs.ws.TailTokens() + estTurnTokens(cs.Request.Messages[turnStart:])
@@ -435,6 +475,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.reasoningTokens += stats.ReasoningTokens
 	cs.costUSD += stats.Cost
 	cs.LastPromptTokens = stats.LastPromptTokens
+	cs.LastOutputTokens = stats.LastOutputTokens
 	cs.LastCachedTokens = stats.LastCachedTokens
 	// Issue #103: fold this turn's per-turn redaction count (cs.redactions,
 	// reset at turn start and counting exactly the in-flight turn) into the

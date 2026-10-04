@@ -99,6 +99,11 @@ type CortexSession struct {
 	Request          *AgentRequest
 	LastPromptTokens int
 	LastCachedTokens int
+	// LastOutputTokens is the last response's billed completion tokens — the
+	// status row's "out" figure (issue #109), mirroring LastPromptTokens for
+	// the "in" side. Updated per request in turn()'s onStatusUpdate and
+	// settled to the turn's final request in turn() after the run.
+	LastOutputTokens int
 	Window           int
 	Study            ModelSpec
 	Fleet            Fleet
@@ -269,6 +274,7 @@ type CortexSession struct {
 	sameActionBlocked map[string]bool
 
 	sessionStart    time.Time
+	turnStart       time.Time // in-flight turn's start (issue #109: the status row's elapsed clock); zero between turns
 	turns           int
 	turnNo          int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
 	tokensIn        int
