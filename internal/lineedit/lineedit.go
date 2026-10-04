@@ -20,11 +20,12 @@ var ErrInterrupted = errors.New("lineedit: interrupted")
 // Terminal owns a TTY in cbreak mode for an interactive session. Construct with
 // Open and always Close (it restores the prior terminal state).
 type Terminal struct {
-	in      *os.File
-	out     io.Writer
-	fd      int
-	old     *termState
-	history *History
+	in         *os.File
+	out        io.Writer
+	fd         int
+	old        *termState
+	history    *History
+	completers map[string]Completer // Tab-completion sources, nil = completion off
 
 	// mu guards the two pieces of terminal-wide state a background goroutine
 	// can observe: the live pinned prompt (so Inspect can park it instead of
@@ -37,6 +38,14 @@ type Terminal struct {
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
 func (t *Terminal) SetHistory(h *History) { t.history = h }
+
+// SetCompletion wires the Tab-completion sources (issue #108): slash commands,
+// the /model continuation, and @path mentions. Passing a nil map (or leaving
+// it unset) disables completion entirely — Tab is then inserted as a literal
+// character and the line passes through as typed (see readLineWith's keyTab
+// case), which is also exactly what the non-TTY path does, since it never
+// reaches ReadLine at all.
+func (t *Terminal) SetCompletion(c map[string]Completer) { t.completers = c }
 
 // AddHistory records a submitted line for recall. The caller chooses what to
 // record (e.g. skipping session-ending meta commands).
@@ -208,13 +217,38 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 // It backs the type-ahead path: keystrokes captured while a turn streamed land
 // here as the starting draft, so the user's in-flight input isn't lost.
 func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
-	src := newReaderSource(t.fd)
+	return t.readLineWith(prompt, prefill, newReaderSource(t.fd))
+}
+
+// readLineWith is ReadLinePrefilled over an explicit byte source — the seam
+// the non-TTY tests drive the driver with an in-memory source, exactly as
+// inspectWith does for the inspector (both let the key-decoding and buffer
+// loop run for real without a terminal).
+func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string, error) {
 	buf := &buffer{}
 	if prefill != "" {
 		setBuffer(buf, prefill)
 	}
-	redraw := func() { io.WriteString(t.out, renderLine(prompt, buf, t.width())) }
-	redraw()
+	// completion holds the live Tab-completion state (issue #108); nil means
+	// the completer map was never wired and Tab is inert.
+	var completion *Completions
+	if t.completers != nil {
+		completion = NewCompletions()
+	}
+	redraw := func(row string) {
+		io.WriteString(t.out, renderLine(prompt, buf, t.width()))
+		// The candidate row renders below the input row as a plain-text row
+		// (no popup box). renderLine parks the cursor at the end of the input
+		// row, so the row text lands on the next line, and a fresh input-row
+		// redraw (\r\033[K) clears it because the candidate row never exceeds
+		// the terminal width. A multi-line buffer collapses to a summary
+		// (renderSummary), which is itself a single row, so the invariant
+		// holds there too.
+		if row != "" {
+			io.WriteString(t.out, "\r\n"+truncate(row, t.width()))
+		}
+	}
+	redraw("")
 
 	// History navigation: hpos indexes into history; at history.Len() means the
 	// live draft (preserved so ↓ past the newest restores what was typed).
@@ -234,6 +268,24 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 			line := buf.string()
 			io.WriteString(t.out, "\r\n")
 			return line, nil // caller decides what to record (AddHistory)
+		case keyTab:
+			// No completer wired (the non-TTY path never calls SetCompletion):
+			// Tab is inert — it inserts nothing and drops nothing. Insert it as
+			// a literal character, exactly as typed, rather than silently
+			// eating it; there is no completion state to invalidate.
+			if completion == nil {
+				buf.insert('\t')
+				redraw("")
+				continue
+			}
+			cands := t.completionCandidates(buf.string(), buf.pos)
+			filled, pos, row := completion.Tab(buf.string(), buf.pos, func(l string, c int) []string {
+				return cands
+			})
+			setBuffer(buf, filled)
+			buf.pos = pos
+			redraw(row)
+			continue // the candidate row is drawn by redraw; skip the generic one
 		case keyUp:
 			if hpos == 0 {
 				continue
@@ -257,7 +309,11 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 			if t.history.Len() == 0 {
 				continue
 			}
-			res, action := t.reverseSearch(src)
+			rs, ok := src.(*readerSource)
+			if !ok {
+				continue // non-TTY source: reverse-i-search needs the fd's reader
+			}
+			res, action := t.reverseSearch(rs)
 			switch action {
 			case rsSubmit:
 				io.WriteString(t.out, "\r\n")
@@ -304,8 +360,32 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 		case keyUnknown, keyAbort, keyPageUp, keyPageDown:
 			continue // no state change → no redraw (paging belongs to the inspector)
 		}
-		redraw()
+		if completion != nil {
+			completion.Change() // any other key invalidates the candidate state
+		}
+		redraw("")
 	}
+}
+
+// completionCandidates merges every wired completer's candidates for the
+// current line+cursor. The sources never overlap: the slash set fires only
+// before the first space, its Sub hook only for a known command after it,
+// and the path completer only on an @word — so no candidate can appear
+// twice. The result is the list Tab cycles through, so a stable order is
+// kept: the sources are iterated in a fixed order and each source's list is
+// left in its own (already deterministic) order.
+func (t *Terminal) completionCandidates(line string, cursor int) []string {
+	var out []string
+	if c, ok := t.completers["slash"]; ok {
+		out = append(out, c.Candidates(line, cursor)...)
+	}
+	if c, ok := t.completers["model"]; ok {
+		out = append(out, c.Candidates(line, cursor)...)
+	}
+	if c, ok := t.completers["path"]; ok {
+		out = append(out, c.Candidates(line, cursor)...)
+	}
+	return out
 }
 
 // setBuffer replaces the line with s and parks the cursor at the end.

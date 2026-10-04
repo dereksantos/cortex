@@ -135,6 +135,21 @@ Memory is model-driven — ask in natural language ("remember that …" /
 `/remember` and `/forget` slash commands were removed with the mechanical
 capture/retract pipeline.
 
+Tab completes in the interactive REPL (issue #108; the engine is pure in
+`internal/lineedit/completion.go`, wired by `cmd/cortex/mentions.go`):
+slash commands, the `/model <id>` argument (bare model ids from one source —
+the slash completer's Sub hook), and `@path` file mentions (workspace-relative,
+`.gitignore`-aware, `..`/absolute escapes refused). First Tab fills the common
+prefix, later Tabs cycle the candidates — each candidate splices in place of
+the word at the cursor, so surrounding text survives. A submitted `@path`
+mention attaches the file to the turn with the same size rules as `read_file`
+(small files inline, large files as a structural outline + pointer to
+study); the mention is replaced by a `[@path attached]` marker in what the
+model sees. Only an `@` starting a whitespace-delimited word is a mention
+(emails and `@types/node`-style names are prose), and a mention that does not
+resolve to a readable file leaves the input unchanged. History records the
+line exactly as typed.
+
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
 ❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
 actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s

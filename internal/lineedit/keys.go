@@ -30,6 +30,7 @@ const (
 	keyEOF           // Ctrl-D
 	keyReverseSearch // Ctrl-R
 	keyAbort         // Ctrl-G
+	keyTab           // Tab (completion, issue #108)
 	keyPaste         // bracketed paste (text in keyEvent.paste)
 	keyUnknown
 )
@@ -64,6 +65,8 @@ func decodeKeyByte(b byte, src byteSource) (keyEvent, error) {
 	switch b {
 	case '\r', '\n':
 		return keyEvent{kind: keyEnter}, nil
+	case '\t':
+		return keyEvent{kind: keyTab}, nil
 	case 0x7f, 0x08:
 		return keyEvent{kind: keyBackspace}, nil
 	case 0x01:

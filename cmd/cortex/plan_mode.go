@@ -232,9 +232,25 @@ func (r *PlanRunResult) addLintReceipt(receipt string) {
 //     as not reached.
 //  4. The returned Reply lists every step as done / failed / not reached.
 //
+// attachment (issue #108), when non-empty, is the @path mention attachment
+// for the task (see processMentions): it is prepended to the planning turn
+// and the single-turn fallback, so the model sees the mentioned file content
+// (or outline) — the steps themselves are unaffected (they run on the same
+// session, where the attachment is already in context).
+//
 // Running each step as a separate turn — not one long tool loop — is what
 // lets context demotion (#131) act at every boundary.
-func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out PlanRunResult, err error) {
+func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachment ...string) (out PlanRunResult, err error) {
+	att := ""
+	if len(attachment) > 0 {
+		att = attachment[0]
+	}
+	prepend := func(input string) string {
+		if att != "" {
+			return att + "\n" + input
+		}
+		return input
+	}
 	// Issue #141: every turn this run executes (planning, fallback, each
 	// step — failed or interrupted ones included, since Turn returns the
 	// receipt on its error path too) contributes its "tests changed"
@@ -269,7 +285,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out Pla
 	// because the saved list is the FILTERED one, not the full registry.)
 	savedTools := cs.Request.Tools
 	cs.Request.Tools = nil
-	planRes, planErr := turn(planModeInstruction + "\n\nTask: " + task)
+	planRes, planErr := turn(prepend(planModeInstruction + "\n\nTask: " + task))
 	// Restore the session's own filtered tool list NOW — before any step or
 	// fallback turn runs — because runLoop left cs.Request.Tools nil (it
 	// stamps req.Tools = ts.Tools = nil on the tool-less planning turn).
@@ -290,7 +306,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string) (out Pla
 		// The model's reply was not a parseable ordered list (prose, a
 		// single "step", or tool-call markup). Fall back to doing the whole
 		// task in one plain turn — the pre-step-mode behavior (#150).
-		res, err := turn(task)
+		res, err := turn(prepend(task))
 		if err != nil {
 			return PlanRunResult{Planned: false}, fmt.Errorf("planning reply was not a step list; the fallback single turn failed: %w", err)
 		}
