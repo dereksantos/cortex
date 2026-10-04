@@ -55,23 +55,22 @@ func lineGolden(t *testing.T, name, got string) {
 	}
 }
 
-// lineWidths is the width axis: 40 is the clip boundary (the labels below
-// exceed it, so the w40 goldens record the truncated "…" form and differ from
-// w80/w200, where the labels fit), 80 is the conventional fallback width
-// (Terminal.width() falls back to it on a non-TTY, lineedit.go), and 200
-// leaves the labels unclipped. Width 0 is NOT swept: in production
-// Terminal.width() never returns 0 (it falls back to 80), so a 0-width frame
-// would pin a state no user can ever see.
+// lineWidths is the width axis: 40 is the tight clip boundary (both labels
+// below exceed it, so the w40 goldens record the truncated "…" form), 80 is
+// the conventional fallback width (Terminal.width() falls back to it on a
+// non-TTY, lineedit.go), and 200 leaves both labels unclipped. Width 0 is NOT
+// swept: in production Terminal.width() never returns 0 (it falls back to 80),
+// so a 0-width frame would pin a state no user can ever see.
 var lineWidths = []int{40, 80, 200}
 
-// statusLabel is the activity label the status-row goldens pin. It is 66
-// runes — longer than the 40-column sweep minimum — so the w40 case records
-// the truncated form (truncate appends "…") and differs from w80/w200.
+// statusLabel is the activity label the status-row goldens pin. It is between
+// 40 and 80 columns, so the w40 case records the truncated form (truncate
+// appends "…") and the unclipped form only at w200.
 const statusLabel = "thinking about the change, verifying each step against the spec… and back again 3s"
 
-// confirmAsk is the Confirm ask the approval goldens pin. It is 62 runes —
-// longer than the 40-column sweep minimum — so the w40 case records the
-// truncated form and differs from w80/w200.
+// confirmAsk is the Confirm ask the approval goldens pin. It is longer than
+// 40 columns, so the w40 case records the truncated form, and fits the wider
+// sweeps (w80 and w200) unclipped.
 const confirmAsk = "run the full test suite against the working tree? [y/N]"
 
 // statusFrame builds an anchor with the given width and activity label, runs

@@ -3,6 +3,7 @@ package lineedit
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -78,6 +79,11 @@ func renderSummary(prompt string, buf *buffer, width int) string {
 }
 
 // truncate cuts s to at most w display columns, appending "…" if shortened.
+// Escape sequences are copied through without counting (they occupy no
+// cells), and when the cut clips a styled s the result ends with a reset so
+// the styling can't bleed onto whatever renders below (the status row is
+// always dim, and a clipped dim row with a missing reset would dim the
+// input row beneath it).
 func truncate(s string, w int) string {
 	if displayWidth(s) <= w {
 		return s
@@ -86,16 +92,37 @@ func truncate(s string, w int) string {
 		return ""
 	}
 	var b strings.Builder
-	used := 0
-	for _, r := range s {
+	used, styled := 0, false
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				j++
+			}
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				j++ // consume the final byte
+			}
+			b.WriteString(s[i:j])
+			styled = true
+			i = j
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
 		rw := runewidth.RuneWidth(r)
 		if used+rw > w-1 {
 			break
 		}
 		b.WriteRune(r)
 		used += rw
+		i += size
 	}
 	b.WriteRune('…')
+	if styled {
+		b.WriteString(ansiReset)
+	}
 	return b.String()
 }
 
