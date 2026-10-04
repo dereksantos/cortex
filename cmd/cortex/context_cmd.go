@@ -78,13 +78,24 @@ func (cs *CortexSession) contextReportLines() []string {
 
 // contextHeaderLine renders "context — <model> · <window>k window · turn
 // <N>", gray. N is the working set's total tracked turn count (0 before the
-// first turn completes — cs.ws is nil then).
+// first turn completes — cs.ws is nil then). When the session has used the
+// model (tokensIn > 0), a compact cumulative-totals suffix follows the turn
+// count: "· <in> in / <out> out" plus "· $<cost>" only when the backend
+// reported one (costUSD > 0 — never estimated, mirroring the status row). A
+// zero-cost session with tokens still shows the token figure without a cost.
 func (cs *CortexSession) contextHeaderLine() string {
 	turn := 0
 	if cs.ws != nil {
 		turn = cs.ws.TotalTurns()
 	}
-	return withColor(fmt.Sprintf("context — %s · %s window · turn %d", cs.Request.Model, humanK(cs.windowSize()), turn), gray)
+	line := fmt.Sprintf("context — %s · %s window · turn %d", cs.Request.Model, humanK(cs.windowSize()), turn)
+	if cs.tokensIn > 0 {
+		line += " · " + humanK(cs.tokensIn) + " in / " + humanK(cs.tokensOut) + " out"
+		if cs.costUSD > 0 {
+			line += " · " + humanCost(cs.costUSD)
+		}
+	}
+	return withColor(line, gray)
 }
 
 // cacheHeadlineLine renders the prefix-cache health line. Once a request

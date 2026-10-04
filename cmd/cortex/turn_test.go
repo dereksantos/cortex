@@ -1443,6 +1443,61 @@ func TestStartStopActivitySetsPhase(t *testing.T) {
 	}
 }
 
+// TestStatusStatsAssembles pins statusStats()'s mapping of session state to the
+// status row's figures (issue #109): the model name, the ctx% math
+// (LastPromptTokens over the window), the turn's in/out tokens, the cost-only-
+// when-reported rule, the turn start, and the session totals.
+func TestStatusStatsAssembles(t *testing.T) {
+	start := time.Now().Add(-3 * time.Second)
+	cs := &CortexSession{
+		Request:          &AgentRequest{Model: "anthropic/claude-sonnet-4.5"},
+		Window:           100000,
+		LastPromptTokens: 42000,
+		LastOutputTokens: 1100,
+		costUSD:          0.013,
+		tokensIn:         100000,
+		tokensOut:        25000,
+		turnStart:        start,
+	}
+	got := cs.statusStats()
+	if got.Model != "anthropic/claude-sonnet-4.5" {
+		t.Errorf("Model = %q, want the coding model's name", got.Model)
+	}
+	// ctx% is LastPromptTokens over the window: 42000/100000 = 0.42 → "42%".
+	if got.Ctx <= 0 || got.Ctx >= 0.43 || got.Ctx < 0.419 {
+		t.Errorf("Ctx = %v, want ~0.42 (42000/100000)", got.Ctx)
+	}
+	if got.InTokens != 42000 {
+		t.Errorf("InTokens = %d, want the last prompt's billed size 42000", got.InTokens)
+	}
+	if got.OutTokens != 1100 {
+		t.Errorf("OutTokens = %d, want the last response's billed size 1100", got.OutTokens)
+	}
+	if got.CostUSD != 0.013 {
+		t.Errorf("CostUSD = %v, want the session's cumulative cost 0.013", got.CostUSD)
+	}
+	if got.SessionIn != 100000 || got.SessionOut != 25000 {
+		t.Errorf("session totals = %d/%d, want 100000/25000", got.SessionIn, got.SessionOut)
+	}
+	if !got.TurnStart.Equal(start) {
+		t.Errorf("TurnStart = %v, want the stamped turn start %v", got.TurnStart, start)
+	}
+
+	// Cost hidden at zero: when the backend never reported a cost, the figure
+	// must be 0 so the row omits the segment entirely — never estimated.
+	cs.costUSD = 0
+	if got := cs.statusStats(); got.CostUSD != 0 {
+		t.Errorf("CostUSD with no reported cost = %v, want 0 (hidden)", got.CostUSD)
+	}
+
+	// Before any request: ctx is 0 (LastPromptTokens 0) and the turn in/out
+	// tokens are 0 — the row's ctx and token segments hide themselves.
+	fresh := &CortexSession{Request: &AgentRequest{Model: "m"}, Window: 100000}
+	if got := fresh.statusStats(); got.Ctx != 0 || got.InTokens != 0 || got.OutTokens != 0 {
+		t.Errorf("fresh statusStats = %+v, want Ctx/InTokens/OutTokens all 0", got)
+	}
+}
+
 // TestTurnPhaseIdleAfterCompletion guards turn()'s own phase bookkeeping: it
 // should enter phaseThinking at the start and — via its deferred setPhase —
 // land back on phaseIdle once the turn (including a mid-turn tool call) fully

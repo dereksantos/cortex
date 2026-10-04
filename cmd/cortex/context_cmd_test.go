@@ -278,6 +278,55 @@ func TestContextHeaderLineNoWorkingSetYet(t *testing.T) {
 	}
 }
 
+// TestContextHeaderLineSessionTotals pins the cumulative session totals
+// suffix (issue #109's "/context" acceptance item): once the session has used
+// the model, the header carries "· <in> in / <out> out" after the turn count,
+// with the "· $<cost>" figure appended only when the backend reported one.
+func TestContextHeaderLineSessionTotals(t *testing.T) {
+	cs := &CortexSession{
+		Window:    4000,
+		Request:   &AgentRequest{Model: "m"},
+		tokensIn:  12000,
+		tokensOut: 3000,
+		costUSD:   0.013,
+	}
+	got := stripANSI(cs.contextHeaderLine())
+	// The base header must still read first; the totals follow the turn count.
+	if !strings.HasPrefix(got, "context — m · "+humanK(4000)+" window · turn 0") {
+		t.Errorf("contextHeaderLine() = %q, want the base header before the totals", got)
+	}
+	if !strings.HasSuffix(got, "· "+humanK(12000)+" in / "+humanK(3000)+" out · "+humanCost(0.013)) {
+		t.Errorf("contextHeaderLine() = %q, want the totals suffix '· %s in / %s out · %s'", got, humanK(12000), humanK(3000), humanCost(0.013))
+	}
+	// Tokens alone (no reported cost): the cost figure must be absent, not an
+	// estimated "· $0.000".
+	cs.costUSD = 0
+	got = stripANSI(cs.contextHeaderLine())
+	if !strings.HasSuffix(got, "· "+humanK(12000)+" in / "+humanK(3000)+" out") {
+		t.Errorf("contextHeaderLine() with no cost = %q, want the token totals without a cost figure", got)
+	}
+	if strings.Contains(got, "$") {
+		t.Errorf("contextHeaderLine() with no reported cost must not show a $ figure: %q", got)
+	}
+}
+
+// TestContextHeaderLineNoTotalsOnFreshSession pins the absence of the totals
+// suffix on a session that has never used the model — a zero-cost, zero-token
+// session reads exactly the base header (no dangling "·").
+func TestContextHeaderLineNoTotalsOnFreshSession(t *testing.T) {
+	cs := &CortexSession{
+		Window:  4000,
+		Request: &AgentRequest{Model: "m"},
+	}
+	got := stripANSI(cs.contextHeaderLine())
+	if got != "context — m · "+humanK(4000)+" window · turn 0" {
+		t.Errorf("contextHeaderLine() = %q, want exactly the base header (no totals suffix)", got)
+	}
+	if strings.Contains(got, " in / ") || strings.Contains(got, "$") {
+		t.Errorf("contextHeaderLine() on a fresh session must carry no totals: %q", got)
+	}
+}
+
 // TestCacheHeadlineLineThresholds pins the hit-rate color thresholds: green
 // at/above 80%, yellow at/above 40%, red below.
 func TestCacheHeadlineLineThresholds(t *testing.T) {

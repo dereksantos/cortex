@@ -339,3 +339,322 @@ func TestAnchorSetPromptErasesLiveStatusRow(t *testing.T) {
 		t.Errorf("second SetPrompt over a live status row did not step up before redrawing")
 	}
 }
+
+// statusStatsSample is the full StatusStats the StatusLine tests pin: every
+// segment present, in the issue's own example figures (model, 42% ctx, 18.2k
+// in / 1.1k out, a reported $0.013 cost, 34s elapsed — the latter derived
+// from TurnStart by the code under test, not hard-coded).
+var statusStatsSample = StatusStats{
+	Model:      "anthropic/claude-sonnet-4.5",
+	Ctx:        0.42,
+	InTokens:   18200,
+	OutTokens:  1100,
+	CostUSD:    0.013,
+	SessionIn:  42000,
+	SessionOut: 9000,
+	TurnStart:  time.Now().Add(-34 * time.Second),
+}
+
+// TestStatusLineRenders pins the full stats line (issue #109's row format):
+// every segment present in "<model> · ctx 42% · 18.2k in / 1.1k out ·
+// $0.013 · 34s" order, " · "-joined, cost shown only because the backend
+// reported it.
+func TestStatusLineRenders(t *testing.T) {
+	got := statusStatsSample.StatusLine(0)
+	want := "anthropic/claude-sonnet-4.5 · ctx 42% · 18.2k in / 1.1k out · $0.013 · 34s"
+	if got != want {
+		t.Errorf("StatusLine = %q, want %q", got, want)
+	}
+}
+
+// TestStatusLineOmitsAbsentData is the issue's "cost appears only when the
+// backend reports it (never estimated)" rule plus the other absent-data
+// omissions, as a table: each case flips one field to its absent value and
+// the corresponding segment must disappear (with its joiner) rather than
+// render an empty slot.
+func TestStatusLineOmitsAbsentData(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(s *StatusStats)
+		want string
+	}{
+		{
+			name: "no cost when the backend never reported one",
+			mut:  func(s *StatusStats) { s.CostUSD = 0 },
+			want: "anthropic/claude-sonnet-4.5 · ctx 42% · 18.2k in / 1.1k out · 34s",
+		},
+		{
+			name: "no ctx before any request",
+			mut:  func(s *StatusStats) { s.Ctx = 0 },
+			want: "anthropic/claude-sonnet-4.5 · 18.2k in / 1.1k out · $0.013 · 34s",
+		},
+		{
+			name: "no tokens before any request",
+			mut:  func(s *StatusStats) { s.InTokens, s.OutTokens = 0, 0 },
+			want: "anthropic/claude-sonnet-4.5 · ctx 42% · $0.013 · 34s",
+		},
+		{
+			name: "no elapsed before the turn starts",
+			mut:  func(s *StatusStats) { s.TurnStart = time.Time{} },
+			want: "anthropic/claude-sonnet-4.5 · ctx 42% · 18.2k in / 1.1k out · $0.013",
+		},
+		{
+			name: "nothing set means no line",
+			mut:  func(s *StatusStats) { *s = StatusStats{} },
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := statusStatsSample
+			tc.mut(&s)
+			if got := s.StatusLine(0); got != tc.want {
+				t.Errorf("StatusLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStatusLineTruncatesByPriority is the issue's narrow-width rule: when
+// the full line does not fit, segments drop right-to-left — the elapsed
+// seconds first, then the cost, then the tokens, then the ctx — with the
+// model kept last. Width 0 ("no width known") never truncates.
+func TestStatusLineTruncatesByPriority(t *testing.T) {
+	s := statusStatsSample
+	full := s.StatusLine(0)
+	if full == "" || len(full) < 40 {
+		t.Fatalf("sample line too short to exercise the drops: %q", full)
+	}
+	for _, w := range []int{40, 35, 30, 25, 20, 15, 10, 5} {
+		w := w
+		t.Run("w"+itoa(w), func(t *testing.T) {
+			got := s.StatusLine(w)
+			if got == full {
+				t.Errorf("w%d: no truncation at all: %q", w, got)
+			}
+			if dw := displayWidth(got); dw > w {
+				t.Errorf("w%d: visible width %d exceeds budget %d: %q", w, dw, w, got)
+			}
+			// The model is kept until it alone cannot fit; everything it
+			// keeps must be a prefix of the full line's segments, in order —
+			// drops are right-to-left, never reordering.
+			if w >= displayWidth("anthropic/claude-sonnet-4.5") {
+				if !strings.HasPrefix(got, "anthropic/claude-sonnet-4.5") {
+					t.Errorf("w%d: model dropped before the budget ran out: %q", w, got)
+				}
+			}
+			// Once the budget cannot hold model + " · " + ctx, the ctx segment
+			// is gone; and it can never come back after the tokens drop.
+			if !strings.Contains(got, "ctx ") {
+				if strings.Contains(got, " in / ") || strings.Contains(got, "$") || strings.HasSuffix(got, "s") {
+					t.Errorf("w%d: a lower-priority segment survived while ctx was dropped: %q", w, got)
+				}
+			}
+			// No dangling joiner: a truncated line never ends with or carries
+			// an orphan " · " (a drop must take its joiner with it).
+			if strings.HasSuffix(got, " ·") || strings.Contains(got, "· ·") {
+				t.Errorf("w%d: dangling joiner in %q", w, got)
+			}
+			if strings.Contains(got, "·") && !strings.Contains(got, " · ") {
+				t.Errorf("w%d: malformed joiner in %q", w, got)
+			}
+		})
+	}
+}
+
+// TestStatusLineElapses is the wall-clock half: the seconds segment counts
+// whole seconds since TurnStart — 0s in the first second, and it advances as
+// the turn runs (the tick loop's repaint is what makes it visible).
+func TestStatusLineElapses(t *testing.T) {
+	t.Run("zero before the first second", func(t *testing.T) {
+		s := statusStatsSample
+		s.TurnStart = time.Now()
+		if got := s.StatusLine(0); got == "" || !strings.HasSuffix(got, " · 0s") {
+			t.Errorf("fresh turn: %q, want it to end \"· 0s\"", got)
+		}
+	})
+	t.Run("advances with the turn", func(t *testing.T) {
+		s := statusStatsSample
+		s.TurnStart = time.Now().Add(-2500 * time.Millisecond)
+		if got := s.StatusLine(0); got == "" || !strings.HasSuffix(got, " · 2s") {
+			t.Errorf("2.5s in: %q, want it to end \"· 2s\"", got)
+		}
+	})
+}
+
+// TestStatusLineFormats pins the number formatting the row relies on: the
+// k-notation (18200 -> "18.2k"), the percent (0.42 -> "42%"), and the cost
+// magnitudes ($0.013 / $1.25). These ride the goldens too; asserting them
+// here keeps a formatting change from failing only at the snapshot boundary.
+func TestStatusLineFormats(t *testing.T) {
+	if got := humanK(18200); got != "18.2k" {
+		t.Errorf("humanK(18200) = %q, want 18.2k", got)
+	}
+	if got := humanK(999); got != "999" {
+		t.Errorf("humanK(999) = %q, want 999", got)
+	}
+	if got := humanK(1000); got != "1k" {
+		t.Errorf("humanK(1000) = %q, want 1k", got)
+	}
+	if got := humanK(2_300_000); got != "2.3M" {
+		t.Errorf("humanK(2300000) = %q, want 2.3M", got)
+	}
+	if got := pct(0.42); got != "42%" {
+		t.Errorf("pct(0.42) = %q, want %q", got, "42%")
+	}
+	if got := pct(0.426); got != "43%" {
+		t.Errorf("pct(0.426) = %q, want %q (round-half-up)", got, "43%")
+	}
+	if got := "$" + humanCost(0.013); got != "$0.013" {
+		t.Errorf("cost 0.013 = %q, want $0.013", got)
+	}
+	if got := "$" + humanCost(1.25); got != "$1.25" {
+		t.Errorf("cost 1.25 = %q, want $1.25", got)
+	}
+}
+
+// TestAnchorSetStatusAppendsStatsToTheRow pins the anchor-side half: with an
+// activity label live, the rendered status row is the dim label plus the
+// stats line, " · "-joined (issue #109's one plain-text status row); with
+// stats cleared (zero value) the row is exactly what it was before this
+// change — the dim label alone — so an existing caller that never wires
+// SetStatus sees a byte-identical row. The assertions read a.status (the
+// stored row text) rather than parsing redraw escape sequences off the
+// sink, which the golden frames below already cover byte for byte.
+func TestAnchorSetStatusAppendsStatsToTheRow(t *testing.T) {
+	s := statusStatsSample
+	wantRow := dim("thinking... · " + s.StatusLine(0))
+
+	a, _ := newTestAnchor("> ", "", 200)
+	// The label is live (SetThinking's "thinking...") before the stats
+	// arrive — the production order.
+	a.SetActivity("thinking...")
+	a.SetStatus(s)
+	if a.rows != 2 {
+		t.Fatalf("rows = %d, want 2 (status + input)", a.rows)
+	}
+	if a.status != wantRow {
+		t.Errorf("status row = %q, want %q", a.status, wantRow)
+	}
+
+	// A repaint (the tick loop's cadence) re-derives the same row.
+	a.mu.Lock()
+	a.refreshStatusLocked()
+	a.mu.Unlock()
+	if a.status != wantRow {
+		t.Errorf("repainted row = %q, want %q", a.status, wantRow)
+	}
+
+	// Clearing the stats returns the row to label-only.
+	a.SetStatus(StatusStats{})
+	if a.status != dim("thinking...") {
+		t.Errorf("cleared row = %q, want the bare dim label %q", a.status, dim("thinking..."))
+	}
+}
+
+// TestAnchorSetStatusTrimsToTheRowWidth is the narrow-width half at the row
+// level (the StatusLine-level priority order is covered by
+// TestStatusLineTruncatesByPriority): at 40 columns the 14-column label plus
+// the full stats line cannot fit, so the stats side trims to the width left
+// after the label — and the visible row stays within the width.
+func TestAnchorSetStatusTrimsToTheRowWidth(t *testing.T) {
+	a, _ := newTestAnchor("> ", "", 40)
+	a.mu.Lock()
+	a.drawLocked()
+	a.mu.Unlock()
+
+	a.mu.Lock()
+	a.activity = "thinking... 3s"
+	a.refreshStatusLocked()
+	a.stats = statusStatsSample
+	a.refreshStatusLocked()
+	a.mu.Unlock()
+
+	if a.rows != 2 {
+		t.Fatalf("rows = %d, want 2 (status + input)", a.rows)
+	}
+	visible := stripANSI(a.status)
+	if dw := displayWidth(visible); dw > 40 {
+		t.Errorf("row visible width %d exceeds 40: %q", dw, visible)
+	}
+	if !strings.HasPrefix(visible, "thinking... 3s") {
+		t.Errorf("label must keep its full width (the caller's text, never trimmed by the stats): %q", visible)
+	}
+	// At 40 columns the 14-column label leaves 23 for the stats; the 31-
+	// column model is itself clipped to those 23 ("…"-suffixed, via
+	// StatusLine's final truncate), so NOTHING beyond the model can
+	// survive — and the cost can never appear here.
+	if strings.Contains(visible, "$") || strings.Contains(visible, "ctx ") || strings.Contains(visible, " in / ") {
+		t.Errorf("row at 40 columns must keep the label + (clipped) model only: %q", visible)
+	}
+	// The row is the label, the joiner, and the model clipped to exactly the
+	// width left after the label.
+	want := "thinking... 3s · " + truncate(statusStatsSample.Model, 40-14-3)
+	if visible != want {
+		t.Errorf("row = %q, want %q", visible, want)
+	}
+}
+
+// TestPlainReportPathsUnchanged is the step's acceptance item at the
+// lineedit level: the row's degradation gates (NO_COLOR, CORTEX_LOOP_RENDER=0,
+// non-TTY) live in cmd/cortex's renderEnabled() — anchoredInput() is false
+// under all three, so the Anchor (and this status row) is never created and
+// the plain scrolling report is the pre-change output, byte for byte. The
+// row itself is plain text by design: its only ANSI is the hardcoded dim SGR
+// lineedit wraps the status row in (no NO_COLOR toggle in this package — see
+// the golden_test.go header), so nothing changes here for those envs. What IS
+// pinned here: with no stats and no activity the block is one row and the row
+// renders exactly the prompt — the shape the plain path must keep — and a
+// stats value with no activity never opens a row on its own.
+func TestPlainReportPathsUnchanged(t *testing.T) {
+	a, out := newTestAnchor("> ", "draft", 80)
+	a.mu.Lock()
+	a.drawLocked()
+	a.mu.Unlock()
+	out.Reset()
+
+	// A fresh redraw of the bare block is exactly the prompt line.
+	a.mu.Lock()
+	a.drawLocked()
+	a.mu.Unlock()
+	if a.rows != 1 {
+		t.Fatalf("rows = %d, want 1 (no activity, no stats)", a.rows)
+	}
+	if got := strings.TrimSpace(stripANSI(out.String())); got != "> draft" {
+		t.Errorf("bare row = %q, want the prompt and buffer only", got)
+	}
+	// A stats value with no activity must not open a status row on its own —
+	// the row rides the activity label (thinking/tool), never the reverse.
+	a.mu.Lock()
+	a.stats = statusStatsSample
+	a.refreshStatusLocked()
+	a.mu.Unlock()
+	if a.rows != 1 || a.status != "" {
+		t.Errorf("stats without activity opened a status row: rows=%d status=%q", a.rows, a.status)
+	}
+}
+
+// TestAnchorSetStatusClearsOnStop pins the Stop() field-clearing half of the
+// lifecycle directly (the goroutine half — close(stop), <~done — needs a real
+// terminal; the field drops are what the next turn's fresh anchor relies on
+// not to inherit).
+func TestAnchorSetStatusClearsOnStop(t *testing.T) {
+	a, _ := newTestAnchor("> ", "", 80)
+	a.mu.Lock()
+	a.activity = "thinking..."
+	a.stats = statusStatsSample
+	a.refreshStatusLocked() // status row live with stats
+	a.mu.Unlock()
+
+	a.mu.Lock()
+	// The same clears Stop() performs after its goroutines have exited.
+	a.eraseLocked()
+	a.status, a.activity, a.stats = "", "", StatusStats{}
+	a.mu.Unlock()
+	if a.stats != (StatusStats{}) {
+		t.Errorf("stats not cleared: %+v", a.stats)
+	}
+	if a.activity != "" || a.status != "" {
+		t.Errorf("activity/status not cleared: %q %q", a.activity, a.status)
+	}
+}
