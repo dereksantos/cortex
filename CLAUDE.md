@@ -212,21 +212,30 @@ the model-driven memory tools
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked. The gate also tracks "same-action" effect classes so a blocked
-  action can't be re-routed in a later command: `git-history-write`,
-  `hook-disabling`, and `git-stash` act as one barred group (a turn whose
-  `git stash pop` is refused can't re-enter as `git stash push`), and
-  `git-stash` covers `git stash`/`git stash <sub>` for every mutating sub —
+  action can't be re-routed in a later command: `git-history-write` and
+  `hook-disabling` act as one barred group (a refused `git commit` can't
+  re-enter as `--no-verify`), and `git-stash` is its OWN group — it covers
+  `git stash`/`git stash <sub>` for every mutating sub —
   push/pop/apply/branch/drop/clear/store, bare `git stash` included — with
-  the read-only `show` and `list` excluded. Separately, when a command rewrites
-  a file in place (`sed -i`, `ed -s`, `perl -pi`, an interpreter `-c` script
-  string, or a redirect/append target — quote-aware), the tool appends a note
+  the read-only `show` and `list` excluded, and a refused `git stash pop`
+  bars a later `git stash push` but NOT an unrelated `git commit` (#201).
+  Whether a stash is Risky at all is a classifier decision: the prompt marks
+  working-tree-discarding git operations (stash pop/apply/clear,
+  `checkout --`, restore) risky because they can lose uncommitted work.
+  Separately, when a command rewrites
+  a file in place (`sed -i`, `ed -s`, `perl -pi`, gawk's `awk -i inplace`,
+  an interpreter `-c` script string, or a redirect/append target —
+  quote-aware; plain awk only READS its file list), the tool appends a note
   naming each touched target (workdir-relative when a workdir is anchored) and
   steering to `edit_file`/`write_file`, whose diff display and post-edit hook
   scripted edits skip (#201). When such a rewrite targets a workdir path, the
   same format-only post-edit hook `write_file`/`edit_file` run is run on it
   and its note folded into the result, so script-edits get the same format
   coverage as tool edits (only on the success path — a refused command made no
-  change; untrusted/no-format-command no-ops).
+  change; untrusted/no-format-command no-ops). The hook never runs on a
+  script-form target: a `-c` program's arguments are only a guess at the file
+  it opens, so the steering note names it but the formatter is not pointed
+  at it.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;

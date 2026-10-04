@@ -362,23 +362,43 @@ func TestEffectClass_GitStash(t *testing.T) {
 	}
 }
 
-// TestEffectClass_Grouping pins that the git effect classes act as one
-// barred group (issue #169, extended for git-stash in issue #201): a
-// blocked member bars every other member.
+// TestEffectClass_Grouping pins the same-action ledger grouping (issue #169;
+// git-stash split out in issue #201): git-history-write and hook-disabling
+// bar each other (a blocked commit must not re-enter as a hook-disabling
+// spelling), while git-stash bars ONLY itself — a declined `git stash pop`
+// must not refuse an unrelated `git commit` for the rest of the turn.
 func TestEffectClass_Grouping(t *testing.T) {
-	for _, cls := range []string{EffectGitHistoryWrite, EffectHookDisabling, EffectGitStash} {
-		t.Run(cls, func(t *testing.T) {
-			got := EffectClasses(cls)
-			want := []string{EffectGitHistoryWrite, EffectHookDisabling, EffectGitStash}
-			if len(got) != len(want) {
-				t.Fatalf("EffectClasses(%q) = %v, want %v", cls, got, want)
+	cases := []struct {
+		cls  string
+		want []string
+	}{
+		{EffectGitHistoryWrite, []string{EffectGitHistoryWrite, EffectHookDisabling}},
+		{EffectHookDisabling, []string{EffectGitHistoryWrite, EffectHookDisabling}},
+		{EffectGitStash, []string{EffectGitStash}},
+		{"some-other-class", []string{"some-other-class"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cls, func(t *testing.T) {
+			got := EffectClasses(tc.cls)
+			if len(got) != len(tc.want) {
+				t.Fatalf("EffectClasses(%q) = %v, want %v", tc.cls, got, tc.want)
 			}
-			for i := range want {
-				if got[i] != want[i] {
-					t.Fatalf("EffectClasses(%q) = %v, want %v", cls, got, want)
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("EffectClasses(%q) = %v, want %v", tc.cls, got, tc.want)
 				}
 			}
 		})
+	}
+	// A blocked git-stash must not bar the history-write group (the
+	// over-blocking the #201 review caught): neither class may appear in
+	// the stash class's barred set, and the commit side stays its own group.
+	for _, banned := range []string{EffectGitHistoryWrite, EffectHookDisabling} {
+		for _, c := range EffectClasses(EffectGitStash) {
+			if c == banned {
+				t.Errorf("EffectClasses(%q) must not bar %q: %v", EffectGitStash, banned, EffectClasses(EffectGitStash))
+			}
+		}
 	}
 }
 
@@ -404,6 +424,7 @@ func TestEffectClass_NoMatch(t *testing.T) {
 		{"cherry-pick", "git cherry-pick abc123"},
 		{"add", "git add ."},
 		{"stash show (read-only)", "git stash show -p"},
+		{"stash list (read-only)", "git stash list"},
 		{"clean", "git clean -fd"},
 		{"commit-verbose (not commit)", "git commit-verbose"},
 		{"commit-msg-hook (not commit)", "git commit-msg-hook"},

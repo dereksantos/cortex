@@ -31,11 +31,17 @@ import (
 //	ed -s                                  the whole stdin program edits
 //	                                       the file on its argument list
 //	perl -pi [OPTS] FILE...                -p/-i (any order, any cluster)
-//	awk 'prog' FILE...                     the program writes, the last
-//	                                       arguments are the input files
+//	awk -i inplace 'prog' FILE...         gawk's in-place form: the file list
+//	                                       IS the output; plain awk only READS
+//	                                       its file list (a `> out` on a plain
+//	                                       awk is caught by the redirect scan)
 //	  (python/ruby/node/perl) -c 'SCRIPT' [ARG...]   the script string opens
 //	                                       files in-process (open(...,'w'),
-//	                                       Path.write_text)
+//	                                       Path.write_text); ARG is only a
+//	                                       GUESS at the target (the script may
+//	                                       open a path the argument does not
+//	                                       name) — the steering note applies,
+//	                                       the post-edit hook does not
 //	  ... > TARGET   /   >> TARGET         an unquoted redirection: the shell
 //	                                       rewrites TARGET before the
 //	                                       command starts — the same
@@ -52,10 +58,11 @@ import (
 // regions, and takes the word after each unquoted `>`/`>>`. A quoted
 // `> "out.txt"` target comes through with its quotes stripped.
 //
-// awk is an exception to the in-script rule: `awk 'prog' FILE... > out` is
-// the usual idiom (the program's print goes to stdout), so the redirect
-// target is the rewrite target and the file list is its input, not its
-// output.
+// Redirects are the exception to the in-script rule: `awk 'prog' FILE... >
+// out` is the usual idiom (the program's print goes to stdout), so the
+// redirect target is the rewrite target and the file list is its input, not
+// its output. Only gawk's `-i inplace` flag makes the file list itself the
+// output — plain awk has no in-place mode at all.
 
 // rewriteForm names one detected rewrite in the model-facing note (step 3);
 // step 4 folds it into the hook line for a workdir target.
@@ -218,16 +225,18 @@ func scanRewritePart(part string, add func(string, rewriteForm)) {
 	if len(words) < 2 {
 		return
 	}
-	// A leading VAR=val is an env-mutated invocation; the binary is words[1].
+	// A leading VAR=val is an env-mutated invocation (possibly several:
+	// `LC_ALL=C LANG=C sed ...`); the binary is the first word without an
+	// `=`. Words with an `=` are never the binary.
 	offset := 0
-	if strings.Contains(words[0].val, "=") {
-		offset = 1
+	for offset < len(words) && strings.Contains(words[offset].val, "=") {
+		offset++
 	}
 	if offset >= len(words) {
 		return
 	}
-	bin := lastPathElem(words[0].val)
-	args := words[1:]
+	bin := lastPathElem(words[offset].val)
+	args := words[offset+1:]
 	switch bin {
 	case "sed":
 		scanSed(args, add)
@@ -335,22 +344,30 @@ func scanPerl(args []shellWord, add func(string, rewriteForm)) {
 	}
 }
 
-// scanAwk: `awk 'prog' FILE...` — the program writes, the trailing bare
-// arguments are the input files. (A redirect target, if any, is reported by
-// scanRedirects: the awk program's own print goes to stdout, so `awk 'prog'
-// f > out` rewrites out, and the file list is its input, not its output.)
+// scanAwk: `awk -i inplace 'prog' FILE...` (gawk's in-place form) rewrites
+// its file list. Plain awk has NO in-place mode — its file list is its
+// INPUT, and its own print goes to stdout — so a plain `awk 'prog' f` is
+// never named a rewrite target here; if the invocation also redirects
+// stdout to a file, the redirect scan reports THAT target. Only the
+// `-i`/`--in-place` flag (gawk) makes the file list the output.
 func scanAwk(args []shellWord, add func(string, rewriteForm)) {
+	inPlace := false
 	i := 0
 	for i < len(args) {
 		v := args[i].val
-		if strings.HasPrefix(v, "-") && v != "-" {
-			i++
-			if (v == "-v" || v == "-F") && i < len(args) {
-				i++
-			}
-			continue
+		if !strings.HasPrefix(v, "-") || v == "-" {
+			break // the program word
 		}
-		break
+		if v == "-i" || v == "-i inplace" || v == "--in-place" || v == "--in-place=" {
+			inPlace = true
+		}
+		if (v == "-v" || v == "-F") && i+1 < len(args) {
+			i++
+		}
+		i++
+	}
+	if !inPlace {
+		return
 	}
 	// The program is the next word (quoted or bare); skip it.
 	// `awk -f progfile FILE...` names the files after the program file.
@@ -565,6 +582,11 @@ func inPlaceRewriteHookNote(ctx context.Context, deps ToolDeps, command string) 
 	seen := map[string]bool{}
 	var b strings.Builder
 	for _, t := range targets {
+		if t.form == rewriteFormScript {
+			continue // a script-form target is a GUESS (the script string's args
+			// may not be the file it opens); the steering note names it, but
+			// the hook must not format a file the command never touched
+		}
 		abs := absOf(t.raw, wd)
 		if abs == "" || !filepath.IsAbs(abs) {
 			continue

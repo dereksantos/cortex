@@ -361,16 +361,21 @@ func lastPathElement(s string) string {
 // commit` or `svn commit` is a different tool's action, not the git history
 // write this class names).
 //
-// For the per-turn same-action ledger, the three classes act as ONE barred
-// group (EffectClasses: a blocked command bars every class in the set that
-// contains its class): `git commit --no-verify` and `git -c
+// For the per-turn same-action ledger the classes group as follows
+// (EffectClasses: a blocked command bars every class in the set that
+// contains its class): `git-history-write` and `hook-disabling` act as ONE
+// barred group — `git commit --no-verify` and `git -c
 // core.hooksPath=… commit` are BOTH history writes AND hook-disabling
 // spells of exactly the workaround the issue names — a commit that skipped
 // hooks after a blocked commit — so a hook-disabling variant must not re-
-// enter the classifier after a blocked plain commit. git-stash joins the
-// same group: a turn whose stashing is refused (a risky `git stash pop` the
-// operator declines) must not route the same action back in as a `git stash
-// push`, or re-pop on the next command.
+// enter the classifier after a blocked plain commit. `git-stash` is its OWN
+// group (issue #201): a declined `git stash pop` bars a later `git stash
+// push` in the same turn, but it must NOT bar an unrelated `git commit` —
+// a stash is not a way to re-route a commit, and lumping it with the
+// history-write group over-blocked legitimate work. Making the stash class
+// Risky at all is a CLASSIFIER decision (the prompt marks git operations
+// that discard working-tree state risky); the effect class only keeps a
+// declined stash from re-entering as another stash form.
 const (
 	EffectGitHistoryWrite = "git-history-write"
 	EffectHookDisabling   = "hook-disabling"
@@ -378,13 +383,16 @@ const (
 )
 
 // EffectClasses returns the effect classes a command's class bars for the
-// per-turn same-action ledger (issue #169). The git classes are one barred
-// group (see EffectClass); a class with no grouping — or no class at all —
-// bars itself / nothing.
+// per-turn same-action ledger (issue #169). git-history-write and
+// hook-disabling are one barred group (see EffectClass); git-stash bars
+// only itself (a declined stash must not bar an unrelated commit); a class
+// with no grouping — or no class at all — bars itself / nothing.
 func EffectClasses(effectClass string) []string {
 	switch effectClass {
-	case EffectGitHistoryWrite, EffectHookDisabling, EffectGitStash:
-		return []string{EffectGitHistoryWrite, EffectHookDisabling, EffectGitStash}
+	case EffectGitHistoryWrite, EffectHookDisabling:
+		return []string{EffectGitHistoryWrite, EffectHookDisabling}
+	case EffectGitStash:
+		return []string{EffectGitStash}
 	case "":
 		return nil
 	default:

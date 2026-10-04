@@ -29,8 +29,12 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 		{"perl -pi in place", `perl -pi -e 's/x/y/g' internal/tools/golden_test.go`, []string{"internal/tools/golden_test.go"}},
 		{"perl -i -p separate flags", `perl -i -p -e 's/x/y/' f.go`, []string{"f.go"}},
 		{"perl without -i only reads", `perl -ne 'print' f.go`, nil},
-		{"awk program with files", `awk 'NR>3' a.go b.go`, []string{"a.go", "b.go"}},
-		{"awk with -v flag", `awk -v N=3 'NR>N' a.go`, []string{"a.go"}},
+		{"plain awk only reads its file list", `awk 'NR>3' a.go b.go`, nil},
+		{"awk -v flag still reads", `awk -v N=3 'NR>N' a.go`, nil},
+		{"gawk -i inplace rewrites its file list", `awk -i inplace '{print}' f.go`, []string{"f.go"}},
+		{"gawk --in-place rewrites its file list", `awk --in-place 'NR>3' f.go`, []string{"f.go"}},
+		{"env-prefixed sed rewrites", `LC_ALL=C sed -i 's/a/b/' f.go`, []string{"f.go"}},
+		{"multi env-prefixed sed rewrites", `LC_ALL=C LANG=C sed -i 's/a/b/' f.go`, []string{"f.go"}},
 		{"python3 -c with arg", `python3 -c 'import sys; open(sys.argv[1],"w").write("x")' internal/tools/golden_test.go`, []string{"internal/tools/golden_test.go"}},
 		{"python3 -c without arg has no target", `python3 -c 'import sys; open(sys.argv[1],"w")'`, nil},
 		{"python script file (not -c) is not scanned", `python3 script.py`, nil},
@@ -63,7 +67,9 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 
 // TestDetectInPlaceRewrites_NoFalsePositives pins that routine, read-only
 // commands name NO target — the note must not fire on a `go test` or a
-// redirect to /dev/null.
+// redirect to /dev/null. The read-only awk rows pin the false positive the
+// header's conservative claim exists to prevent: plain awk only READS its
+// file list (it has no in-place mode; gawk's -i inplace is the exception).
 func TestDetectInPlaceRewrites_NoFalsePositives(t *testing.T) {
 	cases := []struct {
 		name string
@@ -75,7 +81,8 @@ func TestDetectInPlaceRewrites_NoFalsePositives(t *testing.T) {
 		{"fd dup 2>&1", `go test ./... 2>&1`},
 		{"echo without redirect", `echo hello`},
 		{"git status", `git status`},
-		{"env-prefixed sed is skipped (env-mutated invocation, not a bare binary)", `LC_ALL=C sed -i 's/x/y/' f.go`},
+		{"plain awk only reads its file list", `awk 'NR>3' a.go`},
+		{"awk with -v flag only reads", `awk -v N=3 'NR>N' a.go`},
 		{"perl -c compile-checks (reads) a file, never rewrites", `perl -c f.pl`},
 		{"sed mentioning a file in the script is NOT the target", `sed -n '/def f/:q' f.py`},
 		{"python -c mentioning a path in the script only", `python3 -c 'print(open("internal/tools/attribution.go").read())'`},
@@ -258,6 +265,83 @@ func TestInPlaceRewriteHookNote(t *testing.T) {
 			`sed -i 's/x/y/' a.go && sed -i 's/x/y/' b.go`)
 		if !strings.Contains(got, "a.go") || !strings.Contains(got, "b.go") {
 			t.Errorf("note should name both files, got %q", got)
+		}
+	})
+}
+
+// TestInPlaceRewriteHookNote_ScriptAndReadTargets pins that the post-edit
+// hook is NEVER run on a target the command demonstrably did not rewrite in
+// place: a -c program's arguments are only a GUESS at the file it opens
+// (rewriteFormScript), and plain awk only reads its file list. The steering
+// note still names a detected target; the hook formats only what it is sure
+// the command rewrote (issue #201 review fix).
+func TestInPlaceRewriteHookNote_ScriptAndReadTargets(t *testing.T) {
+	unformatted := "package main\n\nfunc main() {\n  x :=    1\n  _ = x\n}\n"
+
+	t.Run("read-only python -c with arg: note names it, hook does not run", func(t *testing.T) {
+		wd := t.TempDir()
+		if err := os.WriteFile(filepath.Join(wd, "f.go"), []byte(unformatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		deps := hookCmdDeps{wdNoteDeps{wdDeps{wd: wd}}, goFmtCmds(), true}
+		// The steering note still fires: the detected script-form target is
+		// named (it is a guess, and the note steers to the edit tools).
+		if note := inPlaceRewriteNote(deps, `python3 -c 'import sys; print(open(sys.argv[1]).read())' f.go`); !strings.Contains(note, "f.go") {
+			t.Fatalf("steering note should name the script target, got %q", note)
+		}
+		// But the hook must not run on a file the command demonstrably did
+		// not rewrite in place.
+		got := inPlaceRewriteHookNote(context.Background(), deps,
+			`python3 -c 'import sys; print(open(sys.argv[1]).read())' f.go`)
+		if got != "" {
+			t.Fatalf("script-form target should not run the hook, got %q", got)
+		}
+		data, err := os.ReadFile(filepath.Join(wd, "f.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != unformatted {
+			t.Errorf("file should be untouched, got %q", data)
+		}
+	})
+
+	t.Run("plain awk with files: no hook, file untouched", func(t *testing.T) {
+		wd := t.TempDir()
+		if err := os.WriteFile(filepath.Join(wd, "a.go"), []byte(unformatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := inPlaceRewriteHookNote(context.Background(),
+			hookCmdDeps{wdNoteDeps{wdDeps{wd: wd}}, goFmtCmds(), true},
+			`awk 'NR>3' a.go`)
+		if got != "" {
+			t.Fatalf("plain awk should not run the hook, got %q", got)
+		}
+		data, err := os.ReadFile(filepath.Join(wd, "a.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != unformatted {
+			t.Errorf("file should be untouched, got %q", data)
+		}
+	})
+
+	t.Run("gawk -i inplace DOES run the hook", func(t *testing.T) {
+		wd := t.TempDir()
+		if err := os.WriteFile(filepath.Join(wd, "f.go"), []byte(unformatted), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := inPlaceRewriteHookNote(context.Background(),
+			hookCmdDeps{wdNoteDeps{wdDeps{wd: wd}}, goFmtCmds(), true},
+			`awk -i inplace '{print}' f.go`)
+		if !strings.Contains(got, "formatted") {
+			t.Fatalf("gawk -i inplace target should run the hook, got %q", got)
+		}
+		data, err := os.ReadFile(filepath.Join(wd, "f.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "  x :=    1") {
+			t.Errorf("file should be gofmt-formatted by the hook, got %q", data)
 		}
 	})
 }
