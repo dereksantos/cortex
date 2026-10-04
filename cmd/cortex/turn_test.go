@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -1636,5 +1639,318 @@ func TestTurnReasoningFallbackNoteIsNotResumable(t *testing.T) {
 		if strings.Contains(m.Content, "re-sent once with reasoning disabled") {
 			t.Errorf("loadSession returned the transcript note as a message: %+v", m)
 		}
+	}
+}
+
+// TestTurnRedactsTranscriptOnly (issue #103) drives the REAL turn path with a
+// scripted model that runs a bash tool whose result (tool message) and whose
+// own assistant answer both carry a secret. It asserts the three-way split the
+// issue demands:
+//
+//   - the on-disk transcript is REDACTED (the secret never hits disk),
+//   - the live in-memory Request.Messages stay VERBATIM (the model can still
+//     use the value this turn),
+//   - TurnResult.Reply is VERBATIM (the answer the user sees this turn),
+//   - TurnResult.Redactions > 0 (the per-turn count is carried).
+func TestTurnRedactsTranscriptOnly(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	// Build the SSE chunks with json.Marshal so the nested quoting is exact
+	// (hand-escaped backtick strings are brittle here).
+	toolArgs, _ := json.Marshal(map[string]string{"command": "echo " + secret})
+	bodyToolCall := fmt.Sprintf(
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":%s}}]}}]}`, string(toolArgs))
+	bodyFinishTC := `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`
+	bodyFinishStop := `{"choices":[{"delta":{},"finish_reason":"stop"}]}`
+	bodyAnswer := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":"the key is %s"}}]}`, secret)
+	bodyUsage := `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// First finish: a tool call whose arguments carry the secret.
+			w.Write([]byte(sseBody(bodyToolCall, bodyFinishTC, bodyUsage)))
+		case 2:
+			// Tool result (an assistant answer) carries the secret again.
+			w.Write([]byte(sseBody(bodyAnswer, bodyFinishStop, bodyUsage)))
+		default:
+			w.Write([]byte(sseBody(bodyAnswer, bodyFinishStop, bodyUsage)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+
+	res, err := cs.Turn(context.Background(), "print my key")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// 1) The on-disk transcript is redacted: the secret must NOT appear in any
+	//    persisted message entry, and at least one marker must.
+	transcript := fallbackTranscriptEntries(t, cs, kindMessage)
+	secretSeen, markerSeen := false, false
+	for _, e := range transcript {
+		if e.Content != "" {
+			if strings.Contains(e.Content, secret) {
+				secretSeen = true
+			}
+			if strings.Contains(e.Content, "[REDACTED:") {
+				markerSeen = true
+			}
+		}
+		for _, tc := range e.ToolCalls {
+			if strings.Contains(tc.Function.Arguments, secret) {
+				secretSeen = true
+			}
+			if strings.Contains(tc.Function.Arguments, "[REDACTED:") {
+				markerSeen = true
+			}
+		}
+	}
+	if secretSeen {
+		t.Errorf("on-disk transcript still contains the secret verbatim — issue #103 requires it redacted before persisting")
+	}
+	if !markerSeen {
+		t.Errorf("on-disk transcript has no [REDACTED:...] marker, want at least one (the secret was seen this turn)")
+	}
+
+	// 2) The live in-memory Request.Messages stay VERBATIM: the model can still
+	//    use the value this turn, so some in-memory message must still hold it.
+	liveHasSecret := false
+	for _, m := range cs.Request.Messages {
+		if strings.Contains(m.Content, secret) {
+			liveHasSecret = true
+			break
+		}
+		for _, tc := range m.ToolCalls {
+			if strings.Contains(tc.Function.Arguments, secret) {
+				liveHasSecret = true
+				break
+			}
+		}
+		if liveHasSecret {
+			break
+		}
+	}
+	if !liveHasSecret {
+		t.Errorf("live in-memory Request.Messages lost the secret — the current turn's context must stay unredacted")
+	}
+
+	// 3) TurnResult.Reply is VERBATIM (the user sees the answer this turn).
+	if !strings.Contains(res.Reply, secret) {
+		t.Errorf("TurnResult.Reply = %q, want it to still contain the verbatim secret this turn", res.Reply)
+	}
+
+	// 4) The per-turn count is carried on the result.
+	if res.Redactions <= 0 {
+		t.Errorf("TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried a secret)", res.Redactions)
+	}
+}
+
+// TestTurnRedactionCountRecordedAndReported (issue #103): the per-turn
+// redaction count that rides TurnResult.Redactions must ALSO be recorded on
+// the turn's journal capture (the "redactions" metadata) and surface where the
+// session reports the turn — the session summary (cs.redactionsTotal, the
+// session-cumulative total). It drives the real turn path (a scripted model
+// that runs a bash tool whose arguments carry a secret, then answers with it
+// again) so every persistence surface — transcript (writeTranscript), journal
+// (captureTurn) — actually masks it, exactly as the transcript test does, but
+// here we check the RECORDING and REPORTING of the count, not the masking.
+//
+// The turn is run TWICE (same secret, so both turns mask it): the session
+// total (cs.redactionsTotal) must equal the SUM of the per-turn
+// TurnResult.Redactions figures — the journal metadata's counts (captureTurn
+// folds its own masking counts into cs.redactions) must reach the session
+// total too (docs/journal.md's invariant: the summary records the same count
+// the capture does).
+func TestTurnRedactionCountRecordedAndReported(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	// Build the SSE chunks with json.Marshal so the nested quoting is exact.
+	toolArgs, _ := json.Marshal(map[string]string{"command": "echo " + secret})
+	bodyToolCall := fmt.Sprintf(
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":%s}}]}}]}`, string(toolArgs))
+	bodyFinishTC := `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`
+	bodyFinishStop := `{"choices":[{"delta":{},"finish_reason":"stop"}]}`
+	bodyAnswer := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":"the key is %s"}}]}`, secret)
+	bodyUsage := `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			w.Write([]byte(sseBody(bodyToolCall, bodyFinishTC, bodyUsage)))
+		case 2, 3:
+			w.Write([]byte(sseBody(bodyAnswer, bodyFinishStop, bodyUsage)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	// captureTurn reads the answer-excerpt cap from cs.Config (cmd/cortex's
+	// Config; nil returns the default) and persists through cs.capturer, which
+	// capture.New wires to a config.Config's ContextDir — the journal the
+	// count is recorded on.
+	cs.Config = &Config{}
+	cs.capturer = capture.New(&config.Config{ContextDir: filepath.Join(root, ".cortex")})
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+
+	res, err := cs.Turn(context.Background(), "print my key")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	turnRedactions := res.Redactions
+
+	// A second turn with the SAME secret: the per-turn counter resets at
+	// turn start, so turn 2's TurnResult.Redactions is turn 2's own figure
+	// (not a running total), and the session-cumulative total must fold it
+	// in too — the sum of the per-turn figures.
+	res2, err := cs.Turn(context.Background(), "print my key again")
+	if err != nil {
+		t.Fatalf("Turn 2: %v", err)
+	}
+	if res2.Redactions <= 0 {
+		t.Fatalf("turn 2 TurnResult.Redactions = %d, want > 0 (the second turn's persisted messages carried the same secret)", res2.Redactions)
+	}
+	if res2.Redactions != turnRedactions {
+		t.Fatalf("turn 2 TurnResult.Redactions = %d, want %d (the per-turn count resets each turn — same secret, same count)", res2.Redactions, turnRedactions)
+	}
+
+	// 1) The per-turn count is carried on the result (the same fact the other
+	//    surfaces record/report) and is non-zero (the turn saw a secret).
+	if turnRedactions <= 0 {
+		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried a secret)", turnRedactions)
+	}
+
+	// 2) The session-cumulative total equals the SUM of the per-turn
+	//    TurnResult.Redactions figures (both turns' counts folded in — the
+	//    capture's own masking counts included, since the fold runs after
+	//    captureTurn, which adds them to cs.redactions).
+	wantTotal := turnRedactions + res2.Redactions
+	if cs.redactionsTotal != wantTotal {
+		t.Errorf("cs.redactionsTotal = %d, want %d (the sum of the per-turn TurnResult.Redactions figures: %d + %d)", cs.redactionsTotal, wantTotal, turnRedactions, res2.Redactions)
+	}
+
+	// 3) The session summary (the "where the session reports the turn" surface)
+	//    surfaces the cumulative total.
+	if !strings.Contains(cs.sessionSummary(), "secrets redacted") {
+		t.Errorf("sessionSummary = %q, want the cumulative redaction total surfaced", cs.sessionSummary())
+	}
+
+	// 4) The turn's journal capture records the per-turn count in its
+	//    metadata ("redactions"), so a review of the capture can account for
+	//    the [REDACTED:…] markers in its own text.
+	entries, _, err := scanCaptureWindow(cs)
+	if err != nil {
+		t.Fatalf("scanCaptureWindow: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no capture entries on disk")
+	}
+	// Read the raw capture.event JSONL to inspect the metadata that
+	// scanCaptureWindow reduces away (it projects to Prompt/Result only).
+	matches, _ := filepath.Glob(filepath.Join(cs.ContextDir(), "journal", "capture", "*.jsonl"))
+	var sawRedactions bool
+	for _, path := range matches {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading capture journal %s: %v", path, err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if line == "" {
+				continue
+			}
+			var e struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				continue
+			}
+			if e.Type != "capture.event" {
+				continue
+			}
+			var ev events.Event
+			if err := json.Unmarshal(e.Payload, &ev); err != nil {
+				continue
+			}
+			if v, ok := ev.Metadata["redactions"].(float64); ok && (int(v) == turnRedactions || int(v) == res2.Redactions) {
+				sawRedactions = true
+			}
+		}
+	}
+	if !sawRedactions {
+		t.Errorf("the turn's journal capture does not record redactions=%d in its metadata — the count must ride the capture", turnRedactions)
+	}
+}
+
+// TestFailedTurnRedactionsFoldedIntoSessionTotal (issue #103, review fix 3): a
+// turn that FAILS after its redacted messages were already persisted to the
+// transcript must still fold its per-turn count (TurnResult.Redactions) into
+// the session-cumulative total (cs.redactionsTotal) — the fold's move to the
+// success path (after captureTurn) must not have dropped it from the error
+// path. The turn is driven through the real path with the test-only
+// senderOverride seam: the user's message (carrying a secret) is persisted —
+// and masked — at append time, before the first send, and the scripted
+// sender's first send fails, so runLoop returns the unrecovered error and
+// turn's err != nil branch runs. No transcript is opened (as in a test
+// without StartTranscript), so only that user message is counted —
+// cs.redactions at the error return is exactly the user message's masking.
+func TestFailedTurnRedactionsFoldedIntoSessionTotal(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m",
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.Config = &Config{}
+	cs.senderOverride = SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		return nil, false, fmt.Errorf("backend down (503)")
+	})
+
+	res, turnErr := cs.Turn(context.Background(), "print my key "+secret)
+	if turnErr == nil {
+		t.Fatal("turn should fail (the scripted first send errors and nothing is recovered)")
+	}
+	if res.Redactions <= 0 {
+		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the user message carried the secret and was persisted before the failure)", res.Redactions)
+	}
+	// The session total must include the failed turn's redactions: on this
+	// single-turn session it equals the turn's own per-turn count.
+	if cs.redactionsTotal != res.Redactions {
+		t.Errorf("cs.redactionsTotal = %d, want %d (the failed turn's TurnResult.Redactions — a failed turn's persisted messages still count)", cs.redactionsTotal, res.Redactions)
+	}
+	// And the session summary (the user-facing surface for the total)
+	// reflects it.
+	if !strings.Contains(cs.sessionSummary(), fmt.Sprintf("%d secrets redacted", res.Redactions)) {
+		t.Errorf("sessionSummary = %q, want the failed turn's redaction total surfaced", cs.sessionSummary())
 	}
 }

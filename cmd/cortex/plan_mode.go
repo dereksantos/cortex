@@ -63,10 +63,41 @@ const planStepCap = 6
 // the whole thing (#150: "unparseable, which falls back to a single turn").
 const planStepFloor = 2
 
+// noReproMarker is the output-shape convention a no-repro step reply must
+// follow (issue #178). The principle (prompt.go's verifyBeforeFixPrinciple)
+// says a reported problem that doesn't reproduce is finished by SAYING so
+// with the evidence — but it does not name the words to say. This marker is
+// those words: each step prompt (planStepPrompt) tells the model to lead such
+// a reply with "Not reproduced:" + the evidence, and noReproNote anchors on
+// the same words. The principle tells the model WHAT to conclude; this
+// convention tells it HOW to write that conclusion down so the note survives
+// into the per-step report and the later steps' prompts — one phrase, two
+// places (each step prompt and the probe), no procedure.
+//
+// The marker belongs only in the step prompts, NOT in the planning
+// instruction: the planning turn has no "step", cannot run tools, and its
+// output-shape rules ("nothing before the list") contradict a reply led by
+// "Not reproduced:" — a model that followed the marker there would produce a
+// plan parsePlan cannot parse, and the run would silently fall back to a
+// single turn. The planning prompt's verifyBeforeFixPrinciple line is enough
+// to shape the plan; the output convention only means something on a step
+// turn that has tools.
+const noReproMarker = `If this step's outcome is that the reported problem does not reproduce, begin your reply with "Not reproduced:" followed by the evidence (the command you ran and what it showed).`
+
 // planModeInstruction is the planning turn's prompt. It fixes the output
 // shape parsePlan relies on: bare "N. text" lines, one per step, 2–6 of
 // them. It asks for no tool use and no prose beyond the list so the reply
 // stays mechanically parseable.
+//
+// The verify-before-fix principle (issue #178) restates prompt.go's
+// verifyBeforeFixPrinciple — the same text every other turn gets in the base
+// system prompt — as a single principle, not a task-shaped procedure:
+// prompts state principles, and the procedure a model draws from them is its
+// own. The planning turn is one model call, so it never reads its own
+// earlier output; restating the principle in the prompt (rather than relying
+// on the system prompt alone) keeps the plan shaped around observable bugs
+// while the output-shape rules above stay the only other instruction in the
+// turn.
 const planModeInstruction = `You are planning a multi-part task. First produce ONLY a plan, then I will execute each step as its own turn.
 
 Respond with a numbered list of steps, one per line, in this exact shape:
@@ -79,7 +110,8 @@ Rules:
 - Give 2 to 6 steps (a small, ordered list — no more than 6).
 - One line per step, starting at 1; nothing before the list, nothing after.
 - No prose, no headings, no bullet markers — only "N. step" lines.
-- Do not use any tools; just output the numbered list.`
+- Do not use any tools; just output the numbered list.
+- ` + verifyBeforeFixPrinciple + ``
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -318,14 +350,23 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 		checkSkipNote = baseNote
 	}
 	// --- 4. Execute each step as its own turn ----------------------------
+	// earlierNotes carries each DONE step's note in order, so a later step's
+	// prompt sees them (planStepPrompt): an earlier no-repro note (issue
+	// #178) is the one that matters — it is what keeps a later "fix it" step
+	// from running blind to the fact that the reported problem never showed
+	// up. Failed/interrupted steps end the run, so only done notes accumulate.
+	var earlierNotes []string
 	stepResults := make([]StepResult, 0, len(steps))
 	for i, step := range steps {
-		// Every step prompt carries the ORIGINAL task, not just the step
-		// line: demotion at the turn boundaries (#131) can fold the planning
-		// turn — the only place the full task text lived — into the outline,
-		// and a later step must not run blind to the overall goal or the
-		// requirements the step text didn't restate (#94's failure mode).
-		_, err := turn(fmt.Sprintf("Overall task: %s\n\nPlan step %d of %d: %s", task, i+1, len(steps), step))
+		// Every step prompt carries the ORIGINAL task (not just the step
+		// line) AND the verify-before-fix principle (issue #178): demotion at
+		// the turn boundaries (#131) can fold the planning turn — the only
+		// place the full task text lived — into the outline, and a later step
+		// must not run blind to the overall goal or the requirements the step
+		// text didn't restate (#94's failure mode). planStepPrompt restates
+		// both so each step turn (tools present) carries them, together with
+		// the earlier done steps' notes (earlierNotes).
+		stepRes, err := turn(planStepPrompt(task, i+1, len(steps), step, earlierNotes))
 		if err != nil {
 			// A cancelled context (Ctrl-C / ESC mid-step) is an INTERRUPT, not
 			// a step failure: record the step and every later step, return the
@@ -349,6 +390,13 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 		// Run the project's own checks after a successful step — but only when
 		// the baseline said the suite was clean, so we don't blame a step for
 		// a failure that pre-dated the plan (see the baseline above).
+		//
+		// The no-repro note is evaluated BEFORE the check branch, in BOTH of
+		// them (issue #178): a failing baseline is exactly the state a
+		// reported bug usually arrives in, and the step's own evidence that
+		// the bug does not reproduce must not be thrown away just because no
+		// check can gate the run.
+		reproNote := noReproNote(stepRes.Reply)
 		if checkGated {
 			cmdLine, _, ok, note := cs.runProjectCheck(ctx)
 			// A cancelled context (Ctrl-C) DURING the check is an INTERRUPT,
@@ -378,16 +426,36 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 			// reported as its own note verbatim — those notes already carry
 			// the "check skipped: " prefix — and must never be rendered as a
 			// "check passed" with a command the user believes ran.
+			//
+			// A no-repro verification (issue #178): the step's job was to
+			// confirm a reported problem and it could not — its reply is the
+			// evidence. Keep that note on the step so the report line says
+			// what happened, not a bare "done" (nor a "check passed" that
+			// would bury the verification outcome). The step is DONE, not
+			// failed: nothing broke and no speculative fix was built.
+			if reproNote != "" {
+				stepResults = append(stepResults, StepResult{Step: step, Status: stepDone, Note: reproNote})
+				earlierNotes = append(earlierNotes, reproNote)
+				continue
+			}
 			sr := StepResult{Step: step, Status: stepDone, Note: note}
 			if cmdLine != "" {
 				// The command actually ran and exited 0: name it.
 				sr.Note = "check passed (" + cmdLine + ")"
 			}
 			stepResults = append(stepResults, sr)
+			earlierNotes = append(earlierNotes, sr.Note)
 		} else {
 			// The baseline failed: run the step but don't gate it. Attach the
-			// baseline-skip note so the reader sees why no check ran.
-			stepResults = append(stepResults, StepResult{Step: step, Status: stepDone, Note: checkSkipNote})
+			// baseline-skip note so the reader sees why no check ran — UNLESS
+			// the step's reply is a no-repro verdict, which carries its own
+			// evidence instead (see the reproNote check above).
+			note := checkSkipNote
+			if reproNote != "" {
+				note = reproNote
+			}
+			stepResults = append(stepResults, StepResult{Step: step, Status: stepDone, Note: note})
+			earlierNotes = append(earlierNotes, note)
 		}
 	}
 
@@ -407,6 +475,75 @@ func interruptPlan(stepResults []StepResult, steps []string, i int, err error) (
 	}
 	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))},
 		fmt.Errorf("plan interrupted at step %d: %w", i+1, err)
+}
+
+// noReproNote is a step's own verification note when its reply reports that
+// the reported problem does NOT reproduce (issue #178). A non-empty result
+// means "keep this note on the step" — it is the evidence the step's report
+// line carries instead of a bare "done" (or a "check passed" that would bury
+// the verification outcome).
+//
+// The probe is ANCHORED to the verdict the convention points at: a line that
+// starts with "not reproduced" (case-insensitive), the phrasing noReproMarker
+// (in each step prompt) tells the model to lead a no-repro reply with — so a real model's verdict, whatever the evidence,
+// is recognized. Anchoring to the line start (rather than any substring
+// match on "not reproduce") keeps a reply that merely ECHOES prompt or plan
+// wording — "if the bug does not reproduce …", "I could not reproduce it at
+// first, then reproduced it with -race" — from being misread as a no-repro
+// verdict. A no-repro reply that states its verdict some other way (the
+// model skipped the convention) is simply not flagged: the report line then
+// falls back to the check summary, which is honest about what was verified.
+func noReproNote(reply string) string {
+	trimmed := strings.TrimSpace(reply)
+	if trimmed == "" {
+		return ""
+	}
+	for _, line := range strings.Split(trimmed, "\n") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "not reproduced") {
+			return truncateNote(trimmed)
+		}
+	}
+	return ""
+}
+
+// planStepPrompt builds the prompt for ONE planned step's turn (issue #178).
+// It restates BOTH the overall task and the verify-before-fix principle
+// (prompt.go's verifyBeforeFixPrinciple, already in the base system prompt),
+// so each step turn (tools present) carries them even after demotion folds
+// the planning turn into the outline (#131 / #94's failure mode). The
+// step's tools are present here (unlike the planning turn), so the model can
+// and should run the test or command that confirms the problem.
+//
+// It also carries the no-repro output-shape convention (noReproMarker): the
+// principle says a non-reproducing problem is finished by saying so with the
+// evidence, but doesn't name the words — the marker tells the model to lead
+// such a reply with "Not reproduced:" so noReproNote recognizes the verdict
+// and carries it into the report and the later steps' prompts.
+//
+// earlierNotes are the DONE steps' notes in order (skipped when empty): an
+// earlier step's no-repro note (issue #178) must reach a later step, so a
+// "fix it" step knows the bug never reproduced instead of running blind and
+// building a speculative fix. Done-only notes are carried too: they are the
+// outcome a later step builds on.
+func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
+	p := fmt.Sprintf(
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, noReproMarker,
+	)
+	if len(earlierNotes) > 0 {
+		p += "\n\nEarlier steps:" + notesList(earlierNotes)
+	}
+	return p
+}
+
+// notesList renders earlier steps' notes as numbered lines — "1. note" — so
+// a step's prompt can carry them without prose a model must parse around.
+func notesList(notes []string) string {
+	var b strings.Builder
+	for i, n := range notes {
+		fmt.Fprintf(&b, "\n%d. %s", i+1, n)
+	}
+	return b.String()
 }
 
 // truncateNote bounds a raw note (check output) embedded in a skip note, so a

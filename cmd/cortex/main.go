@@ -809,6 +809,10 @@ func main() {
 		// the safety net for the UNRECOVERED case (err != nil), already
 		// handled there; this is the recovered case, its sibling.
 		printBackendError(res.LastError)
+		// Issue #103: a turn whose persisted messages carried a secret reports
+		// how much was masked (dim provenance, not an alarm) — the same
+		// per-turn count the journal capture's metadata and TurnResult carry.
+		printRedactions(os.Stdout, res.Redactions)
 		afterTurn(session, err)
 	}
 

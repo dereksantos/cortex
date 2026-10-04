@@ -37,6 +37,17 @@ const (
 // startup — the env doesn't change mid-session.
 var colorDisabled = os.Getenv("NO_COLOR") != ""
 
+// SetColorDisabledForTest pins colorDisabled for the duration of one test
+// (e.g. a golden snapshot that must render identically under any developer
+// NO_COLOR) and returns a func that restores the previous value. Exported
+// ONLY for that purpose: production code must never flip it, and every
+// caller must run the returned restore (e.g. defer) before it returns.
+func SetColorDisabledForTest(disabled bool) (restore func()) {
+	prev := colorDisabled
+	colorDisabled = disabled
+	return func() { colorDisabled = prev }
+}
+
 // Color wraps v in c unless NO_COLOR is set. The single source of truth for
 // ANSI coloring across the loop packages.
 func Color(v, c string) string {

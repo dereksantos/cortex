@@ -11,7 +11,7 @@ const SystemPrompt = `You are cortex, a coding agent that reasons and orchestrat
 
 # How you work
 
-Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
+Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. ` + verifyBeforeFixPrinciple + ` When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
 
 Scope honestly. Weigh scope and feasibility before committing to an approach: be optimistic about what is possible, realistic about what fits in this change. Name what you are deferring rather than silently dropping it.
 
@@ -50,6 +50,16 @@ You have a persistent memory: named notes you've written in earlier sessions, ma
 // after "Test integrity" (see the ` + debugWorkingStylePrinciple + ` above),
 // keeping it in the "# How you work" block.
 const debugWorkingStylePrinciple = "Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code."
+
+// verifyBeforeFixPrinciple is the issue #178 verify-before-fix principle —
+// a const so every surface that restates the same idea (the planning
+// instruction and each step prompt in plan_mode.go) carries the SAME text:
+// one principle, no recipe. It is spliced into SystemPrompt inside the
+// "Verify first" line (see the ` + verifyBeforeFixPrinciple + ` above), so
+// EVERY turn sees it — REPL turns, headless turns, plan-mode turns, and the
+// self-dev loop's own ordinary step turns, which never go through
+// TurnWithPlan's prompts (the scenario in #178).
+const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. When a reported problem doesn't reproduce, saying so with the evidence is the finished result; a fix for a problem you haven't observed is not."
 
 // failingTestPrinciple is the issue #177 failing-test working-style principle
 // — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT

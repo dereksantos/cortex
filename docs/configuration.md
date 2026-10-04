@@ -588,10 +588,39 @@ The default trailer has no email address. GitHub only credits a
 
 ### What is recorded
 
-Loop firings record whether the commit they made carried the trailer, as
-`attributed` on the `loop.run` journal event (omitted when false or when the
-firing made no commit). Commits from `cortex change commit`, Discord
-checkpoints and the `bash` tool are not journaled with an attribution flag.
+Every commit Cortex makes is journaled, so compliance is measured rather than
+assumed. Two records cover it:
+
+- **`loop.run`'s `attributed` field** — the loop firing's own view: did the
+  commit this firing landed carry the trailer (omitted when false, or when the
+  firing made no commit at all).
+- **`attribution.commit`** (machine-level journal,
+  `~/.cortex/journal/attribution/`) — one event per commit the harness sees,
+  from whichever path made it: the `bash` tool's backstop, `cortex change
+  commit`, or the Discord WIP checkpoint (which shares that function). It
+  carries the session and turn where there is one, the project, the command,
+  and an `outcome` naming what the backstop decided: `added`,
+  `already_present`, `skipped_unparseable`, `skipped_amend`, `skipped_stdin`,
+  or `disabled` (attribution off — recorded too, so the off periods are
+  visible).
+
+Each `attribution.commit` event is written twice over a commit's life, told
+apart by `verified`. The intent write goes down before the command runs, so a
+commit that never happened (a refused command) still records why it was left
+alone. After a run that succeeded, a second event carries `sha` and
+`trailer_present` — the resulting commit's hash and whether `git log -1`
+actually finds the trailer in its message. That second line is the fact; the
+first is only the intent, and the two can disagree in the direction that
+matters: a pipeline the backstop refused to rewrite (`skipped_unparseable`)
+may commit anyway, and the verified event then reports `trailer_present:
+false`. Loop firings therefore write both records for the same commit and
+never contradict each other. A commit that was refused outright — not on a
+change branch, nothing to commit — writes no `attribution.commit` at all: the
+reason already reaches the caller, and an entry naming a SHA the repository
+doesn't have would be worse than no entry.
+
+Reading the stream back is `journal.LatestAttributionCommits`, or plain `jq`
+over the segments. See [`docs/journal.md`](journal.md) for the class.
 
 ## Project commands, post-edit hook and workspace trust
 
@@ -808,3 +837,5 @@ runner, not a working knob.
   the `limits.*` memory-index caps and the `scope` arg govern.
 - [`docs/cross-source-learning.md`](cross-source-learning.md) — the user
   memory tier, its shadowing rules, and the cross-project promotion design.
+- [`docs/journal.md`](journal.md) — the `attribution` writer-class the
+  `attribution.*` receipts are written to, and its entry schema.

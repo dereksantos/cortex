@@ -278,6 +278,25 @@ type CortexSession struct {
 	injectedChars   int
 	captures        int
 	injections      int
+	// redactions is the running count of secret patterns masked for the
+	// CURRENT turn as they were persisted (issue #103): writeTranscript
+	// redacts each outgoing message (content + tool-call args + tool results)
+	// on the way to the on-disk transcript, so a secret the agent read is never
+	// stored. The live in-memory Request.Messages stays verbatim (the model
+	// still uses the value this turn); only what hits disk is masked. The
+	// counter is reset at the START of every turn (turn.go) so it always
+	// counts exactly the in-flight turn, and carried on TurnResult so a
+	// caller can see it.
+	redactions int
+	// redactionsTotal is the CUMULATIVE session count of secret patterns
+	// masked while the session's messages were persisted (issue #103): every
+	// turn's per-turn redactions (cs.redactions, reset at turn start) is
+	// folded in here once the turn ends, so the session summary and the eval
+	// journal can report the session-wide total — distinct from the per-turn
+	// cs.redactions that rides TurnResult. It is a session-lifetime metric in
+	// the same sense as cs.captures / cs.tokensIn (the summary reports the
+	// session's whole lifetime, not just the current post-/clear conversation).
+	redactionsTotal int
 
 	md      *markdownRenderer
 	mdWidth int
@@ -555,6 +574,30 @@ func (cs *CortexSession) AttributionCommit() string {
 		model = cs.Request.Model
 	}
 	return cs.Config.attributionCommit(model)
+}
+
+// AttributionJournaler implementation for *CortexSession (issue #146): the
+// coordinate pair an attribution.commit receipt carries. The bash tool cannot
+// reach a session's turn ordinal or workspace root, and cmd/cortex cannot own
+// the write path (internal/tools classifies the commit), so the session
+// supplies the coordinates and internal/tools appends the event — the same
+// split Workdirer uses. turn is cs.turnNo, the 1-based in-flight turn (0
+// between turns), matching the "turn" field captureTurn records.
+func (cs *CortexSession) AttributionSession() (string, int) {
+	if cs == nil {
+		return "", 0
+	}
+	return cs.SessionID, cs.turnNo
+}
+
+// AttributionProject returns the receipt's workspace root ("" when the session
+// has none — a bare test construction, where the event still records the
+// command it observed).
+func (cs *CortexSession) AttributionProject() string {
+	if cs == nil || cs.workspace == nil {
+		return ""
+	}
+	return cs.workspace.Root
 }
 
 // ValidateToolCall provides dynamic validation for tool calls beyond config.

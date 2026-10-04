@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -188,25 +189,9 @@ func renderCandidateRow(cands []string) string {
 	}
 	row := strings.Join(cands, "  ")
 	if extra > 0 {
-		row += "  … +" + itoa(extra)
+		row += "  … +" + strconv.Itoa(extra)
 	}
 	return row
-}
-
-// itoa is a tiny int→string helper so renderCandidateRow can avoid importing
-// strconv for one use (the rest of this file is string-only).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }
 
 // sameSlice reports whether a and b are element-equal.

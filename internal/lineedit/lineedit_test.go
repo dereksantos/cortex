@@ -191,3 +191,38 @@ func TestStripANSIWidth(t *testing.T) {
 		t.Errorf("displayWidth(colored) = %d, want 2", w)
 	}
 }
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		w        int
+		want     string
+		wantCols int // visible width of want, when the cut shortens
+	}{
+		{"fits", "abcdef", 8, "abcdef", 0},
+		{"plain cut", "abcdefghij", 6, "abcde…", 6},
+		{"dim cut", dim("abcdefghij"), 6, ansiDim + "abcde…" + ansiReset, 6},
+		{"wide cut", "abcdefghij", 1, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncate(tt.in, tt.w)
+			if got != tt.want {
+				t.Errorf("truncate(%q, %d) = %q, want %q", tt.in, tt.w, got, tt.want)
+			}
+			if tt.wantCols > 0 && displayWidth(got) != tt.wantCols {
+				t.Errorf("displayWidth(truncate) = %d, want %d", displayWidth(got), tt.wantCols)
+			}
+			if tt.wantCols > 0 {
+				wantEnd := "…"
+				if strings.Contains(tt.in, "\x1b") {
+					wantEnd += ansiReset // a clipped styled cut must close the styling
+				}
+				if !strings.HasSuffix(got, wantEnd) {
+					t.Errorf("clipped output must end with %q: %q", wantEnd, got)
+				}
+			}
+		})
+	}
+}
