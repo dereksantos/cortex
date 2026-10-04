@@ -55,9 +55,24 @@ func lineGolden(t *testing.T, name, got string) {
 	}
 }
 
-// lineWidths is the width axis: 40 and 200 are the clip boundary on either
-// side of 80, and 0 is the non-TTY/piped form (renderLine falls back to 80).
-var lineWidths = []int{40, 80, 200, 0}
+// lineWidths is the width axis: 40 is the clip boundary (the labels below
+// exceed it, so the w40 goldens record the truncated "…" form and differ from
+// w80/w200, where the labels fit), 80 is the conventional fallback width
+// (Terminal.width() falls back to it on a non-TTY, lineedit.go), and 200
+// leaves the labels unclipped. Width 0 is NOT swept: in production
+// Terminal.width() never returns 0 (it falls back to 80), so a 0-width frame
+// would pin a state no user can ever see.
+var lineWidths = []int{40, 80, 200}
+
+// statusLabel is the activity label the status-row goldens pin. It is 66
+// runes — longer than the 40-column sweep minimum — so the w40 case records
+// the truncated form (truncate appends "…") and differs from w80/w200.
+const statusLabel = "thinking about the change, verifying each step against the spec… and back again 3s"
+
+// confirmAsk is the Confirm ask the approval goldens pin. It is 62 runes —
+// longer than the 40-column sweep minimum — so the w40 case records the
+// truncated form and differs from w80/w200.
+const confirmAsk = "run the full test suite against the working tree? [y/N]"
 
 // statusFrame builds an anchor with the given width and activity label, runs
 // the exact draw/erase/draw sequence the real tick loop performs for a status
@@ -99,7 +114,7 @@ func TestStatusRowGolden(t *testing.T) {
 	for _, w := range lineWidths {
 		w := w
 		t.Run(caseName(w), func(t *testing.T) {
-			lineGolden(t, "status_"+caseName(w), statusFrame(w, "thinking... 3s"))
+			lineGolden(t, "status_"+caseName(w), statusFrame(w, statusLabel))
 		})
 	}
 }
@@ -111,7 +126,7 @@ func TestConfirmAskGolden(t *testing.T) {
 	for _, w := range lineWidths {
 		w := w
 		t.Run(caseName(w), func(t *testing.T) {
-			lineGolden(t, "confirm_"+caseName(w), confirmFrame(w, "draft", "run it? [y/N]"))
+			lineGolden(t, "confirm_"+caseName(w), confirmFrame(w, "draft", confirmAsk))
 		})
 	}
 }
@@ -170,21 +185,29 @@ func glyphAudit(frame string, allowed func(rune) bool) string {
 	return strings.Join(bad, "\n")
 }
 
+// sweepLabels are the longest label/ask the golden sweep drives the sweep
+// width with, so a glyph that only surfaces at a clipped width still gets
+// checked in its unclipped form.
+var sweepLabels = []struct{ status, ask string }{
+	{statusLabel, confirmAsk},
+	{"thinking... 3s", "run it? [y/N]"},
+}
+
 // TestAnchoredRowGlyphContract enforces the plain-text decision on the
 // anchored status row and Confirm ask frames, at every width the golden
 // sweep uses (a glyph regression could in principle surface only at a
 // clipped width): no box-drawing, no retired icons.
 func TestAnchoredRowGlyphContract(t *testing.T) {
-	status := "thinking... 3s"
-	ask := "run it? [y/N]"
 	for _, w := range lineWidths {
 		w := w
 		t.Run(caseName(w), func(t *testing.T) {
-			if bad := glyphAudit(statusFrame(w, status), lineeditRuneAllowed); bad != "" {
-				t.Errorf("status row carries banned glyphs:\n%s\nframe:\n%s", bad, statusFrame(w, status))
-			}
-			if bad := glyphAudit(confirmFrame(w, "draft", ask), lineeditRuneAllowed); bad != "" {
-				t.Errorf("confirm ask carries banned glyphs:\n%s\nframe:\n%s", bad, confirmFrame(w, "draft", ask))
+			for _, l := range sweepLabels {
+				if bad := glyphAudit(statusFrame(w, l.status), lineeditRuneAllowed); bad != "" {
+					t.Errorf("status row carries banned glyphs:\n%s\nframe:\n%s", bad, statusFrame(w, l.status))
+				}
+				if bad := glyphAudit(confirmFrame(w, "draft", l.ask), lineeditRuneAllowed); bad != "" {
+					t.Errorf("confirm ask carries banned glyphs:\n%s\nframe:\n%s", bad, confirmFrame(w, "draft", l.ask))
+				}
 			}
 		})
 	}
