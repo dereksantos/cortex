@@ -3,6 +3,7 @@ package shellrisk
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -209,39 +210,110 @@ func TestClassify_DenyFloorBeatsSafeLooking(t *testing.T) {
 }
 
 // TestBlockedMessage pins the exact wording the blocked-result message
-// returns to the model (issue #169). The phrasing states that the *action*
-// isn't allowed — not just this spelling of it — and tells the model to
-// continue without it rather than route around the block with a
-// same-effect variant. Both call sites (cmd/cortex's gateShell and the
-// headlessDeps stub in internal/tools) must use this single constructor so
-// the wording can't drift; this test fails loudly if it does.
+// returns to the model (issue #169; reworded for issue #200). The phrasing
+// states that the *action* isn't allowed — not just this spelling of it —
+// and tells the model to continue without it rather than route around the
+// block with a same-effect variant. It also carries the unknown-value tail
+// (blockedUnknownClause): the check didn't run, so its value is still
+// unknown — no guess, no proxy check, marked unverified. Both call sites
+// (cmd/cortex's gateShell and the headlessDeps stub in internal/tools) must
+// use this single constructor so the wording can't drift; this test fails
+// loudly if it does.
 func TestBlockedMessage(t *testing.T) {
 	got := BlockedMessage("rewrites git history")
-	want := "blocked (risk: rewrites git history): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it and say in your final answer what you couldn't do."
+	want := "blocked (risk: rewrites git history): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("BlockedMessage(\"rewrites git history\") =\n%q\nwant\n%q", got, want)
 	}
 }
 
 // TestBlockedMessage_EmptyReason pins the empty-reason edge case: the
-// message still carries the full shape so the model reads the same
-// instruction regardless of the reason.
+// message still carries the full shape — including the unknown-value tail —
+// so the model reads the same instruction regardless of the reason.
 func TestBlockedMessage_EmptyReason(t *testing.T) {
 	got := BlockedMessage("")
-	want := "blocked (risk: ): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it and say in your final answer what you couldn't do."
+	want := "blocked (risk: ): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("BlockedMessage(\"\") =\n%q\nwant\n%q", got, want)
 	}
 }
 
+// TestRefusedMessage pins the exact wording the deny-floor refusal returns to
+// the model (issue #200). It used to be duplicated inline at the two call
+// sites (cmd/cortex's gateShell and internal/tools's headlessDeps); this test
+// pins the shared constructor so the wording can't drift again. It carries
+// the same unknown-value tail as BlockedMessage: the command never ran, so
+// its value is still unknown.
+func TestRefusedMessage(t *testing.T) {
+	got := RefusedMessage("rm -rf of a filesystem root / home / cwd")
+	want := "refused by the safety gate (rm -rf of a filesystem root / home / cwd): this command will not run; choose a safer approach. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
+	if got != want {
+		t.Errorf("RefusedMessage(\"rm -rf of a filesystem root / home / cwd\") =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestDeclinedMessage pins the exact wording the approver-decline path
+// returns to the model (issue #200). Unlike BlockedMessage the action is
+// allowed — a human chose not to run it — but the check didn't happen, so it
+// carries the same unknown-value tail.
+func TestDeclinedMessage(t *testing.T) {
+	got := DeclinedMessage()
+	want := "declined by the user; not run. Ask before retrying, or use a safer command. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
+	if got != want {
+		t.Errorf("DeclinedMessage() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRefusalMessagesCarryUnknownClause is the issue #200 invariant across ALL
+// four refusal constructors: every message the model gets for a command that
+// didn't run must tell it that an intended check's result is still unknown,
+// bar guessing, bar a check of something else substituting for it, and
+// require an unverified mark — so none of the refusal paths can drift back
+// into "just continue" wording that invites a guessed value. The clause is
+// neutral about what the command was for (most blocked commands are not
+// checks), so these probes check that neutrality too: no "the value it would
+// have checked" and no "a safer way to check it".
+func TestRefusalMessagesCarryUnknownClause(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+	}{
+		{"BlockedMessage", BlockedMessage("test")},
+		{"RefusedMessage", RefusedMessage("test")},
+		{"SameActionBlockedMessage", SameActionBlockedMessage(EffectGitHistoryWrite)},
+		{"DeclinedMessage", DeclinedMessage()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, probe := range []string{
+				"that result is still unknown",
+				"don't guess it",
+				"mark it unverified",
+			} {
+				if !strings.Contains(tt.msg, probe) {
+					t.Errorf("%s no longer carries the unknown-value clause (missing %q):\n%s", tt.name, probe, tt.msg)
+				}
+			}
+			for _, probe := range []string{
+				"The value it would have checked",
+				"a safer way to check it",
+			} {
+				if strings.Contains(tt.msg, probe) {
+					t.Errorf("%s carries check-assuming wording (%q) — the clause must stay neutral about what the command was for:\n%s", tt.name, probe, tt.msg)
+				}
+			}
+		})
+	}
+}
+
 // TestSameActionBlockedMessage pins the exact wording the per-turn same-
 // action gate returns when a later command belongs to an effect class that
-// was already blocked in the current turn (issue #169). Both call sites
-// (cmd/cortex's gateShell and any other consumer) must use this single
-// constructor so the wording can't drift.
+// was already blocked in the current turn (issue #169; reworded for issue
+// #200). Both call sites (cmd/cortex's gateShell and any other consumer) must
+// use this single constructor so the wording can't drift.
 func TestSameActionBlockedMessage(t *testing.T) {
 	got := SameActionBlockedMessage(EffectGitHistoryWrite)
-	want := "blocked (same action: git-history-write): same action as an earlier blocked command in this turn. This action is not permitted; continue without it and say in your final answer what you couldn't do."
+	want := "blocked (same action: git-history-write): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("SameActionBlockedMessage(git-history-write) =\n%q\nwant\n%q", got, want)
 	}

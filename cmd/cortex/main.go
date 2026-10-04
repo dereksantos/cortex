@@ -513,6 +513,7 @@ func main() {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
+			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
 			// Risky-command confirmation reads a y/N line from the editor. Tool
 			// calls run synchronously on this goroutine between ReadLine calls,
@@ -594,7 +595,9 @@ func main() {
 		}
 
 		// Record for ↑/↓ and Ctrl-R recall — but not the session-enders, so a
-		// fresh prompt's first ↑ lands on real work, not "/quit".
+		// fresh prompt's first ↑ lands on real work, not "/quit". The history
+		// gets the line EXACTLY as typed: mention processing (below) only
+		// rewrites the copy handed to the model, never what the user recalls.
 		if editor != nil && input != "/quit" && input != "/exit" {
 			editor.AddHistory(input)
 		}
@@ -616,6 +619,18 @@ func main() {
 			continue
 		}
 
+		// Issue #108: @path mentions are attached to the turn through the same
+		// size rules as read_file (small files inline, large files as an
+		// outline with a pointer to study). The attachment is prepended to
+		// what the model sees; the mentions in the input are replaced by short
+		// markers. This runs only on the two paths that hand the line to the
+		// model (a normal turn, and /plan's task) — slash commands and prose
+		// the user never sends to the model are left untouched.
+		var mentionAttachment string
+		process := func() {
+			input, mentionAttachment = processMentions(session.root(), input)
+		}
+
 		// /plan <task> runs the plan-then-execute path (#150): one planning
 		// turn, then each step as its own turn with the project's checks in
 		// between. The task is the rest of the line; a bare /plan with no
@@ -633,22 +648,23 @@ func main() {
 				fmt.Println(withColor("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", gray))
 				continue
 			}
+			process()
 			var plan PlanRunResult
 			var planErr error
 			switch {
 			case editor != nil && anchoredInput():
 				typeAhead, planErr = runUnderAnchor(session, editor, typeAhead, func(ctx context.Context) error {
 					var runErr error
-					plan, runErr = session.TurnWithPlan(ctx, task)
+					plan, runErr = session.TurnWithPlan(ctx, task, mentionAttachment)
 					return runErr
 				})
 			case editor != nil:
 				ctx, stop := editor.Interruptible(context.Background())
-				plan, planErr = session.TurnWithPlan(ctx, task)
+				plan, planErr = session.TurnWithPlan(ctx, task, mentionAttachment)
 				typeAhead = stop()
 			default:
 				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-				plan, planErr = session.TurnWithPlan(ctx, task)
+				plan, planErr = session.TurnWithPlan(ctx, task, mentionAttachment)
 				cancel()
 			}
 			if plan.Reply != "" {
@@ -752,6 +768,13 @@ func main() {
 		// The reply itself is printed by the coder sender (printCoderProse /
 		// the live stream), not here — the REPL owns only the turn-boundary
 		// receipt, display, and compaction.
+		process()
+		// Issue #108: prepend the mention attachment (if any) to the turn's
+		// input so the model sees the file content (or outline) in context.
+		turnInput := input
+		if mentionAttachment != "" {
+			turnInput = mentionAttachment + "\n" + input
+		}
 		var (
 			err error
 			res TurnResult
@@ -760,14 +783,14 @@ func main() {
 		case editor != nil && anchoredInput():
 			// runAnchoredTurn runs its own Turn and returns its result, so the
 			// turn-boundary receipt below surfaces in this mode too.
-			typeAhead, res, err = runAnchoredTurn(session, editor, input, typeAhead)
+			typeAhead, res, err = runAnchoredTurn(session, editor, turnInput, typeAhead)
 		case editor != nil:
 			ctx, stop := editor.Interruptible(context.Background())
-			res, err = session.Turn(ctx, input)
+			res, err = session.Turn(ctx, turnInput)
 			typeAhead = stop()
 		default:
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-			res, err = session.Turn(ctx, input)
+			res, err = session.Turn(ctx, turnInput)
 			cancel()
 		}
 		// Issue #141: surface the "tests changed" receipt to the user before

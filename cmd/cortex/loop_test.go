@@ -1119,6 +1119,132 @@ func TestRunLoopDetectsStuckErrorLoop(t *testing.T) {
 	}
 }
 
+// TestStuckHint table-pins the stuckHint off-ramp for each recurring error
+// class (issue #142): a known class must yield its ACTIONABLE redirect (the
+// off-ramp a weak model can't infer from the raw error), and an unrecognized
+// class must fall back to the generic "stop and report" wrap-up. The checks
+// are on loose keywords — the principle, not the exact wording — so a future
+// rephrase keeps the test green as long as the redirect survives, matching the
+// loose-keyword style of the prompt tests.
+func TestStuckHint(t *testing.T) {
+	tests := []struct {
+		name   string
+		class  string
+		wantIn []string // substrings that must appear in the hint
+		notIn  []string // substrings that must NOT appear
+	}{
+		{
+			name:   "no-op edit: confirm it is already applied",
+			class:  "Error: x edit 1: old_string and new_string are identical; nothing to change",
+			wantIn: []string{"already applied", "read_file", "confirm"},
+		},
+		{
+			name:   "edit old_string not found: match the file exactly",
+			class:  "Error: x edit 1: old_string not found in the file",
+			wantIn: []string{"EXACTLY", "old_string", "Re-read"},
+		},
+		{
+			// The issue #142 case: a recurring NOT-FOUND error class. The
+			// class is the leading "Error: …" line with numbers neutralized
+			// (errorClass), so "does not exist" must be present to trigger
+			// the locate-first off-ramp.
+			name:   "recurring not-found: stop guessing, outline/grep the workspace root",
+			class:  "Error: missing.go does not exist. To locate the right path, use outline or grep.",
+			wantIn: []string{"does not exist", "do not guess", "outline", "grep", "workspace root"},
+		},
+		{
+			// The real not-found error read_file/grep/outline return (from
+			// pathNotFoundError in internal/tools) must classify into the
+			// locate-first off-ramp — pinning the end-to-end class→hint
+			// mapping, not just a synthetic string.
+			name:   "read_file/grep/outline not-found error: locate-first off-ramp",
+			class:  "Error: /abs/missing.go does not exist. To locate the right path, use outline (list a directory) or grep (search contents) instead of guessing. The workspace root is /w; all tool paths are relative to it.",
+			wantIn: []string{"does not exist", "do not guess", "workspace root", "re-issue"},
+		},
+		{
+			// A non-not-found error must NOT get the locate-first redirect —
+			// the off-ramp must stay class-specific, not bleed into unrelated
+			// errors.
+			name:   "unrecognized class: generic wrap-up, not the locate-first redirect",
+			class:  "Error: something unrelated went wrong",
+			wantIn: []string{"stop and report"},
+			notIn:  []string{"do not guess paths"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hint := stuckHint(tt.class)
+			lower := strings.ToLower(hint)
+			for _, sub := range tt.wantIn {
+				if !strings.Contains(lower, strings.ToLower(sub)) {
+					t.Errorf("hint missing %q; got:\n%q", sub, hint)
+				}
+			}
+			for _, sub := range tt.notIn {
+				if strings.Contains(lower, strings.ToLower(sub)) {
+					t.Errorf("hint should not contain %q; got:\n%q", sub, hint)
+				}
+			}
+		})
+	}
+}
+
+// TestRunLoopDetectsNotfoundStuck is the end-to-end acceptance test for the
+// issue #142 stuck-hint: a model that keeps hitting a NOT-EXISTING path (each
+// read_file returning the oriented not-found error) must get the locate-first
+// off-ramp injected on the first repeat (stuckThreshold) and be escalated to a
+// "stuck" finalize — instead of the harness thrashing to MaxIter. This is the
+// same shape as TestRunLoopDetectsStuckErrorLoop (which covers the no-op-edit
+// class) but pins the not-found class through the full errorClass → errSeen →
+// stuckHint path.
+func TestRunLoopDetectsNotfoundStuck(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var i int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // finalize round
+			return fakeResp("gave up", nil, 1, 1), false, nil
+		}
+		// Alternate a failing read (always the not-found error) with a
+		// successful read, so the byte-identical no-progress guard (which only
+		// sees CONSECUTIVE identical batches) is reset by the interleaved
+		// success and NEVER trips — forcing the error-class detector to do the
+		// work, exactly like TestRunLoopDetectsStuckErrorLoop.
+		if i++; i%2 == 1 {
+			return fakeResp("", []ToolCall{readCall("e", "missing.go")}, 1, 1), false, nil
+		}
+		return fakeResp("", []ToolCall{readCall("r", "real.go")}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(_ context.Context, c ToolCall) string {
+		if strings.Contains(c.Function.Arguments, "missing.go") {
+			return "Error: missing.go does not exist. To locate the right path, use outline or grep instead of guessing."
+		}
+		return "@real.go:1-5 lines"
+	})
+	_, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if stats.StopReason != "stuck" {
+		t.Errorf("stop = %q, want \"stuck\" — the error-class detector should fire on the recurring not-found error", stats.StopReason)
+	}
+	if stats.Iterations >= 12 {
+		t.Errorf("ran to MaxIter %d — harness thrashed instead of redirecting", stats.Iterations)
+	}
+	foundHint := false
+	for _, m := range req.Messages {
+		if m.Role == RoleUser && strings.Contains(strings.ToLower(m.Content), "do not guess") {
+			foundHint = true
+		}
+	}
+	if !foundHint {
+		t.Error("no locate-first off-ramp (the not-found stuck hint) was injected before giving up")
+	}
+}
+
 // TestRunLoopBlockingSubagentPath proves the subagent path with no second real
 // caller: runLoop driven by the real blockingSender over an httptest server (no
 // model) runs a 2-round tool loop, accounts tokens, drives the Progress sink,

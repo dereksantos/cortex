@@ -116,17 +116,18 @@ func (cs *CortexSession) cacheHeadlineLine() string {
 		withColor(fmt.Sprintf(" hit last turn · %s evaluated of %s prompt", humanK(evaluated), humanK(cs.LastPromptTokens)), gray)
 }
 
-// gridComponents returns zone A's four pieces in wire order — the same
+// gridComponents returns zone A's five pieces in wire order — the same
 // order they're actually assembled into the prompt (system prompt, session
-// outline, memory index, skills index) — sized by the token-counting
-// helpers below, which the grid and the legend both call so neither
-// recomputes the arithmetic independently.
+// outline, memory index, skills index, workspace note) — sized by the
+// token-counting helpers below, which the grid and the legend both call so
+// neither recomputes the arithmetic independently.
 func (cs *CortexSession) gridComponents() []gridComponent {
 	return []gridComponent{
 		{glyphSystem, cs.systemPromptTokens()},
 		{glyphOutline, cs.outlineTokens()},
 		{glyphMemory, cs.memoryIndexTokens()},
 		{glyphSkills, cs.skillsIndexTokens()},
+		{glyphWorkspace, cs.workspaceTokens()},
 	}
 }
 
@@ -141,9 +142,9 @@ func (cs *CortexSession) gridHighWatermark() int {
 }
 
 // contextGridCellColor picks the ANSI color for one grid cell by its glyph
-// (system/outline/memory/skills/free are fixed colors; tail alone depends
-// on position — green before the demote watermark, red at/after it, per
-// context_grid.go's tailCellPastWatermark). System renders in the
+// (system/outline/memory/skills/workspace/free are fixed colors; tail alone
+// depends on position — green before the demote watermark, red at/after it,
+// per context_grid.go's tailCellPastWatermark). System renders in the
 // terminal's own default color (no wrap) — "bright/default" per the design.
 func contextGridCellColor(glyph rune, idx, window, hiWatermark int) string {
 	switch glyph {
@@ -153,6 +154,8 @@ func contextGridCellColor(glyph rune, idx, window, hiWatermark int) string {
 		return magenta
 	case glyphSkills:
 		return yellow
+	case glyphWorkspace:
+		return cyan
 	case glyphTail:
 		if tailCellPastWatermark(idx, window, hiWatermark) {
 			return red
@@ -223,11 +226,11 @@ func gridTokenLabel(tokens int) string {
 }
 
 // gridLegendLines renders one row per non-empty grid-order component —
-// system, outline, memory, skills, tail (folding the old separate
-// watermarks row into this one), free — reusing the same token-counting
-// helpers the grid itself sizes cells from. A component with zero tokens is
-// omitted entirely (matching the pre-redesign *Line functions' "omit,
-// don't invent" behavior).
+// system, outline, memory, skills, workspace, tail (folding the old
+// separate watermarks row into this one), free — reusing the same
+// token-counting helpers the grid itself sizes cells from. A component with
+// zero tokens is omitted entirely (matching the pre-redesign *Line
+// functions' "omit, don't invent" behavior).
 func (cs *CortexSession) gridLegendLines() []string {
 	var lines []string
 
@@ -241,8 +244,10 @@ func (cs *CortexSession) gridLegendLines() []string {
 		lines = append(lines, gridLegendRow(glyphMemory, magenta, "memory", t, cs.memoryLegendDetail()))
 	}
 	if t := cs.skillsIndexTokens(); t > 0 {
-		count := len(skills.Discover(cs.skillsDirs()))
-		lines = append(lines, gridLegendRow(glyphSkills, yellow, "skills", t, fmt.Sprintf("%d skills", count)))
+		lines = append(lines, gridLegendRow(glyphSkills, yellow, "skills", t, fmt.Sprintf("%d skills", len(skills.Discover(cs.skillsDirs())))))
+	}
+	if t := cs.workspaceTokens(); t > 0 {
+		lines = append(lines, gridLegendRow(glyphWorkspace, cyan, "workspace", t, cs.workspaceLegendDetail()))
 	}
 	if cs.ws != nil && cs.ws.TotalTurns() > 0 {
 		lines = append(lines, gridLegendRow(glyphTail, green, "tail", cs.ws.TailTokens(), cs.tailLegendDetail()))
@@ -395,12 +400,29 @@ func (cs *CortexSession) skillsIndexTokens() int {
 	return cache.TokensOf(len(cs.skillsIndexNote()))
 }
 
+// workspaceLegendDetail reports the workspace root the one-line workspace
+// note states (issue #142) — the same root turn.go injects (shared
+// workspaceRootForNote resolution), so the legend and the wire never
+// disagree. "" when no workspace is resolvable (the row is omitted by the
+// t > 0 caller check).
+func (cs *CortexSession) workspaceLegendDetail() string {
+	return cs.workspaceRootForNote()
+}
+
 // headTokens sums zone A's stable-prefix token cost — system prompt +
-// session outline + memory index + skills index — the same components
-// gridComponents breaks out cell-by-cell for the grid. Also the context
-// gauge bar's (contextbar.go) left (head) segment size, so both consumers
-// share this one sum instead of each recomputing the cache.TokensOf
-// arithmetic.
+// session outline + memory index + skills index + workspace note — the same
+// components gridComponents breaks out cell-by-cell for the grid. Also the
+// context gauge bar's (contextbar.go) left (head) segment size, so both
+// consumers share this one sum instead of each recomputing the
+// cache.TokensOf arithmetic.
 func (cs *CortexSession) headTokens() int {
-	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens() + cs.skillsIndexTokens()
+	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens() + cs.skillsIndexTokens() + cs.workspaceTokens()
+}
+
+// workspaceTokens returns the workspace note's token size (issue #142: the
+// one-line workspace-root note turn.go injects into the ephemeral slot,
+// every turn — the grid and legend count it exactly as the turn sends it).
+// 0 only when no workspace is resolvable (workspaceNote's "" case).
+func (cs *CortexSession) workspaceTokens() int {
+	return cache.TokensOf(len(cs.workspaceNote()))
 }

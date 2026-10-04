@@ -11,7 +11,7 @@ const SystemPrompt = `You are cortex, a coding agent that reasons and orchestrat
 
 # How you work
 
-Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. ` + verifyBeforeFixPrinciple + ` When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
+Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. ` + verifyBeforeFixPrinciple + ` ` + blockedCheckPrinciple + ` When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
 
 Scope honestly. Weigh scope and feasibility before committing to an approach: be optimistic about what is possible, realistic about what fits in this change. Name what you are deferring rather than silently dropping it.
 
@@ -33,6 +33,8 @@ Test integrity. Removing or changing an existing test to make a failing build pa
 
 ` + debugWorkingStylePrinciple + `
 
+` + locateFirstPrinciple + `
+
 Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
 
 # How you communicate
@@ -51,6 +53,14 @@ You have a persistent memory: named notes you've written in earlier sessions, ma
 // keeping it in the "# How you work" block.
 const debugWorkingStylePrinciple = "Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code."
 
+// locateFirstPrinciple is the issue #142 locate-first working-style
+// principle — a const so CLAUDE.md's "The agent's tools" section mirrors the
+// EXACT same text (the docs describe the guidance the model actually
+// receives, so the two can't drift apart). It is spliced into SystemPrompt
+// after the debugging principle (see the ` + locateFirstPrinciple + `
+// above), keeping it in the "# How you work" block.
+const locateFirstPrinciple = "Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers."
+
 // verifyBeforeFixPrinciple is the issue #178 verify-before-fix principle —
 // a const so every surface that restates the same idea (the planning
 // instruction and each step prompt in plan_mode.go) carries the SAME text:
@@ -60,6 +70,23 @@ const debugWorkingStylePrinciple = "Debug carefully. Check every error in test a
 // self-dev loop's own ordinary step turns, which never go through
 // TurnWithPlan's prompts (the scenario in #178).
 const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. When a reported problem doesn't reproduce, saying so with the evidence is the finished result; a fix for a problem you haven't observed is not."
+
+// blockedCheckPrinciple is the issue #200 blocked-check principle — a const
+// so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT same text
+// (the docs describe the guidance the model actually receives, so the two
+// can't drift apart — the same mirror pattern as failingTestPrinciple and
+// debugWorkingStylePrinciple). It is spliced into SystemPrompt inside the
+// "Verify first" line, right after verifyBeforeFixPrinciple, so every turn
+// sees it at the exact moment a bash refusal could land: a blocked, refused,
+// or declined check leaves its result unknown — don't guess it, and a check
+// of something else doesn't stand in for it; failing that, mark the claim
+// unverified wherever it is stated. (The shellrisk refusal messages carry
+// the short per-incident version of the same instruction; this is the
+// standing principle.) Deliberately a principle, not a recipe: no tool names,
+// no paths, no list of incident surfaces — the PR #196/#197 specifics (a
+// focused t.Logf test, in-tree files vs /tmp, comments/goldens/commit
+// summaries) were the incident, not the principle.
+const blockedCheckPrinciple = "A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it."
 
 // failingTestPrinciple is the issue #177 failing-test working-style principle
 // — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT

@@ -164,6 +164,13 @@ func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
 	if !strings.Contains(got, noReproMarker) {
 		t.Errorf("planStepPrompt does not carry the no-repro output-shape convention (noReproMarker):\n%s", got)
 	}
+	// And the issue #200 blocked-check principle: a step turn is where a
+	// blocked verification command actually lands, so the step prompt carries
+	// the standing principle verbatim (same const the base system prompt has)
+	// even after the planning turn is demoted out of the window.
+	if !strings.Contains(got, blockedCheckPrinciple) {
+		t.Errorf("planStepPrompt does not restate the blocked-check principle (blockedCheckPrinciple):\n%s", got)
+	}
 	// And the convention and the probe agree on the same phrase: the marker
 	// the model is told to use is the prefix noReproNote anchors on, so a
 	// reply that follows the convention is recognized (round-2 review: the
@@ -282,9 +289,9 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
 		},
 		{
-			name:     "step prompt carries the original task, the principle, and the no-repro marker",
+			name:     "step prompt carries the original task, the principle, the blocked-check principle, and the no-repro marker",
 			prompt:   users[1],
-			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", noReproMarker},
+			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", blockedCheckPrinciple, noReproMarker},
 		},
 	}
 	for _, tt := range tests {

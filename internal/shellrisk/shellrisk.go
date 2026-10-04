@@ -64,29 +64,69 @@ type Verdict struct {
 	Tier   string // "deny-floor" | "safe-path" | "classified" | "fail-closed"
 }
 
+// blockedUnknownClause is the shared tail every refusal carries (issue #200).
+// It is deliberately neutral about WHAT the refused command was for: most
+// blocked commands are not checks (deny-floor rm -rf, a forced push, a
+// history rewrite), so the tail only speaks about the UNKNOWN VALUE in the
+// case the command was meant to check something — never as a suggestion to
+// find another way to do the refused thing. It also bars the papering-over
+// the PR #196/#197 transcripts show: a blocked rune-count command was
+// answered with hand-counted numbers written into comments and goldens, and
+// a refused mutation run was replaced by probes of a different property —
+// then both were stated as fact in commit summaries.
+const blockedUnknownClause = " If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
+
 // BlockedMessage is the single shared source for the message a blocked
-// command returns to the model (issue #169). Both call sites — the
-// session's gateShell and the headlessDeps stub — must use it so the
-// wording can't drift: a Risky command with no interactive approver, a
-// Risky command inside a subagent, and a Risky command whose approver
-// timed out all read identically to the model. The phrasing states that
-// the *action* isn't allowed (not just this spelling of it), and tells
-// the model to continue without it rather than to route around the
-// block with a same-effect variant — the behavior the per-turn same-
-// action gate (EffectClass) enforces mechanically.
+// command returns to the model (issue #169; reworded for issue #200). Both
+// call sites — the session's gateShell and the headlessDeps stub — must use
+// it so the wording can't drift: a Risky command with no interactive
+// approver, a Risky command inside a subagent, and a Risky command whose
+// approver timed out all read identically to the model. The phrasing states
+// that the *action* isn't allowed (not just this spelling of it), tells the
+// model to continue without it rather than to route around the block with a
+// same-effect variant — the behavior the per-turn same-action gate
+// (EffectClass) enforces mechanically — and tells it to report the gap in
+// its final answer. It carries the neutral unknown-value tail
+// (blockedUnknownClause): if the command was meant to check something, that
+// result is still unknown — don't guess it, don't substitute a check of
+// something else, mark it unverified.
 func BlockedMessage(reason string) string {
-	return "blocked (risk: " + reason + "): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it and say in your final answer what you couldn't do."
+	return "blocked (risk: " + reason + "): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
+}
+
+// RefusedMessage is the single shared source for the message a deny-floor
+// (catastrophic) command returns to the model (issue #200). It used to be
+// duplicated inline at the two refusal call sites (cmd/cortex's gateShell and
+// internal/tools's headlessDeps.GateShell) — exactly the wording-drift risk
+// the #169 constructors were made to remove — so both now use this one. It
+// carries the same neutral unknown-value tail as BlockedMessage
+// (blockedUnknownClause).
+func RefusedMessage(reason string) string {
+	return "refused by the safety gate (" + reason + "): this command will not run; choose a safer approach." + blockedUnknownClause
 }
 
 // SameActionBlockedMessage is the message a same-effect command returns to
 // the model when it belongs to an effect class that was already blocked in
-// the current turn (issue #169). The block is mechanical: the harness
-// records the class of the first blocked command in a turn and refuses any
-// later command in the same class before it is even classified. The
-// message names the class (so the model knows *what* is barred, not just
-// that this spelling was) and points it back to the earlier block.
+// the current turn (issue #169; reworded for issue #200). The block is
+// mechanical: the harness records the class of the first blocked command in a
+// turn and refuses any later command in the same class before it is even
+// classified. The message names the class (so the model knows *what* is
+// barred, not just that this spelling was), points it back to the earlier
+// block, tells the model to report the gap in its final answer, and carries
+// the same neutral unknown-value tail as BlockedMessage.
 func SameActionBlockedMessage(effectClass string) string {
-	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it and say in your final answer what you couldn't do."
+	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
+}
+
+// DeclinedMessage is the message a Risky command returns to the model when
+// the interactive approver said no (issue #200). It used to be duplicated
+// inline in cmd/cortex's gateShell (the confirmRisky and approveRisky paths);
+// both now use this one. Unlike BlockedMessage the action itself is allowed —
+// a human chose not to run it — but it carries the same neutral
+// unknown-value tail: if it was meant to check something, that result is
+// still unknown, so mark it unverified.
+func DeclinedMessage() string {
+	return "declined by the user; not run. Ask before retrying, or use a safer command." + blockedUnknownClause
 }
 
 // ClassifyFn is the tier-3 gray-zone classifier. It returns Safe or Risky
