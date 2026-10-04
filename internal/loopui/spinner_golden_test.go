@@ -4,18 +4,19 @@ package loopui
 // (issue #112). The spinner has no width axis (it renders a single status line
 // to stdout with no clipping). Its color comes from the label, which the
 // caller pre-colors via tools.Color — in the REPL the caller is cmd/cortex's
-// defaultLabel ("thinking..." in Cyan), so the golden records that colored
-// form, the exact SGR the terminal receives.
+// defaultLabel ("thinking..." in Cyan), so the colored golden records that
+// exact SGR; the NO_COLOR golden records the same frame with tools.Color
+// forced off, the shape a NO_COLOR terminal receives.
 //
-// The NO_COLOR form is not pinned here: tools.colorDisabled is unexported and
-// read once at startup, so a test in another package can't flip it (the same
-// reason cmd/cortex's grid NO_COLOR subtest strips ANSI instead of pinning the
-// flag). The NO_COLOR contract — that Color strips its wrap — is tested in
-// internal/tools.
-//
-// The spinner repaints on a 90ms tick; the golden records the shape of ONE
-// repaint plus the Stop() clear (the only two things the spinner writes):
-// "\r<colored label>\033[K" for the repaint, then "\r\033[K" for the clear.
+// The frame is captured deterministically: the spinner's repaint interval is
+// an unexported field (tickInterval) that this test pins to 1ms, and the
+// capture POLLS for the first repaint with a generous deadline before
+// calling Stop. The first repaint can land before or after the test's stdout
+// swap depending on goroutine scheduling — tick timing was the source of
+// nondeterminism (NOT the swap itself: Start runs inside the capture, so the
+// swap is in place before any tick) — and polling absorbs it. If no repaint
+// arrives by the deadline the test fails (t.Fatalf) rather than silently
+// returning a clear-only frame.
 //
 // The goldens live in testdata/*.golden next to this file; regenerate with
 // `go test ./internal/loopui -update`.
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,74 +62,104 @@ func spinnerGolden(t *testing.T, name, got string) {
 }
 
 // spinnerFrame runs the spinner with label from Start() (so the first repaint
-// is captured) for just over one tick, then stops it (which clears the line),
-// and returns the deterministic tail of the frame: the LAST repaint + the
-// Stop() clear. The first repaint can land before or after the test's stdout
-// swap depending on goroutine scheduling, so the head of the capture is
-// nondeterministic — but the tail (one repaint + one clear) is the same
-// either way, and it is the shape the terminal ends up showing. The frame is
-// otherwise deterministic: no wall clock or elapsed time (the label's "N s"
-// is the caller's own text).
+// is captured), polls the live capture until that repaint lands, then stops
+// the spinner (which clears the line), and returns the deterministic frame:
+// the FIRST repaint plus the Stop() clear — the two-part shape the golden
+// pins.
+//
+// Determinism: the repaint interval is an unexported field (tickInterval,
+// set here because this test lives in the spinner's own package) pinned to
+// 10ms, so the first tick fires ~10ms after Start; the poll then absorbs the
+// scheduling race (the tick firing before the pipe reader goroutine has
+// caught up) with a generous 2s deadline, and fails hard (t.Fatalf) if no
+// repaint arrives rather than recording a clear-only frame. The 10ms period
+// also guarantees no second repaint lands inside the poll window (a 1ms
+// period leaked one under a stalled machine), so the capture is exactly
+// first repaint + Stop clear.
 func spinnerFrame(t *testing.T, label string) string {
 	t.Helper()
 	repaint := "\r" + label + "\033[K"
+	clear := "\r\033[K"
 	s := NewSpinner()
 	s.SetLabel(label)
-	out := captureStdout(t, func() {
-		s.Start()
-		// Wait just over one 90ms tick so at least one repaint lands, then stop.
-		time.Sleep(100 * time.Millisecond)
-		s.Stop()
-	})
-	// The capture is repaint* followed by the Stop clear "\r\033[K". The
-	// deterministic tail is the last repaint (if directly present) + the clear.
-	clear := "\r\033[K"
-	i := strings.LastIndex(out, clear)
-	if i < 0 {
-		t.Fatalf("spinner frame missing the Stop clear: %q", out)
-	}
-	if i >= len(repaint) && out[i-len(repaint):i] == repaint {
-		return out[i-len(repaint):]
-	}
-	return out[i:]
-}
+	s.tickInterval = 10 * time.Millisecond // test-only: first tick fast and deterministic
 
-// TestSpinnerGolden pins the plain spinner frame — one repaint plus the
-// Stop() clear — as it renders in the REPL: the label colored the way
-// cmd/cortex's defaultLabel colors it (thinking... in Cyan).
-func TestSpinnerGolden(t *testing.T) {
-	const label = "thinking... 3s"
-	spinnerGolden(t, "spinner", spinnerFrame(t, tools.Color(label, tools.Cyan)))
-}
-
-// captureStdout runs f with os.Stdout redirected and returns what it printed.
-// The spinner prints via fmt.Print/Printf to os.Stdout, so capturing it (and
-// only it) requires swapping the global handle around the run.
-func captureStdout(t *testing.T, f func()) string {
-	t.Helper()
+	var mu sync.Mutex
+	var out strings.Builder
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	prev := os.Stdout
-	os.Stdout = w
-	done := make(chan string, 1)
+	done := make(chan struct{})
 	go func() {
-		var b strings.Builder
+		defer close(done)
 		buf := make([]byte, 4096)
 		for {
-			n, err := r.Read(buf)
-			b.Write(buf[:n])
-			if err != nil {
-				break
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				out.Write(buf[:n])
+				mu.Unlock()
+			}
+			if rerr != nil {
+				return
 			}
 		}
-		done <- b.String()
 	}()
-	f()
+	snapshot := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return out.String()
+	}
+
+	prev := os.Stdout
+	os.Stdout = w
+	s.Start()
+
+	// Poll the live capture until the first repaint has landed.
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(snapshot(), repaint) {
+		if time.Now().After(deadline) {
+			os.Stdout = prev
+			w.Close()
+			t.Fatalf("spinner produced no repaint within 2s: %q", snapshot())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	s.Stop()
 	os.Stdout = prev
 	w.Close()
-	out := <-done
+	<-done // the reader drains the rest of the pipe before close(done)
 	r.Close()
-	return out
+
+	frames := snapshot()
+	i := strings.Index(frames, repaint)
+	if i < 0 {
+		t.Fatalf("spinner frame missing the repaint: %q", frames)
+	}
+	tail := frames[i:]
+	if !strings.HasSuffix(tail, clear) {
+		t.Fatalf("spinner frame does not end with the Stop clear: %q", frames)
+	}
+	return tail
+}
+
+// TestSpinnerGolden pins the plain spinner frame — one repaint plus the
+// Stop() clear — in both color forms: the label colored the way
+// cmd/cortex's defaultLabel colors it (thinking... in Cyan), and the same
+// label with tools.Color forced off (the NO_COLOR terminal's frame). Color is
+// pinned via tools.SetColorDisabledForTest so the goldens hold regardless of
+// the developer's NO_COLOR environment.
+func TestSpinnerGolden(t *testing.T) {
+	const label = "thinking... 3s"
+
+	t.Run("colored", func(t *testing.T) {
+		defer tools.SetColorDisabledForTest(false)()
+		spinnerGolden(t, "spinner_colored", spinnerFrame(t, tools.Color(label, tools.Cyan)))
+	})
+
+	t.Run("no_color", func(t *testing.T) {
+		defer tools.SetColorDisabledForTest(true)()
+		spinnerGolden(t, "spinner_nocolor", spinnerFrame(t, tools.Color(label, tools.Cyan)))
+	})
 }

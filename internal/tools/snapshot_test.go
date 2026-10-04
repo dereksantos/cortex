@@ -43,13 +43,14 @@ type width int
 var matrix = []width{40, 80, 200, 0}
 
 // caseName names a matrix corner: the width (w0 for the no-clip path) plus,
-// for the diff path, the render mode.
-func caseName(w width, rich bool) string {
+// for the diff path, the render mode: flat means CORTEX_LOOP_RENDER=0 (true),
+// rich means the default rendering (false).
+func caseName(w width, flat bool) string {
 	s := "w0"
 	if w != 0 {
 		s = "w" + fmt.Sprint(int(w))
 	}
-	if rich {
+	if flat {
 		return s + "_flat"
 	}
 	return s + "_rich"
@@ -64,14 +65,15 @@ func restoreRich(t *testing.T, disabled bool) {
 }
 
 // runCase captures the frame f renders under one width (in both color and
-// NO_COLOR form) with the flat flag set to rich, and writes/compares two
-// goldens (…_colored.golden and …_nocolor.golden) under testdata. The frame
-// is normalized before compare/write so the wall clock and elapsed times never
-// leak in. base is the renderer's name; w and rich name the corner.
-func runCase(t *testing.T, base string, w width, rich bool, f func(width int) string) {
+// NO_COLOR form) with the given render mode (flat = CORTEX_LOOP_RENDER=0),
+// and writes/compares two goldens (…_colored.golden and …_nocolor.golden)
+// under testdata. The frame is normalized before compare/write so the wall
+// clock and elapsed times never leak in. base is the renderer's name; w and
+// flat name the corner.
+func runCase(t *testing.T, base string, w width, flat bool, f func(width int) string) {
 	t.Helper()
 	defer restoreWidth(t, int(w))()
-	restoreRich(t, rich)
+	restoreRich(t, flat)
 
 	var colored, nocolor string
 	{
@@ -82,7 +84,7 @@ func runCase(t *testing.T, base string, w width, rich bool, f func(width int) st
 		defer restoreColor(t, true)()
 		nocolor = f(int(w))
 	}
-	name := fmt.Sprintf("snap_%s_%s", base, caseName(w, rich))
+	name := fmt.Sprintf("snap_%s_%s", base, caseName(w, flat))
 	goldenFrame(t, "testdata", name+"_colored", colored)
 	goldenFrame(t, "testdata", name+"_nocolor", nocolor)
 }
@@ -129,10 +131,10 @@ func TestDiffUnderEditSnapshot(t *testing.T) {
 	before, after := seedDiff()
 	for _, w := range matrix {
 		w := w
-		for _, rich := range []bool{false, true} {
-			w, rich := w, rich
-			t.Run(caseName(w, rich), func(t *testing.T) {
-				runCase(t, "diff", w, rich, func(w int) string {
+		for _, flat := range []bool{false, true} {
+			w, flat := w, flat
+			t.Run(caseName(w, flat), func(t *testing.T) {
+				runCase(t, "diff", w, flat, func(w int) string {
 					return captureStdout(t, func() {
 						printFileDiff(headlessDeps{}, before, after)
 					})

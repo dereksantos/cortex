@@ -17,6 +17,7 @@ package lineedit
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +112,80 @@ func TestConfirmAskGolden(t *testing.T) {
 		w := w
 		t.Run(caseName(w), func(t *testing.T) {
 			lineGolden(t, "confirm_"+caseName(w), confirmFrame(w, "draft", "run it? [y/N]"))
+		})
+	}
+}
+
+// --- glyph contract (the anchored row's half) --------------------------------
+
+// The 2026-07-19 plain-text decision bans box-drawing (U+2500–U+257F) and the
+// retired icon set (❯◆▸✻⤷⚠✦) on every terminal render path; the anchored
+// status row and Confirm ask are two of those paths. This audit checks their
+// REAL frames (statusFrame/confirmFrame above — the same drawLocked/eraseLocked
+// sequence the terminal shows), so a glyph regression in lineedit's row
+// rendering fails here. (internal/tools and cmd/cortex run the same audit in
+// the packages that own their paths.)
+
+const (
+	// bannedLineeditIconSet is the retired icon glyphs the REPL dropped
+	// on 2026-07-19 (see the internal/tools counterpart).
+	bannedLineeditIconSet = "❯◆▸✻⤷⚠✦"
+	// ellipsis is the sanctioned truncation marker: clipRunes' "…" in a
+	// long status label or buffer is the REPL's deliberate elision marker,
+	// not part of the retired icon set.
+	ellipsis = '…'
+)
+
+// lineeditRuneAllowed reports whether r may appear in an anchored row frame:
+// printable ASCII plus the sanctioned ellipsis — no box-drawing
+// (U+2500–U+257F), no retired icons (bannedLineeditIconSet).
+func lineeditRuneAllowed(r rune) bool {
+	if r >= 0x2500 && r <= 0x257F {
+		return false
+	}
+	if strings.ContainsRune(bannedLineeditIconSet, r) {
+		return false
+	}
+	return r >= 0x20 && r < 0x7f || r == ellipsis
+}
+
+// glyphAudit scans a frame against an allowed-rune predicate and returns one
+// line per offender ("" when clean). Control characters the terminal
+// protocol itself needs — CR/LF and ESC (ANSI color/cursor codes, present in
+// the colored frames by design) — are never flagged: the decision under test
+// is about the GLYPHS a frame prints, not the escape plumbing that carries
+// its colors.
+func glyphAudit(frame string, allowed func(rune) bool) string {
+	var bad []string
+	for i, line := range strings.Split(frame, "\n") {
+		for _, r := range line {
+			if r == '\r' || r == '\x1b' {
+				continue
+			}
+			if !allowed(r) {
+				bad = append(bad, fmt.Sprintf("line %d: U+%04X %q", i+1, r, r))
+			}
+		}
+	}
+	return strings.Join(bad, "\n")
+}
+
+// TestAnchoredRowGlyphContract enforces the plain-text decision on the
+// anchored status row and Confirm ask frames, at every width the golden
+// sweep uses (a glyph regression could in principle surface only at a
+// clipped width): no box-drawing, no retired icons.
+func TestAnchoredRowGlyphContract(t *testing.T) {
+	status := "thinking... 3s"
+	ask := "run it? [y/N]"
+	for _, w := range lineWidths {
+		w := w
+		t.Run(caseName(w), func(t *testing.T) {
+			if bad := glyphAudit(statusFrame(w, status), lineeditRuneAllowed); bad != "" {
+				t.Errorf("status row carries banned glyphs:\n%s\nframe:\n%s", bad, statusFrame(w, status))
+			}
+			if bad := glyphAudit(confirmFrame(w, "draft", ask), lineeditRuneAllowed); bad != "" {
+				t.Errorf("confirm ask carries banned glyphs:\n%s\nframe:\n%s", bad, confirmFrame(w, "draft", ask))
+			}
 		})
 	}
 }

@@ -15,10 +15,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // updateGridGoldens is the -update flag (issue #112), the cmd/cortex-side
@@ -64,12 +67,10 @@ func gridGolden(t *testing.T, name, got string) {
 // deliberate block-element design of 2026-07-19, NOT box-drawing) is what
 // the snapshot records.
 //
-// The NO_COLOR subtest does NOT flip tools.colorDisabled from here (it lives
-// in internal/tools and package main can't pin it): it instead checks that
-// coloredContextGridLines, with the ANSI wrap stripped, equals
-// renderContextGrid's pure uncolored form — the structural identity the
-// two renderers promise (coloring wraps the same glyphs), and the frame the
-// NO_COLOR terminal actually shows.
+// Color is PINNED via tools.SetColorDisabledForTest so the goldens render
+// identically regardless of the developer's NO_COLOR environment: the
+// colored subtest forces color on, the NO_COLOR one forces it off and
+// snapshots the frame that a NO_COLOR terminal actually shows.
 func TestContextGridGolden(t *testing.T) {
 	const (
 		window      = 128000
@@ -86,48 +87,144 @@ func TestContextGridGolden(t *testing.T) {
 	placement := computeContextGrid(components, tailTokens, window)
 
 	t.Run("colored", func(t *testing.T) {
+		defer tools.SetColorDisabledForTest(false)()
 		gridGolden(t, "context_grid_colored", strings.Join(coloredContextGridLines(placement, window, hiWatermark), "\n"))
 	})
 
 	t.Run("no_color", func(t *testing.T) {
-		colored := coloredContextGridLines(placement, window, hiWatermark)
-		var sb strings.Builder
-		for i, line := range colored {
-			if i > 0 {
-				sb.WriteByte('\n')
-			}
-			sb.WriteString(stripANSI(line))
-		}
+		defer tools.SetColorDisabledForTest(true)()
+		got := strings.Join(coloredContextGridLines(placement, window, hiWatermark), "\n")
 		want := strings.Join(renderContextGrid(placement, window, hiWatermark), "\n")
-		if sb.String() != want {
-			t.Fatalf("colored grid stripped of ANSI differs from the pure uncolored form:\n--- stripped colored ---\n%s\n--- renderContextGrid ---\n%s", sb.String(), want)
+		if got != want {
+			t.Fatalf("NO_COLOR coloredContextGridLines differs from the pure uncolored form:\n--- NO_COLOR colored ---\n%s\n--- renderContextGrid ---\n%s", got, want)
 		}
-		gridGolden(t, "context_grid_no_color", sb.String())
+		gridGolden(t, "context_grid_no_color", got)
 	})
 }
 
 // TestContextGridWindowGolden pins the /context grid frame across a sweep of
-// representative model-window sizes (issue #112): 8k (a small local model),
-// 128k (the default coding window), and 256k (a large window, whose gutter
-// ladder is 0k/32k/…/224k and whose cell size is 2000 tokens). The turn-14
-// mock (128k) is already pinned above for its own numbers; this sweep pins
-// the *scaling* — how cell size, the gutter ladder, the demote-tick row, and
-// the tail's red-vs-green split move as the window does — so a regression in
-// any of those at a window other than 128k can't hide behind the single
-// mock's snapshot.
+// representative model-window sizes (issue #112): 8k (a small local model)
+// and 256k (a large window, whose gutter ladder is 0k/32k/…/224k and whose
+// cell size is 2000 tokens). The 128k window is already pinned by
+// TestContextGridGolden for its turn-14 figures, so it stays out of this
+// sweep — its golden would be a duplicate.
 //
-// Each window keeps the same turn-14 component ratios (system 2.1k, outline
-// 6.4k, memory 1.2k, skills 0.5k, tail 22.4k, demote watermark at 64k) so the
-// only thing that moves between goldens is the window: the cell size changes,
-// and so do the gutter labels and the row the demote tick lands on. The frame
-// is a pure function of (window, components, tail, hiWatermark) — no wall
-// clock — so the goldens are stable by construction.
+// Components, tail, and the demote watermark scale proportionally with the
+// window (as fractions of it: system 1/128, outline 1/20, memory 1/107,
+// skills 1/256, tail 1/6, watermark 1/2), so every size shows all segments —
+// system, outline, memory, skills, tail, free — and a demote tick, and the
+// frame's scaling is what the sweep pins: how cell size, the gutter ladder,
+// the demote-tick row, and the tail's red-vs-green split move as the window
+// does. A regression in any of those at a window other than 128k can't hide
+// behind the single mock's snapshot.
 //
-// The NO_COLOR subtest is structural (colored stripped of ANSI equals
-// renderContextGrid), not a byte-golden: it pins the same invariant the
-// turn-14 test does, for each window, so the coloring pass and the pure
-// layout can't drift apart at any size.
+// Color is pinned like TestContextGridGolden: the colored subtest renders
+// with color forced on, the no_color subtest with it forced off.
 func TestContextGridWindowGolden(t *testing.T) {
+	tests := []struct {
+		name   string
+		window int
+	}{
+		{"w8k", 8000},
+		{"w256k", 256000},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			components := []gridComponent{
+				{glyphSystem, tt.window / 128},
+				{glyphOutline, tt.window / 20},
+				{glyphMemory, tt.window / 107},
+				{glyphSkills, tt.window / 256},
+			}
+			tailTokens := tt.window / 6
+			hiWatermark := tt.window / 2
+
+			placement := computeContextGrid(components, tailTokens, tt.window)
+
+			t.Run("colored", func(t *testing.T) {
+				defer tools.SetColorDisabledForTest(false)()
+				gridGolden(t, "context_grid_"+tt.name+"_colored",
+					strings.Join(coloredContextGridLines(placement, tt.window, hiWatermark), "\n"))
+			})
+
+			t.Run("no_color", func(t *testing.T) {
+				defer tools.SetColorDisabledForTest(true)()
+				got := strings.Join(coloredContextGridLines(placement, tt.window, hiWatermark), "\n")
+				want := strings.Join(renderContextGrid(placement, tt.window, hiWatermark), "\n")
+				if got != want {
+					t.Fatalf("NO_COLOR coloredContextGridLines differs from the pure uncolored form:\n--- NO_COLOR colored ---\n%s\n--- renderContextGrid ---\n%s", got, want)
+				}
+			})
+		})
+	}
+}
+
+// --- glyph contract (the grid's half) ---------------------------------------
+
+// The 2026-07-19 plain-text decision bans box-drawing (U+2500–U+257F) and the
+// retired icon set (❯◆▸✻⤷⚠✦) on every terminal render path. The grid is the
+// deliberate exception: its cell glyphs █▓▒░■· (plus the demote tick ◂) are
+// its design. The audit below checks the grid's REAL render functions
+// (renderContextGrid, coloredContextGridLines) — not a re-implementation —
+// so a glyph regression in either one fails here. The other render paths
+// run the same audit in the packages that own them (internal/tools,
+// internal/lineedit); each package owns its own helpers.
+
+const (
+	// bannedGridIconSet is the retired icon glyphs (see the package doc).
+	bannedGridIconSet = "❯◆▸✻⤷⚠✦"
+	// gridGlyphs is the grid's intentional block-element vocabulary.
+	gridGlyphs = "█▓▒░■·◂"
+)
+
+// gridRuneAllowed reports whether r may appear in the /context grid's frame:
+// box-drawing and retired icons are banned (as everywhere), grid glyphs are
+// allowed, and anything else must be printable ASCII (… is not expected in
+// the grid but is allowed, matching the plain-path audit's punctuation
+// tolerance).
+func gridRuneAllowed(r rune) bool {
+	if r >= 0x2500 && r <= 0x257F {
+		return false // box-drawing: banned on the grid too
+	}
+	if strings.ContainsRune(bannedGridIconSet, r) {
+		return false
+	}
+	if strings.ContainsRune(gridGlyphs, r) {
+		return true
+	}
+	return r >= 0x20 && r < 0x7f || r == '…'
+}
+
+// glyphAudit scans a frame against an allowed-rune predicate and returns one
+// line per offender ("" when clean). Control characters the terminal
+// protocol itself needs — CR/LF and ESC (ANSI color/cursor codes, present in
+// colored frames by design) — are never flagged: the decision under test is
+// about the GLYPHS a frame prints, not the escape plumbing that carries its
+// colors.
+func glyphAudit(frame string, allowed func(rune) bool) string {
+	var bad []string
+	for i, line := range strings.Split(frame, "\n") {
+		for _, r := range line {
+			if r == '\r' || r == '\x1b' {
+				continue
+			}
+			if !allowed(r) {
+				bad = append(bad, fmt.Sprintf("line %d: U+%04X %q", i+1, r, r))
+			}
+		}
+	}
+	return strings.Join(bad, "\n")
+}
+
+// TestContextGridGlyphContract enforces the grid's glyph vocabulary on the
+// grid's real render functions, in both color modes: no box-drawing, no
+// retired icons, nothing outside the sanctioned set — and the positive
+// check that the grid's cell glyphs (█▓▒░■·) and the demote tick (◂) are
+// still present, since a "simplification" that strips them changes the
+// report's design.
+func TestContextGridGlyphContract(t *testing.T) {
 	components := []gridComponent{
 		{glyphSystem, 2100},
 		{glyphOutline, 6400},
@@ -135,43 +232,29 @@ func TestContextGridWindowGolden(t *testing.T) {
 		{glyphSkills, 500},
 	}
 	const (
+		window      = 128000
 		tailTokens  = 22400
 		hiWatermark = 64000
 	)
+	placement := computeContextGrid(components, tailTokens, window)
 
-	tests := []struct {
-		name   string
-		window int
-	}{
-		{"w8k", 8000},
-		{"w128k", 128000},
-		{"w256k", 256000},
+	{
+		defer tools.SetColorDisabledForTest(false)()
+		colored := strings.Join(coloredContextGridLines(placement, window, hiWatermark), "\n")
+		if bad := glyphAudit(colored, gridRuneAllowed); bad != "" {
+			t.Errorf("colored /context grid leaves its sanctioned vocabulary:\n%s\nframe:\n%s", bad, colored)
+		}
 	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			placement := computeContextGrid(components, tailTokens, tt.window)
-
-			t.Run("colored", func(t *testing.T) {
-				gridGolden(t, "context_grid_"+tt.name+"_colored",
-					strings.Join(coloredContextGridLines(placement, tt.window, hiWatermark), "\n"))
-			})
-
-			t.Run("no_color", func(t *testing.T) {
-				colored := coloredContextGridLines(placement, tt.window, hiWatermark)
-				var sb strings.Builder
-				for i, line := range colored {
-					if i > 0 {
-						sb.WriteByte('\n')
-					}
-					sb.WriteString(stripANSI(line))
-				}
-				want := strings.Join(renderContextGrid(placement, tt.window, hiWatermark), "\n")
-				if sb.String() != want {
-					t.Fatalf("colored grid stripped of ANSI differs from the pure uncolored form:\n--- stripped colored ---\n%s\n--- renderContextGrid ---\n%s", sb.String(), want)
-				}
-			})
-		})
+	{
+		defer tools.SetColorDisabledForTest(true)()
+		plain := strings.Join(renderContextGrid(placement, window, hiWatermark), "\n")
+		if bad := glyphAudit(plain, gridRuneAllowed); bad != "" {
+			t.Errorf("uncolored /context grid leaves its sanctioned vocabulary:\n%s\nframe:\n%s", bad, plain)
+		}
+		for _, g := range []string{"█", "▓", "▒", "░", "■", "·", "◂ demote"} {
+			if !strings.Contains(plain, g) {
+				t.Errorf("/context grid missing glyph %q:\n%s", g, plain)
+			}
+		}
 	}
 }
