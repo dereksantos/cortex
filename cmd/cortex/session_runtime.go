@@ -10,6 +10,7 @@ import (
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/loopui"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/redact"
 	"github.com/dereksantos/cortex/internal/userhome"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -252,19 +253,50 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		summary += "\n[" + outcome + "]"
 	}
 	if answer != "" {
+		// Issue #103: redact the answer BEFORE truncating it — a secret cut
+		// below its minimum match length by the excerpt cap would otherwise
+		// persist partly unmasked. Redact-then-truncate can only ever lose
+		// the TAIL of a match (the head is intact, and for a fixed-length
+		// key like sk-… that leaves no usable prefix). The truncation
+		// marker is kept for untruncated answers only; a long answer that
+		// was already cut by the cap does not stack a second ellipsis onto
+		// the marker.
+		answer, _ = redact.Redact(answer)
 		cap := cs.Config.captureExcerptCapChars()
 		if len(answer) > cap {
-			answer = answer[:cap] + "…"
+			answer = answer[:cap]
+			if !strings.HasSuffix(answer, "…") {
+				answer += "…"
+			}
 		}
 		summary += "\n→ " + answer
 	}
+	// Issue #103: redact the event's two free-text fields — the user prompt
+	// (ToolInput.user_prompt) and the whole capture summary (ToolResult, which
+	// carries the user prompt + the outcome line + the answer) — right at the
+	// capture seam, so a secret the agent read or echoed this turn never
+	// reaches the on-disk journal. captureTurn is the single choke point for
+	// the loop's captures (loop.run and cortex learn's replay re-read this
+	// same journal), and it is a distinct surface from the transcript's
+	// per-message redaction (session.go's writeTranscript): the live in-memory
+	// turnMsgs are left verbatim, so the model can still use a value this turn
+	// — only what is persisted here is masked. The counts are folded into
+	// cs.redactions so they ride the turn's reported figure (TurnResult.Redactions
+	// and the "redactions" metadata below) — the capture is the journal's OWN
+	// masking, on top of the transcript's, so the figure a human sees (the
+	// REPL/headless notice) and the one the journal records cover the journal
+	// too, as docs/journal.md's invariant says.
+	redactedUserPrompt, n := redact.Redact(userMsg)
+	cs.redactions += n
+	redactedSummary, n2 := redact.Redact(summary)
+	cs.redactions += n2
 	if err := cs.capturer.CaptureEvent(&events.Event{
 		Source:     events.SourceGeneric,
 		EventType:  events.EventToolUse,
 		Timestamp:  time.Now(),
 		ToolName:   "loop",
-		ToolInput:  map[string]any{"type": "turn", "user_prompt": userMsg},
-		ToolResult: summary,
+		ToolInput:  map[string]any{"type": "turn", "user_prompt": redactedUserPrompt},
+		ToolResult: redactedSummary,
 		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: cs.ContextDir()},
 		// "turn" is this turn's ordinal within cs.SessionID's transcript
 		// (cs.turns, already incremented above to match the value
@@ -275,8 +307,13 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		// int), unlike storing the turn's full text a second time here.
 		// learn.go's learnFullTurnText uses it to recover a turn's
 		// verbatim messages when the digest's capture-summary line would
-		// otherwise truncate past a durable fact.
-		Metadata: map[string]any{"verified": turnUsedTools(turnMsgs), "turn": cs.turns},
+		// otherwise truncate past a durable fact. "redactions" (issue #103)
+		// records how many secret patterns were masked for this turn as its
+		// messages hit the transcript/journal — the per-turn count that also
+		// rides TurnResult.Redactions, so the journal (and the session
+		// summary, via cs.redactionsTotal) can account for the redaction a
+		// review of this capture's text would otherwise see only as [REDACTED:…].
+		Metadata: map[string]any{"verified": turnUsedTools(turnMsgs), "turn": cs.turns, "redactions": cs.redactions},
 	}); err == nil {
 		cs.captures++
 	}
@@ -302,10 +339,19 @@ func (cs *CortexSession) sessionSummary() string {
 	if cs.costUSD > 0 {
 		cost = " | " + humanCost(cs.costUSD)
 	}
+	// Issue #103: the session-cumulative redaction total (cs.redactionsTotal,
+	// folded in per turn in turn.go) rides the summary — the human-facing
+	// "where the session reports the turn" surface — so a session that masked
+	// secrets is reported at the same place turns/tokens/captured are. Hidden
+	// on a zero count (the common case: no secret ever hit a persisted surface).
+	redactions := ""
+	if cs.redactionsTotal > 0 {
+		redactions = fmt.Sprintf(" | %d secrets redacted", cs.redactionsTotal)
+	}
 	header := fmt.Sprintf("%d turns | %s", cs.turns, dur)
-	body := fmt.Sprintf("%s in / %s out%s | %d captured | %d memory injections",
+	body := fmt.Sprintf("%s in / %s out%s | %d captured | %d memory injections%s",
 		humanK(cs.tokensIn), humanK(cs.tokensOut), cost,
-		cs.captures, cs.injections)
+		cs.captures, cs.injections, redactions)
 	return header + "\n" + body
 }
 
@@ -334,8 +380,8 @@ func (cs *CortexSession) emitSessionMetrics() {
 		InjectedContextTokens: cs.injectedChars / 4,
 		LatencyMs:             time.Since(cs.sessionStart).Milliseconds(),
 		AgentTurnsTotal:       cs.turns,
-		Notes: fmt.Sprintf("captures=%d injections=%d",
-			cs.captures, cs.injections),
+		Notes: fmt.Sprintf("captures=%d injections=%d redactions=%d",
+			cs.captures, cs.injections, cs.redactionsTotal),
 	}
 	entry, err := journal.NewEvalCellResultEntry(p)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/projectcmd"
+	"github.com/dereksantos/cortex/internal/redact"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -220,7 +221,18 @@ func (cs *CortexSession) MemoryWrite(name, content, scope string) (string, error
 	if store == nil {
 		return fmt.Sprintf("%s memory is unavailable in this session", tier), nil
 	}
-	saved, err := store.Write(name, content, time.Now())
+	// Issue #103: redact the note's content right at the write seam, before
+	// it is persisted to the on-disk note, so a secret the agent or the
+	// learn-loop captured never reaches .cortex/memory/*.md. MemoryWrite is
+	// the single choke point for model- and learn-loop-driven writes (both
+	// call into this method); memory_read of the note returns the same
+	// redacted body the store holds. The per-turn redaction counter is folded
+	// in with the transcript's (cs.redactions, reset per turn in turn.go) so a
+	// caller's TurnResult.Redactions reflects every surface that persisted a
+	// secret this turn — transcript, journal, and now memory.
+	redacted, n := redact.Redact(content)
+	cs.redactions += n
+	saved, err := store.Write(name, redacted, time.Now())
 	if err != nil {
 		return "", err
 	}

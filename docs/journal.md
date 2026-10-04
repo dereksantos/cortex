@@ -172,6 +172,12 @@ This is the eval primitive that makes auto-tuning mechanical: you can ask "would
   already-ignored workspace) is a silent no-op.
 - **No remote upload by default.** CLI refuses to send journal contents anywhere. Opt-in flag required, explicit per command.
 - **JSONL stays grep/jq-readable.** No binary framing, no encryption-by-default. The user can read what Cortex is recording.
+- **Secrets never persist verbatim (issue #103).** The journal is grep- and jq-readable by design, and that is exactly why a known-secret pattern must never be stored in its raw form: a `sk-…`/`ghp_…`/AWS key the agent *read* (a tool result) or *echoed* (its own answer) would otherwise sit on disk in plain text for anyone with read access to `.cortex/`. Every persistence surface masks known-secret patterns at the write seam, before they hit disk:
+  - **Transcripts** — `CortexSession.writeTranscript` (`cmd/cortex/session.go`) redacts each outgoing message (content + tool-call arguments + tool results) via `internal/redact` before `writeEntry`; the live in-memory `Request.Messages` is left verbatim so the model can still use a value this turn.
+  - **Journal** — `CortexSession.captureTurn` (`cmd/cortex/session_runtime.go`) redacts the capture event's user prompt and summary (the turn's outcome line + answer) at the `CaptureEvent` seam, so a secret in a tool's output reaches the journal only as `[REDACTED:…]`.
+  - **Memory** — `CortexSession.MemoryWrite` (`cmd/cortex/tool_deps.go`) redacts a note's content before `store.Write`, so a secret never reaches `.cortex/memory/*.md`.
+
+  Redaction is lossy by design (the original value is not recoverable), which is the intended trade-off: a masked secret is a provenance note, not a credential. The count of patterns masked per turn is recorded — on the turn's capture event (`Metadata["redactions"]`), on `TurnResult.Redactions`, and on the session summary (`cs.redactionsTotal`) — so a reader of the redacted text can see how much was masked. Note `recall` of a demoted turn returns the **redacted** form too: it fetches the raw transcript messages, which were written already redacted, so a secret never resurfaces through the recall path either.
 - **Capture is host-process-independent.** The capture path appends to its segment regardless of what else is running — there is no daemon for it to depend on today (see the historical note above).
 
 ## What this enables

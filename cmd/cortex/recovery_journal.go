@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/redact"
 )
 
 // recoveryClassDir resolves the project-scope recovery journal class dir
@@ -89,5 +90,9 @@ func (cs *CortexSession) transcriptNote(content string) {
 	if cs.transcript == nil {
 		return
 	}
-	cs.writeEntry(sessionEntry{Kind: kindNote, Turn: cs.turnNo, Message: Message{Role: RoleSystem, Content: content}})
+	// Issue #103: the note is persisted into the session file, so mask its
+	// secret patterns on the copy that hits disk (the caller's content stays
+	// verbatim — the note text is not re-shown in the model's context).
+	redacted, _ := redact.Redact(content)
+	cs.writeEntry(sessionEntry{Kind: kindNote, Turn: cs.turnNo, Message: Message{Role: RoleSystem, Content: redacted}})
 }
