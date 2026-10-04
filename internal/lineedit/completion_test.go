@@ -534,6 +534,21 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 		}
 	})
 
+	t.Run("a partial name at the root is prefix-matched", func(t *testing.T) {
+		// Root-level partial: relAt is bare "@" (no trailing separator), so
+		// the candidate is "@main.go", not "@/main.go".
+		got := sortedCands(t, "@ma", 3, p)
+		want := []string{"@main.go"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Candidates(\"@ma\", 3) = %v, want %v", got, want)
+		}
+		got = sortedCands(t, "@no", 3, p)
+		want = []string{"@notes.txt"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Candidates(\"@no\", 3) = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("a partial name under a directory is prefix-matched", func(t *testing.T) {
 		got := sortedCands(t, "@src/al", 6, p)
 		want := []string{"@src/alpha.go"}

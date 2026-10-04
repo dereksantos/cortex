@@ -82,3 +82,26 @@ func TestTabFillsSinglePathCandidateEndToEnd(t *testing.T) {
 		t.Errorf("line = %q, want \"@src/alpha.go\" (single-match fill keeps the @ marker)", line)
 	}
 }
+
+// TestTabFillsRootLevelPathCandidateEndToEnd pins the same fill for a
+// ROOT-level partial: a single Tab on "@ma" fills "@main.go" — the
+// root-level candidate must not carry a stray separator ("@/main.go"),
+// which is neither an extension of the typed word (no fill) nor a
+// mention tools.ConfinePath would accept.
+func TestTabFillsRootLevelPathCandidateEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{"main.go", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f, err)
+		}
+	}
+	line, err := readLineWithNoTTY(t, "@ma\t\r", "", map[string]Completer{
+		"path": PathCompleter{Root: root, MaxCandidates: 50},
+	})
+	if err != nil {
+		t.Fatalf("readLineWith: %v", err)
+	}
+	if line != "@main.go" {
+		t.Errorf("line = %q, want \"@main.go\" (root-level single-match fill keeps the @ marker)", line)
+	}
+}

@@ -374,13 +374,17 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 		return nil
 	}
 	// relAt is the mention path as seen FROM dir, INCLUDING the "@" marker
-	// ("@", "@src/") — ""-trimmed only of the typed tail: it is the typed
-	// word's prefix, and every candidate must carry the marker exactly once
-	// (a candidate replaces the whole typed word, "@src/al", so "@" stays).
-	relAt := "@" + strings.TrimSuffix(rel, tail)
-	if relAt != "" && !strings.HasSuffix(relAt, string(filepath.Separator)) {
-		relAt += string(filepath.Separator)
+	// ("@", "@src/") — the typed word's prefix with the typed tail trimmed:
+	// every candidate must carry the marker exactly once (a candidate
+	// replaces the whole typed word, "@src/al", so "@" stays). The separator
+	// is appended only when there is a real path segment: at the workspace
+	// root the prefix is bare "@" (no trailing "/"), or a root-level file's
+	// candidate would come out as "@/main.go".
+	pre := strings.TrimSuffix(rel, tail)
+	if pre != "" && !strings.HasSuffix(pre, string(filepath.Separator)) {
+		pre += string(filepath.Separator)
 	}
+	relAt := "@" + pre
 	return p.completeUnder(dir, tail, relAt)
 }
 
