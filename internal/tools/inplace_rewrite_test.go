@@ -406,7 +406,7 @@ func TestBashInPlaceRewriteHookNoteEndToEnd(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(wd, "main.go"), []byte(unformatted), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		got, err := Execute(context.Background(), bashCall(t, `sed -i 's/x/y/' main.go`),
+		got, err := Execute(context.Background(), bashCall(t, `sed -i.bak 's/x/y/' main.go`),
 			hookCmdDeps{wdNoteDeps{wdDeps{wd: wd}}, goFmtCmds(), true})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -435,7 +435,7 @@ func TestBashInPlaceRewriteHookNoteEndToEnd(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(wd, "main.go"), []byte("package main\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		got, err := Execute(context.Background(), bashCall(t, `sed -i 's/x/y/' main.go`),
+		got, err := Execute(context.Background(), bashCall(t, `sed -i.bak 's/x/y/' main.go`),
 			hookCmdDeps{wdNoteDeps{wdDeps{wd: wd}}, goFmtCmds(), false})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
