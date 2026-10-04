@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -84,12 +83,13 @@ func TestTabFillsSinglePathCandidateEndToEnd(t *testing.T) {
 	}
 }
 
-// TestTabNeverFillsABogusMultiLevelPath pins the multi-missing-segment case
-// end to end: typing "@sr" and pressing Tab must never write a path built
-// from typed missing segments into the buffer. The candidates are
-// {"@src/", "@src/alpha.go"} (the common prefix is exactly "@sr", so the
-// first Tab offers without filling); after cycling Tabs the buffer holds one
-// of those real candidates.
+// TestTabNeverFillsABogusMultiLevelPath pins the multi-level descent end to
+// end with a genuinely multi-segment mention: "@src/nope/al" has a tail of
+// two typed levels ("nope/al") that match no existing path, so Tab must
+// leave the line UNCHANGED — no candidate may be built from the typed
+// missing segments. And "@sr/al" — one typed segment that only matches a
+// directory plus a real file below it — has exactly one candidate
+// ("@src/alpha.go"), so the single-match contract fills it on the FIRST Tab.
 func TestTabNeverFillsABogusMultiLevelPath(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
@@ -100,26 +100,29 @@ func TestTabNeverFillsABogusMultiLevelPath(t *testing.T) {
 			t.Fatalf("write %s: %v", f, err)
 		}
 	}
-	line, err := readLineWithNoTTY(t, "@sr\t\t\t\r", "", map[string]Completer{
+	completers := map[string]Completer{
 		"path": PathCompleter{Root: root, MaxCandidates: 50},
-	})
-	if err != nil {
-		t.Fatalf("readLineWith: %v", err)
 	}
-	// "@src/al/" would be a fake built from the typed missing segment (a
-	// directory that does not exist); no candidate may contain it, and
-	// neither may the filled line. "@src/alpha.go" (the real match) must
-	// NOT be caught: the check is for the separator-terminated fake, not a
-	// bare substring.
-	if strings.Contains(line, "@src/al/") {
-		t.Errorf("line = %q contains a candidate built from typed missing segments", line)
-	}
-	for _, want := range []string{"@sr", "@src/", "@src/alpha.go"} {
-		if line == want {
-			return
+
+	t.Run("a non-matching multi-level tail leaves the line unchanged", func(t *testing.T) {
+		line, err := readLineWithNoTTY(t, "@src/nope/al\t\r", "", completers)
+		if err != nil {
+			t.Fatalf("readLineWith: %v", err)
 		}
-	}
-	t.Errorf("line = %q, want one of [@sr @src/ @src/alpha.go]", line)
+		if line != "@src/nope/al" {
+			t.Errorf("line = %q, want \"@src/nope/al\" (no candidate matches the typed tail)", line)
+		}
+	})
+
+	t.Run("a single real match below a missing first segment fills on the first Tab", func(t *testing.T) {
+		line, err := readLineWithNoTTY(t, "@sr/al\t\r", "", completers)
+		if err != nil {
+			t.Fatalf("readLineWith: %v", err)
+		}
+		if line != "@src/alpha.go" {
+			t.Errorf("line = %q, want \"@src/alpha.go\" (single-match fill, first Tab)", line)
+		}
+	})
 }
 
 // TestTabFillsRootLevelPathCandidateEndToEnd pins the same fill for a

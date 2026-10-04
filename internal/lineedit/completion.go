@@ -66,17 +66,30 @@ func replaceWord(line string, cursor int, repl string) (string, int, bool) {
 	return out, start + len([]rune(repl)), true
 }
 
-// fillPrefix extends the word ending at the cursor in line with the common
-// prefix of c (the "completion fill"), and parks the cursor at the end of the
-// filled word. Word boundaries are whitespace (the REPL line is a prose line,
-// not a code line, so there is no richer boundary set).
+// firstFill applies the first Tab to the word ending at the cursor in line.
+// Word boundaries are whitespace (the REPL line is a prose line, not a code
+// line, so there is no richer boundary set).
 //
-// The acceptance-target behavior: typing `/mo`+Tab against {/model, /model-x}
-// fills to `/model` (the common prefix) and offers both — it must NOT
-// silently pick one.
-func fillPrefix(line string, cursor int, c []string) (filled string, pos int, ok bool) {
+// A single candidate fills on the first Tab (the "single match fills"
+// contract): per the Completer contract a candidate is a replacement for the
+// WHOLE word, so it is spliced in place of the word — the text before and
+// after the word survives. The splice is valid even when the candidate is not
+// a textual extension of the typed word: a path candidate often resolves
+// through a directory level the user only typed partially (typing "@sr/al"
+// against src/alpha.go offers "@src/alpha.go", not "@sr/al" plus more), and
+// the single real match still fills.
+//
+// Several candidates fill to the COMMON PREFIX and offer the rest — the
+// acceptance-target behavior: typing `/mo`+Tab against {/model, /model-x}
+// fills to `/model` and offers both, it must NOT silently pick one. The
+// prefix must be a strict extension of the typed word (the word is a prefix
+// of the prefix): anything else would clobber finished text.
+func firstFill(line string, cursor int, c []string) (filled string, pos int, ok bool) {
 	if len(c) == 0 {
 		return line, cursor, false
+	}
+	if len(c) == 1 {
+		return replaceWord(line, cursor, c[0])
 	}
 	prefix := commonPrefix(c)
 	if prefix == "" {
@@ -123,7 +136,9 @@ func NewCompletions() *Completions { return &Completions{} }
 // offered nothing).
 //
 // The contract the driver relies on:
-//   - first Tab: fill the common prefix (no cycle yet) and show all candidates;
+//   - first Tab: a single candidate fills in place of the word; several
+//     candidates fill to the common prefix (when it extends the word) — and
+//     the row shows every candidate;
 //   - later Tabs: cycle to the next candidate and show just that one, so the
 //     row always reflects what the buffer holds now;
 //   - a line change (any non-Tab key) resets the state via Change.
@@ -134,12 +149,13 @@ func (cm *Completions) Tab(line string, cursor int, get func(line string, cursor
 		return line, cursor, ""
 	}
 	if !cm.offered {
-		// First Tab: fill the common prefix (when it extends the typed word);
-		// the row shows every candidate so the user sees what is reachable.
-		// The index parks at -1, so the NEXT Tab selects the FIRST candidate —
-		// no candidate is skipped on the first cycle.
+		// First Tab: a single candidate fills the word in place; several fill
+		// to the common prefix (when it extends the typed word). The row shows
+		// every candidate so the user sees what is reachable. The index parks
+		// at -1, so the NEXT Tab selects the FIRST candidate — no candidate is
+		// skipped on the first cycle.
 		var ok bool
-		filled, pos, ok = fillPrefix(line, cursor, cands)
+		filled, pos, ok = firstFill(line, cursor, cands)
 		if !ok {
 			filled, pos = line, cursor // nothing new to fill — just show the list
 		}
@@ -482,14 +498,14 @@ func (p PathCompleter) listDir(dir, rel string) []string {
 // prefixes carries the marker exactly once. The typed tail may span several
 // segments ("sr/in": nearest existing ancestor ".", tail "sr/in" — the
 // nearestDir walk builds the tail across every typed level that doesn't
-// exist): the FIRST segment is prefix-matched against names, and a directory
-// match with a remaining tail is descended into. The matched directory is
-// offered itself (with "/") exactly when the descent yields at least one
-// deeper candidate — typing "@sr" + Tab on {"@src/", "@src/alpha.go"} offers
-// without filling (common prefix "@sr"), the cycle Tab picks the directory,
-// and a following Tab descends; when the deeper segment matches nothing the
-// directory is NOT offered, so a typo can't fill to a path the rest of the
-// tail doesn't live in.
+// exist): the FIRST segment is prefix-matched against names, and EVERY
+// directory whose name matches the first segment (sorted, siblings included)
+// is descended into with the remaining tail, so a match in one sibling is not
+// hidden by an earlier sibling that gave nothing. The descent returns only
+// the deeper candidates: the matched directory itself is never re-emitted,
+// because a directory candidate would discard the text typed after the slash
+// and break the "single match fills on the first Tab" contract when exactly
+// one file matches the whole tail.
 func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 	first, rest := tail, ""
 	if i := strings.IndexByte(tail, '/'); i >= 0 {
@@ -522,15 +538,18 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 				break
 			}
 		} else if e.IsDir() {
-			// The tail continues past this level: the matched directory itself is
-			// NOT a candidate here — it is re-emitted by the descent below only
-			// if the remaining tail also completes, so a non-matching deeper
-			// segment can't smuggle a bare directory name back out.
+			// The tail continues past this level: only the deeper segments are
+			// candidates — the directory itself is descended into, not offered
+			// (a directory candidate would discard the text typed after the
+			// slash, and a non-matching deeper segment can't smuggle a bare
+			// directory name back out).
 			continue
 		}
 	}
-	// A directory whose name matched the first segment continues the rest of
-	// the tail.
+	// Every directory whose name matched the first segment continues the
+	// rest of the tail: descending into all of them (not just the first)
+	// keeps a real match in a later sibling from being hidden by an earlier
+	// sibling that gave nothing.
 	if rest != "" {
 		for _, e := range entries {
 			if e.Name() == ".git" || !e.IsDir() || !strings.HasPrefix(e.Name(), first) {
@@ -540,18 +559,10 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 			if gitignored(p.RootAbs(), full) {
 				continue
 			}
-			sub := p.completeUnder(full, rest, relAt+e.Name()+string(filepath.Separator))
-			if len(sub) > 0 {
-				dirCand := relAt + e.Name() + string(filepath.Separator)
-				if p.confined(dirCand) {
-					out = append(out, dirCand)
-				}
-			}
-			out = append(out, sub...)
+			out = append(out, p.completeUnder(full, rest, relAt+e.Name()+string(filepath.Separator))...)
 			if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
 				return out[:p.MaxCandidates]
 			}
-			break
 		}
 	}
 	return out

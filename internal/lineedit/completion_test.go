@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// --- commonPrefix / fillPrefix (the acceptance "common-prefix fill") --------
+// --- commonPrefix / firstFill (the acceptance "completion fill") ------------
 
 func TestCommonPrefix(t *testing.T) {
 	tests := []struct {
@@ -33,7 +33,7 @@ func TestCommonPrefix(t *testing.T) {
 	}
 }
 
-func TestFillPrefix(t *testing.T) {
+func TestFirstFill(t *testing.T) {
 	tests := []struct {
 		name     string
 		line     string
@@ -71,13 +71,17 @@ func TestFillPrefix(t *testing.T) {
 			wantOK:   true,
 		},
 		{
-			name:     "cursor mid-word: the word ending at the cursor is the target",
+			// A single candidate splices the word in place — even one whose
+			// text is NOT a prefix-extension of the typed word — so a
+			// mid-word cursor with exactly one match still fills (and the
+			// cursor parks at the end of the replaced word).
+			name:     "mid-word cursor with one candidate: the word is replaced",
 			line:     "/modelx",
 			cursor:   6,
 			cands:    []string{"/model"},
 			wantLine: "/modelx",
 			wantPos:  6,
-			wantOK:   false,
+			wantOK:   true,
 		},
 		{
 			name:     "the typed word is not a prefix of the common prefix: refuse",
@@ -124,12 +128,40 @@ func TestFillPrefix(t *testing.T) {
 			wantPos:  10,
 			wantOK:   true,
 		},
+		{
+			// Single candidate: the "single match fills" contract — the
+			// candidate is spliced in place of the WHOLE word (the Completer
+			// contract), even when it is not a textual extension of the typed
+			// word: "@sr/al" resolves through the directory "src" to
+			// "@src/alpha.go" on a single Tab, and the buffer keeps the real
+			// mention. (When the word and candidate share no prefix at all the
+			// fill is still a clean word splice, so the cursor lands at the
+			// end of the word — there is no prefix to stop at.)
+			name:     "a single candidate fills in place of the word, even across a resolved level",
+			line:     "@sr/al",
+			cursor:   6,
+			cands:    []string{"@src/alpha.go"},
+			wantLine: "@src/alpha.go",
+			wantPos:  13,
+			wantOK:   true,
+		},
+		{
+			// A single candidate splices the word in place; surrounding text
+			// on both sides survives.
+			name:     "a single candidate keeps the surrounding text",
+			line:     "see @src/al, ok",
+			cursor:   11,
+			cands:    []string{"@src/alpha.go"},
+			wantLine: "see @src/alpha.go, ok",
+			wantPos:  17,
+			wantOK:   true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotLine, gotPos, ok := fillPrefix(tt.line, tt.cursor, tt.cands)
+			gotLine, gotPos, ok := firstFill(tt.line, tt.cursor, tt.cands)
 			if gotLine != tt.wantLine || gotPos != tt.wantPos || ok != tt.wantOK {
-				t.Errorf("fillPrefix(%q, %d, %v) = (%q, %d, %v), want (%q, %d, %v)",
+				t.Errorf("firstFill(%q, %d, %v) = (%q, %d, %v), want (%q, %d, %v)",
 					tt.line, tt.cursor, tt.cands, gotLine, gotPos, ok, tt.wantLine, tt.wantPos, tt.wantOK)
 			}
 		})
@@ -235,8 +267,11 @@ func TestTabCycling(t *testing.T) {
 		cm.Tab("/m", 2, get)
 		other := []string{"/hook"}
 		line, pos, row := cm.Tab("/m", 2, func(string, int) []string { return other })
-		if line != "/m" || pos != 2 || row != "/hook" {
-			t.Errorf("Tab after list change = (%q, %d, %q), want (\"/m\", 2, \"/hook\") — nothing new to fill, just offer the new list", line, pos, row)
+		// The list changed to a SINGLE candidate: the reset re-fills with the
+		// single-match contract (the candidate splices the word in place), and
+		// the row shows the new list.
+		if line != "/hook" || pos != 5 || row != "/hook" {
+			t.Errorf("Tab after list change = (%q, %d, %q), want (\"/hook\", 5, \"/hook\") — single candidate splices the word", line, pos, row)
 		}
 	})
 
@@ -608,13 +643,31 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 		}
 		// A matching FIRST segment descends: "@sr" matches the directory
 		// "src", and the remaining tail "al" is completed under it. The
-		// directory itself is offered ("@src/") so Tab can cycle to it and
-		// descend one more level; the deeper candidate carries the full real
-		// path — never the typed missing segments.
+		// descent returns only the deeper candidates — the directory itself
+		// is not offered (it would discard the "al" typed after the slash) —
+		// so a single real match fills on the first Tab.
 		got = sortedCands(t, "@sr/al", 5, p)
-		want := []string{"@src/", "@src/alpha.go"}
+		want := []string{"@src/alpha.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@sr/al\", 5) = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("descent covers sibling directories, not just the first match", func(t *testing.T) {
+		// With both "scripts" and "src" present, "@s/al" must descend into
+		// EVERY directory whose name starts with "s" — the earlier sibling
+		// ("scripts") that gives no match must not hide the real match in
+		// "src".
+		if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o755); err != nil {
+			t.Fatalf("mkdir scripts: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "scripts", "check.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write scripts/check.sh: %v", err)
+		}
+		got := sortedCands(t, "@s/al", 5, p)
+		want := []string{"@src/alpha.go"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Candidates(\"@s/al\", 5) = %v, want %v", got, want)
 		}
 	})
 
