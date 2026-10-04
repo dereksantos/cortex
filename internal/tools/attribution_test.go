@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dereksantos/cortex/internal/projectcmd"
-
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/journal"
 )
@@ -367,29 +365,17 @@ type mockAttributionProvider struct {
 
 func (m *mockAttributionProvider) AttributionCommit() string { return m.trailer }
 
+// mockDeps is the tools test double WITHOUT the optional AttributionJournaler
+// capability: it implements ToolDeps and nothing more, so attributionJournalerOf
+// finds no journaler and bash() writes no attribution event for it. That is what
+// keeps every non-attribution bash test off the machine-level journal — a method
+// on the type, not a nil field, is what makes the assertion hold; a test that
+// wants receipts wraps it in journalingMockDeps.
 type mockDeps struct {
 	attribution AttributionProvider
 	gated       []string // every command GateShell was asked to classify
 	gateRefuse  bool     // GateShell refuses (nothing runs)
 	workdir     string   // Workdirer: where bash runs ("" = process CWD)
-	// journaler, when set, makes mockDeps an tools.AttributionJournaler — the
-	// optional capability bash() asserts dynamically. Left nil elsewhere, so
-	// the "no journaler" path stays covered by every other mockDeps user.
-	journaler AttributionJournaler
-}
-
-func (m *mockDeps) AttributionSession() (string, int) {
-	if m.journaler == nil {
-		return "", 0
-	}
-	return m.journaler.AttributionSession()
-}
-
-func (m *mockDeps) AttributionProject() string {
-	if m.journaler == nil {
-		return ""
-	}
-	return m.journaler.AttributionProject()
 }
 
 func (m *mockDeps) Workdir() string { return m.workdir }
@@ -505,15 +491,17 @@ func (r *recordingJournaler) AttributionSession() (string, int) {
 
 func (r *recordingJournaler) AttributionProject() string { return r.project }
 
-// journalingDeps returns a mockDeps that journals attributions through rec,
-// redirecting the machine-level journal at a temp CORTEX_HOME so a test never
-// writes the real ~/.cortex/journal.
-func journalingDeps(t *testing.T, trailer, project string) (*mockDeps, *recordingJournaler) {
+// journalingDeps returns deps that journal attributions through a fixed
+// recordingJournaler scoped to project, wrapped so ONLY the returned value
+// carries the capability, with the machine-level journal redirected at a temp
+// CORTEX_HOME so a test never writes the real ~/.cortex. The second return is
+// the plain *mockDeps underneath, for the knobs a test still needs (gate).
+func journalingDeps(t *testing.T, project, trailer string) (ToolDeps, *mockDeps) {
 	t.Helper()
 	withIsolatedUserHome(t)
 	rec := &recordingJournaler{session: "sess-1", turn: 4, project: project}
-	deps := &mockDeps{attribution: &mockAttributionProvider{trailer: trailer}, journaler: rec}
-	return deps, rec
+	mock := &mockDeps{attribution: &mockAttributionProvider{trailer: trailer}, workdir: project}
+	return journalingMockDeps{mockDeps: mock, j: rec}, mock
 }
 
 // readAttributionEvents reads back everything the isolated journal holds, so a
@@ -564,6 +552,10 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 		// the command actually creates a commit in the temp repo).
 		wantVerified int
 		wantTrailer  bool
+		// committed makes the repo hold one commit before the command runs, the
+		// shape a false receipt needs to be possible: an unattributed HEAD the
+		// command can be caught naming as its own work.
+		committed bool
 	}{
 		{
 			name:         "simple commit - added, then verified present",
@@ -626,18 +618,58 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 			command:     "git log --oneline",
 			wantOutcome: "",
 		},
+		{
+			// --dry-run is one simple `git commit …` the backstop rewrites (so
+			// the intent is added) and git exits 0 for, yet it creates no commit.
+			// In a repo that already HAS one, a post-run read of HEAD alone would
+			// receipt that pre-existing commit as this command's work — the wrong
+			// compliance fact. Only a moved HEAD earns a receipt, so the intent
+			// stands alone here.
+			name:         "added but makes no commit - intent only, no verified receipt",
+			trailer:      tr,
+			command:      `git commit -q -m x --dry-run`,
+			wantOutcome:  journal.AttributionOutcomeAdded,
+			wantVerified: 0,
+			committed:    true,
+		},
+		{
+			// The command exits 0 and mentions a commit it never made (`true`
+			// swallows git's nothing-to-commit failure). A chain, so the backstop
+			// leaves it alone — and with HEAD unmoved there is still no receipt.
+			name:         "chain makes no commit - skipped_unparseable, no receipt",
+			trailer:      tr,
+			command:      `git commit -q -m x; true`,
+			wantOutcome:  journal.AttributionOutcomeSkippedUnparseable,
+			wantVerified: 0,
+			committed:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := newAttributionRepo(t)
-			deps, _ := journalingDeps(t, tt.trailer, dir)
-			deps.workdir = dir
+			if tt.committed {
+				commitInRepo(t, dir, "prior work")
+			}
+			baseline := headSHA(t, dir)
+			deps, _ := journalingDeps(t, dir, tt.trailer)
 
 			if _, err := bash(context.Background(), bashCall(t, tt.command), deps); err != nil {
 				t.Fatalf("bash: %v", err)
 			}
 
 			events := readAttributionEvents(t)
+			// An intent event is exactly one per observed commit command; a
+			// second of either kind is the double receipt the record must not
+			// read as two commits.
+			var intents []journal.AttributionCommitPayload
+			for _, e := range events {
+				if !e.Verified {
+					intents = append(intents, e)
+				}
+			}
+			if len(intents) != 1 && tt.wantOutcome != "" {
+				t.Errorf("intent events = %d, want exactly 1: %+v", len(intents), events)
+			}
 			if tt.wantOutcome == "" {
 				if len(events) != 0 {
 					t.Fatalf("events = %+v, want none for a non-commit command", events)
@@ -674,11 +706,22 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 				t.Fatalf("verified receipts = %d, want %d: %+v", len(verified), tt.wantVerified, events)
 			}
 			if tt.wantVerified == 0 {
+				// Nothing was committed, so HEAD must still be the baseline the
+				// command started from — except when the backstop was disabled
+				// (attribution off): a real commit made then is correctly
+				// unattributed, and correctly gets no receipt because there is
+				// no trailer to verify against.
+				if after := headSHA(t, dir); after != baseline && tt.trailer != "" {
+					t.Errorf("HEAD moved (%s -> %s) but the command was to commit nothing", baseline, after)
+				}
 				return
 			}
 			got := verified[0]
 			if got.SHA == "" {
 				t.Error("verified receipt has no SHA")
+			}
+			if got.SHA == baseline {
+				t.Errorf("verified receipt names the pre-existing HEAD %s, not a commit this command made", got.SHA)
 			}
 			if got.SHA != headSHA(t, dir) {
 				t.Errorf("verified SHA = %q, want HEAD %q", got.SHA, headSHA(t, dir))
@@ -699,8 +742,7 @@ func TestBashAttributionVerifiedRecordsUnattributedCommit(t *testing.T) {
 		t.Skip("git not available")
 	}
 	dir := newAttributionRepo(t)
-	deps, _ := journalingDeps(t, "Co-Authored-By: Cortex (m1)", dir)
-	deps.workdir = dir
+	deps, _ := journalingDeps(t, dir, "Co-Authored-By: Cortex (m1)")
 
 	// A chain the backstop refuses to rewrite; git still commits.
 	cmd := `git commit -q -m "by hand" ; git log -1 --format=%H >/dev/null`
@@ -736,9 +778,8 @@ func TestBashAttributionRefusedCommandJournalsNothing(t *testing.T) {
 		t.Skip("git not available")
 	}
 	dir := newAttributionRepo(t)
-	deps, _ := journalingDeps(t, "Co-Authored-By: Cortex (m1)", dir)
-	deps.workdir = dir
-	deps.gateRefuse = true
+	deps, mock := journalingDeps(t, dir, "Co-Authored-By: Cortex (m1)")
+	mock.gateRefuse = true
 
 	if _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
 		t.Fatalf("bash: %v", err)
@@ -771,8 +812,8 @@ func TestBashAttributionNoJournalerIsNoop(t *testing.T) {
 		dir := newAttributionRepo(t)
 		withIsolatedUserHome(t)
 		deps := ToolDeps(noJournalerDeps{
-			attribution: &mockAttributionProvider{trailer: "Co-Authored-By: Cortex (m1)"},
-			workdir:     dir,
+			mockDeps: &mockDeps{workdir: dir},
+			trailer:  "Co-Authored-By: Cortex (m1)",
 		})
 		if _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
 			t.Fatalf("bash: %v", err)
@@ -786,9 +827,9 @@ func TestBashAttributionNoJournalerIsNoop(t *testing.T) {
 	})
 	t.Run("journaler with no coordinates still records", func(t *testing.T) {
 		dir := newAttributionRepo(t)
-		deps, _ := journalingDeps(t, "Co-Authored-By: Cortex (m1)", "")
-		deps.journaler = &recordingJournaler{}
-		deps.workdir = dir
+		withIsolatedUserHome(t)
+		mock := &mockDeps{attribution: &mockAttributionProvider{trailer: "Co-Authored-By: Cortex (m1)"}, workdir: dir}
+		deps := ToolDeps(journalingMockDeps{mockDeps: mock, j: &recordingJournaler{}})
 		if _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
 			t.Fatalf("bash: %v", err)
 		}
@@ -805,86 +846,51 @@ func TestBashAttributionNoJournalerIsNoop(t *testing.T) {
 	})
 }
 
-// noJournalerDeps is the ToolDeps double WITHOUT the AttributionJournaler
-// capability. mockDeps carries the two methods (the journaling tests need
-// them), so this type stands on its own: it is what headlessDeps and every
-// other non-journaling double look like, which is what makes the dynamic
-// assertion in attributionJournalerOf worth testing.
-type noJournalerDeps struct {
-	attribution AttributionProvider
-	workdir     string
+// journalingMockDeps adds the optional AttributionJournaler capability to a
+// mockDeps by EMBEDDING it: the two journaler methods live here, not on
+// mockDeps, so plain *mockDeps really does not satisfy the interface — a Go type
+// assertion checks the method set, never a field. Wrapping is therefore the only
+// way a test gets attribution receipts, and every other bash test stays off the
+// machine-level journal by construction.
+type journalingMockDeps struct {
+	*mockDeps
+	j AttributionJournaler
 }
 
-func (d noJournalerDeps) Workdir() string { return d.workdir }
-func (d noJournalerDeps) AttributionCommit() string {
-	if d.attribution == nil {
-		return ""
+func (d journalingMockDeps) AttributionSession() (string, int) {
+	return d.j.AttributionSession()
+}
+
+func (d journalingMockDeps) AttributionProject() string { return d.j.AttributionProject() }
+
+// noJournalerDeps is a ToolDeps double WITHOUT the AttributionJournaler
+// capability: it embeds mockDeps for the inert ToolDeps surface and shadows the
+// three methods bash() reads, so it is what headlessDeps and every other
+// non-journaling double look like — which is what makes the dynamic assertion in
+// attributionJournalerOf worth testing.
+type noJournalerDeps struct {
+	*mockDeps
+	trailer string
+}
+
+func (d noJournalerDeps) AttributionCommit() string { return d.trailer }
+
+// TestBashAttributionPlainMockDepsHasNoJournaler pins the double's shape the
+// moment before it matters: *mockDeps must NOT satisfy AttributionJournaler, so
+// a bash test that never wraps it cannot write an attribution event to the real
+// ~/.cortex/journal no matter which command it runs.
+func TestBashAttributionPlainMockDepsHasNoJournaler(t *testing.T) {
+	if _, ok := AttributionJournaler(nil).(interface{ AttributionProject() string }); ok {
+		t.Fatal("nil must not satisfy AttributionJournaler")
 	}
-	return d.attribution.AttributionCommit()
-}
-func (noJournalerDeps) Quiet() bool                                      { return true }
-func (noJournalerDeps) GateShell(context.Context, string) (string, bool) { return "", true }
-func (noJournalerDeps) MemoryWrite(string, string, string) (string, error) {
-	return "", nil
-}
-func (noJournalerDeps) MemoryRead(string, string) (string, error) { return "", nil }
-func (noJournalerDeps) MemorySearch(string, string) (string, error) {
-	return "", nil
-}
-func (noJournalerDeps) MemoryForget(string, string) (string, error) { return "", nil }
-func (noJournalerDeps) Recall(string) (string, error)               { return "", nil }
-func (noJournalerDeps) Outline(string, int) (string, error)         { return "", nil }
-func (noJournalerDeps) SeedBudget() int                             { return 0 }
-func (noJournalerDeps) RunSubagent(context.Context, Subagent, string) (string, error) {
-	return "", nil
-}
-func (noJournalerDeps) Summarize(context.Context, string, string, int) (string, bool, error) {
-	return "", false, nil
-}
-func (noJournalerDeps) SummarizeText(context.Context, string, string, int) (string, bool, error) {
-	return "", false, nil
-}
-func (noJournalerDeps) AllowDelete() (string, bool)              { return "", false }
-func (noJournalerDeps) ValidateToolCall(ToolCall) (bool, string) { return true, "" }
-func (noJournalerDeps) RemoveOutlineEntry(string) bool           { return false }
-func (noJournalerDeps) MergeOutlineEntries(string, string) (string, error) {
-	return "", nil
-}
-func (noJournalerDeps) OutlineLen() int { return 0 }
-func (noJournalerDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
-	return 0, 0, 0, 0, nil
-}
-func (noJournalerDeps) IsToolEnabled(string) bool       { return true }
-func (noJournalerDeps) MemoryIndexCap() int             { return 0 }
-func (noJournalerDeps) UserMemoryIndexCap() int         { return 0 }
-func (noJournalerDeps) CaptureExcerptCap() int          { return 0 }
-func (noJournalerDeps) MaxTaskContextChars() int        { return 0 }
-func (noJournalerDeps) MaxToolOutput() int              { return 0 }
-func (noJournalerDeps) MaxToolIterations() int          { return 0 }
-func (noJournalerDeps) InstructionBytesCap() int        { return 0 }
-func (noJournalerDeps) MaxServedModelsShown() int       { return 0 }
-func (noJournalerDeps) FleetDiscoveryTimeout() int      { return 0 }
-func (noJournalerDeps) PreflightTimeout() int           { return 0 }
-func (noJournalerDeps) SelfHealEnabled() bool           { return false }
-func (noJournalerDeps) ToolLimits() Limits              { return Limits{} }
-func (noJournalerDeps) TailHighWatermark() int          { return 0 }
-func (noJournalerDeps) TailDrainWatermark() int         { return 0 }
-func (noJournalerDeps) OutlineBudget() int              { return 0 }
-func (noJournalerDeps) SeedBudgetTokens() int           { return 0 }
-func (noJournalerDeps) MaxToolOutputBytes() int         { return 0 }
-func (noJournalerDeps) MaxReadBytes() int               { return 0 }
-func (noJournalerDeps) DefaultRangeLines() int          { return 0 }
-func (noJournalerDeps) MaxRangeLines() int              { return 0 }
-func (noJournalerDeps) MaxHits() int                    { return 0 }
-func (noJournalerDeps) LineCap() int                    { return 0 }
-func (noJournalerDeps) MaxOutputBytes() int             { return 0 }
-func (noJournalerDeps) FetchTimeoutSec() int            { return 0 }
-func (noJournalerDeps) FetchMaxRedirects() int          { return 0 }
-func (noJournalerDeps) FetchMaxBodyBytes() int          { return 0 }
-func (noJournalerDeps) WebSearchDefaultMaxResults() int { return 0 }
-func (noJournalerDeps) WebSearchMaximumMaxResults() int { return 0 }
-func (noJournalerDeps) ProjectCommands() projectcmd.Commands {
-	return projectcmd.Commands{}
+	var plain any = &mockDeps{}
+	if _, ok := plain.(AttributionJournaler); ok {
+		t.Fatal("*mockDeps satisfies AttributionJournaler: every bash test using it would journal")
+	}
+	var wrapped any = journalingMockDeps{mockDeps: &mockDeps{}}
+	if _, ok := wrapped.(AttributionJournaler); !ok {
+		t.Fatal("journalingMockDeps must satisfy AttributionJournaler")
+	}
 }
 
 // newAttributionRepo buildss a throwaway repo with one staged file, ready for a
@@ -911,6 +917,18 @@ func newAttributionRepo(t *testing.T) string {
 	}
 	run("add", "a.txt")
 	return dir
+}
+
+// commitInRepo makes one commit in dir, so a test's repo has a HEAD to start
+// from — the precondition for telling a commit the command made apart from one
+// it merely mentions.
+func commitInRepo(t *testing.T, dir, message string) {
+	t.Helper()
+	cmd := exec.Command("git", "commit", "-q", "-m", message)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit %q: %v\n%s", message, err, out)
+	}
 }
 
 // headSHA returns dir's full HEAD commit hash, or "" when it has none yet.

@@ -1915,9 +1915,19 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// The command runs in the session's workdir when one is anchored — a
 	// serve/loop-hosted session's shell must act in ITS project, not wherever
 	// the hosting process was started (workdir.go). runDir is that same
-	// directory ("" = the process CWD) kept for the post-run attribution
-	// verification, which must read the repository the commit landed in.
+	// directory ("" = the process CWD) kept for the attribution HEAD reads
+	// before and after the run, which must look at the repository the commit
+	// actually lands in.
 	runDir := workdirOf(deps)
+	// attributionBeforeHEAD is HEAD as of just before the command runs, so the
+	// post-run receipt can tell a commit this command made from a pre-existing
+	// HEAD it merely mentions. Read only for a command the backstop recognized
+	// as a commit — never for outcomeNotACommit, so a plain `ls` or `go test`
+	// spawns no git process.
+	attributionBeforeHEAD := ""
+	if attributionOutcome != outcomeNotACommit {
+		attributionBeforeHEAD, _, _ = attributionHead(runDir)
+	}
 	shellCmd := exec.CommandContext(ctx, "bash", "-c", command)
 	if runDir != "" {
 		shellCmd.Dir = runDir
@@ -1957,9 +1967,11 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	// The command succeeded: read the repository back and journal the FACT of
 	// the commit it landed — SHA and whether the trailer is really in the
-	// message — rather than trusting the rewrite. No-op unless deps journal
-	// and the working directory has a commit to read (issue #146).
-	journalAttributionVerified(runDir, attributionTrailer, command, attributionOutcome, deps)
+	// message — rather than trusting the rewrite. Only a HEAD that MOVED
+	// counts: a command that mentions git commit but commits nothing (nothing
+	// to commit, `|| true`) gets no receipt naming somebody else's commit.
+	// No-op unless deps journal (issue #146).
+	journalAttributionVerified(runDir, attributionBeforeHEAD, attributionTrailer, command, attributionOutcome, deps)
 	if attributionNote != "" {
 		result += "\n" + attributionNote
 	}

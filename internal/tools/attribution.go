@@ -4,7 +4,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/dereksantos/cortex/internal/journal"
 )
@@ -318,12 +317,19 @@ func journalAttributionIntent(deps ToolDeps, command, outcome string) {
 	})
 }
 
-// journalAttributionVerified re-reads HEAD after a command that ran
-// successfully and appends the fact event: the commit's SHA plus whether its
-// message actually contains the trailer. It writes nothing when there is no
-// journaler, no repo, and no commit (the usual case for a non-git command),
-// and nothing when the command already got its verified receipt from another
-// path — its SHA is in the per-deps dedupe set (attributionDedupe).
+// journalAttributionVerified appends the fact event for a command that ran
+// successfully: the commit's SHA plus whether its message actually contains
+// the trailer, both read back from the repository. HEAD must have MOVED —
+// beforeSHA is what attributionHeadOf reported for dir just before the
+// command ran, and a post-run HEAD identical to it means this command made no
+// commit, whatever its exit status said. Without that comparison a command
+// that mentions a commit but makes none (`git commit -m x || true`, a
+// nothing-to-commit chain ending in `git push`) would record the pre-existing
+// HEAD as its own commit and describe that older commit's trailer — a wrong
+// compliance fact, the one thing this record exists to get right.
+//
+// It writes nothing when there is no journaler, no trailer to look for, no
+// repository before or after, or no new commit.
 //
 // intent is what the backstop decided for this same command, carried through
 // so a receipt confirming an UNATTRIBUTED commit (the backstop left a pipeline
@@ -332,20 +338,14 @@ func journalAttributionIntent(deps ToolDeps, command, outcome string) {
 // dir is where the command ran ("" = the process CWD), matching bash's own
 // working-directory choice, so the verification reads the repository the
 // commit actually landed in.
-func journalAttributionVerified(dir, trailer, command, intent string, deps ToolDeps) {
+func journalAttributionVerified(dir, beforeSHA, trailer, command, intent string, deps ToolDeps) {
 	j := attributionJournalerOf(deps)
 	if j == nil || trailer == "" {
 		return
 	}
 	sha, body, ok := attributionHead(dir)
-	if !ok {
-		return // no repository, or no commit: nothing to verify against
-	}
-	if st := attributionDedupe(deps); st != nil {
-		if st.claims(sha) {
-			return // this exact commit was already reported verified
-		}
-		st.claim(sha)
+	if !ok || sha == beforeSHA {
+		return // no repository, or this command made no commit
 	}
 	sessionID, turn := j.AttributionSession()
 	_ = journal.AppendAttributionCommit(journal.AttributionCommitPayload{
@@ -361,10 +361,12 @@ func journalAttributionVerified(dir, trailer, command, intent string, deps ToolD
 }
 
 // attributionHead returns HEAD's full commit hash and its message in dir, or
-// ok=false when dir isn't a repository or has no commit yet — the usual case
-// for a non-git command, which is why the verification stays silent there.
-// One `git log` call carries both facts a receipt needs; a failure comes back
-// as ok=false because a receipt is never worth an error the model must read.
+// ok=false when dir isn't a repository or has no commit yet.
+//
+// The caller calls it only for a command the backstop recognized as a commit
+// (never for outcomeNotACommit), so a git process is spawned for a commit
+// claim, not for every successful bash call. A failure comes back as ok=false
+// because a receipt is never worth an error the model must read.
 func attributionHead(dir string) (sha, body string, ok bool) {
 	cmd := exec.Command("git", "log", "-1", "--format=%H%x00%B")
 	cmd.Dir = dir
@@ -377,92 +379,4 @@ func attributionHead(dir string) (sha, body string, ok bool) {
 		return "", "", false
 	}
 	return hash, message, true
-}
-
-// attributionSkipState is the per-deps dedupe set behind
-// journalAttributionVerified: the commits whose fact has already been
-// reported. Without it, a command that commits through a path that journals
-// for itself (`cortex change commit`, run through the bash tool) would get a
-// second verified receipt from bash()'s own check — the same SHA twice, which
-// reads as two commits. Keyed on the deps value so each session (or test
-// double) carries its own set, and lazily created: a session that never
-// commits allocates nothing. See attributionSkipRegistry.
-type attributionSkipState struct {
-	mu    sync.Mutex
-	shas  map[string]bool
-	order []string
-}
-
-const attributionSkipMax = 64
-
-// claims reports whether sha's verified receipt was already written.
-func (s *attributionSkipState) claims(sha string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.shas[sha]
-}
-
-// claim records sha as reported, dropping the oldest beyond attributionSkipMax
-// so a long-lived session's set stays bounded (a re-seen old SHA can only
-// ever mean a duplicate receipt, never a wrong one).
-func (s *attributionSkipState) claim(sha string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.shas == nil {
-		s.shas = make(map[string]bool)
-	}
-	if s.shas[sha] {
-		return
-	}
-	s.shas[sha] = true
-	s.order = append(s.order, sha)
-	if len(s.order) > attributionSkipMax {
-		drop := s.order[0]
-		s.order = s.order[1:]
-		delete(s.shas, drop)
-	}
-}
-
-// attributionSkipRegistry holds one skip state per ToolDeps value. ToolDeps is
-// an interface, so it can't carry a field; a WeakMap is what's wanted and Go
-// has none, hence this bounded map — bounded so a long-lived process that
-// builds sessions per turn can't accumulate one entry per session forever.
-var attributionSkipRegistry = &boundedDepsMap{cap: attributionSkipMax}
-
-type boundedDepsMap struct {
-	mu    sync.Mutex
-	byDep map[ToolDeps]*attributionSkipState
-	order []ToolDeps
-	cap   int
-}
-
-// attributionDedupe returns deps' dedupe set, or nil when deps can't hold
-// state (a nil interface value) — in which case no dedupe happens and a
-// double-committed SHA may be reported twice, which is a data-quality wrinkle,
-// not a wrong fact.
-func attributionDedupe(deps ToolDeps) *attributionSkipState {
-	if deps == nil {
-		return nil
-	}
-	return attributionSkipRegistry.getOrCreate(deps)
-}
-
-func (m *boundedDepsMap) getOrCreate(deps ToolDeps) *attributionSkipState {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.byDep == nil {
-		m.byDep = make(map[ToolDeps]*attributionSkipState)
-	}
-	if st, ok := m.byDep[deps]; ok {
-		return st
-	}
-	st := &attributionSkipState{}
-	m.byDep[deps] = st
-	m.order = append(m.order, deps)
-	if len(m.order) > m.cap {
-		drop := m.order[0]
-		m.order = m.order[1:]
-		delete(m.byDep, drop)
-	}
-	return st
 }
