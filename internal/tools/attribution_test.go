@@ -552,19 +552,16 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 		// the command actually creates a commit in the temp repo).
 		wantVerified int
 		wantTrailer  bool
-		// wantNoGitProcess marks a command that isn't a commit at all, for which
-		// nothing may be recorded — and is always paired with wantBogusGit,
-		// because zero journal events alone prove nothing (an empty-Outcome
-		// append is rejected by the journal regardless).
+		// wantNoGitProcess marks a command that isn't a commit at all: the
+		// case runs under withGitSpy and fails if the spy recorded a single
+		// git call. It needs a repo that already HAS a commit (committed) —
+		// that is the shape a stray HEAD read is possible in.
 		wantNoGitProcess bool
-		// wantBogusGit runs the command under a PATH shadowing git with a stub
-		// printing a fixed HEAD, so a verification read that should not happen
-		// becomes observable: it turns the command's output into the stub's, and
-		// a receipt out of the shadow HEAD. wantOutput is then the verbatim
-		// output showing what really ran. bash resolves its own interpreter by
-		// absolute path, so the command under test is unaffected by the shadow.
-		wantBogusGit bool
-		wantOutput   string
+		// wantDirectVerified calls journalAttributionVerified directly with
+		// intent outcomeNotACommit instead of going through bash(). Used when
+		// the command under test is itself a git invocation, which would
+		// otherwise satisfy the spy on its own.
+		wantDirectVerified bool
 		// committed makes the repo hold one commit before the command runs, the
 		// shape a false receipt needs to be possible: an unattributed HEAD the
 		// command can be caught naming as its own work.
@@ -626,13 +623,16 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 			wantVerified: 0,
 		},
 		{
-			name:             "not a commit at all - nothing recorded",
-			trailer:          tr,
-			command:          "git log --oneline",
-			wantOutcome:      "",
-			wantNoGitProcess: true,
-			wantBogusGit:     true,
-			wantOutput:       "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\x00bogus commit HEAD\n",
+			// A git command run for real would satisfy the spy itself, so this
+			// case calls journalAttributionVerified directly: the spy is then
+			// answered only by an attribution HEAD read.
+			name:               "not a commit at all - no git process",
+			trailer:            tr,
+			command:            "git log --oneline",
+			wantOutcome:        "",
+			wantNoGitProcess:   true,
+			wantDirectVerified: true,
+			committed:          true,
 		},
 		{
 			// --dry-run is one simple `git commit …` the backstop rewrites (so
@@ -662,16 +662,13 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 		{
 			// The shape that actually matters: a plain command in a repo that
 			// already HAS a commit. Only journalAttributionVerified's own intent
-			// guard keeps it from reading HEAD here, so the shadow git makes the
-			// difference observable — a read would answer with the stub's HEAD and
-			// print its listing, not the directory's.
+			// guard keeps it from reading HEAD here, so the spy is what proves it
+			// never tried.
 			name:             "non-commit in a repo with a commit - nothing recorded",
 			trailer:          tr,
 			command:          "ls",
 			wantOutcome:      "",
 			wantNoGitProcess: true,
-			wantBogusGit:     true,
-			wantOutput:       "LSRAN\n",
 			committed:        true,
 		},
 	}
@@ -683,12 +680,18 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 			}
 			baseline := headSHA(t, dir)
 			deps, mock := journalingDeps(t, dir, tt.trailer)
-
-			var bogusGitCleanup func(t *testing.T)
-			if tt.wantBogusGit {
-				bogusGitCleanup = withBogusGit(t)
+			gitCalls := ""
+			if tt.wantNoGitProcess {
+				gitCalls = withGitSpy(t)
 			}
-			out, err := bash(context.Background(), bashCall(t, tt.command), deps)
+			var err error
+			if tt.wantDirectVerified {
+				// Straight to the guard: the command is itself a git call, which
+				// would satisfy the spy before attribution ever looked.
+				journalAttributionVerified(dir, "", tt.trailer, tt.command, outcomeNotACommit, deps)
+			} else {
+				_, err = bash(context.Background(), bashCall(t, tt.command), deps)
+			}
 			if err != nil {
 				t.Fatalf("bash: %v", err)
 			}
@@ -707,17 +710,16 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 				t.Errorf("intent events = %d, want exactly 1: %+v", len(intents), events)
 			}
 			if tt.wantNoGitProcess {
-				if cmds := mock.gated; len(cmds) != 1 || cmds[0] != tt.command {
-					t.Fatalf("commands the gate saw = %q, want exactly the recorded command run once", cmds)
+				if !tt.wantDirectVerified {
+					if cmds := mock.gated; len(cmds) != 1 || cmds[0] != tt.command {
+						t.Fatalf("commands the gate saw = %q, want exactly the recorded command run once", cmds)
+					}
 				}
-				if out != tt.wantOutput {
-					t.Errorf("bash(%q) output = %q, want %q", tt.command, out, tt.wantOutput)
+				if n := spyGitCalls(t, gitCalls); n != 0 {
+					t.Errorf("git processes spawned = %d, want 0: a non-commit command must not read HEAD", n)
 				}
 				if events := readAttributionEvents(t); len(events) != 0 {
 					t.Fatalf("events = %+v, want none for a non-commit command", events)
-				}
-				if bogusGitCleanup != nil {
-					defer bogusGitCleanup(t)
 				}
 			}
 			if tt.wantOutcome == "" {
@@ -896,40 +898,50 @@ func TestBashAttributionNoJournalerIsNoop(t *testing.T) {
 	})
 }
 
-// The bash tool spawns its command with exec.CommandContext(ctx, "bash", "-c",
-// command) — a literal interpreter path, never resolved through PATH — while
-// attributionHead builds exec.Command("git", …), which IS a PATH lookup. That
-// asymmetry is what makes the wantBogusGit cases above decidable: with git
-// shadowed, the command under test still runs for real while an attribution
-// HEAD read returns the shadow's fixed answer, so "the command ran" and "the
-// repository was probed" leave different output and different journal events.
-
-// withBogusGit runs the rest of the test under a PATH that shadows ls(1) with a
-// stub printing LSRAN and git with a stub printing a fixed HEAD (shaped like
-// `git log -1 --format=%H%x00%B`), so a case can tell "the command ran" from
-// "the attribution HEAD read was attempted": their output and the events they
-// leave behind are different, and neither can pass for the other. Only git is
-// load-bearing: bash() spawns the command under test as `bash -c …` with a
-// literal interpreter path, so shadowing it would replace the command itself.
-// Returns the PATH-restoring cleanup, to be deferred where the assertions on the
-// command's output happen.
-func withBogusGit(t *testing.T) func(t *testing.T) {
+// withGitSpy puts a recording git stub at the FRONT of PATH for the rest of
+// the test and returns the marker file the stub appends "called" to on every
+// invocation. attributionHead builds exec.Command("git", …), a PATH lookup, so
+// any HEAD read it makes is counted here. That is the only way to see that a
+// non-commit command spawns no git process at all: the read's result never
+// reaches bash()'s output, and the journal rejects an empty-Outcome receipt
+// whether or not HEAD was read — so neither observable channel proves it. The
+// stub answers like `git log -1 --format=%H%x00%B` so a read that DOES happen
+// still behaves plausibly. Call it only once the repo fixture is built: the spy
+// shadows git, so real git must already be done with. PATH goes in through
+// t.Setenv, which the testing package restores even when the subtest fails
+// fatally.
+func withGitSpy(t *testing.T) (marker string) {
 	t.Helper()
 	bin := t.TempDir()
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+	marker = filepath.Join(t.TempDir(), "git-calls")
+	// The marker is written before PATH changes, so an absent file can only ever
+	// mean the stub was never invoked.
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
 	}
-	write("ls", "#!/bin/sh\necho LSRAN\n")
-	write("git", "#!/bin/sh\nprintf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\000bogus commit HEAD\\n'\nexit 0\n")
-	old := os.Getenv("PATH")
-	os.Setenv("PATH", bin+string(os.PathListSeparator)+old)
-	return func(t *testing.T) {
-		t.Helper()
-		os.Setenv("PATH", old)
+	stub := "#!/bin/sh\necho called >> \"" + marker + "\"\n" +
+		"printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\000bogus commit HEAD\\n'\nexit 0\n"
+	// Written unpowered then chmod'd, so a failed chmod cannot leave an
+	// executable stub that never reports to the marker.
+	stubPath := filepath.Join(bin, "git")
+	if err := os.WriteFile(stubPath, []byte(stub), 0o600); err != nil {
+		t.Fatalf("write git stub: %v", err)
 	}
+	if err := os.Chmod(stubPath, 0o755); err != nil {
+		t.Fatalf("chmod git stub: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return marker
+}
+
+// spyGitCalls counts how many times the withGitSpy stub ran: one marker line
+// per invocation.
+func spyGitCalls(t *testing.T, path string) int {
+	t.Helper()
+	if path == "" {
+		return 0
+	}
+	return countFileLines(path)
 }
 
 // journalingMockDeps adds the optional AttributionJournaler capability to a
