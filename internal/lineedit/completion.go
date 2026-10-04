@@ -16,14 +16,16 @@ import (
 	"strings"
 )
 
-// Completer answers "what can the cursor position in line complete to?" The
-// driver calls it on every Tab and on every change to the completion-relevant
-// part of the line; a source may return nil (nothing to offer).
+// Completer answers "what can the word ending at the cursor position in line
+// complete to?" The driver calls it on every Tab and on every change to the
+// completion-relevant part of the line; a source may return nil (nothing to
+// offer).
+//
+// Contract: every candidate is the replacement for the WORD ending at the
+// cursor, not the whole line — a path source offers the `@path` mention text,
+// a model source offers the bare model id. The engine splices that replacement
+// into the line, keeping the text before and after the word intact.
 type Completer interface {
-	// Candidates returns the completions offered for the given line. Each
-	// candidate is what the buffer SHOULD contain in full after acceptance —
-	// for a path source that means the complete `@path` text (mention marker
-	// included), for a command source the complete command line.
 	Candidates(line string, cursor int) []string
 }
 
@@ -43,6 +45,26 @@ func commonPrefix(c []string) string {
 	return p
 }
 
+// replaceWord swaps the whitespace-delimited word ending at the cursor in
+// line for repl, keeping everything before and after the word. This is the
+// single acceptance rule the engine applies to every candidate: sources
+// return the replacement for the word (see the Completer contract), and the
+// engine splices it in — never overwriting the rest of the line. Returns
+// ok=false when there is no word to replace (cursor at line start or right
+// after whitespace) so the caller leaves the line untouched.
+func replaceWord(line string, cursor int, repl string) (string, int, bool) {
+	runes := []rune(line)
+	start := cursor
+	for start > 0 && !isWordSep(runes[start-1]) {
+		start--
+	}
+	if start == cursor {
+		return line, cursor, false
+	}
+	out := string(runes[:start]) + repl + string(runes[cursor:])
+	return out, start + len([]rune(repl)), true
+}
+
 // fillPrefix extends the word ending at the cursor in line with the common
 // prefix of c (the "completion fill"), and parks the cursor at the end of the
 // filled word. Word boundaries are whitespace (the REPL line is a prose line,
@@ -60,7 +82,6 @@ func fillPrefix(line string, cursor int, c []string) (filled string, pos int, ok
 		return line, cursor, false
 	}
 	runes := []rune(line)
-	// The word ending at the cursor: walk left over non-whitespace.
 	start := cursor
 	for start > 0 && !isWordSep(runes[start-1]) {
 		start--
@@ -78,10 +99,7 @@ func fillPrefix(line string, cursor int, c []string) (filled string, pos int, ok
 		// Nothing new to fill (prefix equals or is shorter than the word).
 		return line, cursor, false
 	}
-	// Replace the typed word with the full prefix.
-	filled = string(runes[:start]) + prefix + string(runes[cursor:])
-	pos = start + len([]rune(prefix))
-	return filled, pos, true
+	return replaceWord(line, cursor, prefix)
 }
 
 // Completions is one live Tab-completion state: the candidate list last offered
@@ -115,14 +133,17 @@ func (cm *Completions) Tab(line string, cursor int, get func(line string, cursor
 		return line, cursor, ""
 	}
 	if !cm.offered {
-		// First Tab: fill the common prefix.
+		// First Tab: fill the common prefix (when it extends the typed word);
+		// the row shows every candidate so the user sees what is reachable.
+		// The index parks at -1, so the NEXT Tab selects the FIRST candidate —
+		// no candidate is skipped on the first cycle.
 		var ok bool
 		filled, pos, ok = fillPrefix(line, cursor, cands)
 		if !ok {
 			filled, pos = line, cursor // nothing new to fill — just show the list
 		}
 		cm.src = cands
-		cm.idx = 0
+		cm.idx = -1
 		cm.offered = true
 		row = renderCandidateRow(cands)
 		return filled, pos, row
@@ -134,9 +155,17 @@ func (cm *Completions) Tab(line string, cursor int, get func(line string, cursor
 		return cm.Tab(line, cursor, get)
 	}
 	cm.idx = (cm.idx + 1) % len(cands)
-	filled, pos = cands[cm.idx], len([]rune(cands[cm.idx]))
+	// A candidate is the replacement for the word ending at the cursor (see
+	// the Completer contract): splice it in place of that word, keeping the
+	// text before and after. When there is no word (cursor at line start or
+	// after whitespace) there is nothing to splice into — leave the line as
+	// the user left it; the row still shows the candidate the next Tab will
+	// fill.
 	row = renderCandidateRow([]string{cands[cm.idx]})
-	return filled, pos, row
+	if filled, pos, ok := replaceWord(line, cursor, cands[cm.idx]); ok {
+		return filled, pos, row
+	}
+	return line, cursor, row
 }
 
 // Change is called when the line changes for any reason other than a Tab. It
@@ -204,9 +233,12 @@ type SlashCompleter struct {
 	// so Tab cycling is deterministic.
 	Commands []string
 	// Sub, if non-nil, returns continuation candidates for the current line
-	// (e.g. model names after "/model "). It is consulted ONLY when the
-	// command before the cursor is a known command followed by a space — the
-	// command itself is complete and the user is typing its argument.
+	// (e.g. the bare model id after "/model "). It is consulted ONLY when
+	// the command before the cursor is a known command followed by a space —
+	// the command itself is complete and the user is typing its argument.
+	// Candidates follow the Completer contract: they replace the word ending
+	// at the cursor (the argument), not the whole line — the "/model "
+	// prefix stays untouched by acceptance.
 	Sub func(line string, cursor int) []string
 }
 
@@ -281,10 +313,14 @@ func (m ModelCompleter) Candidates(line string, cursor int) []string {
 		return nil
 	}
 	arg := line[lastSpace+1 : cursor]
+	// Candidates are the bare model ids: per the Completer contract they
+	// replace the ARGUMENT word ending at the cursor, leaving "/model " in
+	// the line intact. Spliced acceptance then fills "/model q" → "/model
+	// qwen/..." — and cycling a later Tab only ever rewrites the id.
 	var out []string
 	for _, n := range names {
 		if strings.HasPrefix(n, arg) {
-			out = append(out, prefix+n)
+			out = append(out, n)
 		}
 	}
 	return out
@@ -352,7 +388,11 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 		return nil
 	}
 	// relAt is the mention path (minus @) as seen FROM dir: "" when dir is
-	// the workspace root, otherwise the rel prefix up to and including dir.
+	// the workspace root, otherwise the rel prefix up to and including dir —
+	// without the "@", because a candidate is the replacement for the word
+	// ending at the cursor: the user has already typed the "@", and the
+	// engine splices the candidate in place of the whole word, so every
+	// candidate carries the marker exactly once.
 	relAt := strings.TrimSuffix(rel, tail)
 	if relAt != "" && !strings.HasSuffix(relAt, string(filepath.Separator)) {
 		relAt += string(filepath.Separator)
@@ -429,7 +469,7 @@ func (p PathCompleter) listDir(dir, rel string) []string {
 		if !p.confined(cand) {
 			continue
 		}
-		out = append(out, "@"+cand)
+		out = append(out, cand)
 		if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
 			break
 		}
@@ -473,7 +513,7 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 		if !p.confined(candRel) {
 			continue
 		}
-		out = append(out, "@"+candRel)
+		out = append(out, candRel)
 		if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
 			break
 		}
@@ -583,7 +623,28 @@ func gitignored(root, path string) bool {
 			dirsOnly = true
 			line = strings.TrimSuffix(line, "/")
 		}
-		if dirsOnly && !pathUnder(segs, line) && !gitignoreMatch(line, rel, isDir) {
+		// A rule matches this path when its pattern does, OR — for a
+		// directory rule — the path lives under a directory named by the
+		// rule (everything below an ignored directory is ignored). The
+		// dirsOnly half of that requires the directory: "build/" never
+		// matches a file NAMED "build", and a non-directory rule like
+		// "*.log" matches only by its pattern, never by position — so a
+		// .gitignore containing "*.py[cod]" hides the .pyc files, not the
+		// whole tree.
+		var matched bool
+		if dirsOnly {
+			// "build/" ignores a directory NAMED build (the name match, incl.
+			// globs) and everything under a directory named by the rule
+			// (pathUnder) — but never a plain file that happens to be named
+			// "build". pathUnder is false for the directory itself, so the
+			// isDir name-match covers that case; the OR keeps the two halves
+			// separate so a file named like the dir is never caught.
+			matched = (isDir && gitignoreMatch(line, rel, true)) ||
+				pathUnder(segs, line)
+		} else {
+			matched = gitignoreMatch(line, rel, isDir)
+		}
+		if !matched {
 			continue
 		}
 		ignored = !negate

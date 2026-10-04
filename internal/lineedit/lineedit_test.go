@@ -21,6 +21,13 @@ func (s *sliceSource) next() (byte, error) {
 	return b, nil
 }
 
+// firstByte satisfies pollSource (a no-idle variant of the inspector's
+// scriptSource): the byte, with the idle flag always false.
+func (s *sliceSource) firstByte() (byte, bool, error) {
+	b, err := s.next()
+	return b, false, err
+}
+
 // decodeAll drives decodeKey until EOF, returning every event.
 func decodeAll(t *testing.T, in string) []keyEvent {
 	t.Helper()

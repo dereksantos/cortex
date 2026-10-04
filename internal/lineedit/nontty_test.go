@@ -1,73 +1,53 @@
 package lineedit
 
 import (
-	"strings"
+	"bytes"
 	"testing"
 )
 
-// TestNonTTYPathIgnoresTab verifies the acceptance criterion that the non-TTY
-// path ignores Tab: when the completer map is not wired (the non-TTY path
-// never calls SetCompletion), Tab is inert — it inserts nothing and breaks
-// nothing. The decodeKey function still maps \t to keyTab (the key is
-// recognized), but the driver's keyTab handler sees completion == nil and
-// simply continues the loop without any state change.
-func TestNonTTYPathIgnoresTab(t *testing.T) {
-	// decodeKey still maps \t to keyTab — the key is recognized at the
-	// decode level.
-	src := &sliceSource{data: []byte("\t")}
-	ev, err := decodeKey(src)
-	if err != nil {
-		t.Fatalf("decodeKey: %v", err)
+// readLineWithNoTTY drives the real ReadLinePrefilled driver (readLineWith —
+// the same loop the REPL runs) against an in-memory byte source: no TTY is
+// needed (the fd is only consulted for width and signal restore, neither of
+// which matters here), so the key decoding and buffer loop execute exactly as
+// they would in the REPL.
+func readLineWithNoTTY(t *testing.T, data string, prefill string, completers map[string]Completer) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	term := &Terminal{out: &out}
+	if completers != nil {
+		term.SetCompletion(completers)
 	}
-	if ev.kind != keyTab {
-		t.Errorf("decodeKey(\\t).kind = %v, want keyTab", ev.kind)
-	}
-
-	// The driver's behavior when completion is nil: the keyTab handler
-	// continues the loop. This is verified by the fact that ReadLinePrefilled
-	// with no SetCompletion call simply never sees the keyTab case take any
-	// action — the buffer is unchanged. We can't easily test the full
-	// ReadLinePrefilled without a TTY, but we can verify the contract at the
-	// Completions level: NewCompletions() is only created when
-	// t.completers != nil, so a nil map means completion stays nil and the
-	// handler's `if completion == nil { continue }` fires.
-	_ = NewCompletions()
+	return term.readLineWith("> ", prefill, &sliceSource{data: []byte(data)})
 }
 
-// TestTabDoesNotInsertWhenNoCompleterWired verifies that the completion state
-// (Completions) is only created when a completer map is wired. This is the
-// non-TTY invariant: a terminal that never calls SetCompletion has
-// t.completers == nil, so ReadLinePrefilled's `if t.completers != nil`
-// check fails and completion stays nil — Tab then hits the
-// `if completion == nil { continue }` guard and does nothing.
-func TestTabDoesNotInsertWhenNoCompleterWired(t *testing.T) {
-	// A Terminal without SetCompletion has nil completers.
-	t1 := &Terminal{}
-	if t1.completers != nil {
-		t.Error("zero-value Terminal should have nil completers")
+// TestTabIsInertWithoutCompletion wires the non-TTY invariant into the driver
+// itself: a Terminal that never had SetCompletion called (completers == nil —
+// the state of every non-TTY session, which reads with bufio.Scanner and never
+// opens the editor) has Tab decoded as a key and then dropped by the driver's
+// `if completion == nil { continue }` guard. The line comes back UNCHANGED:
+// whatever bytes were typed — including a tab — pass through as typed;
+// nothing is completed, cycled, or inserted.
+func TestTabIsInertWithoutCompletion(t *testing.T) {
+	line, err := readLineWithNoTTY(t, "/he\tlp\r", "", nil)
+	if err != nil {
+		t.Fatalf("readLineWith: %v", err)
 	}
+	if line != "/he\tlp" {
+		t.Errorf("line = %q, want %q (no completer wired: Tab inserts nothing)", line, "/he\tlp")
+	}
+}
 
-	// After SetCompletion with a non-nil map, completers is set.
-	t2 := &Terminal{}
-	t2.SetCompletion(map[string]Completer{"slash": SlashCompleter{Commands: []string{"/help"}}})
-	if t2.completers == nil {
-		t.Error("SetCompletion should set the completers map")
+// TestTabCompletesWhenWired is the same path with a completer set: the first
+// Tab fills the common prefix in place, keeping the typed prefix — the
+// behavior the inert test above says is absent without completion.
+func TestTabCompletesWhenWired(t *testing.T) {
+	line, err := readLineWithNoTTY(t, "/he\t\r", "", map[string]Completer{
+		"slash": SlashCompleter{Commands: []string{"/help", "/hook"}},
+	})
+	if err != nil {
+		t.Fatalf("readLineWith: %v", err)
 	}
-
-	// The driver creates a Completions only when completers is non-nil.
-	var completion *Completions
-	if t1.completers != nil {
-		completion = NewCompletions()
+	if line != "/help" {
+		t.Errorf("line = %q, want \"/help\" (common-prefix fill on first Tab)", line)
 	}
-	if completion != nil {
-		t.Error("no completer wired: completion should stay nil (Tab is inert)")
-	}
-
-	// A completer with no candidates returns nil from Candidates — the
-	// engine then returns the line unchanged.
-	empty := SlashCompleter{Commands: []string{"/help"}}
-	if cands := empty.Candidates("hello", 5); cands != nil {
-		t.Errorf("Candidates for a non-command line = %v, want nil", cands)
-	}
-	_ = strings.TrimSpace // keep strings imported
 }

@@ -422,6 +422,14 @@ helper, and writing table-driven tests):
 | `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
 
+Tab completes slash commands, `/model` ids, and `@path` file mentions in the
+interactive REPL. A submitted `@path` mention attaches the file to the turn —
+small files inline, large files as a structural outline (same rules as the
+`read_file` tool); the mention becomes an `[@path attached]` marker in what
+the model sees. Only an `@` starting a whitespace-delimited word counts (an
+email or an `@types/node`-style name is prose), and a mention that does not
+resolve to a readable file is left as typed.
+
 Durable memory is model-driven rather than a slash command. Ask naturally to
 remember or forget something and the agent will use the `memory_*` tools.
 

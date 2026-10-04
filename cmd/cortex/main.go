@@ -594,15 +594,10 @@ func main() {
 			continue
 		}
 
-		// Issue #108: @path mentions are attached to the turn through the same
-		// size rules as read_file (small files inline, large files as an
-		// outline with a pointer to study). The attachment is prepended to the
-		// user's message so the model sees it in context; the mentions in the
-		// input are replaced by short markers.
-		input, mentionAttachment := processMentions(session.root(), input)
-
 		// Record for ↑/↓ and Ctrl-R recall — but not the session-enders, so a
-		// fresh prompt's first ↑ lands on real work, not "/quit".
+		// fresh prompt's first ↑ lands on real work, not "/quit". The history
+		// gets the line EXACTLY as typed: mention processing (below) only
+		// rewrites the copy handed to the model, never what the user recalls.
 		if editor != nil && input != "/quit" && input != "/exit" {
 			editor.AddHistory(input)
 		}
@@ -624,6 +619,18 @@ func main() {
 			continue
 		}
 
+		// Issue #108: @path mentions are attached to the turn through the same
+		// size rules as read_file (small files inline, large files as an
+		// outline with a pointer to study). The attachment is prepended to
+		// what the model sees; the mentions in the input are replaced by short
+		// markers. This runs only on the two paths that hand the line to the
+		// model (a normal turn, and /plan's task) — slash commands and prose
+		// the user never sends to the model are left untouched.
+		var mentionAttachment string
+		process := func() {
+			input, mentionAttachment = processMentions(session.root(), input)
+		}
+
 		// /plan <task> runs the plan-then-execute path (#150): one planning
 		// turn, then each step as its own turn with the project's checks in
 		// between. The task is the rest of the line; a bare /plan with no
@@ -641,22 +648,23 @@ func main() {
 				fmt.Println(withColor("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", gray))
 				continue
 			}
+			process()
 			var plan PlanRunResult
 			var planErr error
 			switch {
 			case editor != nil && anchoredInput():
 				typeAhead, planErr = runUnderAnchor(session, editor, typeAhead, func(ctx context.Context) error {
 					var runErr error
-					plan, runErr = session.TurnWithPlan(ctx, task)
+					plan, runErr = session.TurnWithPlan(ctx, task, mentionAttachment)
 					return runErr
 				})
 			case editor != nil:
 				ctx, stop := editor.Interruptible(context.Background())
-				plan, planErr = session.TurnWithPlan(ctx, task)
+				plan, planErr = session.TurnWithPlan(ctx, task, mentionAttachment)
 				typeAhead = stop()
 			default:
 				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-				plan, planErr = session.TurnWithPlan(ctx, task)
+				plan, planErr = session.TurnWithPlan(ctx, task, mentionAttachment)
 				cancel()
 			}
 			if plan.Reply != "" {
@@ -760,6 +768,7 @@ func main() {
 		// The reply itself is printed by the coder sender (printCoderProse /
 		// the live stream), not here — the REPL owns only the turn-boundary
 		// receipt, display, and compaction.
+		process()
 		// Issue #108: prepend the mention attachment (if any) to the turn's
 		// input so the model sees the file content (or outline) in context.
 		turnInput := input

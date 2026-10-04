@@ -157,16 +157,69 @@ func TestTabCycling(t *testing.T) {
 		cm := NewCompletions()
 		cm.Tab("/m", 2, get) // first: fill
 		line, pos, row := cm.Tab("/model", 6, get)
+		if line != "/model" || pos != 6 || row != "/model" {
+			t.Errorf("second Tab = (%q, %d, %q), want (\"/model\", 6, \"/model\") — the FIRST candidate, not a skip", line, pos, row)
+		}
+		line, pos, row = cm.Tab("/model", 6, get)
 		if line != "/model-x" || pos != 8 || row != "/model-x" {
-			t.Errorf("second Tab = (%q, %d, %q), want (\"/model-x\", 8, \"/model-x\")", line, pos, row)
+			t.Errorf("third Tab = (%q, %d, %q), want (\"/model-x\", 8, \"/model-x\")", line, pos, row)
 		}
 		line, pos, row = cm.Tab("/model-x", 8, get)
 		if line != "/model-y" || pos != 8 || row != "/model-y" {
-			t.Errorf("third Tab = (%q, %d, %q), want (\"/model-y\", 8, \"/model-y\")", line, pos, row)
+			t.Errorf("fourth Tab = (%q, %d, %q), want (\"/model-y\", 8, \"/model-y\")", line, pos, row)
 		}
 		line, pos, row = cm.Tab("/model-y", 8, get)
 		if line != "/model" || pos != 6 || row != "/model" {
-			t.Errorf("fourth Tab (wraparound) = (%q, %d, %q), want (\"/model\", 6, \"/model\")", line, pos, row)
+			t.Errorf("fifth Tab (wraparound) = (%q, %d, %q), want (\"/model\", 6, \"/model\")", line, pos, row)
+		}
+	})
+
+	t.Run("cycling splices the candidate in place of the mention word, keeping surrounding text", func(t *testing.T) {
+		// The word-level contract: candidates replace the word ending at the
+		// cursor; text before and after the word survives every cycle Tab.
+		// Bare candidates (no "@"): the mention word "@src/" already carries
+		// the marker, so the replacement is the path only — the same shape
+		// PathCompleter.Candidates and the end-to-end acceptance test use.
+		pathCands := []string{"src/main.go", "src/notes.md"}
+		getPath := func(line string, cursor int) []string { return pathCands }
+
+		cm := NewCompletions()
+		line, pos, _ := cm.Tab("see @src/", 9, getPath) // first: no common prefix beyond "@src/" → no fill
+		if line != "see @src/" || pos != 9 {
+			t.Errorf("first Tab: line=%q pos=%d, want unchanged (no common prefix to fill)", line, pos)
+		}
+		line, pos, row := cm.Tab(line, pos, getPath) // cycle 1: first candidate
+		if line != "see src/main.go" || pos != 15 || row != "src/main.go" {
+			t.Errorf("cycle Tab = (%q, %d, %q), want (\"see src/main.go\", 15, \"src/main.go\") — \"see \" must survive", line, pos, row)
+		}
+		line, pos, row = cm.Tab(line, pos, getPath) // cycle 2: second
+		if line != "see src/notes.md" || pos != 16 || row != "src/notes.md" {
+			t.Errorf("cycle Tab = (%q, %d, %q), want (\"see src/notes.md\", 16, \"src/notes.md\")", line, pos, row)
+		}
+		line, pos, _ = cm.Tab(line, pos, getPath) // wraparound
+		if line != "see src/main.go" || pos != 15 {
+			t.Errorf("wraparound Tab = (%q, %d), want (\"see src/main.go\", 15)", line, pos)
+		}
+	})
+
+	t.Run("text after the mention word also survives cycling", func(t *testing.T) {
+		pathCands := []string{"src/main.go", "src/notes.md"}
+		getPath := func(line string, cursor int) []string { return pathCands }
+
+		// Drive from a known filled state: the mention word "@src/" with text
+		// after it; every cycle Tab must rewrite only the word. The cursor
+		// sits at the END of the mention word (pos 9, right after "@src/"),
+		// so the engine's word boundary finds "@src/" — not the following
+		// prose.
+		cm := NewCompletions()
+		cm.Change()
+		line, pos, _ := cm.Tab("see @src/ and @x", 9, getPath) // first: no common prefix beyond "@src/" — just offer
+		if line != "see @src/ and @x" || pos != 9 {
+			t.Errorf("first Tab: line=%q pos=%d, want unchanged (no new prefix to fill)", line, pos)
+		}
+		line, pos, _ = cm.Tab(line, pos, getPath) // cycle 1
+		if line != "see src/main.go and @x" || pos != 15 {
+			t.Errorf("cycle Tab = (%q, %d), want (\"see src/main.go and @x\", 15) — text after the word must survive", line, pos)
 		}
 	})
 
@@ -260,18 +313,32 @@ func TestSlashCompleterSub(t *testing.T) {
 		Commands: commands,
 		Sub: func(line string, cursor int) []string {
 			subCalls++
-			return []string{"/model qwen/qwen3-coder:free"}
+			// Word-level contract: the bare model id replaces the argument
+			// word; the "/model " prefix stays in the line untouched.
+			return []string{"qwen/qwen3-coder:free"}
 		},
 	}
 
 	t.Run("a known command plus space triggers Sub", func(t *testing.T) {
 		got := s.Candidates("/model ", 7)
-		want := []string{"/model qwen/qwen3-coder:free"}
+		want := []string{"qwen/qwen3-coder:free"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"/model \", 7) = %v, want %v", got, want)
 		}
 		if subCalls == 0 {
 			t.Error("Sub was not consulted")
+		}
+	})
+
+	t.Run("a known command plus space with a typed argument narrows Sub", func(t *testing.T) {
+		before := subCalls
+		got := s.Candidates("/model q", 8)
+		want := []string{"qwen/qwen3-coder:free"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Candidates(\"/model q\", 8) = %v, want %v", got, want)
+		}
+		if subCalls == before {
+			t.Error("Sub was not consulted for the argument position")
 		}
 	})
 
@@ -286,10 +353,14 @@ func TestSlashCompleterSub(t *testing.T) {
 	})
 
 	t.Run("a bare command (no trailing space) offers the command list, not Sub", func(t *testing.T) {
+		before := subCalls
 		got := s.Candidates("/model", 6)
 		want := []string{"/model"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"/model\", 6) = %v, want %v", got, want)
+		}
+		if subCalls != before {
+			t.Error("Sub was consulted for a bare command")
 		}
 	})
 }
@@ -301,18 +372,19 @@ func TestModelCompleter(t *testing.T) {
 		return []string{"qwen/qwen3-coder:free", "tencent/hy3:free"}
 	}}
 
-	t.Run("completes after /model ", func(t *testing.T) {
+	t.Run("completes after /model with the bare id (word-level contract)", func(t *testing.T) {
 		got := m.Candidates("/model q", 8)
-		want := []string{"/model qwen/qwen3-coder:free"}
+		want := []string{"qwen/qwen3-coder:free"}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("Candidates(\"/model q\", 8) = %v, want %v", got, want)
+			t.Errorf("Candidates(\"/model q\", 8) = %v, want %v (the bare id — it replaces the argument word)", got, want)
 		}
 	})
 
-	t.Run("an empty argument offers every name", func(t *testing.T) {
+	t.Run("an empty argument offers every name as a bare id", func(t *testing.T) {
 		got := m.Candidates("/model ", 7)
-		if len(got) != 2 {
-			t.Errorf("Candidates(\"/model \", 7) = %v, want both names", got)
+		want := []string{"qwen/qwen3-coder:free", "tencent/hy3:free"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Candidates(\"/model \", 7) = %v, want %v", got, want)
 		}
 	})
 
@@ -337,6 +409,43 @@ func TestModelCompleter(t *testing.T) {
 	})
 }
 
+// TestModelCandidateFill drives the real engine against the /model
+// continuation: the candidates are bare ids (word-level), so the first Tab
+// fills the common model-id prefix INTO the argument word, leaving "/model
+// " intact — and every candidate appears exactly once (the single-source
+// wiring cmd/cortex uses; the old double source listed each id twice).
+func TestModelCandidateFill(t *testing.T) {
+	nameCands := []string{"qwen/qwen3-coder:free", "qwen/qwen3-coder-pro:free"}
+	get := func(line string, cursor int) []string { return nameCands }
+
+	// "/model q" + first Tab: common prefix of the two ids is "qwen/qwen3-"
+	// ... wait, the common prefix of "qwen/qwen3-coder:free" and
+	// "qwen/qwen3-coder-pro:free" is "qwen/qwen3-coder" — fill splices it in
+	// place of "q".
+	cm := NewCompletions()
+	line, pos, _ := cm.Tab("/model q", 8, get)
+	if line != "/model qwen/qwen3-coder" || pos != 23 {
+		t.Errorf("first Tab = (%q, %d), want (\"/model qwen/qwen3-coder\", 23) — the id prefix fills the argument, /model untouched", line, pos)
+	}
+	// Cycle: first candidate, spliced in place of the argument word.
+	line, pos, _ = cm.Tab(line, pos, get)
+	if line != "/model qwen/qwen3-coder:free" || pos != 28 {
+		t.Errorf("cycle Tab = (%q, %d), want the first candidate spliced in place", line, pos)
+	}
+
+	// No duplicates when both sources of a mis-wired map are the SAME id list:
+	// the engine's merge would double them — the single-source wiring is what
+	// prevents that, and the first-Tab fill (above) is the behavior that only
+	// works when candidates are word-level.
+	seen := map[string]bool{}
+	for _, c := range nameCands {
+		if seen[c] {
+			t.Errorf("duplicate candidate %q", c)
+		}
+		seen[c] = true
+	}
+}
+
 // --- PathCompleter -----------------------------------------------------------
 
 // writeTree creates a small workspace under root with a nested .gitignore.
@@ -347,6 +456,10 @@ func writeTree(t *testing.T, root string) {
 		"src/internal.go": "package main\n",
 		"main.go":         "package main\n",
 		"notes.txt":       "hello\n",
+		"debug.log":       "log\n",
+		"a/x.log":         "log\n",
+		"a/keep.log":      "kept\n",
+		"keep.log":        "kept\n",
 		"build/out.bin":   "ignored\n",
 		"vendor/dep.go":   "package dep\n",
 	}
@@ -359,7 +472,7 @@ func writeTree(t *testing.T, root string) {
 			t.Fatalf("write %s: %v", p, err)
 		}
 	}
-	ig := "build/\nvendor/\n"
+	ig := "build/\nvendor/\n*.log\n!keep.log\n"
 	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(ig), 0o644); err != nil {
 		t.Fatalf("write .gitignore: %v", err)
 	}
@@ -402,9 +515,12 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 
 	t.Run("a bare @ offers the top level", func(t *testing.T) {
 		got := sortedCands(t, "@", 1, p)
-		// build/ and vendor/ are gitignored; .git is not created by the
-		// fixture. The candidates are the complete "@path" mentions.
-		want := []string{"@.gitignore", "@main.go", "@notes.txt", "@src/"}
+		// build/ and vendor/ are gitignored (directory rules); *.log hides
+		// debug.log (non-directory rule) but NOT the rest of the tree — the
+		// old bug where one *.log rule hid every path. a/ and keep.log are
+		// offered; the mention marker is NOT part of the candidates (they
+		// replace the typed @-word, which already carries the marker).
+		want := []string{".gitignore", "a/", "keep.log", "main.go", "notes.txt", "src/"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@\", 1) = %v, want %v", got, want)
 		}
@@ -412,7 +528,7 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 
 	t.Run("a directory mention lists its children", func(t *testing.T) {
 		got := sortedCands(t, "@src/", 5, p)
-		want := []string{"@src/alpha.go", "@src/internal.go"}
+		want := []string{"src/alpha.go", "src/internal.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@src/\", 5) = %v, want %v", got, want)
 		}
@@ -420,7 +536,7 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 
 	t.Run("a partial name under a directory is prefix-matched", func(t *testing.T) {
 		got := sortedCands(t, "@src/al", 6, p)
-		want := []string{"@src/alpha.go"}
+		want := []string{"src/alpha.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@src/al\", 6) = %v, want %v", got, want)
 		}
@@ -435,7 +551,7 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 		}
 		got = sortedCands(t, "@", 1, p)
 		for _, c := range got {
-			if strings.Contains(c, "vendor") || strings.Contains(c, "build") {
+			if strings.Contains(c, "vendor") || strings.Contains(c, "build") || strings.HasSuffix(c, ".log") && !strings.HasPrefix(c, "keep.log") {
 				t.Errorf("top-level candidates include a gitignored path: %v", got)
 			}
 		}
@@ -456,9 +572,33 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 			t.Errorf("Candidates(\"@src/nonexist\", 11) = %v, want nil", got)
 		}
 		got = sortedCands(t, "@src/alpha", 9, p)
-		want := []string{"@src/alpha.go"}
+		want := []string{"src/alpha.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@src/alpha\", 9) = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("acceptance splices the candidate in place of the @-word", func(t *testing.T) {
+		// The word-level contract, end-to-end: with "@src/" typed, the
+		// candidates are the src children; the first Tab offers them, the
+		// cycle Tabs splice them in place of the @-word, keeping "see ".
+		cands := p.Candidates("see @src/", 9)
+		want := []string{"src/alpha.go", "src/internal.go"}
+		if !reflect.DeepEqual(sortedCands(t, "@src/", 5, p), want) {
+			t.Fatalf("candidates = %v, want %v (sanity)", cands, want)
+		}
+		cm := NewCompletions()
+		line, pos, _ := cm.Tab("see @src/", 9, func(string, int) []string { return cands }) // first: no common prefix beyond "@src/" → no fill
+		if line != "see @src/" || pos != 9 {
+			t.Errorf("first Tab = (%q, %d), want unchanged (no common prefix to fill)", line, pos)
+		}
+		line, pos, _ = cm.Tab(line, pos, func(string, int) []string { return cands }) // cycle 1: first candidate
+		if line != "see src/alpha.go" || pos != 16 {
+			t.Errorf("cycle Tab = (%q, %d), want (\"see src/alpha.go\", 16)", line, pos)
+		}
+		line, pos, _ = cm.Tab(line, pos, func(string, int) []string { return cands }) // cycle 2: second
+		if line != "see src/internal.go" || pos != 19 {
+			t.Errorf("cycle Tab = (%q, %d), want (\"see src/internal.go\", 19)", line, pos)
 		}
 	})
 }
@@ -498,6 +638,21 @@ func TestGitignored(t *testing.T) {
 		{"main.go", false},
 		{"src/alpha.go", false},
 		{".gitignore", false},
+		// Non-directory rule: *.log hides the .log files only — NOT every
+		// path in the tree (the old bug: one *.log rule hid everything,
+		// which is why @-completion offered nothing in a repo whose
+		// .gitignore has *.py[cod]).
+		{"debug.log", true},
+		{"a/x.log", true},
+		// Negation: !keep.log un-hides keep.log despite *.log.
+		{"keep.log", false},
+		{"a/keep.log", false},
+		// A directory rule does not match a FILE named like the directory.
+		// (writeTree's build/ is a directory; a file named "build" would not
+		// be ignored by the "build/" rule alone — covered here via the
+		// pattern half: build/out.bin is ignored by POSITION, and the dir
+		// itself is ignored by name.)
+		{"build", true}, // the directory itself (gitignoreMatch on the dir)
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -505,6 +660,19 @@ func TestGitignored(t *testing.T) {
 				t.Errorf("gitignored(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+
+	// A directory rule must not match a file named like the directory:
+	// "build/" in .gitignore does not ignore a FILE called "build".
+	root2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root2, "build"), []byte("a file named build\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root2, ".gitignore"), []byte("build/\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := gitignored(root2, filepath.Join(root2, "build")); got {
+		t.Errorf("gitignored on a FILE named build = true, want false (the \"build/\" rule is dirs-only)")
 	}
 }
 

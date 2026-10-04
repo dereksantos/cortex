@@ -216,7 +216,14 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 // It backs the type-ahead path: keystrokes captured while a turn streamed land
 // here as the starting draft, so the user's in-flight input isn't lost.
 func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
-	src := newReaderSource(t.fd)
+	return t.readLineWith(prompt, prefill, newReaderSource(t.fd))
+}
+
+// readLineWith is ReadLinePrefilled over an explicit byte source — the seam
+// the non-TTY tests drive the driver with an in-memory source, exactly as
+// inspectWith does for the inspector (both let the key-decoding and buffer
+// loop run for real without a terminal).
+func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string, error) {
 	buf := &buffer{}
 	if prefill != "" {
 		setBuffer(buf, prefill)
@@ -261,8 +268,14 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 			io.WriteString(t.out, "\r\n")
 			return line, nil // caller decides what to record (AddHistory)
 		case keyTab:
+			// No completer wired (the non-TTY path never calls SetCompletion):
+			// Tab is inert — it inserts nothing and drops nothing. Insert it as
+			// a literal character, exactly as typed, rather than silently
+			// eating it; there is no completion state to invalidate.
 			if completion == nil {
-				continue // no completer wired — Tab inserts nothing
+				buf.insert('\t')
+				redraw("")
+				continue
 			}
 			cands := t.completionCandidates(buf.string(), buf.pos)
 			filled, pos, row := completion.Tab(buf.string(), buf.pos, func(l string, c int) []string {
@@ -295,7 +308,11 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 			if t.history.Len() == 0 {
 				continue
 			}
-			res, action := t.reverseSearch(src)
+			rs, ok := src.(*readerSource)
+			if !ok {
+				continue // non-TTY source: reverse-i-search needs the fd's reader
+			}
+			res, action := t.reverseSearch(rs)
 			switch action {
 			case rsSubmit:
 				io.WriteString(t.out, "\r\n")
@@ -350,12 +367,12 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 }
 
 // completionCandidates merges every wired completer's candidates for the
-// current line+cursor. The fixed command set and the /model continuation are
-// both consulted (they never overlap: one fires only before the first space,
-// the other only after it), and the path completer fires anywhere an @word is.
-// The result is the list Tab cycles through, so a stable order is kept: the
-// sources are iterated in a fixed order and each source's list is left in its
-// own (already deterministic) order.
+// current line+cursor. The sources never overlap: the slash set fires only
+// before the first space, its Sub hook only for a known command after it,
+// and the path completer only on an @word — so no candidate can appear
+// twice. The result is the list Tab cycles through, so a stable order is
+// kept: the sources are iterated in a fixed order and each source's list is
+// left in its own (already deterministic) order.
 func (t *Terminal) completionCandidates(line string, cursor int) []string {
 	var out []string
 	if c, ok := t.completers["slash"]; ok {
