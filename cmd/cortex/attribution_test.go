@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/loops"
 	"github.com/dereksantos/cortex/internal/registry"
 )
@@ -291,5 +292,59 @@ func TestRunLoopFiringNoModelJournalsAttributedCommit(t *testing.T) {
 	}
 	if n := countTrailers(body, "Co-Authored-By"); n != 1 || !strings.Contains(body, "Co-Authored-By: Cortex") {
 		t.Errorf("commit message should carry exactly one default trailer, got %d:\n%s", n, body)
+	}
+}
+
+// TestRunLoopFiringAlsoWritesAttributionCommit proves the two attribution
+// records a loop firing leaves agree rather than duplicate each other's
+// question: loop.run's `attributed` flag (which firing made a commit and
+// whether it was attributed) and the machine-level attribution.commit receipt
+// (which commit, by SHA, and whether the trailer is really in it — read off
+// `git log`, not assumed). Issue #146's ask is the second one, so a firing
+// must produce it.
+func TestRunLoopFiringAlsoWritesAttributionCommit(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
+
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, writeFileTurnTestSessionFactory(t)); err != nil {
+		t.Fatalf("RunLoopFiring: %v", err)
+	}
+
+	entries := readAttributionEvents(t)
+	if len(entries) != 1 {
+		t.Fatalf("attribution.commit events = %d, want exactly 1: %+v", len(entries), entries)
+	}
+	got := entries[0]
+	if got.Outcome != journal.AttributionOutcomeAdded {
+		t.Errorf("outcome = %q, want %q", got.Outcome, journal.AttributionOutcomeAdded)
+	}
+	if !got.Verified || got.SHA == "" {
+		t.Fatalf("receipt = %+v, want the post-commit read-back with a SHA", got)
+	}
+	full, err := gitCmdOutput(t, root, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+	if got.SHA != full {
+		t.Errorf("receipt SHA = %q, want HEAD %q", got.SHA, full)
+	}
+	if !got.TrailerPresent {
+		t.Error("TrailerPresent = false, want true (attribution is on by default)")
+	}
+	if got.Project != root {
+		t.Errorf("Project = %q, want %q", got.Project, root)
+	}
+
+	// loop.run still carries its own view, and it must not contradict this one.
+	loops := readLoopRunEntries(t)
+	if len(loops) != 1 {
+		t.Fatalf("loop.run entries = %d, want 1: %+v", len(loops), loops)
+	}
+	if loops[0].Attributed != got.TrailerPresent {
+		t.Errorf("loop.run attributed = %v contradicts receipt trailer_present = %v", loops[0].Attributed, got.TrailerPresent)
 	}
 }

@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/dereksantos/cortex/internal/journal"
 )
 
 // One change at a time. The persistent Cortex process works on a single branch dedicated
@@ -169,10 +172,16 @@ func commitChangeIn(dir, message string) (string, error) {
 // enabled, default template. Returns the short commit hash and whether the
 // commit carries the trailer (false only when attribution is disabled or
 // the commit template is "").
+//
+// Every commit this makes is journaled (issue #146) — including the disabled
+// case, so the periods when attribution was off are visible in the record
+// too — with the fact read back from the repository rather than assumed: see
+// journalChangeCommit.
 func commitChangeWithAttribution(dir, message string, cfg *Config) (string, bool, error) {
 	trailer := cfg.attributionCommit(cfg.resolveBinding(roleCode, nil).Model)
 	if trailer == "" {
 		head, err := commitChangeIn(dir, message)
+		journalChangeCommit(dir, "", message, head, err)
 		return head, false, err
 	}
 
@@ -185,7 +194,80 @@ func commitChangeWithAttribution(dir, message string, cfg *Config) (string, bool
 	}
 	finalMessage := strings.TrimSpace(string(output))
 	head, err := commitChangeIn(dir, finalMessage)
+	journalChangeCommit(dir, trailer, finalMessage, head, err)
 	return head, true, err
+}
+
+// journalChangeCommit appends the attribution.commit receipt for one
+// `cortex change commit` (and the Discord WIP checkpoint, which reaches the
+// same function). Like every attribution write it is best-effort — a failed
+// receipt must never turn a committed change into a failed command — and it
+// records the COMPLIANCE FACT, not the intent: the SHA of what landed and
+// whether `git log -1` really finds the trailer in it, which is the only
+// reading that distinguishes "we asked for the trailer" from "the commit has
+// it".
+//
+// Nothing is written when the commit didn't happen (err non-nil): the
+// refusal reasons ("not on a change branch", "nothing to commit") already
+// reach the caller, and a journal entry claiming a SHA that doesn't exist
+// would be worse than no entry. Session/turn coordinates are absent here —
+// `cortex change commit` is a CLI call with no session — so the event carries
+// the project and the facts alone.
+func journalChangeCommit(dir, trailer, message, head string, err error) {
+	if err != nil {
+		return
+	}
+	outcome := journal.AttributionOutcomeAdded
+	if trailer == "" {
+		outcome = journal.AttributionOutcomeDisabled
+	}
+	sha, body, ok := headCommit(dir)
+	if !ok {
+		// No readable HEAD means no fact to record; fall back to the intent so
+		// the commit is at least counted, marked unverified.
+		_ = journal.AppendAttributionCommit(journal.AttributionCommitPayload{
+			Project: changeProjectDir(dir),
+			Outcome: outcome,
+			Command: "cortex change commit " + firstLine(message),
+		})
+		return
+	}
+	_ = journal.AppendAttributionCommit(journal.AttributionCommitPayload{
+		Project:        changeProjectDir(dir),
+		Outcome:        outcome,
+		Command:        "cortex change commit " + firstLine(message),
+		SHA:            sha,
+		TrailerPresent: trailer != "" && strings.Contains(body, trailer),
+		Verified:       true,
+	})
+}
+
+// headCommit returns dir's HEAD commit hash and full message ("" dir = the
+// process CWD), or ok=false when there is no repository or no commit to read.
+func headCommit(dir string) (sha, body string, ok bool) {
+	out, err := gitCmdIn(dir, "log", "-1", "--format=%H%x00%B")
+	if err != nil {
+		return "", "", false
+	}
+	hash, message, found := strings.Cut(out, "\x00")
+	if !found || hash == "" {
+		return "", "", false
+	}
+	return hash, message, true
+}
+
+// changeProjectDir names the workspace a change commit belongs to: dir when
+// one was given, the process CWD otherwise (the convention every
+// *In/zero-arg pair in this file follows).
+func changeProjectDir(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 // slugifyChange turns a free-text change name into a safe branch suffix:

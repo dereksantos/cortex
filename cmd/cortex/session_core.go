@@ -576,6 +576,30 @@ func (cs *CortexSession) AttributionCommit() string {
 	return cs.Config.attributionCommit(model)
 }
 
+// AttributionJournaler implementation for *CortexSession (issue #146): the
+// coordinate pair an attribution.commit receipt carries. The bash tool cannot
+// reach a session's turn ordinal or workspace root, and cmd/cortex cannot own
+// the write path (internal/tools classifies the commit), so the session
+// supplies the coordinates and internal/tools appends the event — the same
+// split Workdirer uses. turn is cs.turnNo, the 1-based in-flight turn (0
+// between turns), matching the "turn" field captureTurn records.
+func (cs *CortexSession) AttributionSession() (string, int) {
+	if cs == nil {
+		return "", 0
+	}
+	return cs.SessionID, cs.turnNo
+}
+
+// AttributionProject returns the receipt's workspace root ("" when the session
+// has none — a bare test construction, where the event still records the
+// command it observed).
+func (cs *CortexSession) AttributionProject() string {
+	if cs == nil || cs.workspace == nil {
+		return ""
+	}
+	return cs.workspace.Root
+}
+
 // ValidateToolCall provides dynamic validation for tool calls beyond config.
 // Returns (true, "") if valid, (false, message) if invalid.
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
