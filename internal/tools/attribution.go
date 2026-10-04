@@ -320,7 +320,7 @@ func journalAttributionIntent(deps ToolDeps, command, outcome string) {
 // journalAttributionVerified appends the fact event for a command that ran
 // successfully: the commit's SHA plus whether its message actually contains
 // the trailer, both read back from the repository. HEAD must have MOVED —
-// beforeSHA is what attributionHeadOf reported for dir just before the
+// beforeSHA is what attributionHead reported for dir just before the
 // command ran, and a post-run HEAD identical to it means this command made no
 // commit, whatever its exit status said. Without that comparison a command
 // that mentions a commit but makes none (`git commit -m x || true`, a
@@ -329,7 +329,10 @@ func journalAttributionIntent(deps ToolDeps, command, outcome string) {
 // compliance fact, the one thing this record exists to get right.
 //
 // It writes nothing when there is no journaler, no trailer to look for, no
-// repository before or after, or no new commit.
+// repository before or after, or no new commit. It also returns before
+// touching the repository when intent is outcomeNotACommit: bash() calls it
+// after every successful command, and a command the backstop does not treat
+// as a commit has no claim to verify — so it must not cost a git process.
 //
 // intent is what the backstop decided for this same command, carried through
 // so a receipt confirming an UNATTRIBUTED commit (the backstop left a pipeline
@@ -340,7 +343,7 @@ func journalAttributionIntent(deps ToolDeps, command, outcome string) {
 // commit actually landed in.
 func journalAttributionVerified(dir, beforeSHA, trailer, command, intent string, deps ToolDeps) {
 	j := attributionJournalerOf(deps)
-	if j == nil || trailer == "" {
+	if j == nil || trailer == "" || intent == outcomeNotACommit {
 		return
 	}
 	sha, body, ok := attributionHead(dir)
@@ -363,9 +366,9 @@ func journalAttributionVerified(dir, beforeSHA, trailer, command, intent string,
 // attributionHead returns HEAD's full commit hash and its message in dir, or
 // ok=false when dir isn't a repository or has no commit yet.
 //
-// The caller calls it only for a command the backstop recognized as a commit
-// (never for outcomeNotACommit), so a git process is spawned for a commit
-// claim, not for every successful bash call. A failure comes back as ok=false
+// Both callers — bash()'s pre-run read and journalAttributionVerified — skip
+// it for outcomeNotACommit, so a git process is spawned for a commit claim,
+// not for every successful bash call. A failure comes back as ok=false
 // because a receipt is never worth an error the model must read.
 func attributionHead(dir string) (sha, body string, ok bool) {
 	cmd := exec.Command("git", "log", "-1", "--format=%H%x00%B")
