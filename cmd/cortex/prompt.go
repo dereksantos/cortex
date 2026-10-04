@@ -67,13 +67,16 @@ const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. Whe
 // can't drift apart — the same mirror pattern as failingTestPrinciple and
 // debugWorkingStylePrinciple). It is spliced into SystemPrompt inside the
 // "Verify first" line, right after verifyBeforeFixPrinciple, so every turn
-// sees it at the exact moment a bash refusal could land: a blocked or
-// refused check leaves its value unknown — guess it, and a proxy check
-// doesn't count, and any claim that couldn't be checked must be marked
-// unverified rather than written into code comments, goldens, or summaries
-// as fact. (The shellrisk refusal messages carry the short per-incident
-// version of the same instruction; this is the standing principle.)
-const blockedCheckPrinciple = "If the check you needed is blocked, refused, or declined — its value is still unknown: don't guess it, and a proxy check that observes something else is not a check of it. Prefer a safe way in the working tree (a focused test with t.Logf; in-tree files, not /tmp or a different cwd). Any value or claim you could not check must be marked unverified — never written as fact into code comments, goldens, or your final answer or commit summary."
+// sees it at the exact moment a bash refusal could land: a blocked, refused,
+// or declined check leaves its result unknown — don't guess it, and a check
+// of something else doesn't stand in for it; failing that, mark the claim
+// unverified wherever it is stated. (The shellrisk refusal messages carry
+// the short per-incident version of the same instruction; this is the
+// standing principle.) Deliberately a principle, not a recipe: no tool names,
+// no paths, no list of incident surfaces — the PR #196/#197 specifics (a
+// focused t.Logf test, in-tree files vs /tmp, comments/goldens/commit
+// summaries) were the incident, not the principle.
+const blockedCheckPrinciple = "A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it."
 
 // failingTestPrinciple is the issue #177 failing-test working-style principle
 // — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT

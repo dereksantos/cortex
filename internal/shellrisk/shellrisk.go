@@ -64,15 +64,17 @@ type Verdict struct {
 	Tier   string // "deny-floor" | "safe-path" | "classified" | "fail-closed"
 }
 
-// blockedUnknownClause is the shared tail every refusal carries (issue #200):
-// a blocked, refused, or declined check leaves its value UNKNOWN, and the
-// model must not paper over the gap — no guessed value, no proxy check that
-// observes something else, no unmarked claim. The PR #196/#197 transcripts
-// show the failure mode: a blocked rune-count command was answered with
-// hand-counted numbers written into comments and goldens, and a refused
-// mutation run was replaced by probes of a different property — then both
-// were stated as fact in commit summaries.
-const blockedUnknownClause = " The value it would have checked is still UNKNOWN: don't guess it, and don't substitute a proxy check that observes something else — that is not a check of this. Mark it unverified in your final answer and in anything you write (comments, goldens, commit messages)."
+// blockedUnknownClause is the shared tail every refusal carries (issue #200).
+// It is deliberately neutral about WHAT the refused command was for: most
+// blocked commands are not checks (deny-floor rm -rf, a forced push, a
+// history rewrite), so the tail only speaks about the UNKNOWN VALUE in the
+// case the command was meant to check something — never as a suggestion to
+// find another way to do the refused thing. It also bars the papering-over
+// the PR #196/#197 transcripts show: a blocked rune-count command was
+// answered with hand-counted numbers written into comments and goldens, and
+// a refused mutation run was replaced by probes of a different property —
+// then both were stated as fact in commit summaries.
+const blockedUnknownClause = " If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 
 // BlockedMessage is the single shared source for the message a blocked
 // command returns to the model (issue #169; reworded for issue #200). Both
@@ -83,12 +85,13 @@ const blockedUnknownClause = " The value it would have checked is still UNKNOWN:
 // that the *action* isn't allowed (not just this spelling of it), tells the
 // model to continue without it rather than to route around the block with a
 // same-effect variant — the behavior the per-turn same-action gate
-// (EffectClass) enforces mechanically — and (issue #200) that the value the
-// command would have checked is still unknown: don't guess it, don't
-// substitute a proxy check, and mark it unverified wherever the claim might
-// otherwise be written as fact (blockedUnknownClause).
+// (EffectClass) enforces mechanically — and tells it to report the gap in
+// its final answer. It carries the neutral unknown-value tail
+// (blockedUnknownClause): if the command was meant to check something, that
+// result is still unknown — don't guess it, don't substitute a check of
+// something else, mark it unverified.
 func BlockedMessage(reason string) string {
-	return "blocked (risk: " + reason + "): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it." + blockedUnknownClause
+	return "blocked (risk: " + reason + "): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
 }
 
 // RefusedMessage is the single shared source for the message a deny-floor
@@ -96,11 +99,10 @@ func BlockedMessage(reason string) string {
 // duplicated inline at the two refusal call sites (cmd/cortex's gateShell and
 // internal/tools's headlessDeps.GateShell) — exactly the wording-drift risk
 // the #169 constructors were made to remove — so both now use this one. It
-// carries the same unknown-value tail as BlockedMessage
-// (blockedUnknownClause): the command never ran, so whatever it would have
-// told the model is unknown.
+// carries the same neutral unknown-value tail as BlockedMessage
+// (blockedUnknownClause).
 func RefusedMessage(reason string) string {
-	return "refused by the safety gate (" + reason + "): this command will not run; choose a different, safer way to check it." + blockedUnknownClause
+	return "refused by the safety gate (" + reason + "): this command will not run; choose a safer approach." + blockedUnknownClause
 }
 
 // SameActionBlockedMessage is the message a same-effect command returns to
@@ -110,17 +112,19 @@ func RefusedMessage(reason string) string {
 // turn and refuses any later command in the same class before it is even
 // classified. The message names the class (so the model knows *what* is
 // barred, not just that this spelling was), points it back to the earlier
-// block, and carries the same unknown-value tail as BlockedMessage.
+// block, tells the model to report the gap in its final answer, and carries
+// the same neutral unknown-value tail as BlockedMessage.
 func SameActionBlockedMessage(effectClass string) string {
-	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it." + blockedUnknownClause
+	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
 }
 
 // DeclinedMessage is the message a Risky command returns to the model when
 // the interactive approver said no (issue #200). It used to be duplicated
 // inline in cmd/cortex's gateShell (the confirmRisky and approveRisky paths);
 // both now use this one. Unlike BlockedMessage the action itself is allowed —
-// a human chose not to run it — but the same unknown-value discipline holds:
-// the check didn't happen, so mark it unverified.
+// a human chose not to run it — but it carries the same neutral
+// unknown-value tail: if it was meant to check something, that result is
+// still unknown, so mark it unverified.
 func DeclinedMessage() string {
 	return "declined by the user; not run. Ask before retrying, or use a safer command." + blockedUnknownClause
 }

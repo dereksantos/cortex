@@ -295,39 +295,56 @@ func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
 	}
 }
 
-// TestDefaultPromptEncodesBlockedCheckGuidance pins issue #200's content: the
-// built-in prompt must tell the model what to do the moment a check is
-// blocked, refused, or declined — the value stays UNKNOWN (no guessing, no
-// proxy check of something else counted as the check), prefer a safe in-tree
-// way (focused test with t.Logf), and any claim that couldn't be checked must
-// be marked unverified rather than written as fact into comments, goldens, or
-// summaries. The 2026-10-04 PR #196/#197 reviews are the case this exists
-// for: a blocked rune-count bash command was answered with hand-counted
-// numbers written into comments and goldens, and a refused mutation run was
-// replaced by probes of a different property — both stated as fact in commit
-// summaries. The keywords were checked against the pre-#200 prompt
-// (strings.Contains on SystemPrompt with the principle removed) so each rides
-// only on the new principle — the same loose, rewrite-tolerant style as
-// TestDefaultPromptEncodesFailingTestGuidance.
+// TestDefaultPromptEncodesBlockedCheckGuidance pins issue #200's content:
+// the built-in prompt must tell the model what to do the moment a check is
+// blocked, refused, or declined — its result stays unknown (no guessing, a
+// check of something else doesn't stand in for it), and failing a safe way to
+// observe the same thing, the claim is marked unverified wherever it is
+// stated. The 2026-10-04 PR #196/#197 reviews are the case this exists for:
+// a blocked rune-count bash command was answered with hand-counted numbers
+// written into comments and goldens, and a refused mutation run was replaced
+// by probes of a different property — both stated as fact in commit
+// summaries.
+//
+// The keyword assertions run against blockedCheckPrinciple ITSELF, and each
+// keyword is additionally asserted ABSENT from the full prompt with the
+// principle stripped — so every subtest actually rides on the new principle.
+// (Keywords that occur elsewhere in the prompt can't be used for the
+// absence check: the pre-#200 prompt already contained "guess" in "a wrong
+// guess costs more", so asserting it against the full prompt alone would
+// pass with the principle removed and pin nothing — "guess" is therefore
+// checked in the const only, and the absence-checked keywords below are
+// ones that occur ONLY in the principle.) The same loose, rewrite-tolerant
+// style as TestDefaultPromptEncodesFailingTestGuidance.
 func TestDefaultPromptEncodesBlockedCheckGuidance(t *testing.T) {
-	lower := strings.ToLower(SystemPrompt)
+	// The full prompt with the principle removed: the splice site in
+	// SystemPrompt is verifyBeforeFixPrinciple + " " + blockedCheckPrinciple
+	// + " " — strip exactly the principle and one surrounding separator,
+	// leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		verifyBeforeFixPrinciple+" "+blockedCheckPrinciple,
+		verifyBeforeFixPrinciple, 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the blocked-check principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
 	tests := []struct {
-		keyword string
-		intent  string
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
 	}{
-		{"blocked", "the trigger: a check that was blocked, refused, or declined"},
-		{"unknown", "the state: the value the blocked check would have produced is still unknown"},
-		{"guess", "the ban: don't guess the unmeasured value"},
-		{"proxy check", "the ban: a proxy check that observes something else is not the check"},
-		{"t.logf", "the suggested safe in-tree way: a focused test with t.Logf"},
-		{"unverified", "the obligation: mark the unchecked claim unverified"},
-		{"golden", "where unmarked claims have been shipped: goldens"},
-		{"commit", "where unmarked claims have been shipped: commit summaries"},
+		{"blocked", "the trigger: a check that was blocked, refused, or declined", true},
+		{"unknown", "the state: the result is still unknown", true},
+		{"guess", "the ban: don't guess the unmeasured result", false}, // "a wrong guess costs more" is elsewhere in the prompt
+		{"stand in", "the ban: a check of something else doesn't stand in for it", true},
+		{"unverified", "the obligation: mark the unchecked claim unverified wherever it is stated", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.keyword, func(t *testing.T) {
-			if !strings.Contains(lower, tt.keyword) {
-				t.Errorf("built-in prompt no longer encodes the blocked-check guidance (%s): missing %q", tt.intent, tt.keyword)
+			if !strings.Contains(strings.ToLower(blockedCheckPrinciple), tt.keyword) {
+				t.Errorf("blockedCheckPrinciple no longer encodes the blocked-check guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
 			}
 		})
 	}

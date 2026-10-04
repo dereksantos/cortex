@@ -221,7 +221,7 @@ func TestClassify_DenyFloorBeatsSafeLooking(t *testing.T) {
 // loudly if it does.
 func TestBlockedMessage(t *testing.T) {
 	got := BlockedMessage("rewrites git history")
-	want := "blocked (risk: rewrites git history): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it. The value it would have checked is still UNKNOWN: don't guess it, and don't substitute a proxy check that observes something else — that is not a check of this. Mark it unverified in your final answer and in anything you write (comments, goldens, commit messages)."
+	want := "blocked (risk: rewrites git history): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("BlockedMessage(\"rewrites git history\") =\n%q\nwant\n%q", got, want)
 	}
@@ -232,7 +232,7 @@ func TestBlockedMessage(t *testing.T) {
 // so the model reads the same instruction regardless of the reason.
 func TestBlockedMessage_EmptyReason(t *testing.T) {
 	got := BlockedMessage("")
-	want := "blocked (risk: ): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it. The value it would have checked is still UNKNOWN: don't guess it, and don't substitute a proxy check that observes something else — that is not a check of this. Mark it unverified in your final answer and in anything you write (comments, goldens, commit messages)."
+	want := "blocked (risk: ): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("BlockedMessage(\"\") =\n%q\nwant\n%q", got, want)
 	}
@@ -246,7 +246,7 @@ func TestBlockedMessage_EmptyReason(t *testing.T) {
 // its value is still unknown.
 func TestRefusedMessage(t *testing.T) {
 	got := RefusedMessage("rm -rf of a filesystem root / home / cwd")
-	want := "refused by the safety gate (rm -rf of a filesystem root / home / cwd): this command will not run; choose a different, safer way to check it. The value it would have checked is still UNKNOWN: don't guess it, and don't substitute a proxy check that observes something else — that is not a check of this. Mark it unverified in your final answer and in anything you write (comments, goldens, commit messages)."
+	want := "refused by the safety gate (rm -rf of a filesystem root / home / cwd): this command will not run; choose a safer approach. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("RefusedMessage(\"rm -rf of a filesystem root / home / cwd\") =\n%q\nwant\n%q", got, want)
 	}
@@ -258,17 +258,21 @@ func TestRefusedMessage(t *testing.T) {
 // carries the same unknown-value tail.
 func TestDeclinedMessage(t *testing.T) {
 	got := DeclinedMessage()
-	want := "declined by the user; not run. Ask before retrying, or use a safer command. The value it would have checked is still UNKNOWN: don't guess it, and don't substitute a proxy check that observes something else — that is not a check of this. Mark it unverified in your final answer and in anything you write (comments, goldens, commit messages)."
+	want := "declined by the user; not run. Ask before retrying, or use a safer command. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("DeclinedMessage() =\n%q\nwant\n%q", got, want)
 	}
 }
 
 // TestRefusalMessagesCarryUnknownClause is the issue #200 invariant across ALL
-// four refusal constructors: every message the model gets for a check that
-// didn't run must tell it the value is still unknown, bar guessing, bar proxy
-// checks, and require an unverified mark — so none of the refusal paths can
-// drift back into "just continue" wording that invites a guessed value.
+// four refusal constructors: every message the model gets for a command that
+// didn't run must tell it that an intended check's result is still unknown,
+// bar guessing, bar a check of something else substituting for it, and
+// require an unverified mark — so none of the refusal paths can drift back
+// into "just continue" wording that invites a guessed value. The clause is
+// neutral about what the command was for (most blocked commands are not
+// checks), so these probes check that neutrality too: no "the value it would
+// have checked" and no "a safer way to check it".
 func TestRefusalMessagesCarryUnknownClause(t *testing.T) {
 	tests := []struct {
 		name string
@@ -282,13 +286,20 @@ func TestRefusalMessagesCarryUnknownClause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, probe := range []string{
-				"UNKNOWN",
+				"that result is still unknown",
 				"don't guess it",
-				"proxy check",
-				"Mark it unverified",
+				"mark it unverified",
 			} {
 				if !strings.Contains(tt.msg, probe) {
 					t.Errorf("%s no longer carries the unknown-value clause (missing %q):\n%s", tt.name, probe, tt.msg)
+				}
+			}
+			for _, probe := range []string{
+				"The value it would have checked",
+				"a safer way to check it",
+			} {
+				if strings.Contains(tt.msg, probe) {
+					t.Errorf("%s carries check-assuming wording (%q) — the clause must stay neutral about what the command was for:\n%s", tt.name, probe, tt.msg)
 				}
 			}
 		})
@@ -302,7 +313,7 @@ func TestRefusalMessagesCarryUnknownClause(t *testing.T) {
 // use this single constructor so the wording can't drift.
 func TestSameActionBlockedMessage(t *testing.T) {
 	got := SameActionBlockedMessage(EffectGitHistoryWrite)
-	want := "blocked (same action: git-history-write): same action as an earlier blocked command in this turn. This action is not permitted; continue without it. The value it would have checked is still UNKNOWN: don't guess it, and don't substitute a proxy check that observes something else — that is not a check of this. Mark it unverified in your final answer and in anything you write (comments, goldens, commit messages)."
+	want := "blocked (same action: git-history-write): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("SameActionBlockedMessage(git-history-write) =\n%q\nwant\n%q", got, want)
 	}

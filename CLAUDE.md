@@ -207,9 +207,10 @@ the model-driven memory tools
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked. Every refusal (blocked, refused, or declined) carries the shared
-  unknown-value tail from the shellrisk constructors (issue #200): the value
-  the command would have checked is still UNKNOWN — don't guess it, don't
-  substitute a proxy check, mark it unverified.
+  unknown-value tail from the shellrisk constructors (issue #200), neutral
+  about what the command was for: if it was meant to check something, that
+  result is still unknown — don't guess it, don't substitute a check of
+  something else, mark it unverified.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;
@@ -305,7 +306,7 @@ Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a
 
 Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
 
-If the check you needed is blocked, refused, or declined — its value is still unknown: don't guess it, and a proxy check that observes something else is not a check of it. Prefer a safe way in the working tree (a focused test with t.Logf; in-tree files, not /tmp or a different cwd). Any value or claim you could not check must be marked unverified — never written as fact into code comments, goldens, or your final answer or commit summary.
+A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,
