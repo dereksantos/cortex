@@ -507,7 +507,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		return "", true
 	case shellrisk.Blocked:
 		cs.recordSameActionBlock(command)
-		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
+		return shellrisk.RefusedMessage(v.Reason), false
 	default:
 		// The single shared source for the reworded blocked message
 		// (internal/shellrisk.BlockedMessage, issue #169): a Risky command with
@@ -528,7 +528,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 				return "", true
 			}
 			cs.recordSameActionBlock(command)
-			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
+			return shellrisk.DeclinedMessage(), false
 		}
 		// approveRisky is Discord's non-terminal-but-human-present approval
 		// path (docs/cortex-web.md Phase 7) — checked independently of
@@ -544,7 +544,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 				return blocked, false
 			}
 			cs.recordSameActionBlock(command)
-			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
+			return shellrisk.DeclinedMessage(), false
 		}
 		cs.recordSameActionBlock(command)
 		return blocked, false

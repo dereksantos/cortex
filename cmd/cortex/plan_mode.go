@@ -511,8 +511,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple, noReproMarker,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)

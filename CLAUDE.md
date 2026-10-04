@@ -206,7 +206,10 @@ the model-driven memory tools
   (per-edit / turn-end / never / inactive).
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked.
+  Blocked. Every refusal (blocked, refused, or declined) carries the shared
+  unknown-value tail from the shellrisk constructors (issue #200): the value
+  the command would have checked is still UNKNOWN — don't guess it, don't
+  substitute a proxy check, mark it unverified.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;
@@ -301,6 +304,8 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
 
 Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
+
+If the check you needed is blocked, refused, or declined — its value is still unknown: don't guess it, and a proxy check that observes something else is not a check of it. Prefer a safe way in the working tree (a focused test with t.Logf; in-tree files, not /tmp or a different cwd). Any value or claim you could not check must be marked unverified — never written as fact into code comments, goldens, or your final answer or commit summary.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,
