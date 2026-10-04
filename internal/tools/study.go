@@ -124,7 +124,7 @@ Your tools:
 - edit_file(path, old_string, new_string): exact-match edit, whitespace-tolerant on retry.
 - bash(command): run a shell command — build it, test it, inspect it. Risky commands are refused outright; there is no one to ask for approval in this loop, so don't attempt anything destructive or irreversible.
 
-Locate, then change, then verify: use grep/outline to find exactly where the goal's work belongs, make the change, then run the relevant build/test command with bash to confirm it before you stop. If a check is refused or blocked, its value is still unknown — don't guess it, and don't present a proxy check of something else as if it were the check. Verify what you can verify, adapt without repeating the refused call, and mark anything unverified in your report.
+Locate, then change, then verify: use grep/outline to find exactly where the goal's work belongs, make the change, then run the relevant build/test command with bash to confirm it before you stop. If a check is blocked or refused, its result is still unknown — don't guess it, and a check of something else doesn't stand in for it. Verify what you can, look for another safe way to observe the same thing, adapt without repeating the refused call, and mark anything unverified in your report.
 
 Then STOP and report what you changed and how you verified it. Be concise and concrete: name the files and the change, and state the verification result (what you ran, what it showed). If the goal can't be completed with your tools, say so and explain what's blocking it rather than guessing. Write the report in plain prose — never paste literal tool-call, XML, or <function …>/<tool_call> markup into it.`
 
