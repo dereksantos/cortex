@@ -285,6 +285,106 @@ func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
 	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), verifyBeforeFixPrinciple) {
 		t.Error("planStepPrompt must restate the verify-before-fix principle (same const) for each step turn")
 	}
+	// The step prompt restates the issue #200 blocked-check principle the same
+	// way: a step turn is where a blocked verification command actually lands,
+	// and demotion at the turn boundaries can fold the planning turn out of
+	// view — so the step prompt carries the standing principle, not just the
+	// base system prompt.
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), blockedCheckPrinciple) {
+		t.Error("planStepPrompt must restate the blocked-check principle (same const) for each step turn")
+	}
+}
+
+// TestDefaultPromptEncodesBlockedCheckGuidance pins issue #200's content:
+// the built-in prompt must tell the model what to do the moment a check is
+// blocked, refused, or declined — its result stays unknown (no guessing, a
+// check of something else doesn't stand in for it), and failing a safe way to
+// observe the same thing, the claim is marked unverified wherever it is
+// stated. The 2026-10-04 PR #196/#197 reviews are the case this exists for:
+// a blocked rune-count bash command was answered with hand-counted numbers
+// written into comments and goldens, and a refused mutation run was replaced
+// by probes of a different property — both stated as fact in commit
+// summaries.
+//
+// The keyword assertions run against blockedCheckPrinciple ITSELF, and each
+// keyword is additionally asserted ABSENT from the full prompt with the
+// principle stripped — so every subtest actually rides on the new principle.
+// (Keywords that occur elsewhere in the prompt can't be used for the
+// absence check: the pre-#200 prompt already contained "guess" in "a wrong
+// guess costs more", so asserting it against the full prompt alone would
+// pass with the principle removed and pin nothing — "guess" is therefore
+// checked in the const only, and the absence-checked keywords below are
+// ones that occur ONLY in the principle.) The same loose, rewrite-tolerant
+// style as TestDefaultPromptEncodesFailingTestGuidance.
+func TestDefaultPromptEncodesBlockedCheckGuidance(t *testing.T) {
+	// The full prompt with the principle removed: the splice site in
+	// SystemPrompt is verifyBeforeFixPrinciple + " " + blockedCheckPrinciple
+	// + " " — strip exactly the principle and one surrounding separator,
+	// leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		verifyBeforeFixPrinciple+" "+blockedCheckPrinciple,
+		verifyBeforeFixPrinciple, 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the blocked-check principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		{"blocked", "the trigger: a check that was blocked, refused, or declined", true},
+		{"unknown", "the state: the result is still unknown", true},
+		{"guess", "the ban: don't guess the unmeasured result", false}, // "a wrong guess costs more" is elsewhere in the prompt
+		{"stand in", "the ban: a check of something else doesn't stand in for it", true},
+		{"unverified", "the obligation: mark the unchecked claim unverified wherever it is stated", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(blockedCheckPrinciple), tt.keyword) {
+				t.Errorf("blockedCheckPrinciple no longer encodes the blocked-check guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
+// TestBlockedCheckPrinciplePosition pins where the issue #200 principle sits:
+// in the "# How you work" block, inside the "Verify first" line right after
+// verifyBeforeFixPrinciple (issue #178's) and before debugWorkingStylePrinciple
+// (issue #154's) — a position check, not a content check, mirroring
+// TestFailingTestPrinciplePosition. The placement matters: the model meets it
+// at the exact moment a bash refusal could land, next to the verify-first
+// principle it extends.
+func TestBlockedCheckPrinciplePosition(t *testing.T) {
+	i := strings.Index(SystemPrompt, blockedCheckPrinciple)
+	if i < 0 {
+		t.Fatal("the blocked-check principle is not in the built-in prompt")
+	}
+	if v := strings.Index(SystemPrompt, verifyBeforeFixPrinciple); v < 0 || i < v {
+		t.Error("the blocked-check principle must sit after the verify-before-fix principle, in the same Verify-first line")
+	}
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the blocked-check principle must sit before the debugging principle")
+	}
+	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the blocked-check principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+}
+
+// TestBlockedCheckPrincipleMirroredInClaudeMD is the issue #200 consistency
+// tripwire, mirroring TestFailingTestPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints → Testing" section must carry the EXACT text the model
+// receives (blockedCheckPrinciple) so docs and prompt can't drift apart.
+func TestBlockedCheckPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	if !strings.Contains(string(data), blockedCheckPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's blocked-check principle verbatim (blockedCheckPrinciple) — the docs and the prompt have drifted apart")
+	}
 }
 
 // The built-in prompt must encode the working-style preferences

@@ -222,7 +222,7 @@ func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool
 	case shellrisk.Safe:
 		return "", true
 	case shellrisk.Blocked:
-		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
+		return shellrisk.RefusedMessage(v.Reason), false
 	default: // Risky — no interactive approver in a headless context.
 		return shellrisk.BlockedMessage(v.Reason), false
 	}

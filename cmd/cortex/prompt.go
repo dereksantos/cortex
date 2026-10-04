@@ -11,7 +11,7 @@ const SystemPrompt = `You are cortex, a coding agent that reasons and orchestrat
 
 # How you work
 
-Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. ` + verifyBeforeFixPrinciple + ` When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
+Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. ` + verifyBeforeFixPrinciple + ` ` + blockedCheckPrinciple + ` When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
 
 Scope honestly. Weigh scope and feasibility before committing to an approach: be optimistic about what is possible, realistic about what fits in this change. Name what you are deferring rather than silently dropping it.
 
@@ -70,6 +70,23 @@ const locateFirstPrinciple = "Locate first. Outline or grep a path to find exact
 // self-dev loop's own ordinary step turns, which never go through
 // TurnWithPlan's prompts (the scenario in #178).
 const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. When a reported problem doesn't reproduce, saying so with the evidence is the finished result; a fix for a problem you haven't observed is not."
+
+// blockedCheckPrinciple is the issue #200 blocked-check principle — a const
+// so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT same text
+// (the docs describe the guidance the model actually receives, so the two
+// can't drift apart — the same mirror pattern as failingTestPrinciple and
+// debugWorkingStylePrinciple). It is spliced into SystemPrompt inside the
+// "Verify first" line, right after verifyBeforeFixPrinciple, so every turn
+// sees it at the exact moment a bash refusal could land: a blocked, refused,
+// or declined check leaves its result unknown — don't guess it, and a check
+// of something else doesn't stand in for it; failing that, mark the claim
+// unverified wherever it is stated. (The shellrisk refusal messages carry
+// the short per-incident version of the same instruction; this is the
+// standing principle.) Deliberately a principle, not a recipe: no tool names,
+// no paths, no list of incident surfaces — the PR #196/#197 specifics (a
+// focused t.Logf test, in-tree files vs /tmp, comments/goldens/commit
+// summaries) were the incident, not the principle.
+const blockedCheckPrinciple = "A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it."
 
 // failingTestPrinciple is the issue #177 failing-test working-style principle
 // — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT
