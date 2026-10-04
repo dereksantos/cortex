@@ -368,7 +368,10 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 	}
 	// Otherwise walk up to the nearest existing ancestor and complete under
 	// it. nearestDir returns the ancestor directory plus the typed tail
-	// RELATIVE to that directory ("src/nonexist" → dir="src", tail="nonexist").
+	// RELATIVE to that directory, which may span several segments
+	// ("src/nonexist" → dir="src", tail="nonexist"; "src/inter/fo" →
+	// dir="src", tail="inter/fo" — completeUnder descends the tail one
+	// segment at a time and offers nothing when a level matches no directory).
 	dir, tail := p.nearestDir(base)
 	if dir == "" {
 		return nil
@@ -389,8 +392,10 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 }
 
 // nearestDir walks up from abs to the deepest existing directory, returning it
-// plus the typed path tail RELATIVE to it ("src/nonexist" → dir="src",
-// tail="nonexist" — NO trailing separator, so the caller can prefix-match
+// plus the typed path tail RELATIVE to it, built up as the walk descends
+// ("src/nonexist" → dir="src", tail="nonexist"; "src/inter/fo" → dir="src",
+// tail="inter/fo" — the tail may span several segments when several typed
+// levels don't exist; NO trailing separator, so the caller can prefix-match
 // names against the first segment). Returns ("", "") when the walk reaches
 // (or passes) the workspace root without finding a directory.
 func (p PathCompleter) nearestDir(abs string) (dir, tail string) {
@@ -403,7 +408,11 @@ func (p PathCompleter) nearestDir(abs string) (dir, tail string) {
 		if parent == abs || !withinRoot(parent, root) {
 			return "", ""
 		}
-		tail = filepath.Base(abs)
+		if tail == "" {
+			tail = filepath.Base(abs)
+		} else {
+			tail = filepath.Base(abs) + string(filepath.Separator) + tail
+		}
 		abs = parent
 	}
 }
@@ -471,9 +480,16 @@ func (p PathCompleter) listDir(dir, rel string) []string {
 // relAt is the mention path as seen from dir, INCLUDING the "@" marker: "@"
 // for the workspace root, "@src/" for a nested directory — every candidate it
 // prefixes carries the marker exactly once. The typed tail may span several
-// segments ("src/in": nearest existing ancestor "src", tail "in"): the FIRST
-// segment is prefix-matched against names, and a directory match with a
-// remaining tail is descended into.
+// segments ("sr/in": nearest existing ancestor ".", tail "sr/in" — the
+// nearestDir walk builds the tail across every typed level that doesn't
+// exist): the FIRST segment is prefix-matched against names, and a directory
+// match with a remaining tail is descended into. The matched directory is
+// offered itself (with "/") exactly when the descent yields at least one
+// deeper candidate — typing "@sr" + Tab on {"@src/", "@src/alpha.go"} offers
+// without filling (common prefix "@sr"), the cycle Tab picks the directory,
+// and a following Tab descends; when the deeper segment matches nothing the
+// directory is NOT offered, so a typo can't fill to a path the rest of the
+// tail doesn't live in.
 func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 	first, rest := tail, ""
 	if i := strings.IndexByte(tail, '/'); i >= 0 {
@@ -498,15 +514,19 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 			if e.IsDir() {
 				candRel += string(filepath.Separator)
 			}
-		} else if !e.IsDir() {
-			continue // more of the tail remains — only a directory can continue it
-		}
-		if !p.confined(candRel) {
+			if !p.confined(candRel) {
+				continue
+			}
+			out = append(out, candRel)
+			if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
+				break
+			}
+		} else if e.IsDir() {
+			// The tail continues past this level: the matched directory itself is
+			// NOT a candidate here — it is re-emitted by the descent below only
+			// if the remaining tail also completes, so a non-matching deeper
+			// segment can't smuggle a bare directory name back out.
 			continue
-		}
-		out = append(out, candRel)
-		if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
-			break
 		}
 	}
 	// A directory whose name matched the first segment continues the rest of
@@ -521,6 +541,12 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 				continue
 			}
 			sub := p.completeUnder(full, rest, relAt+e.Name()+string(filepath.Separator))
+			if len(sub) > 0 {
+				dirCand := relAt + e.Name() + string(filepath.Separator)
+				if p.confined(dirCand) {
+					out = append(out, dirCand)
+				}
+			}
 			out = append(out, sub...)
 			if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
 				return out[:p.MaxCandidates]

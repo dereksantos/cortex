@@ -596,6 +596,28 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 		}
 	})
 
+	t.Run("a missing directory spanning levels is descended into, not faked", func(t *testing.T) {
+		// The typed tail spans two missing levels ("src" exists,
+		// "src/nope" doesn't): the completer must descend the tail segment
+		// by segment — no directory matches "nope", so nothing is offered,
+		// and in particular no candidate may re-emit the typed missing
+		// segments ("@src/nope/al/..." — a path that does not exist).
+		got := sortedCands(t, "@src/nope/al", 11, p)
+		if got != nil {
+			t.Errorf("Candidates(\"@src/nope/al\", 11) = %v, want nil", got)
+		}
+		// A matching FIRST segment descends: "@sr" matches the directory
+		// "src", and the remaining tail "al" is completed under it. The
+		// directory itself is offered ("@src/") so Tab can cycle to it and
+		// descend one more level; the deeper candidate carries the full real
+		// path — never the typed missing segments.
+		got = sortedCands(t, "@sr/al", 5, p)
+		want := []string{"@src/", "@src/alpha.go"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("Candidates(\"@sr/al\", 5) = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("acceptance splices the candidate in place of the @-word", func(t *testing.T) {
 		// The word-level contract, end-to-end: with "@src/" typed, the
 		// candidates are the src children (each carrying the "@" marker);

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,44 @@ func TestTabFillsSinglePathCandidateEndToEnd(t *testing.T) {
 	if line != "@src/alpha.go" {
 		t.Errorf("line = %q, want \"@src/alpha.go\" (single-match fill keeps the @ marker)", line)
 	}
+}
+
+// TestTabNeverFillsABogusMultiLevelPath pins the multi-missing-segment case
+// end to end: typing "@sr" and pressing Tab must never write a path built
+// from typed missing segments into the buffer. The candidates are
+// {"@src/", "@src/alpha.go"} (the common prefix is exactly "@sr", so the
+// first Tab offers without filling); after cycling Tabs the buffer holds one
+// of those real candidates.
+func TestTabNeverFillsABogusMultiLevelPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	for _, f := range []string{"src/alpha.go", "src/internal.go"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("x\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f, err)
+		}
+	}
+	line, err := readLineWithNoTTY(t, "@sr\t\t\t\r", "", map[string]Completer{
+		"path": PathCompleter{Root: root, MaxCandidates: 50},
+	})
+	if err != nil {
+		t.Fatalf("readLineWith: %v", err)
+	}
+	// "@src/al/" would be a fake built from the typed missing segment (a
+	// directory that does not exist); no candidate may contain it, and
+	// neither may the filled line. "@src/alpha.go" (the real match) must
+	// NOT be caught: the check is for the separator-terminated fake, not a
+	// bare substring.
+	if strings.Contains(line, "@src/al/") {
+		t.Errorf("line = %q contains a candidate built from typed missing segments", line)
+	}
+	for _, want := range []string{"@sr", "@src/", "@src/alpha.go"} {
+		if line == want {
+			return
+		}
+	}
+	t.Errorf("line = %q, want one of [@sr @src/ @src/alpha.go]", line)
 }
 
 // TestTabFillsRootLevelPathCandidateEndToEnd pins the same fill for a
