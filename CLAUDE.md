@@ -177,12 +177,17 @@ the model-driven memory tools
   redirects to `study`; large Go files return a declaration skeleton.
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits. Failure results are self-correcting: an
-  ambiguous match lists every occurrence's line number, a not-found match
-  carries a bounded snippet of the closest region in the file (line-numbered,
-  so the model can anchor on actual content without a separate read). A
-  successful result appends the current changed region (added lines marked
-  `>`, removed `-`, context unmarked, capped at 12 lines) so the model's view
-  of the file stays in sync (#173).
+  ambiguous match lists every occurrence's line number. A not-found match
+  scores EVERY line of the old block against the file and anchors a bounded
+  snippet of the closest region on the best-scoring line (not just the first,
+  so a multi-line span whose first line is absent still finds the region its
+  other lines point at); it also appends a directive to re-read the current
+  span and retry `edit_file` — or use `write_file` for a whole-file rewrite —
+  rather than scripting the change through `bash` (sed/awk/python) (#201:
+  scripted multi-line edits corrupt files and skip the diff display + post-
+  edit hook). A successful result appends the current changed region (added
+  lines marked `>`, removed `-`, context unmarked, capped at 12 lines) so the
+  model's view of the file stays in sync (#173).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
@@ -206,7 +211,22 @@ the model-driven memory tools
   (per-edit / turn-end / never / inactive).
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked.
+  Blocked. The gate also tracks "same-action" effect classes so a blocked
+  action can't be re-routed in a later command: `git-history-write`,
+  `hook-disabling`, and `git-stash` act as one barred group (a turn whose
+  `git stash pop` is refused can't re-enter as `git stash push`), and
+  `git-stash` covers `git stash`/`git stash <sub>` for every mutating sub —
+  push/pop/apply/branch/drop/clear/store, bare `git stash` included — with
+  the read-only `show` and `list` excluded. Separately, when a command rewrites
+  a file in place (`sed -i`, `ed -s`, `perl -pi`, an interpreter `-c` script
+  string, or a redirect/append target — quote-aware), the tool appends a note
+  naming each touched target (workdir-relative when a workdir is anchored) and
+  steering to `edit_file`/`write_file`, whose diff display and post-edit hook
+  scripted edits skip (#201). When such a rewrite targets a workdir path, the
+  same format-only post-edit hook `write_file`/`edit_file` run is run on it
+  and its note folded into the result, so script-edits get the same format
+  coverage as tool edits (only on the success path — a refused command made no
+  change; untrusted/no-format-command no-ops).
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;

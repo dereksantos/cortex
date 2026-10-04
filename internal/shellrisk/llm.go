@@ -19,7 +19,7 @@ Judge by EFFECT, not by how dangerous a command looks in isolation. Routine loca
 safe — reversible, local, no external side effects:
 - reading/searching/inspecting (cat, ls, grep, find without -exec/-delete)
 - building, testing, linting, formatting, type-checking (make, go test, npm test, eslint)
-- creating/moving/editing/deleting files WITHIN the project tree, including build/output dirs (mkdir, touch, mv within the tree, rm of ./build or ./dist or node_modules, sed -i on a project file)
+- creating/moving/deleting files WITHIN the project tree, including build/output dirs (mkdir, touch, mv within the tree, rm of ./build or ./dist or node_modules)
 - inspecting version-control state (git status/log/diff/show)
 - running the project's own programs, scripts, or test binaries locally
 

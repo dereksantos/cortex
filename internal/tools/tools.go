@@ -591,7 +591,7 @@ var OutlineTool = newTool(FunctionOutline,
 // Bash is the bash tool declaration: runs a shell command behind the
 // shellrisk gate (safe runs, risky prompts, blocked refuses).
 var Bash = newTool(FunctionBash,
-	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit.",
+	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit. In-place file rewrites (sed -i, ed, perl -pi, awk, python -c, > redirects) are reported on the result — use edit_file or write_file instead: they show the diff and run the post-edit hook, while scripted edits do neither.",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
@@ -1699,7 +1699,7 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 	oldLines := dropTrailingEmpty(strings.SplitAfter(old, "\n"))
 	k := len(oldLines)
 	if k == 0 || k > len(fileLines) {
-		return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
+		return "", 0, fmt.Errorf("old_string not found%s%s", nearMissHint(fileLines, oldLines), notFoundDirective)
 	}
 	for tier := 1; tier <= 2; tier++ {
 		var starts []int
@@ -1720,8 +1720,15 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 		}
 		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
 	}
-	return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
+	return "", 0, fmt.Errorf("old_string not found%s%s", nearMissHint(fileLines, oldLines), notFoundDirective)
 }
+
+// notFoundDirective is appended to every "old_string not found" failure so a
+// failed match steers the model back toward the edit tools instead of
+// scripting the change through bash (issue #201: sed/awk/inline-python edits
+// skip the diff display and the post-edit hook, and damaged files were then
+// "repaired" with destructive git commands).
+const notFoundDirective = " — do not script this change through bash (sed/awk/python): use read_file to re-read the current span, then retry edit_file; for a whole-file rewrite use write_file."
 
 // windowMatches reports whether a run of file lines equals the old block under
 // the given tolerance tier.
@@ -1828,22 +1835,23 @@ func leadingWS(s string) string {
 }
 
 // nearMissHint returns the current content of the file region closest (by word
-// overlap) to old's first meaningful line, so a failed edit is self-correcting:
-// the model can see what is actually in the file around that line and craft a
-// corrected old_string without a separate read_file call. The snippet shows at
-// most 3 lines of context (the closest line plus one above and below, clipped
-// at the file's edges), each with its line number. Returns "" when nothing is
-// similar enough.
+// overlap) to old, so a failed edit is self-correcting: the model can see what
+// is actually in the file around the best-matching line and craft a corrected
+// old_string without a separate read_file call. Every meaningful line of old is
+// scored against every file line and the snippet anchors on the overall best
+// (not just old's first line): a multi-line span whose first line is absent —
+// an added context line, a stale line the turn itself replaced — still finds
+// the region its other lines point at. The snippet shows at most 3 lines of
+// context (the closest line plus one above and below, clipped at the file's
+// edges), each with its line number. Returns "" when nothing is similar enough.
 func nearMissHint(fileLines, oldLines []string) string {
-	target := ""
+	targets := make([]map[string]bool, 0, len(oldLines))
 	for _, l := range oldLines {
-		if t := strings.TrimSpace(strings.TrimSuffix(l, "\n")); t != "" {
-			target = t
-			break
+		if t := wordSet(strings.TrimSpace(strings.TrimSuffix(l, "\n"))); len(t) > 0 {
+			targets = append(targets, t)
 		}
 	}
-	tset := wordSet(target)
-	if len(tset) == 0 {
+	if len(targets) == 0 {
 		return ""
 	}
 	bestIdx, bestScore := -1, 0.0
@@ -1852,8 +1860,11 @@ func nearMissHint(fileLines, oldLines []string) string {
 		if body == "" {
 			continue
 		}
-		if s := jaccard(tset, wordSet(body)); s > bestScore {
-			bestScore, bestIdx = s, i
+		ws := wordSet(body)
+		for _, tset := range targets {
+			if s := jaccard(tset, ws); s > bestScore {
+				bestScore, bestIdx = s, i
+			}
 		}
 	}
 	if bestIdx < 0 || bestScore < 0.5 {
@@ -2044,10 +2055,20 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// attributionTrailer is what a verified receipt must find in the commit
 	// message; "" (attribution off) means there is no fact to verify.
 	attributionTrailer := deps.AttributionCommit()
+	// In-place rewrite detection (issue #201) scans the same command the gate
+	// classifies: the attribution backstop only ever touches `git commit`, so
+	// the scanned command is what will actually run. The note rides BOTH
+	// outcomes — a command that was refused (and made no change) still tells
+	// the model what it would have touched, so the steering happens before
+	// the damage, not after.
+	rewriteNote := inPlaceRewriteNote(deps, command)
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
 	// reads the reason plainly and adapts.
 	if msg, ok := deps.GateShell(ctx, command); !ok {
+		if rewriteNote != "" {
+			msg += "\n" + rewriteNote
+		}
 		return msg, nil
 	}
 	// leadBin is the first token, used only for the grep-empty heuristic below.
@@ -2102,7 +2123,7 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// grep error and keeps its stderr (merged into result by CombinedOutput).
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
-			leadBin == "grep" && strings.TrimSpace(result) == "" {
+			leadBin == "grep" && strings.TrimSpace(result) == "" && rewriteNote == "" {
 			return "(no matches)", nil
 		}
 		result += "\n[exit error: " + runErr.Error() + "]"
@@ -2110,6 +2131,9 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// intent receipt stands alone, with no verified fact behind it.
 		if attributionNote != "" {
 			result += "\n" + attributionNote
+		}
+		if rewriteNote != "" {
+			result += "\n" + rewriteNote
 		}
 		return result, nil
 	}
@@ -2122,6 +2146,18 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	journalAttributionVerified(runDir, attributionBeforeHEAD, attributionTrailer, command, attributionOutcome, deps)
 	if attributionNote != "" {
 		result += "\n" + attributionNote
+	}
+	if rewriteNote != "" {
+		result += "\n" + rewriteNote
+	}
+	// Post-edit hook for in-place rewrites (issue #201, step 4): the command
+	// ran, so run the same format-only hook write_file/edit_file run on each
+	// workdir target it touched. Never fails the bash call — it only appends
+	// a note. The note rides ONLY the success path: a refused command made no
+	// change, so there is nothing to format (the steering note above already
+	// named the targets before the damage).
+	if hookNote := inPlaceRewriteHookNote(ctx, deps, command); hookNote != "" {
+		result += "\n" + hookNote
 	}
 	return result, nil
 }

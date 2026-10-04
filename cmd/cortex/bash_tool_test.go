@@ -271,12 +271,13 @@ func TestBashGrepNoMatch(t *testing.T) {
 // in the same class is refused before classification, an unrelated Safe
 // command still runs, and the ledger resets on a new turn.
 //
-// The stub classifyShell returns Risky for every git-history-write and
-// hook-disabling command (so the first is blocked by the risk gate,
-// recording its effect class in the ledger) but Safe for everything else
-// (so an unrelated command still runs). Every later same-class command is
-// refused by the ledger — not re-classified — and carries the same-action
-// refusal; the first block of each class carries the shared risk message.
+// The stub classifyShell returns Risky for every tracked effect class
+// (git-history-write, hook-disabling, git-stash) so the first is blocked by
+// the risk gate, recording its effect class in the ledger, but Safe for
+// everything else (so an unrelated command still runs). Every later
+// same-group command is refused by the ledger — not re-classified — and
+// carries the same-action refusal; the first block of each class carries the
+// shared risk message.
 func TestSameActionLedger(t *testing.T) {
 	// Risky for the two tracked effect classes and for the network-access
 	// control (curl), Safe for the rest — this mirrors the real gate's shape
@@ -348,6 +349,21 @@ func TestSameActionLedger(t *testing.T) {
 				{command: "git status", wantRun: true, wantMarker: ""},
 				// A same-class command after the Safe interlude is still refused.
 				{command: "git commit --amend", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+			},
+		},
+		{
+			// Issue #201: git-stash joins the one barred group, so a declined
+			// risky `git stash` bars the rest of the group for the turn —
+			// the model cannot re-route the action as a `git commit` after a
+			// declined stash, or as another stash form.
+			name: "a blocked git stash bars the whole group for the turn",
+			steps: []step{
+				{command: "git stash pop", wantRun: false, wantMarker: "blocked (risk:"},
+				{command: "git stash push -m wip", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git commit -m x", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				{command: "git commit --no-verify -m x", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// A read-only stash form is NOT in the class — it runs.
+				{command: "git stash list", wantRun: true, wantMarker: ""},
 			},
 		},
 	}
