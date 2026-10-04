@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
@@ -100,6 +101,24 @@ type Toolset struct {
 	// the answer untouched. Only the coder turn wires it; subagents and tests
 	// leave it nil.
 	FinalizeHook func() string
+	// OnForcedFinalize, when non-nil, is consulted exactly once — at the
+	// forced-finalize exit (the run stopped on a bound: max-iter,
+	// token-budget, read-budget, no-progress, stuck, or an error it
+	// recovered from) — AFTER finalizeLoop has produced the turn's answer
+	// from the honesty-core prompt. It receives the run's stats as they
+	// stand at that moment and returns a harness note; when the note is
+	// non-empty the engine runs one more, tools-withheld finalize round
+	// (forcedFinalizeHookRound) whose reply is APPENDED to the answer, so
+	// the model's final words account for facts the turn never reached the
+	// clean-finalize hook for: a turn cut off at the tool-call cap (issue
+	// #161) never answers with no tool calls, so FinalizeHook (the
+	// testwatch #141/#154 and turn-end lint #129 receipts) never fires for
+	// it, and the forced answer otherwise hands in unfinished work —
+	// leftover debug prints, scratch files, unfixed lint findings —
+	// unreported. An empty return (or a nil hook) leaves the answer
+	// untouched, byte for byte. Only the coder turn wires it; subagents
+	// and tests leave it nil.
+	OnForcedFinalize func(stats loopStats) string
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
@@ -241,6 +260,36 @@ func stuckHint(class string) string {
 // not a main-loop special case.
 const noProgressNudge = "Harness note: that tool call was byte-identical to the previous one and produced the same result. Repeating it will not yield new information — try a different command or approach, or stop and report what you've found."
 
+// toolCapWarningRounds is the distance-to-the-cap at which runLoop starts
+// warning the model (issue #161): on the first tool round where the number of
+// rounds the model can still spend on tool calls — the in-flight batch
+// (round i of the loop, the (i+1)-th round) plus the ones after it
+// (remaining = MaxIter - i) — falls to this threshold, one "Harness note"
+// tells the turn how many tool-call rounds it still gets and asks it to wrap up
+// or clean up (remove debug prints, delete scratch files, leave tests passing
+// or failing-honest) before the cap forces a tools-withheld finalize. Without
+// the warning, the cap arrives silently mid-exploration and the forced answer
+// hands in unfinished work — the incident #161 names. On a 100-round cap the
+// loop runs i = 0..99, so the warning lands at i = 90 (remaining = 100-90 = 10)
+// saying "10 remaining", and the rounds left (90..99) are exactly ten — a model
+// that keeps calling tools gets precisely the rounds the count promised, never
+// cut off before. A run with MaxIter at or below the threshold gets no warning
+// (it would be every round); a turn that ends with a clean finalize before the
+// threshold never crosses it; it fires at most once per turn.
+const toolCapWarningRounds = 10
+
+// toolCapWarning is the cap-approaching note itself. The remaining count is
+// the tool-call rounds still available INCLUDING the one whose tool calls are
+// being dispatched when the warning fires (remaining = MaxIter - i: round i is
+// the (i+1)-th round of a loop that runs i = 0 .. MaxIter-1, so it plus the
+// rounds after it are MaxIter - i). On a 100-round cap the warning names
+// "10 remaining" at i=90 — this batch plus the next nine — and a model that
+// keeps calling tools gets exactly those ten rounds: the cap, if it doesn't
+// wrap up, lands at round 100 exactly as the count promised.
+func toolCapWarning(remaining int) string {
+	return "Harness note: you have " + strconv.Itoa(remaining) + " tool-call round(s) left before the per-turn tool-call limit forces a final answer. Wrap up: finish the work you are on, or clean up what you leave behind — remove debug prints you added, delete scratch files you created, and make sure the project's tests pass (or state plainly which ones fail and why) — so your final answer is not handed in mid-exploration with unfinished work behind it."
+}
+
 // FinalizeStyle selects how a forced finalize should END. The honesty core is
 // shared; only the closing differs, because the callers differ in who is
 // listening: an interactive turn has a next turn (the user can say "continue"),
@@ -357,6 +406,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	baseTemp := req.Temperature // restore after a one-shot jitter
 	stop := ""
 	lastObservation := ""
+	capWarned := false // the cap-approaching note fired (at most once per turn, issue #161)
 	for i := 0; i < b.MaxIter; i++ {
 		stats.Iterations = i + 1
 		var restoreEffort func()
@@ -639,6 +689,29 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			appendMsg(Message{Role: RoleUser, Content: stuckHint(hintClass)})
 			jitter = true
 		}
+		// Cap-approaching warning (issue #161): the model asked for tool calls
+		// with at most toolCapWarningRounds left INCLUDING the in-flight batch:
+		// round i is the (i+1)-th round of the i = 0 .. MaxIter-1 loop, so the
+		// rounds the model can still spend on tool calls — this batch plus the
+		// ones after it — are remaining = MaxIter - i. Tell it the count and ask
+		// it to wrap up or clean up (remove debug prints, delete scratch
+		// files, leave tests honest) BEFORE the cap decides for it, so the
+		// rounds it is told it still has are exactly the rounds it actually
+		// gets (on a 100-round cap: at i=90 the model hears "10 remaining",
+		// rounds 90..99 are exactly ten, and if it keeps asking the cap lands
+		// on round 99, the last of them). Injected after the tool results, like
+		// the stuck hint and the no-progress nudge: the API requires tool
+		// results to follow the assistant message before any user turn, and the
+		// model still gets this batch's output before hearing the warning. Once
+		// per turn (capWarned); a MaxIter at or below the threshold never fires
+		// it (it would be every round); a clean finalize before the threshold
+		// never reaches this point.
+		if !capWarned && b.MaxIter > toolCapWarningRounds {
+			if remaining := b.MaxIter - i; remaining <= toolCapWarningRounds {
+				appendMsg(Message{Role: RoleUser, Content: toolCapWarning(remaining)})
+				capWarned = true
+			}
+		}
 		// The redirect didn't take and the same error keeps recurring — stop thrashing
 		// and finalize from what's gathered.
 		if stop == "stuck" {
@@ -668,6 +741,13 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	stats.StopReason = stop
 	stats.FinalizeForced = true
 	content, finalStats, err := finalizeLoop(ctx, send, req, finalizePromptFor(stop, ts.Finalize), &stats, appendMsg, lastObservation)
+	// Issue #161: a bound-forced finish skips the clean-finalize path where
+	// FinalizeHook runs (the turn never answered with no tool calls), so the
+	// testwatch / turn-end-lint receipts the hook delivers would vanish
+	// exactly when the work is most likely unfinished. Consult the session's
+	// forced-finalize counterpart for one more tools-withheld round; an
+	// empty note leaves the answer untouched.
+	content = forcedFinalizeHookRound(ctx, send, req, ts, &finalStats, appendMsg, content)
 	// Restore the advertised tools: finalize withheld them, but the caller's
 	// request (cs.Request for the coder) is long-lived and reused next turn.
 	req.Tools = ts.Tools
@@ -804,6 +884,62 @@ func finalizeHookRound(ctx context.Context, send Sender, req *AgentRequest, ts T
 	appendMsg(r2.Choices[0].Message)
 	accountUsage(stats, r2, req.MaxTokens)
 	if a2 := strings.TrimSpace(r2.Choices[0].Message.Content); a2 != "" {
+		if answer != "" {
+			answer += "\n\n"
+		}
+		answer += a2
+	}
+	return answer
+}
+
+// forcedFinalizeHookRound is issue #161's counterpart of finalizeHookRound:
+// when a bound dragged the run to its forced finalize (max-iter,
+// token-budget, …), the turn never took the clean-finalize path, so
+// Toolset.FinalizeHook (the testwatch #141/#154 and turn-end lint #129
+// receipts, via turn.go) never ran and the forced answer would hand in
+// unfinished work — leftover debug prints, scratch files, unfixed lint
+// findings — without ever naming it. runLoop calls this exactly once, on
+// the forced-finalize exit, AFTER finalizeLoop has produced the answer: it
+// consults ts.OnForcedFinalize (nil for every subagent and test) for a
+// harness note and, when the note is non-empty, hands it to the model in
+// one more, tools-withheld finalize round — the same shape as
+// finalizeHookRound, whose discipline this round follows exactly:
+//
+//   - APPEND, never replace: a small model answers the note narrowly
+//     (just the leftover facts), so the turn's forced answer — the honesty-
+//     core digest the bound-forced run earned — is kept and the reply to
+//     the note is appended to it (turn.go's forced-framing asks the model
+//     to restate the full picture, the same way the clean-finalize framing
+//     does, so the append is a complete record either way);
+//   - tools withheld and effort off (docs/thinking-models.md §5a): this is
+//     a formatting/accounting ask on a run whose tool budget is spent, not
+//     more work;
+//   - empty note, empty reply, or a failed send leaves the answer
+//     untouched (the common case — a bound-forced turn with nothing the
+//     scans found to report — is byte-identical to before this seam).
+//
+// The round's usage is folded into the run's stats (accountUsage), so the
+// extra model round-trip counts toward the caller's token and cost totals
+// like every other engine send.
+func forcedFinalizeHookRound(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, stats *loopStats, appendMsg func(Message), answer string) string {
+	if ts.OnForcedFinalize == nil {
+		return answer
+	}
+	note := ts.OnForcedFinalize(*stats)
+	if note == "" {
+		return answer
+	}
+	savedTools := req.Tools
+	req.Tools = nil
+	defer func() { req.Tools = savedTools }()
+	appendMsg(Message{Role: RoleUser, Content: note})
+	res, _, err := send.Send(ctx, req)
+	if err != nil || res == nil || len(res.Choices) == 0 {
+		return answer
+	}
+	appendMsg(res.Choices[0].Message)
+	accountUsage(stats, res, req.MaxTokens)
+	if a2 := strings.TrimSpace(res.Choices[0].Message.Content); a2 != "" {
 		if answer != "" {
 			answer += "\n\n"
 		}

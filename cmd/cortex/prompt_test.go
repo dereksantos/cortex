@@ -238,6 +238,55 @@ func TestMemorySectionForState(t *testing.T) {
 	}
 }
 
+// TestDefaultPromptEncodesVerifyBeforeFix pins the issue #178 principle in
+// the built-in SystemPrompt: the prompt must tell the model to confirm a
+// problem exists before fixing it, and that a reported problem that doesn't
+// reproduce is finished by reporting so with the evidence — not by a fix for
+// a problem that was never observed. The check is on the PRINCIPLE (the
+// verify-before-fix idea and the honest no-repro outcome), not exact
+// wording, so a future rewrite can rephrase without breaking this test as
+// long as the idea survives — the same loose style as
+// TestDefaultPromptEncodesTestIntegrity. It checks the built-in prompt
+// specifically: every turn sees it (REPL, headless, plan mode, and the
+// self-dev loop's ordinary step turns), so the principle lives here rather
+// than only in plan-mode prompts.
+func TestDefaultPromptEncodesVerifyBeforeFix(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, keyword := range []string{
+		"confirm",   // verify-before-fix: confirm the problem exists before fixing it
+		"reproduce", // the no-repro case: a reported problem that doesn't reproduce
+		"evidence",  // the no-repro outcome must carry evidence
+		"observed",  // a fix for a problem you haven't observed is not the finished result
+	} {
+		if !strings.Contains(lower, keyword) {
+			t.Errorf("built-in prompt no longer encodes the verify-before-fix principle (missing %q)", keyword)
+		}
+	}
+}
+
+// TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt pins issue #178's
+// delivery: the built-in SystemPrompt carries verifyBeforeFixPrinciple
+// VERBATIM, and the same const is restated in the planning instruction and
+// every step prompt (plan_mode.go), so a loop-driven ordinary turn, a plan
+// step, and the planning turn all see the identical principle text. The plan
+// mode const is checked here (not in plan_mode_test.go) because the point is
+// that the BASE prompt — which every turn, loop-driven or not, is seeded
+// with — carries the principle, not only the plan-mode prompts.
+func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
+	if i := strings.Index(SystemPrompt, verifyBeforeFixPrinciple); i < 0 {
+		t.Fatal("the built-in SystemPrompt does not carry the verify-before-fix principle verbatim")
+	} else if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the verify-before-fix principle must sit in the \"# How you work\" block (inside \"Verify first\"), before \"# How you communicate\"")
+	}
+	if !strings.Contains(planModeInstruction, verifyBeforeFixPrinciple) {
+		t.Error("planModeInstruction must restate the verify-before-fix principle (same const) for the planning turn")
+	}
+	// The step prompt restates it for each step turn (tools present) too.
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), verifyBeforeFixPrinciple) {
+		t.Error("planStepPrompt must restate the verify-before-fix principle (same const) for each step turn")
+	}
+}
+
 // The built-in prompt must encode the working-style preferences
 // (2026-07-20, extended 2026-09-28 by issue #148): verify-first, clarify
 // ambiguity with the user, delegation to subagents, simple communication,
@@ -400,5 +449,69 @@ func TestLocateFirstPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 	if !strings.Contains(string(data), locateFirstPrinciple) {
 		t.Error("CLAUDE.md's \"The agent's tools\" section no longer mirrors the built-in prompt's locate-first working-style principle verbatim (locateFirstPrinciple) — the docs and the prompt have drifted apart")
+	}
+}
+
+// TestDefaultPromptEncodesFailingTestGuidance pins issue #177's content: the
+// built-in prompt must treat an existing test's expected value as evidence —
+// the burden of proof lands on a change that disagrees with it, and rewriting
+// an expectation to match output you just produced is not a fix. (The loop in
+// PR #176 edited a correct assertion to match its own off-by-one output; this
+// is the guidance that was missing.) Each keyword was checked against the
+// pre-#177 prompt (strings.Contains on SystemPrompt with the principle
+// removed) so it rides only on the new principle, and none leans on the
+// recipe wording the principle deliberately avoids — the same loose,
+// rewrite-tolerant style as TestDefaultPromptEncodesTestIntegrity.
+func TestDefaultPromptEncodesFailingTestGuidance(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	tests := []struct {
+		keyword string
+		intent  string
+	}{
+		{"expected value", "the expectation is the recorded decision the change must answer to"},
+		{"burden of proof", "when a test disagrees with your change, the change bears the proof"},
+		{"never a fix", "matching your own new output is never a fix"},
+		{"specification", "rewritten output becomes the spec — the failure mode to avoid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(lower, tt.keyword) {
+				t.Errorf("built-in prompt no longer encodes the failing-test guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+		})
+	}
+}
+
+// TestFailingTestPrinciplePosition pins where the issue #177 principle sits:
+// in the "# How you work" block, after the "Test integrity" paragraph (issue
+// #141's) and before the debugging principle (issue #154's) — a position
+// check, not a content check, mirroring TestDefaultPromptEncodesDebugWorkingStyle.
+func TestFailingTestPrinciplePosition(t *testing.T) {
+	i := strings.Index(SystemPrompt, failingTestPrinciple)
+	if i < 0 {
+		t.Fatal("the failing-test working-style principle is not in the built-in prompt")
+	}
+	if ti := strings.Index(SystemPrompt, "Test integrity."); ti < 0 || i < ti {
+		t.Error("the failing-test principle must sit after the \"Test integrity\" paragraph")
+	}
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the failing-test principle must sit before the debugging principle")
+	}
+	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the failing-test principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+}
+
+// TestFailingTestPrincipleMirroredInClaudeMD is the issue #177 consistency
+// tripwire, mirroring TestDebugPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints → Testing" section must carry the EXACT text the model
+// receives (failingTestPrinciple) so docs and prompt can't drift apart.
+func TestFailingTestPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	if !strings.Contains(string(data), failingTestPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's failing-test working-style principle verbatim (failingTestPrinciple) — the docs and the prompt have drifted apart")
 	}
 }

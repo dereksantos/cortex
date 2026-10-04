@@ -352,7 +352,7 @@ per-call `model` argument pins another. See
 |---|---|
 | `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. |
 | `write_file` | Create or overwrite a file. |
-| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. |
+| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. Failures carry the match line numbers (ambiguous) or a closest-region snippet (not found); successes include the current changed region. |
 | `study` | Produce a goal-curated digest of a large file or directory. |
 | `agent` | Hand off one bounded implementation task (read, edit, verify via `bash`) to a subagent; unlike `study`, it can write files and run commands. |
 | `outline` | Map project/file structure without reading all contents. |
@@ -382,8 +382,12 @@ cortex --version | cortex version   print the version and exit
 cortex resume [id]                  resume a session; defaults to latest
                                   (its resume banner goes to stderr)
 cortex turn [--session id] [--plan] [--json] <input...>
-                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn);
-                                  --session's resume banner and the session id go to stderr — stdout is the answer only
+                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn); the
+                                  verify-before-fix principle rides in the base system prompt (so every turn sees it) and is restated in the planning and
+                                  step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence (lead the
+                                  reply with "Not reproduced:" + the evidence), and that note is carried into the later steps' prompts and the per-step
+                                  report (issue #178); --session's resume banner
+                                  and the session id go to stderr — stdout is the answer only
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex learn [--project <name>]     run one background learning pass over the journal
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
@@ -415,7 +419,7 @@ helper, and writing table-driven tests):
 | `/help` | List the slash commands. |
 | `/context` | Show the current session's context-window map — the stable prefix vs. hydrated tail, plus the last request's prompt/cache usage. |
 | `/compact` | Summarize the conversation now as a safety net. |
-| `/plan <task>` | Plan-then-execute: one planning turn, then each step as its own turn (the `cortex turn --plan` path). |
+| `/plan <task>` | Plan-then-execute: one planning turn, then each step as its own turn (the `cortex turn --plan` path). The verify-before-fix principle rides in the base system prompt (so every turn sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence (lead the reply with "Not reproduced:" + the evidence), and that note is carried into the later steps' prompts and the per-step report (issue #178). |
 | `/clear` | Start a fresh session. |
 | `/sessions` | List persisted session IDs. |
 | `/model [name]` | Show role bindings or switch the coding model for this session. |

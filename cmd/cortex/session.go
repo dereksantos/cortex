@@ -12,6 +12,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/fslock"
+	"github.com/dereksantos/cortex/internal/redact"
 )
 
 const (
@@ -420,7 +421,39 @@ func (cs *CortexSession) writeEntry(e sessionEntry) {
 }
 
 func (cs *CortexSession) writeTranscript(m Message) {
-	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: m})
+	// Issue #103: redact the OUTGOING message (content + every tool-call's
+	// arguments + any tool result) before it is persisted, so a secret the
+	// agent read or printed never reaches the on-disk transcript. A deep copy
+	// is redacted — the live in-memory Request.Messages (and the message
+	// m is a copy of) is left verbatim so the model can still use the value
+	// this turn. The number of patterns masked is folded into cs.redactions,
+	// reset per turn (turn.go) and carried on TurnResult.
+	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: cs.redactedMessage(m)})
+}
+
+// redactedMessage returns a deep copy of m with its secret patterns masked
+// (issue #103), folding the count of masked patterns into cs.redactions. The
+// input m is not mutated — callers rely on the live in-memory message staying
+// verbatim for the current turn. Content is masked, and every tool call's
+// arguments are masked on the copy so they reach the transcript redacted.
+func (cs *CortexSession) redactedMessage(m Message) Message {
+	r := Message{
+		Role:       m.Role,
+		ToolCallID: m.ToolCallID,
+		Content:    m.Content,
+	}
+	redacted, n := redact.Redact(m.Content)
+	r.Content = redacted
+	cs.redactions += n
+	if m.ToolCalls != nil {
+		r.ToolCalls = make([]ToolCall, len(m.ToolCalls))
+		for i, c := range m.ToolCalls {
+			c.Function.Arguments, n = redact.Redact(c.Function.Arguments)
+			cs.redactions += n
+			r.ToolCalls[i] = c
+		}
+	}
+	return r
 }
 
 func (cs *CortexSession) writeSessionState() {
@@ -428,11 +461,31 @@ func (cs *CortexSession) writeSessionState() {
 		return
 	}
 	high, low := cs.ws.GetWatermarks()
+	// Issue #103: the state snapshot persists outline text (User, Actions,
+	// ReplyHead — built from live, unredacted messages in demote.go) and the
+	// folded digest (summarizer output over that text) into the same session
+	// file. Redact REDACTED COPIES of each field — the live cs.outline and
+	// cs.outlineFolded stay verbatim (the outline block rides the model's
+	// context this turn, so masking the live copy would blind the model to a
+	// value it still uses), and the counts are NOT folded into
+	// cs.redactions: the per-turn counter counts secrets masked while THIS
+	// turn's messages hit the transcript, and the snapshot is a periodic
+	// restatement of turns already counted when their messages were written.
+	outline := make([]cache.OutlineEntry, len(cs.outline))
+	for i, e := range cs.outline {
+		e.User, _ = redact.Redact(e.User)
+		e.ReplyHead, _ = redact.Redact(e.ReplyHead)
+		e.Actions = make([]string, len(e.Actions))
+		for j, a := range e.Actions {
+			e.Actions[j], _ = redact.Redact(a)
+		}
+		outline[i] = e
+	}
+	folded, _ := redact.Redact(cs.outlineFolded)
 	cs.writeEntry(sessionEntry{Kind: kindState, State: &sessionState{
 		Version: stateVersion, Base: cs.ws.Base(), Frontier: cs.ws.Demoted(),
 		TotalTurns: cs.ws.TotalTurns(), HighWatermark: high, LowWatermark: low,
-		LastTurn: cs.turns, Outline: append([]cache.OutlineEntry(nil), cs.outline...),
-		OutlineFolded: cs.outlineFolded,
+		LastTurn: cs.turns, Outline: outline, OutlineFolded: folded,
 	}})
 }
 

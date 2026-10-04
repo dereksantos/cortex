@@ -260,9 +260,9 @@ output     MaxTokens (existing reserve)
         write a `demote` event so the decision is journaled/auditable)
 2. outline > cap?  → schedule a fold (may run via Summarize before send, or deferred)
 3. send; runLoop appends as today — within-turn requests are pure prefix extension
-   (within a turn, before EACH send: in-turn demotion may swap the current
-    turn's oldest tool results for recall-citable stubs in the wire copy only —
-    see "In-turn demotion"; the transcript is never touched)
+   (within a turn, before EACH send: in-turn demotion may swap the previous
+    turn's and the current turn's oldest tool results for recall-citable stubs
+    in the wire copy only — see "In-turn demotion"; the transcript is never touched)
 ```
 
 No scoring model, no triage LLM on the hot path. `working-memory.md`'s
@@ -283,17 +283,29 @@ next send fails (issue #171: a self-dev run grew to ~131k prompt tokens against
 a 131072 window). **In-turn demotion** fixes the same problem at **message
 granularity, inside the turn**.
 
-Before each main-loop send, if the current turn's accumulated tool results have
-outgrown the hydrated tail's **high watermark** (the same W/2 the turn-end path
-uses), the **oldest** tool results are swapped, in the wire copy only, for
-one-line stubs that carry a **recall citation** into the session transcript —
-draining until at or under the **low watermark** (W/3) or nothing stubbable
-remains. Under the high watermark the request goes out byte-for-byte as today.
+Before each main-loop send, if the **whole prompt** (wire prefix + hydrated
+tail + current turn) has outgrown the **high watermark** (the same W/2
+the turn-end path uses), the **oldest** stubbable tool results are swapped, in
+the wire copy only, for one-line stubs that carry a **recall citation** into
+the session transcript — draining until at or under the **low watermark** (W/3)
+or nothing stubbable remains. The current turn's candidates are drained first
+(oldest first, keepRecent stay verbatim); when they are exhausted and the
+prompt is still over the low watermark, the drain continues into the hydrated
+tail (`[FrontierMsg(), turnStart)`, which may span several turns — the tail's
+spans are the ones DemoteBatch never demotes). This is what issue #180 adds: a
+resumed session with a large verbatim tail now triggers in-turn demotion even
+when the current turn alone is small. Under the high watermark the request
+goes out byte-for-byte as today.
 
 **What stays verbatim (never stubbed):** the turn's first and any
 harness-injected user messages; all assistant text and tool calls (the model's
 own reasoning); and the most recent `context.in_turn_keep_recent` (default 6)
-tool results — the newest few are what the model is actively working from.
+tool results of the current turn — the newest few are what the model is
+actively working from. The hydrated tail's results are stubbable candidates
+(oldest first) but are only touched after the current turn's candidates are
+exhausted, with the keepRecent carve-out applying to the tail as a whole (its
+newest `keepRecent` results stay verbatim, independently of the current
+turn's).
 
 **Stub format** — one line, recall-citable:
 

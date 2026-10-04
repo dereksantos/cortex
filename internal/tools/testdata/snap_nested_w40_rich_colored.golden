@@ -1,0 +1,4 @@
+[90m12:34:56[0m  [32mtool: study[0m[90m(internal/tools, w…[0m
+[90m12:34:56[0m    [32mtool: read_file[0m[90m…[0m[90m  1.0s  error: read /tmp/cortex-snapshot/nonexistent-seed-file.txt: open /…[0m
+[90m12:34:56[0m    [32mtool: read_file[0m[90m…[0m[90m  1.0s  error: read /tmp/cortex-snapshot/nonexistent-seed-file.txt: open /…[0m
+[90m12:34:56[0m  [90m  study done: 2 calls, 1.0s, d…[0m

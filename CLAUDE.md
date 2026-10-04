@@ -96,7 +96,7 @@ Three capabilities distinguish it:
 |---|---|
 | `cortex` | Interactive REPL (default) |
 | `cortex resume [id]` | Resume a prior session (default: latest); its resume banner goes to stderr (issue #118) |
-| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118) |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); the verify-before-fix principle rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence — the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118) |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
@@ -191,7 +191,13 @@ the model-driven memory tools
   absolute or out-of-workspace paths, and lists nearby existing candidates
   (issue #142).
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
-  over `write_file` for edits.
+  over `write_file` for edits. Failure results are self-correcting: an
+  ambiguous match lists every occurrence's line number, a not-found match
+  carries a bounded snippet of the closest region in the file (line-numbered,
+  so the model can anchor on actual content without a separate read). A
+  successful result appends the current changed region (added lines marked
+  `>`, removed `-`, context unmarked, capped at 12 lines) so the model's view
+  of the file stays in sync (#173).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
@@ -308,6 +314,8 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 - Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
 
 Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
+
+Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,

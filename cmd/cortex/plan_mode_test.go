@@ -130,6 +130,188 @@ func TestParsePlan(t *testing.T) {
 	}
 }
 
+// TestPlanStepPromptCarriesTaskAndPrinciple proves the per-step prompt
+// (issue #178) keeps the exact "Overall task: / Plan step N of M:" shape the
+// happy-path test asserts AND restates the verify-before-fix principle
+// (prompt.go's verifyBeforeFixPrinciple — the same const the base system
+// prompt carries), so each step turn (tools present) carries both even after
+// the planning turn is demoted out of the window. The check is on the
+// PRINCIPLE, not on recipe phrases: the principle says confirm the problem
+// exists before fixing it, and that a reported problem that doesn't
+// reproduce is finished by reporting it with the evidence. It ALSO carries
+// the no-repro output-shape convention (noReproMarker) that turns that
+// principle's "saying so" into words noReproNote can recognize.
+func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
+	got := planStepPrompt("reproduce and fix the flaky test", 2, 4, "reproduce the bug, then fix it", nil)
+	// The exact two-line shape the existing end-to-end tests assert on.
+	for _, want := range []string{"Overall task: reproduce and fix the flaky test", "Plan step 2 of 4: reproduce the bug, then fix it"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("planStepPrompt missing %q:\n%s", want, got)
+		}
+	}
+	// The verify-before-fix principle is restated for the step turn — check
+	// the PRINCIPLE (verify-before-fix + honest no-repro outcome), not exact
+	// recipe wording.
+	if !strings.Contains(got, verifyBeforeFixPrinciple) {
+		t.Errorf("planStepPrompt does not restate the verify-before-fix principle (verifyBeforeFixPrinciple):\n%s", got)
+	}
+	if !strings.Contains(strings.ToLower(got), "confirm a problem exists before fixing") {
+		t.Errorf("planStepPrompt does not state the verify-before-fix principle (confirm before fix):\n%s", got)
+	}
+	// THE connect-through point (issue #178): the step prompt carries the
+	// no-repro output-shape convention, so a real model that concludes the
+	// bug doesn't reproduce writes it in the shape noReproNote recognizes.
+	if !strings.Contains(got, noReproMarker) {
+		t.Errorf("planStepPrompt does not carry the no-repro output-shape convention (noReproMarker):\n%s", got)
+	}
+	// And the convention and the probe agree on the same phrase: the marker
+	// the model is told to use is the prefix noReproNote anchors on, so a
+	// reply that follows the convention is recognized (round-2 review: the
+	// probe was unreachable for a real model before this).
+	if got := noReproNote("Not reproduced: go test ./... passes"); got != "Not reproduced: go test ./... passes" {
+		t.Errorf("noReproNote did not recognize a reply that follows the %q convention: got %q", noReproMarker, got)
+	}
+}
+
+// TestPlanStepPromptCarriesEarlierNotes proves issue #178's connect-through
+// for plan steps: a step's prompt carries the EARLIER done steps' notes, so
+// a later "fix it" step sees that the earlier step found the reported bug
+// does not reproduce, instead of running blind to it. The no-repro note (the
+// first step's own evidence) must appear in the second step's prompt; a
+// first step (no earlier steps) carries no "Earlier steps:" section at all.
+func TestPlanStepPromptCarriesEarlierNotes(t *testing.T) {
+	first := planStepPrompt("reproduce and fix the bug", 1, 2, "reproduce the bug", nil)
+	if strings.Contains(first, "Earlier steps:") {
+		t.Errorf("the first step's prompt must not carry an 'Earlier steps:' section:\n%s", first)
+	}
+	second := planStepPrompt("reproduce and fix the bug", 2, 2, "fix it",
+		[]string{"not reproduced: the test passes on the current code (go test ./... → ok, 0 failures)", "check passed (go test ./...)"})
+	if !strings.Contains(second, "Earlier steps:") {
+		t.Errorf("the second step's prompt must carry the earlier steps' section:\n%s", second)
+	}
+	// THE point: the earlier no-repro note reaches the fix step.
+	if !strings.Contains(second, "not reproduced: the test passes on the current code") {
+		t.Errorf("the second step's prompt must carry the earlier step's no-repro note:\n%s", second)
+	}
+	if !strings.Contains(second, "check passed (go test ./...)") {
+		t.Errorf("the second step's prompt must also carry the other earlier done note:\n%s", second)
+	}
+	// Notes are numbered, one per line, in order.
+	if !strings.Contains(second, "1. not reproduced: the test passes") || !strings.Contains(second, "2. check passed (go test ./...)") {
+		t.Errorf("the earlier notes must be numbered lines in order:\n%s", second)
+	}
+}
+
+// TestNoReproNote is a table-driven probe of the anchored no-repro verdict
+// (issue #178): a step reply that LEADS with the "not reproduced" verdict
+// yields its evidence as the step's note; a reply that merely echoes prompt
+// wording — "if the bug does not reproduce …" — or states that it first
+// failed to reproduce but then DID, yields "". The match is anchored to the
+// verdict (a line starting with "not reproduced"), so an echo of the rule
+// without a verdict can't be misread as a no-repro outcome.
+func TestNoReproNote(t *testing.T) {
+	tests := []struct {
+		name  string
+		reply string
+		want  string // "" = no note
+	}{
+		{name: "explicit no-repro verdict with evidence", reply: "not reproduced: the test passes on the current code (go test ./... → ok, 0 failures)", want: "not reproduced: the test passes on the current code (go test ./... → ok, 0 failures)"},
+		{name: "no-repro verdict after a preamble line", reply: "I ran the suite twice against the current code.\nnot reproduced: both runs pass (go test ./... → ok).", want: "I ran the suite twice against the current code.\nnot reproduced: both runs pass (go test ./... → ok)."},
+		{name: "echo of the rule without a verdict", reply: "If the bug does not reproduce, I would report it with the evidence, but I checked and it does.", want: ""},
+		{name: "could not reproduce at first, then did and fixed it", reply: "I could not reproduce at first, then reproduced it with -race and fixed it.", want: ""},
+		{name: "no verdict (a plain done)", reply: "done", want: ""},
+		{name: "a done step's reply with no no-repro verdict yields no note", reply: "Done — the fix is in and the tests pass.", want: ""},
+		{name: "empty reply", reply: "", want: ""},
+		{name: "whitespace reply", reply: "   \n", want: ""},
+		// The marker convention the step prompt tells the model to follow
+		// (noReproMarker): a reply that BEGINS with the capitalized
+		// "Not reproduced:" verdict is the real-model case the probe must
+		// recognize — the case-insensitive, line-anchored match handles the
+		// capital N.
+		{name: "the marker convention a step prompt instructs (capitalized lead)", reply: "Not reproduced: the reported crash does not occur — `go test -race ./...` passes on the current code.", want: "Not reproduced: the reported crash does not occur — `go test -race ./...` passes on the current code."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := noReproNote(tt.reply); got != tt.want {
+				t.Errorf("noReproNote(%q) = %q, want %q", tt.reply, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPlanPromptsCarryNoReproRule proves the prompts each turn actually sends
+// (issue #178) restate the verify-before-fix principle: the PLANNING prompt
+// (plan shape + task, no tools) and each STEP prompt (overall task + principle,
+// tools present). It drives TurnWithPlan through the existing planTestBackend
+// seam and inspects lastUserMessages — the recorded per-request user prompts —
+// so it checks the real bytes a turn carries, not just the instruction
+// constant. The check is on the PRINCIPLE (verify-before-fix + honest
+// no-repro outcome), not on the recipe phrases a procedural rule would use.
+func TestPlanPromptsCarryNoReproRule(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. reproduce the bug\n2. fix it\n", // planning turn (tools withheld)
+		"repro done",                        // step 1
+		"fix done",                          // step 2
+	)
+	cs := planTestSession(t, backend, root)
+
+	if _, err := cs.TurnWithPlan(context.Background(), "reproduce and fix a bug"); err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	users := backend.lastUserMessages()
+	if len(users) != 3 {
+		t.Fatalf("recorded prompts = %d, want 3 (one planning + two step)", len(users))
+	}
+
+	// (a) table: which prompt, and what it must carry.
+	// verifyBeforeFixPrinciple is the SAME const the base system prompt
+	// carries (prompt.go), so both planning and step turns see the identical
+	// wording; noReproMarker (the output-shape convention) rides in the STEP
+	// prompts only — the planning turn has no step, no tools, and its
+	// output-shape rules forbid anything before the list, so the marker must
+	// NOT be there (it would break parsePlan).
+	tests := []struct {
+		name     string
+		prompt   string
+		contains []string
+	}{
+		{
+			name:     "planning prompt carries the verify-before-fix principle",
+			prompt:   users[0],
+			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
+		},
+		{
+			name:     "step prompt carries the original task, the principle, and the no-repro marker",
+			prompt:   users[1],
+			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", noReproMarker},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Case-insensitive: the principle's "Confirm a problem exists…" is
+			// capitalized in the prompt (mid-sentence), and the probe must not
+			// depend on that casing.
+			lp := strings.ToLower(tt.prompt)
+			for _, want := range tt.contains {
+				if !strings.Contains(lp, strings.ToLower(want)) {
+					t.Errorf("prompt does not contain %q:\n%s", want, tt.prompt)
+				}
+			}
+		})
+	}
+
+	// The no-repro marker must NOT be in the PLANNING prompt: the planning
+	// turn has no step and no tools, and its output-shape rules ("nothing
+	// before the list") contradict a reply led by "Not reproduced:" — a
+	// model that followed the marker there would produce an unparseable plan
+	// and a silent fallback to a single turn. The marker belongs only in the
+	// step prompts.
+	if strings.Contains(users[0], noReproMarker) {
+		t.Errorf("planning prompt must NOT carry the no-repro marker (it has no step, no tools, and a strict output shape):\n%s", users[0])
+	}
+}
+
 func TestParsePlanCapIsSix(t *testing.T) {
 	var reply strings.Builder
 	for i := 1; i <= 9; i++ {
@@ -367,6 +549,13 @@ func TestTurnWithPlanHappyPath(t *testing.T) {
 		if !strings.Contains(users[i], task) {
 			t.Errorf("step %d prompt %q does not contain the original task %q", i, users[i], task)
 		}
+		// Each step turn (tools present) must ALSO restate the
+		// verify-before-fix principle (issue #178) — the base system prompt
+		// carries it, but each step prompt restates it so it survives demotion
+		// of the planning turn.
+		if !strings.Contains(strings.ToLower(users[i]), strings.ToLower("confirm a problem exists before fixing")) {
+			t.Errorf("step %d prompt %q does not restate the verify-before-fix principle", i, users[i])
+		}
 	}
 	if len(res.Steps) != 3 {
 		t.Fatalf("len(Steps) = %d, want 3", len(res.Steps))
@@ -393,6 +582,122 @@ func TestTurnWithPlanHappyPath(t *testing.T) {
 		if s.Note != "check skipped: no test/build command found for this project" {
 			t.Errorf("step %d note = %q, want %q", i+1, s.Note, "check skipped: no test/build command found for this project")
 		}
+	}
+}
+
+// TestTurnWithPlanNoReproStepIsDone covers issue #178 step 3b: a step whose
+// job was to reproduce a reported bug — and which, on the current code, does
+// NOT reproduce it — must be reported DONE (not failed: no speculative fix was
+// built and nothing broke), and its per-step report line must carry the
+// no-repro note (the model's own "not reproduced" reply) so the reader sees
+// the step was a verification, not a silently skipped fix.
+func TestTurnWithPlanNoReproStepIsDone(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. reproduce the reported bug\n2. fix it\n",                                           // planning turn (tools withheld)
+		"not reproduced: the test passes on the current code (go test ./... → ok, 0 failures)", // step 1 — verification, no bug to fix
+		"fix done", // step 2
+	)
+	cs := planTestSession(t, backend, root)
+
+	// Force the checks to pass deterministically: a clean baseline (gate armed)
+	// and clean post-step checks. Without a stub, the empty temp root yields a
+	// skip note, which would mask the no-repro note we're proving below.
+	orig := runProjectCheckStub
+	t.Cleanup(func() { runProjectCheckStub = orig })
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
+		return "go test ./...", "ok", true, "ok"
+	}
+
+	res, err := cs.TurnWithPlan(context.Background(), "reproduce and fix the reported bug")
+	if err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true")
+	}
+	if len(res.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(res.Steps))
+	}
+	// THE point of the fix: the no-repro step is DONE, not failed.
+	if res.Steps[0].Status != stepDone {
+		t.Fatalf("step 1 status = %v, want done (a non-reproducible bug is reported, not a speculative-fix failure)", res.Steps[0].Status)
+	}
+	// The no-repro note (the model's own reply) is carried in the per-step
+	// report so the reader sees the verification outcome, not a bare "done".
+	if !strings.Contains(res.Steps[0].Note, "not reproduced") {
+		t.Errorf("step 1 note = %q, want the no-repro note from the step's reply", res.Steps[0].Note)
+	}
+	// And it surfaces in the rendered final report line.
+	if !strings.Contains(res.Reply, "1. [done]") || !strings.Contains(res.Reply, "not reproduced") {
+		t.Errorf("final report missing the no-repro step's outcome:\n%s", res.Reply)
+	}
+	// Step 2 was reached, and — THE connect-through point (issue #178) — its
+	// prompt carried step 1's no-repro note, so the fix step ran with the
+	// knowledge that the bug never reproduced instead of blind to it.
+	if res.Steps[1].Status != stepDone {
+		t.Errorf("step 2 status = %v, want done", res.Steps[1].Status)
+	}
+	step2 := backend.lastUserMessages()[2]
+	if !strings.Contains(step2, "Earlier steps:") || !strings.Contains(step2, "not reproduced") {
+		t.Errorf("step 2's prompt must carry step 1's no-repro note (earlier steps):\n%s", step2)
+	}
+}
+
+// TestTurnWithPlanNoReproNoteSurvivesFailingBaseline covers issue #178's
+// dropped-note case: when the BASELINE check fails (the suite was already
+// broken — the usual state when a bug has been reported), the between-step
+// gate is disabled, and a step whose reply reports the bug does NOT
+// reproduce must still carry that note — the no-repro evidence is not thrown
+// away just because no check can gate the run.
+func TestTurnWithPlanNoReproNoteSurvivesFailingBaseline(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. reproduce the reported bug\n2. fix it\n",                                           // planning turn (tools withheld)
+		"not reproduced: the test passes on the current code (go test ./... → ok, 0 failures)", // step 1 — verification, no bug to fix
+		"fix done", // step 2
+	)
+	cs := planTestSession(t, backend, root)
+
+	// The baseline (call 1) FAILS — the suite was already broken before the
+	// plan started. With the gate disabled, NO per-step check may run.
+	orig := runProjectCheckStub
+	t.Cleanup(func() { runProjectCheckStub = orig })
+	var calls int
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
+		calls++
+		return "go test ./...", "FAIL", false, "check failed: FAIL"
+	}
+
+	res, err := cs.TurnWithPlan(context.Background(), "reproduce and fix the reported bug")
+	if err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true")
+	}
+	if len(res.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(res.Steps))
+	}
+	// THE point of the fix: the no-repro note SURVIVES a failing baseline —
+	// it is not replaced by the baseline-skip note.
+	if res.Steps[0].Status != stepDone {
+		t.Errorf("step 1 status = %v, want done (a non-reproducible bug is reported, not a failure)", res.Steps[0].Status)
+	}
+	if !strings.Contains(res.Steps[0].Note, "not reproduced") {
+		t.Errorf("step 1 note = %q, want the no-repro note (a failing baseline must not drop it)", res.Steps[0].Note)
+	}
+	if strings.Contains(res.Steps[0].Note, "failing before plan") {
+		t.Errorf("step 1 note = %q, must not be the baseline-skip note (the no-repro evidence wins)", res.Steps[0].Note)
+	}
+	// Only the baseline check ran (the gate was disabled by it).
+	if calls != 1 {
+		t.Errorf("runProjectCheck calls = %d, want 1 (baseline only; gate disabled after a failing baseline)", calls)
+	}
+	// The no-repro note is also carried to step 2's prompt (earlier notes).
+	step2 := backend.lastUserMessages()[2]
+	if !strings.Contains(step2, "Earlier steps:") || !strings.Contains(step2, "not reproduced") {
+		t.Errorf("step 2's prompt must carry step 1's no-repro note:\n%s", step2)
 	}
 }
 

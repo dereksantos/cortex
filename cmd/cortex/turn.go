@@ -86,6 +86,13 @@ type TurnResult struct {
 	// prints it dim, both via the shared backendErrorLine (status from
 	// errStatus, message redacted).
 	LastError error
+	// Redactions is the number of secret patterns masked while this turn's
+	// messages were persisted to the on-disk transcript (issue #103). It
+	// counts exactly the in-flight turn (reset at turn start in turn.go), so
+	// a caller can see how much was redacted before the turn's text ever hit
+	// disk. The live in-memory messages are NOT redacted — only what is
+	// persisted is — so this is the only place the count is visible.
+	Redactions int
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -121,6 +128,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
 	defer func() { cs.turnNo = 0 }()
+	// Issue #103: reset the per-turn redaction counter so it counts exactly
+	// this in-flight turn's persisted messages (writeTranscript folds each
+	// message's masked patterns in as they hit the transcript); carried on
+	// TurnResult.Redactions before the turn returns.
+	cs.redactions = 0
 
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
@@ -260,14 +272,16 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		maxIter = maxIterOverride
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
-	// Issue #171: in-turn demotion. Before each main-loop send, shrink the
-	// current turn's accumulated tool results (oldest first, keepRecent stay
-	// verbatim, drain to the low watermark) so a long turn cannot overflow the
-	// window before the next request is built. The hook mutates req in place
-	// (applyInTurnDemotion); under budget it is a byte-for-byte no-op. turnStart
-	// bounds the hook to this turn's own messages — earlier (already demoted
-	// to the outline) turns must not be re-stubbed. Subagent callers build
-	// their own Toolset without this hook, so only the coder turn gets it.
+	// Issue #171 + #180: in-turn demotion. Before each main-loop send, shrink
+	// the whole prompt (hydrated tail + current turn, oldest first, keepRecent
+	// stay verbatim, drain to the low watermark) so a long turn — or a resumed
+	// session with a large hydrated tail — cannot overflow the window before
+	// the next request is built. The hook mutates req in place
+	// (applyInTurnDemotion); under budget it is a byte-for-byte no-op.
+	// turnStart bounds the current turn's span; the hydrated tail's span is
+	// [cs.ws.FrontierMsg(), turnStart) (which may span several turns).
+	// Subagent callers build their own Toolset without this hook, so only the
+	// coder turn gets it.
 	ts.BeforeSend = func(req *AgentRequest) {
 		cs.applyInTurnDemotion(req, turnStart)
 	}
@@ -299,6 +313,23 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		default:
 			return testNote + "\n\n" + lintNote
 		}
+	}
+	// Issue #161: a bound-forced finish (max-iter, token-budget, read-budget,
+	// no-progress, stuck, deadline, error-recovered) skips the clean-finalize
+	// path where FinalizeHook runs — the turn never answered with no tool
+	// calls, so the testwatch and turn-end-lint receipts would vanish exactly
+	// when the work is most likely unfinished. OnForcedFinalize reuses the
+	// SAME raw receipt lines the clean-finalize path reads (the testwatch
+	// tests/debug lines via cs.testwatchReceipt, the raw turn-lint receipt
+	// via cs.runTurnLint) and gives them ONE forced-finishing lead-in that
+	// names the actual stop reason and a single restatement ask — never the
+	// clean-finalize framings ("Before you finish …") or a second
+	// restatement ask wrapped around an already-framed note (two "before you
+	// …" framings and two restatement asks in one message to a small
+	// model). An empty note (nothing to report) leaves the forced answer
+	// untouched, byte for byte — the common case.
+	ts.OnForcedFinalize = func(stats loopStats) string {
+		return cs.forcedFinalizeNote(ctx, stats)
 	}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
@@ -405,6 +436,16 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.costUSD += stats.Cost
 	cs.LastPromptTokens = stats.LastPromptTokens
 	cs.LastCachedTokens = stats.LastCachedTokens
+	// Issue #103: fold this turn's per-turn redaction count (cs.redactions,
+	// reset at turn start and counting exactly the in-flight turn) into the
+	// session-cumulative total so the session summary and the eval journal
+	// report the session-wide total, while TurnResult.Redactions still carries
+	// the per-turn figure. On the success path it is folded AFTER captureTurn
+	// (captureTurn adds the capture's own masking counts to cs.redactions, so
+	// the fold must see them — the session summary records the same total
+	// the journal metadata does, docs/journal.md); on the error path it is
+	// folded BEFORE the unrecovered-error return, so a failed turn still
+	// reports what it redacted before it died.
 	// Issue #141: the "tests changed" receipt is surfaced on the RESULT
 	// (not just the journal) so a caller — REPL, headless `cortex turn`, a
 	// self-dev driver — can print it to a human. Compute it here, after
@@ -427,16 +468,27 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		if pf := pendingFailureOf(err); pf != nil {
 			cs.journalModelFailure(pf, err)
 		}
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt}, err
+		// Issue #103: fold on the error path too — the turn's messages were
+		// already persisted and counted before the failure, so the session
+		// total includes what a failed turn redacted (captureTurn never runs
+		// here, so cs.redactions is exact at this point).
+		cs.redactionsTotal += cs.redactions
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Redactions: cs.redactions}, err
 	}
 
 	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
 	// lines) must be built from the ORIGINAL tool results, not the one-line
 	// wire stubs applyInTurnDemotion left in cs.Request.Messages (item 5); for
 	// a turn demotion never touched the view is identical to the wire copy.
+	// It also masks the capture's own artifacts (web_search/fetch_url lines
+	// and the answer) — issue #103 — adding those counts to cs.redactions.
 	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)))
+	// Issue #103: fold AFTER captureTurn so the session-cumulative total
+	// includes the capture's own masking counts (the journal metadata and the
+	// session summary record the same figure, docs/journal.md).
+	cs.redactionsTotal += cs.redactions
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError, Redactions: cs.redactions}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from
@@ -522,4 +574,75 @@ func (cs *CortexSession) reportRecoverableError(role, model string, cause error)
 	}
 	defer w.Close()
 	_, _ = w.Append(entry)
+}
+
+// forcedFinalizeNote is issue #161's bound-forced counterpart of the
+// FinalizeHook pairing (testwatchFinalizeNote + turnLintAtFinalize, the same
+// receipts cs.turn's FinalizeHook consults at the clean-finalize point): it
+// assembles the forced-finishing note from the RAW receipt lines — the
+// testwatch tests/debug lines via cs.testwatchReceipt, the raw turn-lint
+// receipt via cs.runTurnLint (NOT turnLintAtFinalize, whose "Before you
+// finish …" framing and restatement ask are the clean-finalize path's own
+// delivery wording and would double the framing here) — under ONE
+// forced-finishing lead-in that names the bound that actually forced the
+// finish (the stop reason the run's stats carry: "the tool-call limit" only
+// for max-iter, "the token budget" only for token-budget, a generic "a
+// harness bound" for every other stop reason — never a false cause), and a
+// single restatement ask covering whichever facts are present. So a small
+// model sees exactly one framing and one restate instruction, whichever way
+// the turn was cut off. "" (nothing to report) means the forced answer is
+// left untouched.
+func (cs *CortexSession) forcedFinalizeNote(ctx context.Context, stats loopStats) string {
+	testwatchNote := cs.testwatchReceipt()
+	// The RAW lint receipt, not turnLintAtFinalize's framed note: that
+	// framing ("Before you finish …") and its own restatement ask belong to
+	// the clean-finalize path and would double the framing here. runTurnLint
+	// also stores cs.lintReceipt, so TurnResult.LintReceipt stays populated
+	// on the forced path.
+	lintReceipt := cs.runTurnLint(ctx)
+	if testwatchNote == "" && lintReceipt == "" {
+		return ""
+	}
+	var b strings.Builder
+	switch stats.StopReason {
+	case "max-iter":
+		b.WriteString("The harness cut this turn off at the tool-call limit before you finished — the work is likely incomplete. ")
+	case "token-budget":
+		b.WriteString("The harness cut this turn off at the token budget before you finished — the work is likely incomplete. ")
+	default:
+		b.WriteString("The harness cut this turn off before you finished, at a harness bound — the work is likely incomplete. ")
+	}
+	// What the turn left behind: the raw testwatch lines (tests changed /
+	// leftover debug — the same receipt the journal carries) and/or the
+	// turn-end lint receipt. The lead-in is one: "Before you answer: the
+	// harness detected that this turn …", then the lines, then ONE
+	// restatement ask covering whichever facts are present.
+	testLine := cs.testwatchTestsReceipt()
+	debugLine := cs.testwatchDebugReceipt()
+	b.WriteString("Before you answer: the harness detected that this turn ")
+	switch {
+	case testLine != "" && debugLine != "":
+		b.WriteString("removed or substantially shrank one or more of the project's test files AND left leftover debug prints / scratch files behind — ")
+	case testLine != "":
+		b.WriteString("removed or substantially shrank one or more of the project's test files — ")
+	case debugLine != "":
+		b.WriteString("left leftover debug prints in production files and/or scratch files in the workspace — ")
+	default:
+		// Neither testwatch line is present, so the note is lint-only.
+		b.WriteString("has unresolved lint findings — ")
+	}
+	if testwatchNote != "" {
+		b.WriteString(testwatchNote)
+	}
+	if lintReceipt != "" {
+		if testwatchNote != "" {
+			b.WriteString("\n\n")
+		}
+		// Join the receipt without a forced ". ": it may already end in
+		// punctuation (a budget-hit line ends in ")"), and the restatement
+		// ask below carries its own sentence break.
+		b.WriteString(strings.TrimSuffix(lintReceipt, "."))
+	}
+	b.WriteString(". Restate your complete final answer: first your summary of what you changed and why, then plainly account for every item above — which tests you removed or shrank, which debug prints you added, which scratch files you left behind, and for each lint finding state it and what would fix it. Unfinished work left unreported is a worse failure than a partial answer that names what is missing.")
+	return b.String()
 }
