@@ -101,7 +101,8 @@ type CortexSession struct {
 	LastCachedTokens int
 	// LastOutputTokens is the last response's billed completion tokens — the
 	// status row's "out" figure (issue #109), mirroring LastPromptTokens for
-	// the "in" side. Settled in turn() after each run.
+	// the "in" side. Updated per request in turn()'s onStatusUpdate and
+	// settled to the turn's final request in turn() after the run.
 	LastOutputTokens int
 	Window           int
 	Study            ModelSpec

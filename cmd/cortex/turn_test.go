@@ -1621,6 +1621,52 @@ func TestStatusStatsAssembles(t *testing.T) {
 	}
 }
 
+// TestTurnLastOutputTokensIsLastNotPeak (issue #109 review): LastOutputTokens
+// is the last request's billed completion — the status row's "out" figure,
+// mirroring LastPromptTokens for the "in" side — NOT the turn's peak. A
+// scripted backend whose two requests return different completion sizes
+// (300 then 50) drives the real turn path through the senderOverride seam:
+// the live row sees 50 (the last request) after the turn, not 300 (the peak),
+// and in/out describe the same request (500/50), not two different turns.
+func TestTurnLastOutputTokensIsLastNotPeak(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{
+		Window:  128000,
+		Request: &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "system"}}},
+	}
+	cs.Config = &Config{}
+	cs.senderOverride = multiTurnScriptedSender([]*AgentResponse{
+		{
+			Choices: []Choice{{Index: 0, Message: Message{Role: "assistant", ToolCalls: []ToolCall{
+				{Function: FunctionCall{Name: FunctionReadFile, Arguments: `{"path":"a.txt"}`}},
+			}}, FinishReason: "tool_calls"}},
+			Usage: Usage{PromptTokens: 100, CompletionTokens: 300},
+		},
+		{
+			Choices: []Choice{{Index: 0, Message: Message{Role: "assistant", Content: "done"}, FinishReason: "stop"}},
+			Usage:   Usage{PromptTokens: 500, CompletionTokens: 50},
+		},
+	})
+
+	if _, err := cs.Turn(context.Background(), "test"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	// The "in" side is the last request's billed prompt size — 500, not 100.
+	if cs.LastPromptTokens != 500 {
+		t.Errorf("LastPromptTokens = %d, want 500 (the last request's billed prompt)", cs.LastPromptTokens)
+	}
+	// The "out" side must be the LAST request's billed completion — 50 — not
+	// the turn's peak (300): in/out pair the same request.
+	if cs.LastOutputTokens != 50 {
+		t.Errorf("LastOutputTokens = %d, want 50 (the last response's billed completion, not the turn's peak of 300)", cs.LastOutputTokens)
+	}
+	// The live row's figures mirror the session's settled fields.
+	got := cs.statusStats()
+	if got.InTokens != 500 || got.OutTokens != 50 {
+		t.Errorf("statusStats in/out = %d/%d, want 500/50 (the last request's billed usage)", got.InTokens, got.OutTokens)
+	}
+}
+
 // TestTurnPhaseIdleAfterCompletion guards turn()'s own phase bookkeeping: it
 // should enter phaseThinking at the start and — via its deferred setPhase —
 // land back on phaseIdle once the turn (including a mid-turn tool call) fully

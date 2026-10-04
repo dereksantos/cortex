@@ -377,10 +377,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// the char/4 demotion estimate drifts from what the provider actually
 	// billed at any given moment mid-turn. See contextSample in session.go.
 	iter := 0
-	onStatusUpdate := func(lastPromptTokens, maxTokens int) {
+	onStatusUpdate := func(lastPromptTokens, lastOutputTokens, maxTokens int) {
 		iter++
 		// Update the session's token count for display
 		cs.LastPromptTokens = lastPromptTokens
+		cs.LastOutputTokens = lastOutputTokens
 		tailEstNow := 0
 		if cs.ws != nil {
 			tailEstNow = cs.ws.TailTokens() + estTurnTokens(cs.Request.Messages[turnStart:])
@@ -474,7 +475,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.reasoningTokens += stats.ReasoningTokens
 	cs.costUSD += stats.Cost
 	cs.LastPromptTokens = stats.LastPromptTokens
-	cs.LastOutputTokens = stats.PeakOutputTokens
+	cs.LastOutputTokens = stats.LastOutputTokens
 	cs.LastCachedTokens = stats.LastCachedTokens
 	// Issue #103: fold this turn's per-turn redaction count (cs.redactions,
 	// reset at turn start and counting exactly the in-flight turn) into the
