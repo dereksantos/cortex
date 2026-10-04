@@ -67,7 +67,10 @@ Three capabilities distinguish it:
    playbooks under `.cortex/skills` et al (`internal/skills`) — are indexed
    the same way, injected adjacent to the memory index: only name+description
    sit in context until the model reads a skill's `SKILL.md` with `read_file`
-   on demand, per the standard's progressive-disclosure design. Separately,
+   on demand, per the standard's progressive-disclosure design. A one-line
+   workspace note (the absolute workspace root — `workspaceNote`) is injected
+   on every turn at the same slot, so the model never guesses foreign absolute
+   paths (issue #142). Separately,
    `captureTurn()` records each turn (files edited, commands run, final answer)
    to the append-only journal — mechanical, no model — the record
    `study(.cortex/journal)` reads on demand. See
@@ -116,8 +119,8 @@ commands are the `input ==` checks inside the REPL's input loop (`for {`).
 (`cmd/cortex/context_cmd.go` + `context_grid.go`) renders the current
 session's two-zone context window (docs/context-architecture.md) as a fixed
 8×16 glyph grid spanning the whole model window — one glyph per component
-(system prompt, outline, memory index, skills index, hydrated tail, free
-space), a demote-watermark tick, and a legend — under a header and a
+(system prompt, outline, memory index, skills index, workspace note, hydrated
+tail, free space), a demote-watermark tick, and a legend — under a header and a
 prefix-cache health headline. On an interactive TTY that map opens in the
 **inspector** (`internal/lineedit/inspect.go`): an alternate-screen, scrollable
 view that restores the user's scrollback byte-for-byte on exit. The REPL stays
@@ -134,6 +137,21 @@ Memory is model-driven — ask in natural language ("remember that …" /
 "forget the … note") and the agent calls the memory tools; the old
 `/remember` and `/forget` slash commands were removed with the mechanical
 capture/retract pipeline.
+
+Tab completes in the interactive REPL (issue #108; the engine is pure in
+`internal/lineedit/completion.go`, wired by `cmd/cortex/mentions.go`):
+slash commands, the `/model <id>` argument (bare model ids from one source —
+the slash completer's Sub hook), and `@path` file mentions (workspace-relative,
+`.gitignore`-aware, `..`/absolute escapes refused). First Tab fills the common
+prefix, later Tabs cycle the candidates — each candidate splices in place of
+the word at the cursor, so surrounding text survives. A submitted `@path`
+mention attaches the file to the turn with the same size rules as `read_file`
+(small files inline, large files as a structural outline + pointer to
+study); the mention is replaced by a `[@path attached]` marker in what the
+model sees. Only an `@` starting a whitespace-delimited word is a mention
+(emails and `@types/node`-style names are prose), and a mention that does not
+resolve to a readable file leaves the input unchanged. History records the
+line exactly as typed.
 
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
 ❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
@@ -173,8 +191,20 @@ the model-driven memory tools
   Study's read set plus `write_file`/`edit_file`/`bash`, depth cap 1, Risky
   shell treated as Blocked inside it. Runs as the coder's current model by
   default (optional per-call `model` arg); config gate `tools.enable_agent`.
+- The built-in system prompt carries a locate-first working-style principle
+  (issue #142), spliced into the `# How you work` block and mirrored here
+  verbatim (a drift tripwire, same pattern as the debugging principle under
+  Constraints → Testing):
+
+  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers.
+
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
-  redirects to `study`; large Go files return a declaration skeleton.
+  redirects to `study`; large Go files return a declaration skeleton. A
+  directory returns a bounded listing (directories marked `/`) plus a pointer
+  to `outline`, and a missing path returns an oriented error: it points at
+  `outline`/`grep` instead of guessing, states the workspace root for
+  absolute or out-of-workspace paths, and lists nearby existing candidates
+  (issue #142).
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits. Failure results are self-correcting: an
   ambiguous match lists every occurrence's line number, a not-found match
@@ -206,7 +236,11 @@ the model-driven memory tools
   (per-edit / turn-end / never / inactive).
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked.
+  Blocked. Every refusal (blocked, refused, or declined) carries the shared
+  unknown-value tail from the shellrisk constructors (issue #200), neutral
+  about what the command was for: if it was meant to check something, that
+  result is still unknown — don't guess it, don't substitute a check of
+  something else, mark it unverified.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;
@@ -301,6 +335,8 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
 
 Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
+
+A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,

@@ -250,12 +250,17 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.turnIntent = input
 
 	// Put the memory index (and, adjacent to it, the skills index) in the
-	// fixed wire slot. Never mutate the stored system message: that would
-	// invalidate the prompt cache from byte zero and append duplicate
-	// indexes on every turn. Both notes are coder-only — subagentRequest
-	// (study.go) builds a subagent's opening request from its own static
-	// System + seed and never touches this slot, so neither index reaches
-	// Study/Learn/Agent.
+	// fixed wire slot. The workspace note (issue #142 — the absolute
+	// workspace root, so the model stops guessing foreign paths) rides the
+	// same slot, LAST: the indices are content that changes with memory
+	// writes and skill discovery (rare), the note is one static line for the
+	// session's life — ordering keeps the note's position stable even when
+	// the indices above it change. Never mutate the stored system message:
+	// that would invalidate the prompt cache from byte zero and append
+	// duplicate indexes on every turn. All three notes are coder-only —
+	// subagentRequest (study.go) builds a subagent's opening request from
+	// its own static System + seed and never touches this slot, so none of
+	// them reaches Study/Learn/Agent.
 	//
 	// The full memory section (memoryPromptSection) rides in this same
 	// ephemeral slot when there's something to use it on (notes or demoted
@@ -275,16 +280,26 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		memNote = section + "\n\n" + memNote
 	}
 	note := memNote
-	if skillsNote := cs.skillsIndexNote(); skillsNote != "" {
+	skillsNote := cs.skillsIndexNote()
+	if skillsNote != "" {
 		if note != "" {
 			note += "\n\n"
 		}
 		note += skillsNote
 	}
+	if wsNote := cs.workspaceNote(); wsNote != "" {
+		if note != "" {
+			note += "\n\n"
+		}
+		note += wsNote
+	}
 	cs.Request.EphemeralSystem = note
-	if note != "" {
+	// Count only the memory/skills part as an "injection": the workspace note
+	// rides the same slot but is static for the session's life — counting it
+	// would make "memory injections" grow by one on every single turn.
+	if memNote != "" || skillsNote != "" {
 		cs.injections++
-		cs.injectedChars += len(note)
+		cs.injectedChars += len(memNote) + len(skillsNote)
 	}
 
 	maxTok := cs.Request.MaxTokens

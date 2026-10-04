@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/agent"
@@ -150,4 +151,40 @@ func TestAgentModelArg(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAgentPromptEncodesBlockedCheckGuidance pins issue #200's content for the
+// Agent subagent's system prompt — the headless implementation loop, where
+// Risky shell commands count as Blocked and there is no approver, so this is
+// where blocked checks happen most often. The prompt must carry the same
+// intent as the shared blocked-check principle (cmd/cortex's
+// blockedCheckPrinciple): a blocked or refused check leaves its result
+// unknown, no guessing, no proxy check standing in for it, and anything
+// unverified marked in the report. The keywords are asserted against the
+// Agent prompt only — deliberately loose, rewrite-tolerant checks (the same
+// style as TestDefaultPromptEncodesBlockedCheckGuidance), not exact wording —
+// so the guidance can rephrase without breaking the test, but a revert that
+// drops the idea fails loudly.
+func TestAgentPromptEncodesBlockedCheckGuidance(t *testing.T) {
+	tests := []struct {
+		keyword string
+		intent  string
+	}{
+		{"unknown", "the state: a blocked or refused check leaves its result unknown"},
+		{"guess", "the ban: don't guess the unmeasured result"},
+		{"stand in", "the ban: a check of something else doesn't stand in for the check"},
+		{"unverified", "the obligation: mark anything unverified in the report"},
+	}
+	lower := strings.ToLower(Agent.System)
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(lower, tt.keyword) {
+				t.Errorf("the Agent profile's system prompt no longer encodes the blocked-check guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+		})
+	}
+	// The Study profile has no bash, so a check can never be blocked or
+	// refused for it — its prompt needs none of this guidance. No assertion:
+	// checking the keywords against Study.System would pin a false requirement
+	// and break a legitimate future rewording there.
 }
