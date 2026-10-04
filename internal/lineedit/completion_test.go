@@ -177,10 +177,9 @@ func TestTabCycling(t *testing.T) {
 	t.Run("cycling splices the candidate in place of the mention word, keeping surrounding text", func(t *testing.T) {
 		// The word-level contract: candidates replace the word ending at the
 		// cursor; text before and after the word survives every cycle Tab.
-		// Bare candidates (no "@"): the mention word "@src/" already carries
-		// the marker, so the replacement is the path only — the same shape
-		// PathCompleter.Candidates and the end-to-end acceptance test use.
-		pathCands := []string{"src/main.go", "src/notes.md"}
+		// Path candidates carry the "@" marker (a true replacement for the
+		// typed @-word), so the mention stays a mention end to end.
+		pathCands := []string{"@src/main.go", "@src/notes.md"}
 		getPath := func(line string, cursor int) []string { return pathCands }
 
 		cm := NewCompletions()
@@ -189,21 +188,21 @@ func TestTabCycling(t *testing.T) {
 			t.Errorf("first Tab: line=%q pos=%d, want unchanged (no common prefix to fill)", line, pos)
 		}
 		line, pos, row := cm.Tab(line, pos, getPath) // cycle 1: first candidate
-		if line != "see src/main.go" || pos != 15 || row != "src/main.go" {
-			t.Errorf("cycle Tab = (%q, %d, %q), want (\"see src/main.go\", 15, \"src/main.go\") — \"see \" must survive", line, pos, row)
+		if line != "see @src/main.go" || pos != 16 || row != "@src/main.go" {
+			t.Errorf("cycle Tab = (%q, %d, %q), want (\"see @src/main.go\", 16, \"@src/main.go\") — \"see \" must survive", line, pos, row)
 		}
 		line, pos, row = cm.Tab(line, pos, getPath) // cycle 2: second
-		if line != "see src/notes.md" || pos != 16 || row != "src/notes.md" {
-			t.Errorf("cycle Tab = (%q, %d, %q), want (\"see src/notes.md\", 16, \"src/notes.md\")", line, pos, row)
+		if line != "see @src/notes.md" || pos != 17 || row != "@src/notes.md" {
+			t.Errorf("cycle Tab = (%q, %d, %q), want (\"see @src/notes.md\", 17, \"@src/notes.md\")", line, pos, row)
 		}
 		line, pos, _ = cm.Tab(line, pos, getPath) // wraparound
-		if line != "see src/main.go" || pos != 15 {
-			t.Errorf("wraparound Tab = (%q, %d), want (\"see src/main.go\", 15)", line, pos)
+		if line != "see @src/main.go" || pos != 16 {
+			t.Errorf("wraparound Tab = (%q, %d), want (\"see @src/main.go\", 16)", line, pos)
 		}
 	})
 
 	t.Run("text after the mention word also survives cycling", func(t *testing.T) {
-		pathCands := []string{"src/main.go", "src/notes.md"}
+		pathCands := []string{"@src/main.go", "@src/notes.md"}
 		getPath := func(line string, cursor int) []string { return pathCands }
 
 		// Drive from a known filled state: the mention word "@src/" with text
@@ -218,8 +217,8 @@ func TestTabCycling(t *testing.T) {
 			t.Errorf("first Tab: line=%q pos=%d, want unchanged (no new prefix to fill)", line, pos)
 		}
 		line, pos, _ = cm.Tab(line, pos, getPath) // cycle 1
-		if line != "see src/main.go and @x" || pos != 15 {
-			t.Errorf("cycle Tab = (%q, %d), want (\"see src/main.go and @x\", 15) — text after the word must survive", line, pos)
+		if line != "see @src/main.go and @x" || pos != 16 {
+			t.Errorf("cycle Tab = (%q, %d), want (\"see @src/main.go and @x\", 16) — text after the word must survive", line, pos)
 		}
 	})
 
@@ -518,9 +517,10 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 		// build/ and vendor/ are gitignored (directory rules); *.log hides
 		// debug.log (non-directory rule) but NOT the rest of the tree — the
 		// old bug where one *.log rule hid every path. a/ and keep.log are
-		// offered; the mention marker is NOT part of the candidates (they
-		// replace the typed @-word, which already carries the marker).
-		want := []string{".gitignore", "a/", "keep.log", "main.go", "notes.txt", "src/"}
+		// offered; every candidate carries the "@" marker exactly once (a
+		// candidate is a true replacement for the whole typed @-word, so the
+		// buffer always holds a real mention).
+		want := []string{"@.gitignore", "@a/", "@keep.log", "@main.go", "@notes.txt", "@src/"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@\", 1) = %v, want %v", got, want)
 		}
@@ -528,7 +528,7 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 
 	t.Run("a directory mention lists its children", func(t *testing.T) {
 		got := sortedCands(t, "@src/", 5, p)
-		want := []string{"src/alpha.go", "src/internal.go"}
+		want := []string{"@src/alpha.go", "@src/internal.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@src/\", 5) = %v, want %v", got, want)
 		}
@@ -536,7 +536,7 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 
 	t.Run("a partial name under a directory is prefix-matched", func(t *testing.T) {
 		got := sortedCands(t, "@src/al", 6, p)
-		want := []string{"src/alpha.go"}
+		want := []string{"@src/alpha.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@src/al\", 6) = %v, want %v", got, want)
 		}
@@ -551,7 +551,10 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 		}
 		got = sortedCands(t, "@", 1, p)
 		for _, c := range got {
-			if strings.Contains(c, "vendor") || strings.Contains(c, "build") || strings.HasSuffix(c, ".log") && !strings.HasPrefix(c, "keep.log") {
+			// Candidates carry the "@" marker: strip it so the gitignore
+			// shape checks below apply to the path itself.
+			path := strings.TrimPrefix(c, "@")
+			if strings.Contains(path, "vendor") || strings.Contains(path, "build") || strings.HasSuffix(path, ".log") && !strings.HasPrefix(path, "keep.log") {
 				t.Errorf("top-level candidates include a gitignored path: %v", got)
 			}
 		}
@@ -572,7 +575,7 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 			t.Errorf("Candidates(\"@src/nonexist\", 11) = %v, want nil", got)
 		}
 		got = sortedCands(t, "@src/alpha", 9, p)
-		want := []string{"src/alpha.go"}
+		want := []string{"@src/alpha.go"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("Candidates(\"@src/alpha\", 9) = %v, want %v", got, want)
 		}
@@ -580,10 +583,11 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 
 	t.Run("acceptance splices the candidate in place of the @-word", func(t *testing.T) {
 		// The word-level contract, end-to-end: with "@src/" typed, the
-		// candidates are the src children; the first Tab offers them, the
-		// cycle Tabs splice them in place of the @-word, keeping "see ".
+		// candidates are the src children (each carrying the "@" marker);
+		// the first Tab offers them, the cycle Tabs splice them in place of
+		// the @-word, keeping "see " — and the mention stays a mention.
 		cands := p.Candidates("see @src/", 9)
-		want := []string{"src/alpha.go", "src/internal.go"}
+		want := []string{"@src/alpha.go", "@src/internal.go"}
 		if !reflect.DeepEqual(sortedCands(t, "@src/", 5, p), want) {
 			t.Fatalf("candidates = %v, want %v (sanity)", cands, want)
 		}
@@ -593,12 +597,12 @@ func TestPathCompleterListsWorkspace(t *testing.T) {
 			t.Errorf("first Tab = (%q, %d), want unchanged (no common prefix to fill)", line, pos)
 		}
 		line, pos, _ = cm.Tab(line, pos, func(string, int) []string { return cands }) // cycle 1: first candidate
-		if line != "see src/alpha.go" || pos != 16 {
-			t.Errorf("cycle Tab = (%q, %d), want (\"see src/alpha.go\", 16)", line, pos)
+		if line != "see @src/alpha.go" || pos != 17 {
+			t.Errorf("cycle Tab = (%q, %d), want (\"see @src/alpha.go\", 17)", line, pos)
 		}
 		line, pos, _ = cm.Tab(line, pos, func(string, int) []string { return cands }) // cycle 2: second
-		if line != "see src/internal.go" || pos != 19 {
-			t.Errorf("cycle Tab = (%q, %d), want (\"see src/internal.go\", 19)", line, pos)
+		if line != "see @src/internal.go" || pos != 20 {
+			t.Errorf("cycle Tab = (%q, %d), want (\"see @src/internal.go\", 20)", line, pos)
 		}
 	})
 }

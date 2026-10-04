@@ -316,9 +316,10 @@ func (m ModelCompleter) Candidates(line string, cursor int) []string {
 // way tools.ConfinePath confines a tool's path argument: absolute paths and
 // `..` escapes are refused outright, and a resolved path that leaves the
 // workspace via a symlink is refused too. Directories are offered with a
-// trailing "/" so a later Tab descends into them; the mention marker "@" stays
-// on the left of every candidate, so acceptance fills the buffer with the
-// complete mention.
+// trailing "/" so a later Tab descends into them; the mention marker "@" sits
+// on the left of every candidate, so a candidate is a true replacement for
+// the whole typed word ("@src/al" → "@src/alpha.go") and the buffer always
+// holds a real mention.
 type PathCompleter struct {
 	// Root is the workspace root (usually the CWD). Empty means os.Getwd().
 	Root string
@@ -372,13 +373,11 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 	if dir == "" {
 		return nil
 	}
-	// relAt is the mention path (minus @) as seen FROM dir: "" when dir is
-	// the workspace root, otherwise the rel prefix up to and including dir —
-	// without the "@", because a candidate is the replacement for the word
-	// ending at the cursor: the user has already typed the "@", and the
-	// engine splices the candidate in place of the whole word, so every
-	// candidate carries the marker exactly once.
-	relAt := strings.TrimSuffix(rel, tail)
+	// relAt is the mention path as seen FROM dir, INCLUDING the "@" marker
+	// ("@", "@src/") — ""-trimmed only of the typed tail: it is the typed
+	// word's prefix, and every candidate must carry the marker exactly once
+	// (a candidate replaces the whole typed word, "@src/al", so "@" stays).
+	relAt := "@" + strings.TrimSuffix(rel, tail)
 	if relAt != "" && !strings.HasSuffix(relAt, string(filepath.Separator)) {
 		relAt += string(filepath.Separator)
 	}
@@ -425,10 +424,12 @@ func withinRoot(dir, root string) bool {
 	return true
 }
 
-// listDir offers the immediate children of dir (a known-existing directory the
-// user typed a complete mention for). Files as-is, directories with "/". rel
-// is the mention path already typed WITHOUT the @ marker; it ends with "/" for
-// a directory mention ("src/") or is the bare directory name ("src").
+// listDir offers the immediate children of dir (a known-existing directory
+// the user typed a complete mention for). Files as-is, directories with
+// "/". rel is the mention path already typed WITHOUT the @ marker; it ends
+// with "/" for a directory mention ("src/") or is the bare directory name
+// ("src"). Candidates carry the "@" marker: they replace the whole typed
+// @-word, so the buffer always holds a real mention.
 func (p PathCompleter) listDir(dir, rel string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -447,7 +448,7 @@ func (p PathCompleter) listDir(dir, rel string) []string {
 		if rel != "" && !strings.HasSuffix(rel, string(filepath.Separator)) {
 			sep = string(filepath.Separator) // the typed dir has no trailing "/" yet
 		}
-		cand := rel + sep + e.Name()
+		cand := "@" + rel + sep + e.Name()
 		if e.IsDir() {
 			cand += string(filepath.Separator)
 		}
@@ -463,8 +464,9 @@ func (p PathCompleter) listDir(dir, rel string) []string {
 }
 
 // completeUnder offers children of dir whose names begin with the typed tail.
-// relAt is the mention path (minus @) as seen from dir: "" for the workspace
-// root, "src/" for a nested directory. The typed tail may span several
+// relAt is the mention path as seen from dir, INCLUDING the "@" marker: "@"
+// for the workspace root, "@src/" for a nested directory — every candidate it
+// prefixes carries the marker exactly once. The typed tail may span several
 // segments ("src/in": nearest existing ancestor "src", tail "in"): the FIRST
 // segment is prefix-matched against names, and a directory match with a
 // remaining tail is descended into.
@@ -529,9 +531,14 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 // same two-part check tools.ConfinePath uses: lexical containment plus
 // symlink-resolved containment. Refusing a candidate here is what makes
 // "@../../etc/passwd" (or a symlinked escape) simply never appear.
+//
+// Candidates carry the "@" mention marker (they replace the whole typed
+// @-word); it is stripped before the containment check, which is workspace-
+// relative path logic.
 func (p PathCompleter) confined(rel string) bool {
 	root := p.RootAbs()
-	abs := filepath.Join(root, filepath.Clean(rel))
+	path := strings.TrimPrefix(rel, "@")
+	abs := filepath.Join(root, filepath.Clean(path))
 	if !withinRoot(abs, root) {
 		return false
 	}

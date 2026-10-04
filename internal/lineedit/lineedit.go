@@ -41,9 +41,10 @@ func (t *Terminal) SetHistory(h *History) { t.history = h }
 
 // SetCompletion wires the Tab-completion sources (issue #108): slash commands,
 // the /model continuation, and @path mentions. Passing a nil map (or leaving
-// it unset) disables completion entirely — Tab then behaves like any other
-// unbound key (no state change), which is also exactly what the non-TTY path
-// does, since it never reaches ReadLine at all.
+// it unset) disables completion entirely — Tab is then inserted as a literal
+// character and the line passes through as typed (see readLineWith's keyTab
+// case), which is also exactly what the non-TTY path does, since it never
+// reaches ReadLine at all.
 func (t *Terminal) SetCompletion(c map[string]Completer) { t.completers = c }
 
 // AddHistory records a submitted line for recall. The caller chooses what to

@@ -145,38 +145,35 @@ func TestProcessMentionsLargeFileOutlines(t *testing.T) {
 }
 
 // TestMentionCompleterSingleModelSource drives the REAL wired completers
-// (mentionCompleter's map shape, as cmd/cortex/main.go installs them) for a
-// /model continuation: every model id must appear exactly once in the
-// candidate list — the old double wiring (SlashCompleter.Sub AND a separate
-// "model" entry) listed each id twice and never filled the prefix on the
-// first Tab. The ids are word-level (bare model names), so the first Tab
-// fills the common model-id prefix in place of the argument.
+// (the map mentionCompleter builds, with the id list injected through the
+// modelIDs seam) through the REAL lineedit engine for a /model continuation:
+// every model id must appear exactly once in the candidate list — the old
+// double wiring (SlashCompleter.Sub AND a separate "model" entry) listed each
+// id twice and never filled the prefix on the first Tab. The ids are
+// word-level (bare model names), so the first Tab fills the common model-id
+// prefix in place of the argument.
 func TestMentionCompleterSingleModelSource(t *testing.T) {
+	root := setupMentionWorkspace(t)
 	names := []string{"qwen/qwen3-coder:free", "tencent/hy3:free"}
-	commands := []string{
-		"/clear", "/compact", "/context", "/help", "/hook",
-		"/model", "/plan", "/quit", "/sessions",
-	}
-	// The map exactly as mentionCompleter builds it (minus the session's
-	// live model list, which the Sub hook's Names func stands in for):
-	// ONE source for /model, the slash completer's Sub hook — no separate
-	// "model" entry.
-	completers := map[string]lineedit.Completer{
-		"slash": lineedit.SlashCompleter{
-			Commands: commands,
-			Sub: func(line string, cursor int) []string {
-				if !strings.HasPrefix(line, "/model ") {
-					return nil
-				}
-				return lineedit.ModelCompleter{Names: func() []string { return names }}.Candidates(line, cursor)
-			},
-		},
-		"path": lineedit.PathCompleter{Root: t.TempDir(), MaxCandidates: 50},
-	}
+	orig := modelIDs
+	modelIDs = func(*CortexSession) []string { return names }
+	defer func() { modelIDs = orig }()
 
-	// Merged exactly as Terminal.completionCandidates merges them —
-	// including the "model" slot (absent here), so a regression re-adding
-	// it would double every id in this merged list.
+	// A minimal session: root() resolves the PathCompleter's root and
+	// Request.Model feeds modelIDs. The map comes from the REAL
+	// mentionCompleter — if a regression re-added a separate "model" entry,
+	// the merge below (Terminal.completionCandidates' fixed slot order,
+	// slash → model → path) would double every id and this test would fail
+	// instead of going unnoticed.
+	session := &CortexSession{
+		Request:   &AgentRequest{Model: names[0]},
+		workspace: &Workspace{Root: root},
+	}
+	completers := mentionCompleter(session)
+
+	// Merged in the engine's fixed slot order (slash, model, path) — the
+	// same merge Terminal.completionCandidates runs before handing a Tab to
+	// Completions.
 	var cands []string
 	for _, k := range []string{"slash", "model", "path"} {
 		if c, ok := completers[k]; ok {
@@ -190,7 +187,9 @@ func TestMentionCompleterSingleModelSource(t *testing.T) {
 		t.Errorf("candidates[0] = %q, want the bare id (word-level: it replaces the argument word)", cands[0])
 	}
 
-	// The first Tab fills the common model-id prefix into the argument.
+	// The real engine: the first Tab fills the common model-id prefix into
+	// the argument, leaving "/model " intact — the behavior that only works
+	// when there is exactly one source for the ids.
 	cm := lineedit.NewCompletions()
 	line, pos, _ := cm.Tab("/model q", 8, func(string, int) []string { return cands })
 	if line != "/model qwen/qwen3-coder:free" || pos != 28 {

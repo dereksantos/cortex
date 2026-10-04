@@ -134,6 +134,13 @@ func outlineFile(path string) (string, error) {
 // "model" entry here would double every id in the candidate row and break the
 // first-Tab fill, since the engine fills against the word at the cursor — and
 // "/model <id>" is never a prefix of the typed argument word.)
+//
+// modelIDs is a var (not a func) so a test can inject its own id list and
+// drive the REAL map mentionCompleter builds instead of hand-copying its
+// shape — a regression in the wiring (e.g. a separate "model" entry
+// re-appearing) fails the test instead of going unnoticed.
+var modelIDs = modelIDsImpl
+
 func mentionCompleter(session *CortexSession) map[string]lineedit.Completer {
 	// The fixed slash-command set (the REPL's vocabulary, passed in so
 	// lineedit stays free of cmd/cortex).
@@ -161,9 +168,9 @@ func mentionCompleter(session *CortexSession) map[string]lineedit.Completer {
 	}
 }
 
-// modelIDs returns the set of model ids the /model command can switch to:
+// modelIDsImpl returns the set of model ids the /model command can switch to:
 // the currently bound code/study models plus every id the fleet knows.
-func modelIDs(session *CortexSession) []string {
+func modelIDsImpl(session *CortexSession) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(id string) {
