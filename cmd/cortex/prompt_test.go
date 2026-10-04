@@ -392,6 +392,66 @@ func TestDebugPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 }
 
+// TestDefaultPromptEncodesLocateFirst pins issue #142's locate-first
+// principle in the built-in SystemPrompt: the prompt must tell the model to
+// locate before it reads (outline/grep to find where content lives, then
+// read_file only the needed spans), never to invent or guess file paths,
+// never to re-read content already present in context, and never to read
+// files with bash `cat`/`sed`/`head`. The check is on loose keywords (the
+// principle, not the exact wording), so a future rewrite can rephrase without
+// breaking this test as long as the idea survives — the same loose style as
+// TestDefaultPromptEncodesDebugGuidance.
+func TestDefaultPromptEncodesLocateFirst(t *testing.T) {
+	lower := strings.ToLower(SystemPrompt)
+	for _, keyword := range []string{
+		"outline", // locate with outline/grep before reading
+		"grep",    // locate with grep before reading
+		"read",    // read only what you need (read_file, re-read)
+		"guess",   // never invent or guess file paths
+		"bash",    // never use bash cat/sed/head to read files
+		"cat",     // the bash readers to avoid
+		"context", // never re-read content already in context
+	} {
+		if !strings.Contains(lower, keyword) {
+			t.Errorf("built-in prompt no longer encodes the locate-first principle (missing %q)", keyword)
+		}
+	}
+}
+
+// TestDefaultPromptEncodesLocateFirstPosition pins the issue #142 principle's
+// POSITION in the built-in prompt: the locate-first working-style principle
+// (locateFirstPrinciple, spliced into SystemPrompt in the "# How you work"
+// block) must sit in that block, before "# How you communicate". This is a
+// position check, not a content check — the content is pinned by
+// TestDefaultPromptEncodesLocateFirst (loose keywords) and
+// TestLocateFirstPrincipleMirroredInClaudeMD (verbatim mirror in CLAUDE.md). A
+// rewrite that moves the principle into a different section (or a different
+// prompt slot) fails here, even if the wording survives.
+func TestDefaultPromptEncodesLocateFirstPosition(t *testing.T) {
+	if i := strings.Index(SystemPrompt, locateFirstPrinciple); i < 0 {
+		t.Fatal("the locate-first working-style principle is not in the built-in prompt")
+	} else if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the locate-first working-style principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+}
+
+// TestLocateFirstPrincipleMirroredInClaudeMD is the issue #142 consistency
+// tripwire: CLAUDE.md's "The agent's tools" section must mirror the EXACT
+// same locate-first guidance the model actually receives in the built-in
+// prompt (locateFirstPrinciple) — the docs describe the guidance, so the two
+// can't drift apart. It reads the file from the module root (the test's
+// working directory is the package dir, cmd/cortex), so it passes wherever
+// the checkout lives.
+func TestLocateFirstPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	if !strings.Contains(string(data), locateFirstPrinciple) {
+		t.Error("CLAUDE.md's \"The agent's tools\" section no longer mirrors the built-in prompt's locate-first working-style principle verbatim (locateFirstPrinciple) — the docs and the prompt have drifted apart")
+	}
+}
+
 // TestDefaultPromptEncodesFailingTestGuidance pins issue #177's content: the
 // built-in prompt must treat an existing test's expected value as evidence —
 // the burden of proof lands on a change that disagrees with it, and rewriting

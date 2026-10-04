@@ -362,6 +362,38 @@ const memoryIndexCap = 4000
 // limits.user_memory_index_cap_chars — see Config.userMemoryIndexCapChars.
 const userMemoryIndexCap = 1500
 
+// workspaceRootForNote resolves the workspace root the turn-start workspace
+// note states (issue #142): the session's resolved Workspace when set, else
+// the current working directory. "" only when neither is resolvable. Shared
+// by workspaceNote (the injection) and workspaceLegendDetail (/context's
+// legend row) so the wire and the legend can never disagree.
+func (cs *CortexSession) workspaceRootForNote() string {
+	if cs.workspace != nil && cs.workspace.Root != "" {
+		return cs.workspace.Root
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
+}
+
+// workspaceNote renders the turn-start workspace injection (issue #142):
+// one line naming the absolute workspace root so the model never falls back
+// on remembered layouts from other environments (/testbed, /go/src/…, cd
+// /Users/…) and never has to guess where it stands. It is injected for
+// EVERY turn (not gated on notes or outline, like the memory index) because
+// a fresh session's first tool calls are exactly where path guessing bites.
+// "" only when no workspace is resolvable at all (workspaceRootForNote's ""
+// case) — there is no root to state, and the CWD is what every tool
+// resolves relative to anyway.
+func (cs *CortexSession) workspaceNote() string {
+	root := cs.workspaceRootForNote()
+	if root == "" {
+		return ""
+	}
+	return fmt.Sprintf("Workspace: %s is this session's workspace root (absolute path). All tool paths are relative to it — never guess other absolute paths (e.g. /testbed, /go/src/...) or cd elsewhere; use outline or grep to find what you need.", root)
+}
+
 // memoryIndexNote renders the turn-start memory injection: the user tier
 // FIRST, then the project tier (docs/cross-source-learning.md piece 1) — a
 // cross-project fact is the more load-bearing one to keep visible, so it

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/agent"
@@ -55,6 +56,37 @@ func TestRegisterEmptyRolePanics(t *testing.T) {
 		}
 	}()
 	Register(Subagent{Name: "no-role"})
+}
+
+// TestStudyAndAgentSystemForbidBashFileReads pins issue #142's locate-first
+// guidance at the subagent seam: BOTH the Study and Agent system prompts must
+// tell the model not to read files with bash shell commands — use
+// read_file/outline/grep instead. Study has no bash tool, so the guidance is
+// framed as "don't read files with shell commands"; Agent has bash, so the
+// guidance rides on its bash bullet. The check is on a stable substring that
+// must survive in both (the "read_file/outline/grep" reader trio), not the
+// exact wording, so a rephrase keeps the test green as long as the principle
+// does.
+func TestStudyAndAgentSystemForbidBashFileReads(t *testing.T) {
+	for name, sys := range map[string]string{
+		"study": studySystem,
+		"agent": agentSystem,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lower := strings.ToLower(sys)
+			// Both prompts must name the reader trio as the file-reading path…
+			if !strings.Contains(lower, "read_file/outline/grep") {
+				t.Errorf("%s system prompt must name the readers (read_file/outline/grep), got:\n%s", name, sys)
+			}
+			// …and must carry an explicit prohibition on reading files via the shell.
+			if !strings.Contains(lower, "read files") && !strings.Contains(lower, "read file") {
+				t.Errorf("%s system prompt must prohibit reading files with the shell, got:\n%s", name, sys)
+			}
+			if !strings.Contains(lower, "bash") && !strings.Contains(lower, "shell") {
+				t.Errorf("%s system prompt must name the shell as the prohibited file-reading path, got:\n%s", name, sys)
+			}
+		})
+	}
 }
 
 // fakeSubagentDeps embeds headlessDeps for every method Execute needs but this

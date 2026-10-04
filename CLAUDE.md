@@ -67,7 +67,10 @@ Three capabilities distinguish it:
    playbooks under `.cortex/skills` et al (`internal/skills`) — are indexed
    the same way, injected adjacent to the memory index: only name+description
    sit in context until the model reads a skill's `SKILL.md` with `read_file`
-   on demand, per the standard's progressive-disclosure design. Separately,
+   on demand, per the standard's progressive-disclosure design. A one-line
+   workspace note (the absolute workspace root — `workspaceNote`) is injected
+   on every turn at the same slot, so the model never guesses foreign absolute
+   paths (issue #142). Separately,
    `captureTurn()` records each turn (files edited, commands run, final answer)
    to the append-only journal — mechanical, no model — the record
    `study(.cortex/journal)` reads on demand. See
@@ -116,8 +119,8 @@ commands are the `input ==` checks inside the REPL's input loop (`for {`).
 (`cmd/cortex/context_cmd.go` + `context_grid.go`) renders the current
 session's two-zone context window (docs/context-architecture.md) as a fixed
 8×16 glyph grid spanning the whole model window — one glyph per component
-(system prompt, outline, memory index, skills index, hydrated tail, free
-space), a demote-watermark tick, and a legend — under a header and a
+(system prompt, outline, memory index, skills index, workspace note, hydrated
+tail, free space), a demote-watermark tick, and a legend — under a header and a
 prefix-cache health headline. On an interactive TTY that map opens in the
 **inspector** (`internal/lineedit/inspect.go`): an alternate-screen, scrollable
 view that restores the user's scrollback byte-for-byte on exit. The REPL stays
@@ -188,8 +191,20 @@ the model-driven memory tools
   Study's read set plus `write_file`/`edit_file`/`bash`, depth cap 1, Risky
   shell treated as Blocked inside it. Runs as the coder's current model by
   default (optional per-call `model` arg); config gate `tools.enable_agent`.
+- The built-in system prompt carries a locate-first working-style principle
+  (issue #142), spliced into the `# How you work` block and mirrored here
+  verbatim (a drift tripwire, same pattern as the debugging principle under
+  Constraints → Testing):
+
+  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers.
+
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
-  redirects to `study`; large Go files return a declaration skeleton.
+  redirects to `study`; large Go files return a declaration skeleton. A
+  directory returns a bounded listing (directories marked `/`) plus a pointer
+  to `outline`, and a missing path returns an oriented error: it points at
+  `outline`/`grep` instead of guessing, states the workspace root for
+  absolute or out-of-workspace paths, and lists nearby existing candidates
+  (issue #142).
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits. Failure results are self-correcting: an
   ambiguous match lists every occurrence's line number, a not-found match
