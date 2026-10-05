@@ -217,7 +217,10 @@ func (headlessDeps) SummarizeText(context.Context, string, string, int) (string,
 	return "", false, errors.New("summarize unavailable: no session")
 }
 func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool) {
-	v := shellrisk.Classify(ctx, command, nil)
+	// The headless stub has no session, so no taint state: the classifier
+	// note is "" (issue #102 threads the session's taint through the real
+	// gate only, and there is no judge call here either — fn is nil).
+	v := shellrisk.Classify(ctx, command, "", nil)
 	switch v.Level {
 	case shellrisk.Safe:
 		return "", true
@@ -1352,6 +1355,15 @@ func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) 
 	// it never touches trust.
 	hookArg, _ := tc.StringArg("hook")
 	hookSkip := strings.TrimSpace(hookArg) == "skip"
+	// Issue #102: on a tainted turn the workspace is the write boundary —
+	// a page that steered the request must not get an escape-the-workspace
+	// write waved through as ordinary work. Untainted turns pass through
+	// untouched (today's behavior, absolute paths and all). Confined before
+	// the action line prints and before any filesystem touch; the post-edit
+	// hook path below is unaffected — a write that passes still hooks.
+	if err := ConfineWrites(tc, deps); err != nil {
+		return "", err
+	}
 	printToolAction(deps, fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
@@ -1468,6 +1480,13 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 	hookSkip := strings.TrimSpace(a.Hook) == "skip"
+
+	// Issue #102: the tainted-turn write boundary, same as writeFile —
+	// escape paths are rejected before any filesystem touch; untainted
+	// calls and the post-edit hook path are unchanged.
+	if err := ConfineWrites(tc, deps); err != nil {
+		return "", err
+	}
 
 	edits := a.Edits
 	multi := len(edits) > 0
@@ -2032,6 +2051,13 @@ func removePath(tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	path, err := tc.StringArg("path")
 	if err != nil {
+		return "", err
+	}
+	// Issue #102: on a tainted turn, confine to the workspace root — the
+	// deleteRoot below may be configured narrower, but the taint floor
+	// applies even when the configured root is wider (or absent): an
+	// escape rejected here carries ConfinePath's shape + the taint reason.
+	if err := ConfineWrites(tc, deps); err != nil {
 		return "", err
 	}
 	abs, err := confinedPath(root, path)

@@ -289,6 +289,21 @@ type CortexSession struct {
 	// outside a turn.
 	sameActionBlocked map[string]bool
 
+	// taint is the per-turn untrusted-content taint (issue #102): set when
+	// attacker-controllable web content (a fetch_url / web_search result,
+	// detected by its framing marker in coderDispatcher, loop.go) enters the
+	// conversation. While the turn is tainted, gateShell raises the bar for
+	// Risky shell commands: an interactive approver is asked with the taint
+	// reason appended (the intent judge's Safe verdict no longer waves a
+	// Risky command through — see tool_deps.go), and with no approver
+	// reachable (headless, subagent, timeout) the command is blocked with
+	// shellrisk.TaintBlockedMessage. Same lifecycle as sameActionBlocked
+	// (issue #169): inert outside a turn (turnNo == 0 — record drops, the
+	// gate never consults it), explicitly cleared at the START of every
+	// turn in turn.go so a turn that errored or was interrupted before its
+	// end cannot leak the taint into the next one. Nil between turns.
+	taint *untrustedTaint
+
 	sessionStart    time.Time
 	turnStart       time.Time // in-flight turn's start (issue #109: the status row's elapsed clock); zero between turns
 	turns           int
@@ -625,6 +640,11 @@ func (cs *CortexSession) AttributionProject() string {
 // ValidateToolCall provides dynamic validation for tool calls beyond config.
 // Returns (true, "") if valid, (false, message) if invalid.
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
+	// Issue #102's taint rules live at the tools themselves, not here:
+	// write_file / edit_file / remove_path each confine their path with
+	// tools.ConfineWrites before touching the filesystem, and RunSubagent
+	// hands this session to the child as its ToolDeps — so the in-tool check
+	// covers the subagent leg too, and bash pushes are gateShell's floor.
 	switch tc.Function.Name {
 	case "context_adjust_watermarks":
 		// Validate watermarks are within bounds (±highWM/2 — mirrors

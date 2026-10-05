@@ -21,10 +21,10 @@ import (
 // risk gate permits it — the old "not supported" rejection is gone. The gate,
 // not the tokenizer, is what governs whether a command runs.
 func TestBashShellSyntax(t *testing.T) {
-	stubSafe := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubSafe := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Safe, "test: safe", nil
 	}
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test: risky", nil
 	}
 
@@ -286,7 +286,7 @@ func TestSameActionLedger(t *testing.T) {
 	// for the commands the scenarios use (git history writes and hook-
 	// disabling flags are Risky; curl is gray-zone Risky; `ls`/`git status`
 	// are read-only Safe) and lets one stub drive every scenario.
-	stub := func(_ context.Context, command string) (shellrisk.Level, string, error) {
+	stub := func(_ context.Context, command, _ string) (shellrisk.Level, string, error) {
 		if shellrisk.EffectClass(command) != "" {
 			return shellrisk.Risky, "test: always risky", nil
 		}
@@ -398,7 +398,7 @@ func TestSameActionLedger(t *testing.T) {
 // that was blocked in one turn may be re-evaluated by the risk gate in the
 // next (it is refused again by the gate, but NOT by the stale ledger).
 func TestSameActionLedger_ResetsOnNewTurn(t *testing.T) {
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test: always risky", nil
 	}
 	cs := &CortexSession{classifyShell: stubRisky, quiet: true}

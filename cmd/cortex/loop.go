@@ -1278,6 +1278,22 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		if err != nil {
 			return "Error: " + err.Error()
 		}
+		// Issue #102: untrusted-content taint detection. Any observation
+		// carrying the framing wrapper (tools.ObservationIsUntrustedContent
+		// matches the banner this package's wrapper stamps — fetch_url and
+		// web_search frame every result, "no results" included) taints the
+		// turn: a later bash GateShell call consults the taint and raises
+		// approval for Risky commands (tool_deps.go), and the event is
+		// journalled best-effort inside the record call. Detection is on the
+		// OBSERVATION, not on the tool name: the framing is the signal, so a
+		// tool outside the web pair that somehow emits the banner taints too
+		// (fail-closed), and a page cannot forge the banner at the
+		// observation's start or strip it from itself. Skipped when the
+		// observation is an error — the tool returned no content to trust or
+		// distrust.
+		if tools.ObservationIsUntrustedContent(out) {
+			cs.recordUntrustedContent(call.Function.Name)
+		}
 		return out
 	})
 }
