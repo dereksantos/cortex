@@ -1,6 +1,6 @@
 // inspect.go — the alternate-screen "inspector": an on-demand full-screen,
 // scrollable view for the few surfaces that genuinely want a whole screen
-// (/context today; /sessions and a memory browser later).
+// /context today; the session picker and a memory browser later).
 //
 // The REPL is scrollback-native by decision: output goes to the normal
 // terminal buffer so copy-paste, search, and piping all keep working. An
@@ -27,6 +27,13 @@
 // structure. A View's own body is passed through verbatim — the /context grid's
 // cells are information-bearing (a map of the window), not decoration, and the
 // harness must not second-guess them.
+//
+// A view can also be interactive rather than read-only, by implementing the
+// optional Accepter, Filterer, and Selecter interfaces: the harness then routes
+// Enter, Backspace, and typed runes to it (so a filter box can hold the
+// keyboard) and tracks a row cursor that up/down/page/g/G move. Those are
+// strictly additive — a view that implements nothing but Title and Lines is
+// driven exactly as before, keys and frame included.
 package lineedit
 
 import (
@@ -52,7 +59,9 @@ import (
 //
 // Adopting the harness is exactly this: implement Title and Lines, then call
 // Terminal.Inspect(view). Scrolling, paging, resize, key handling, and the
-// enter/restore dance are the harness's job, not the view's.
+// enter/restore dance are the harness's job, not the view's. A view that wants
+// to pick instead of merely display adds Accept, Filter, SetFilter, and
+// Selected — see Accepter, Filterer, and Selecter.
 type View interface {
 	Title() string
 	Lines(width int) []string
@@ -92,6 +101,12 @@ type pollSource interface {
 // inspectAction is the harness's key vocabulary — deliberately tiny. A view
 // does not get to bind keys; every inspector scrolls the same way, so muscle
 // memory carries from /context to whatever adopts this next.
+//
+// The last three entries — Enter, Backspace, and a plain printable rune — are
+// the interactive set: they exist so a view can offer a filter box and a
+// pick-with-Enter affordance instead of being a read-only page. Only views
+// that opt in (Filterer, Selecter) are told about them; the plain list
+// (/context) simply ignores them, exactly as it ignores the cursor.
 type inspectAction int
 
 const (
@@ -103,25 +118,106 @@ const (
 	inspectPageDown
 	inspectTop
 	inspectBottom
+	// inspectEnter is the acceptance key. The harness always stops scrolling on
+	// it and hands the action to an Accepter; nothing else about it is
+	// harness-level, because "what does accepting mean" is the view's business.
+	inspectEnter
+	// inspectBackspace edits the view's filter leftward (Filterer).
+	inspectBackspace
+	// inspectRune appends key.r to the view's filter. The rune travels in
+	// inspectEvent, not in the action value, so the vocabulary stays a closed
+	// set of constants rather than a rune masquerading as one.
+	inspectRune
 )
+
+// inspectEvent is one decoded keystroke: which action it maps to, and for
+// inspectRune the rune itself.
+type inspectEvent struct {
+	action inspectAction
+	r      rune
+}
+
+// Accepter is an optional view interface for the acceptance key. A view that
+// implements it is told when the user hit Enter, so it can treat the selected
+// row as a choice rather than as text on a page — typically by leaving (a
+// picker cancels the inspector the way Escape does) or by recording the pick
+// for its builder to read afterwards. There is deliberately no return channel:
+// a harness that reported a value would have to decide what acceptance means,
+// which is the mistake this seam exists to avoid.
+type Accepter interface {
+	Accept()
+}
+
+// Filterer is an optional view interface for views that narrow their own rows
+// by text. The harness owns no filter state: it appends the typed rune and
+// deletes one on Backspace, and nothing else — the string it hands to
+// SetFilter is what the view's Filter returns plus one keystroke, so the filter
+// semantics (case, substring vs. prefix, which fields match, what an empty
+// filter shows) stay in the view, where they belong.
+type Filterer interface {
+	Filter() string
+	SetFilter(s string)
+}
+
+// Selecter is an optional view interface: which row the user's cursor is on,
+// as an index into the rows the view is currently showing (its filtered list,
+// not the full one). It is read-only and purely informational — the harness
+// itself never consults it, because scrolling a plain list does not care which
+// row is highlighted. It exists so the caller of Inspect can ask the view what
+// was selected once the user has accepted, without the harness having to know
+// that picking is what the view is for. A view with no rows to select returns a
+// negative index.
+type Selecter interface {
+	Selected() int
+}
+
+// Cursorer is an optional view interface for a selectable view: the harness
+// tells it which row the cursor is on, immediately before each repaint. The
+// harness deliberately does not mark the row itself — a View's body is passed
+// through verbatim, and whether the highlight is a bold row, a leading marker,
+// or nothing at all is presentation the view owns. A view that does not
+// implement it is never told, so its bytes stay exactly what Lines returned.
+type Cursorer interface {
+	SetCursor(i int)
+}
 
 // inspectRun is one open inspector. top is the body index shown on the first
 // body row; viewH and bodyLen are carried from the last render so a paging key
 // can be applied before the next one recomputes them.
+//
+// cursor is the interactive half: the highlighted row, -1 when the list has no
+// rows. For a view that is not a Selecter it stays at -1 and every cursor key
+// degrades to the plain scroll it always was, which is what keeps /context
+// byte-identical. topMin records how far down the top of the window has been,
+// the floor a back-up scroll may not rise above while the cursor is visible —
+// see moveCursorTo.
 type inspectRun struct {
 	out    io.Writer
 	src    pollSource
 	sizeFn func() (cols, rows int)
 	view   View
 
+	selectable bool // view implements Selecter: the row cursor is live
+	filterable bool // view implements Filterer: printable keys edit its filter
+
 	top     int
 	viewH   int
 	bodyLen int
 	last    string // last frame written, so an unchanged frame costs no bytes
+	cursor  int    // highlighted row; -1 when the list has no rows (see render)
+	// filterChanged is set by a keystroke that edited the view's filter and
+	// cleared once render has re-parked the cursor on the first match. It is the
+	// one signal that distinguishes "the list changed because the user typed"
+	// from "the list changed because the world did" (a live view re-pulled on an
+	// idle tick), which is what keeps a placed cursor where it was put.
+	filterChanged bool
 }
 
 // runInspect drives one inspector to completion, returning when the user quits
-// (q / ESC / Ctrl-C / Ctrl-D) or the input stream ends.
+// (q / ESC / Ctrl-C / Ctrl-D) or the input stream ends. Enter is not one of
+// them: on Enter the harness tells an Accepter to accept and keeps the screen
+// up, so a view that picks does its own leaving, and one that does not simply
+// ignores the key.
 //
 // A panic in the view is recovered and returned as an error rather than
 // unwound: the caller's deferred restore would put the terminal back either
@@ -134,6 +230,8 @@ func runInspect(out io.Writer, src pollSource, sizeFn func() (int, int), v View)
 		}
 	}()
 	r := &inspectRun{out: out, src: src, sizeFn: sizeFn, view: v}
+	_, r.selectable = v.(Selecter)
+	_, r.filterable = v.(Filterer)
 	return r.loop()
 }
 
@@ -154,22 +252,62 @@ func (r *inspectRun) loop() error {
 			r.render()
 			continue
 		}
-		if r.decode(b) == inspectQuit {
+		if r.decode(b).action == inspectQuit {
 			return nil
 		}
 		r.render()
 	}
 }
 
-// decode maps one first-byte to an action and applies it. Returns inspectQuit
+// decode maps one first-byte to an event and applies it. Returns inspectQuit
 // when the user asked to leave. Escape sequences are decoded through the
 // package's shared decoder (keys.go), so arrows/PgUp/PgDn/Home/End behave
 // identically here and at the prompt.
-func (r *inspectRun) decode(b byte) inspectAction {
+//
+// The routing rule for a view that filters is the whole difference between a
+// picker and a page: a letter belongs to the filter box, so it must not scroll.
+// Only what the harness must keep is special-cased — ESC (cancel, one
+// keystroke, so a sequence's bytes can never be read as the next character
+// typed), Ctrl-C and Ctrl-D, and G for jump-to-bottom — and everything else
+// printable goes to the view. A view that does not filter — every inspector that
+// exists today — is driven exactly as before.
+func (r *inspectRun) decode(b byte) inspectEvent {
+	if r.filterable {
+		switch b {
+		case 0x1b:
+			// ESC is consumed whole here: bare ESC cancels, Alt-<char> is text, and
+			// a cursor/page sequence moves the cursor. No continuation byte of any
+			// of them can reach the filter as a stray character.
+			ev, err := r.readEsc()
+			if err != nil || ev.kind == keyUnknown {
+				return inspectEvent{action: inspectQuit}
+			}
+			if ev.kind == keyRune {
+				return r.apply(inspectEvent{action: inspectRune, r: ev.r})
+			}
+			return r.apply(inspectEvent{action: actionForKey(ev.kind)})
+		case 'G':
+			return r.apply(inspectEvent{action: inspectBottom})
+		case 0x03, 0x04: // Ctrl-C, Ctrl-D
+			return inspectEvent{action: inspectQuit}
+		default:
+			if ev := r.decodeFiltered(b); ev.action != inspectNone {
+				return r.apply(ev)
+			}
+			// Any other control byte (Ctrl-U, Ctrl-K, …) does nothing: a text box
+			// has no use for it, and a plain list's letter bindings must not leak
+			// into one that is collecting text.
+			return inspectEvent{}
+		}
+	}
 	act := inspectNone
 	switch b {
 	case 'q', 'Q', 0x03, 0x04: // q, Ctrl-C, Ctrl-D
-		return inspectQuit
+		return inspectEvent{action: inspectQuit}
+	case '\r', '\n':
+		act = inspectEnter
+	case 0x7f, 0x08:
+		act = inspectBackspace
 	case 'j':
 		act = inspectDown
 	case 'k':
@@ -186,18 +324,64 @@ func (r *inspectRun) decode(b byte) inspectAction {
 		// A bare ESC quits; an ESC that starts a sequence does not. The bytes of
 		// a real sequence arrive in the same burst, so a timeout here means the
 		// user pressed ESC on its own (Anchor.handleByte draws the same line).
-		nb, timedOut, err := r.src.firstByte()
-		if err != nil || timedOut {
-			return inspectQuit
-		}
-		ev, err := decodeEscape(&pushback{b: nb, src: r.src})
+		ev, err := r.readEsc()
 		if err != nil {
-			return inspectNone
+			return inspectEvent{action: inspectQuit}
 		}
 		act = actionForKey(ev.kind)
 	}
-	r.apply(act)
-	return act
+	return r.apply(inspectEvent{action: act})
+}
+
+// readEsc reads the keystroke whose first byte was ESC: a bare ESC (nothing
+// follows within one poll) yields keyUnknown, which every caller reads as
+// cancel; otherwise the sequence is decoded whole through the shared decoder,
+// so none of its bytes are left for the next keystroke to be misread from.
+func (r *inspectRun) readEsc() (keyEvent, error) {
+	nb, timedOut, err := r.src.firstByte()
+	if err != nil {
+		return keyEvent{}, err
+	}
+	if timedOut {
+		return keyEvent{kind: keyUnknown}, nil
+	}
+	return decodeEscape(&pushback{b: nb, src: r.src})
+}
+
+// decodeFiltered decodes a printable keystroke for a view that collects its own
+// text, and returns inspectNone for the handful of keys the caller above keeps.
+// A filtering view is a text box first: a letter never scrolls, and q is q, so
+// the box can hold the word "quit" — the way out is ESC, Ctrl-C, Ctrl-D, the
+// pairing every interactive filter box uses.
+//
+// The byte is classified directly rather than pushed back through the shared
+// decoder, because the inspector loop reads one byte per poll and hands that
+// byte here; pushing it back into decodeKeyByte would block on continuation
+// bytes a scripted source has no more of.
+func (r *inspectRun) decodeFiltered(b byte) inspectEvent {
+	switch b {
+	case '\r', '\n':
+		return inspectEvent{action: inspectEnter}
+	case 0x7f, 0x08:
+		return inspectEvent{action: inspectBackspace}
+	}
+	if b < 0x20 {
+		return inspectEvent{} // control bytes are the caller's, not text
+	}
+	// A printable rune's first byte is not the whole character when it is
+	// multi-byte: assemble it from its continuation bytes (the same utf8Len rule
+	// keys.go's prompt path uses) so the filter receives one character and the
+	// next poll sees the next keystroke rather than a stray 0x80-0xbf byte.
+	buf := []byte{b}
+	for i := 1; i < utf8Len(b); i++ {
+		c, err := r.src.next()
+		if err != nil {
+			break // a truncated rune still contributes its first byte's text
+		}
+		buf = append(buf, c)
+	}
+	rn, _ := utf8.DecodeRune(buf)
+	return inspectEvent{action: inspectRune, r: rn}
 }
 
 // actionForKey maps a decoded cursor key to a scroll action; anything else is
@@ -221,28 +405,114 @@ func actionForKey(k keyKind) inspectAction {
 	return inspectNone
 }
 
-// apply moves the scroll offset. Clamping is left to render, which is the only
-// place that knows the current body length and viewport height — so a resize
-// between two keys can never leave top stranded past the end.
-func (r *inspectRun) apply(a inspectAction) {
+// apply moves the cursor and, through it, the scroll offset, returning the
+// event it moved by so every keystroke has exactly one apply on its path.
+// Clamping is left to render, which is the only place that knows the current
+// body length and viewport height — so a resize, or a filter edit that just
+// narrowed the list, can never leave the cursor or top stranded past the end.
+func (r *inspectRun) apply(e inspectEvent) inspectEvent {
+	switch e.action {
+	case inspectEnter:
+		// The view decides what acceptance means; all the harness does is stop
+		// here instead of scrolling. A view with no Accept is a plain list, for
+		// which Enter is simply inert.
+		if a, ok := r.view.(Accepter); ok {
+			a.Accept()
+		}
+		return e
+	case inspectRune:
+		if f, ok := r.view.(Filterer); ok {
+			f.SetFilter(f.Filter() + string(e.r))
+			r.filterChanged = true
+		}
+		return e
+	case inspectBackspace:
+		if f, ok := r.view.(Filterer); ok {
+			if f.Filter() != "" {
+				f.SetFilter(dropLastRune(f.Filter()))
+				r.filterChanged = true
+			}
+		}
+		return e
+	}
+
 	page := r.viewH - 1 // keep one line of overlap so context carries across a page
 	if page < 1 {
 		page = 1
 	}
-	switch a {
+	switch e.action {
 	case inspectUp:
-		r.top--
+		r.moveCursor(-1, r.bodyLen)
 	case inspectDown:
-		r.top++
+		r.moveCursor(1, r.bodyLen)
 	case inspectPageUp:
-		r.top -= page
+		r.moveCursor(-page, r.bodyLen)
 	case inspectPageDown:
-		r.top += page
+		r.moveCursor(page, r.bodyLen)
 	case inspectTop:
-		r.top = 0
+		r.moveCursorTo(0, r.bodyLen)
 	case inspectBottom:
-		r.top = r.bodyLen // clamped down to the last full page by render
+		// A plain list has no cursor, so "bottom" is its last full page, exactly
+		// as before; a selectable list highlights its last row and pulls the
+		// window along to it.
+		if r.selectable {
+			r.moveCursorTo(r.bodyLen-1, r.bodyLen)
+		} else {
+			r.top = r.bodyLen // clamped down to the last full page by render
+		}
 	}
+	return e
+}
+
+// moveCursor moves the highlighted row by delta rows. Keeping the cursor
+// visible is deliberately not a "follow the cursor" clamp: the window moves
+// only when the highlight is actually past an edge. That is what keeps the
+// topmost row stable — one step down from the middle of a page repaints the
+// same window with one highlight moved, and one step up from the top row does
+// not drag the whole list down with it. For a view that is not selectable
+// there is no cursor, so the keystroke is the plain scroll it always was.
+func (r *inspectRun) moveCursor(delta, bodyLen int) {
+	if !r.selectable {
+		r.top += delta
+		return
+	}
+	r.moveCursorTo(r.cursor+delta, bodyLen)
+}
+
+// moveCursorTo highlights row i (clamped into the current list) and brings the
+// window along only as far as it must to keep that row visible. bodyLen is the
+// caller's fresh row count, because render is the only place that has pulled
+// the list since the last keystroke — the stale r.bodyLen belongs to the
+// previous frame and would clamp a jump to bottom one row short.
+func (r *inspectRun) moveCursorTo(i, bodyLen int) {
+	if i < 0 {
+		i = 0
+	}
+	if bodyLen > 0 && i > bodyLen-1 {
+		i = bodyLen - 1
+	}
+	if bodyLen == 0 {
+		i = -1 // nothing to highlight: an empty list has no row under the cursor
+	}
+	r.cursor = i
+	if r.viewH < 1 || i < 0 {
+		return
+	}
+	if i < r.top {
+		r.top = i
+	} else if i > r.top+r.viewH-1 {
+		r.top = i - r.viewH + 1
+	}
+}
+
+// dropLastRune removes one rune from the end of s, so Backspace on a filter
+// holding a multi-byte character deletes the character and not half of it.
+func dropLastRune(s string) string {
+	if s == "" {
+		return ""
+	}
+	_, size := utf8.DecodeLastRuneInString(s)
+	return s[:len(s)-size]
 }
 
 // render pulls the view, composes a full frame, and writes it only if it
@@ -257,16 +527,71 @@ func (r *inspectRun) render() {
 	if rows < inspectChrome+1 {
 		rows = inspectChrome + 1 // always leave one body row
 	}
+	// One pull per frame, shared by the cursor clamp and the frame itself: the
+	// view is pull-based and live (it may have changed since the last tick), and
+	// asking it twice could paint a frame that describes a different list than
+	// the cursor was clamped against.
+	//
+	// The cursor is clamped before the view is told where it is, so a Cursorer
+	// is never pointed at a row that does not exist. A filter edit that narrowed
+	// the list, or a resize that shortened it, can leave the highlight past the
+	// last row; pull it back so there is always a row under the cursor when there
+	// is a row at all (an empty list has none, which is what Selected reports).
+	viewH := rows - inspectChrome
 	body := r.view.Lines(cols)
-
-	r.viewH = rows - inspectChrome
-	r.bodyLen = len(body)
-	if max := len(body) - r.viewH; r.top > max {
+	if r.selectable {
+		if r.cursor < 0 {
+			r.cursor = 0 // the highlight opens on the first row, and re-opens after an empty filter
+		}
+		if len(body) == 0 {
+			r.cursor = -1
+			r.filterChanged = false
+		} else {
+			// A filtering view parks the highlight on the first match after the
+			// user types: the rows are ordered newest-first, so the top row is the
+			// one they most likely want and Enter needs no second keystroke. Only a
+			// filter edit re-parks it — a resize or an idle repaint of a live view
+			// must never yank a cursor the user placed.
+			if r.filterChanged {
+				r.cursor = 0
+				r.top = 0
+				r.filterChanged = false
+			}
+			// Never carry a highlight down into a list that has shrunk: a filter
+			// edit pulls it back to the last row that exists, so it cannot float
+			// over nothing (an empty list has no cursor at all, above).
+			if r.cursor > len(body)-1 {
+				r.cursor = len(body) - 1
+			}
+			if r.cursor < r.top {
+				r.top = r.cursor
+			}
+			// Keep the highlighted row inside the window, moving the window the
+			// least distance possible: the topmost row stays put whenever the
+			// cursor is already visible, which is what an eye anchored on a list
+			// expects.
+			if r.cursor > r.top+viewH-1 {
+				r.top = r.cursor - viewH + 1
+			}
+		}
+	}
+	if max := len(body) - viewH; r.top > max {
 		r.top = max
 	}
 	if r.top < 0 {
 		r.top = 0
 	}
+
+	// A selectable view marks its own highlighted row, so it is told where the
+	// cursor landed after the clamp — the frame cache then sees a moved cursor,
+	// because the highlight changes the bytes the view renders.
+	if c, ok := r.view.(Cursorer); ok {
+		c.SetCursor(r.cursor)
+		body = r.view.Lines(cols)
+	}
+
+	r.viewH = viewH
+	r.bodyLen = len(body)
 
 	frame := r.frame(cols, body)
 	if frame == r.last {
@@ -298,6 +623,11 @@ func (r *inspectRun) frame(cols int, body []string) string {
 // footer is a position readout plus the key legend. Plain text, no glyphs —
 // the middot is the same separator the rest of the REPL's metadata lines use.
 //
+// A selectable list reports the highlighted row instead of a visible range:
+// where the cursor is is the one number that matters there, and a range says
+// nothing about the choice. A filtering list names its edit keys in the widest
+// form of the legend, so the affordance is on screen rather than in the docs.
+//
 // Rather than let a narrow terminal hard-cut the legend mid-word, the hint
 // degrades in steps and the widest form that fits wins. The last step keeps
 // only the position and "q quit": on any width, the user can still see where
@@ -305,17 +635,37 @@ func (r *inspectRun) frame(cols int, body []string) string {
 func (r *inspectRun) footer(cols int) string {
 	pos := "empty"
 	if r.bodyLen > 0 {
-		last := r.top + r.viewH
-		if last > r.bodyLen {
-			last = r.bodyLen
+		if r.selectable {
+			pos = fmt.Sprintf("row %d of %d", r.cursor+1, r.bodyLen)
+		} else {
+			last := r.top + r.viewH
+			if last > r.bodyLen {
+				last = r.bodyLen
+			}
+			pos = fmt.Sprintf("lines %d-%d of %d", r.top+1, last, r.bodyLen)
 		}
-		pos = fmt.Sprintf("lines %d-%d of %d", r.top+1, last, r.bodyLen)
 	}
-	for _, hint := range []string{
+	hints := []string{
 		"up/down or j/k scroll · PgUp/PgDn page · g/G top/bottom · q quit",
 		"j/k scroll · PgUp/PgDn page · q quit",
 		"q quit",
-	} {
+	}
+	if r.selectable && r.filterable {
+		hints = []string{
+			"up/down select · type to filter · backspace edits · enter picks · esc cancels",
+			"up/down select · type filters · enter picks · esc cancels",
+			"enter picks · esc cancels",
+			"q quit",
+		}
+	} else if r.selectable {
+		hints = []string{
+			"up/down select · PgUp/PgDn page · g/G top/bottom · enter picks · esc cancels",
+			"up/down select · enter picks · esc cancels",
+			"enter picks · esc cancels",
+			"q quit",
+		}
+	}
+	for _, hint := range hints {
 		s := pos + " · " + hint
 		if displayWidth(s) <= cols {
 			return s

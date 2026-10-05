@@ -258,6 +258,12 @@ Sessions persist to `.cortex/sessions/<id>.jsonl` and can be resumed later:
 ./bin/cortex resume
 ```
 
+With no id on an interactive terminal, `resume` opens a picker: type to filter
+by prompt, session id, or model, press Enter to resume that session, or ESC to
+leave it alone and resume the latest one as before. An explicit id is resumed
+directly, and a piped or non-color terminal (`NO_COLOR`, `CORTEX_LOOP_RENDER=0`)
+resumes the latest session without opening anything.
+
 ### Let Cortex introduce itself
 
 Yes—the README can be an input surface for Cortex. Once a backend is configured,
@@ -379,7 +385,8 @@ per-call `model` argument pins another. See
 ```text
 cortex                            interactive REPL
 cortex --version | cortex version   print the version and exit
-cortex resume [id]                  resume a session; defaults to latest
+cortex resume [id]                  resume a session; with no id, pick one
+                                  interactively on a TTY (else latest)
                                   (its resume banner goes to stderr)
 cortex turn [--session id] [--plan] [--json] <input...>
                                   run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn); the
@@ -421,7 +428,7 @@ helper, and writing table-driven tests):
 | `/compact` | Summarize the conversation now as a safety net. |
 | `/plan <task>` | Plan-then-execute: one planning turn, then each step as its own turn (the `cortex turn --plan` path). The verify-before-fix principle rides in the base system prompt (so every turn sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence (lead the reply with "Not reproduced:" + the evidence), and that note is carried into the later steps' prompts and the per-step report (issue #178). |
 | `/clear` | Start a fresh session. |
-| `/sessions` | List persisted session IDs. |
+| `/sessions` | Pick a saved session to resume: a full-screen list you can filter by prompt, id, or model (Enter resumes, ESC leaves the session alone). Prints the plain list when stdout isn't a TTY. |
 | `/model [name]` | Show role bindings or switch the coding model for this session. |
 | `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
