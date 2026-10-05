@@ -185,7 +185,7 @@ func TestGateShellTaintWording(t *testing.T) {
 	cs.recordUntrustedContent("web_search")
 	cs.recordUntrustedContent("fetch_url")
 	var question string
-	cs.confirmRisky = func(q string) bool { question = q; return false }
+	cs.confirmRisky = confirmFromBool(func(q string) bool { question = q; return false })
 	msg, ok := cs.gateShell(context.Background(), "curl http://example.com")
 	if ok {
 		t.Fatal("a declining approver must not run the command")
@@ -246,7 +246,7 @@ func TestRiskyGateUnderTaintJournals(t *testing.T) {
 
 	cs := &CortexSession{workspace: ws, turnNo: 5, classifyShell: riskyJudge}
 	cs.recordUntrustedContent("web_search")
-	cs.confirmRisky = func(string) bool { return true } // the human approves; the gate still happened
+	cs.confirmRisky = confirmFromBool(func(string) bool { return true }) // the human approves; the gate still happened
 	if _, ok := cs.gateShell(context.Background(), "curl http://example.com"); !ok {
 		t.Fatal("an approving human should run the command")
 	}

@@ -41,7 +41,7 @@ func TestGitPushTaintFloor(t *testing.T) {
 		} {
 			cs := &CortexSession{turnNo: 2, classifyShell: judgeSafeEverywhere}
 			var question string
-			cs.confirmRisky = func(q string) bool { question = q; return false }
+			cs.confirmRisky = confirmFromBool(func(q string) bool { question = q; return false })
 			cs.recordUntrustedContent("fetch_url")
 			msg, ok := cs.gateShell(context.Background(), cmd)
 			if ok {
@@ -80,7 +80,7 @@ func TestGitPushTaintFloor(t *testing.T) {
 
 	t.Run("the floor raises to Risky, never Blocks: an approving human runs it", func(t *testing.T) {
 		cs := &CortexSession{turnNo: 4, classifyShell: judgeSafeEverywhere}
-		cs.confirmRisky = func(string) bool { return yes }
+		cs.confirmRisky = confirmFromBool(func(string) bool { return yes })
 		cs.recordUntrustedContent("fetch_url")
 		if msg, ok := cs.gateShell(context.Background(), "git push origin main"); !ok {
 			t.Errorf("an explicitly approved tainted push must run, got %q", msg)

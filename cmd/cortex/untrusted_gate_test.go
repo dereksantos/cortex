@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 )
 
@@ -120,11 +121,11 @@ func TestUntrustedTaintGate(t *testing.T) {
 						cs.confirmRisky = nil
 						if mode == "interactive" && s.approver != approveNone {
 							answer := s.approver == approveYes
-							cs.confirmRisky = func(q string) bool {
+							cs.confirmRisky = confirmFromBool(func(q string) bool {
 								asked = true
 								question = q
 								return answer
-							}
+							})
 						}
 						msg, ok := cs.gateShell(context.Background(), s.command)
 						wantRun := s.wantRunI
@@ -258,5 +259,17 @@ func TestRecordUntrustedContent(t *testing.T) {
 	}
 	if cs.taint.turnNo != 2 {
 		t.Errorf("taint must be stamped to the recording turn, got %d", cs.taint.turnNo)
+	}
+}
+
+// confirmFromBool adapts a yes/no test approver to the confirmRisky hook,
+// which returns a lineedit.ConfirmChoice since session approvals (#107):
+// true answers ConfirmYes (run once), false ConfirmNo.
+func confirmFromBool(f func(string) bool) func(string) lineedit.ConfirmChoice {
+	return func(q string) lineedit.ConfirmChoice {
+		if f(q) {
+			return lineedit.ConfirmYes
+		}
+		return lineedit.ConfirmNo
 	}
 }
