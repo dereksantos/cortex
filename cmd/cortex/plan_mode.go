@@ -520,6 +520,16 @@ func noReproNote(reply string) string {
 // such a reply with "Not reproduced:" so noReproNote recognizes the verdict
 // and carries it into the report and the later steps' prompts.
 //
+// And it restates the review-feedback principle (reviewFeedbackPrinciple,
+// issue #162): a step turn is where a review round's findings actually get
+// applied, and demotion at the turn boundaries (#131) can fold the review
+// itself out of the window — leaving the step with a paraphrase of one or two
+// findings and no obligation to account for the rest. That is how PR #158's
+// placeholder survived two rounds and PR #145 applied both offered
+// alternatives. The step prompt is the last place those findings can be
+// pinned, so the standing principle rides with every step (same const the
+// base system prompt carries).
+//
 // earlierNotes are the DONE steps' notes in order (skipped when empty): an
 // earlier step's no-repro note (issue #178) must reach a later step, so a
 // "fix it" step knows the bug never reproduced instead of running blind and
@@ -527,8 +537,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, noReproMarker,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)
