@@ -293,6 +293,13 @@ func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
 	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), blockedCheckPrinciple) {
 		t.Error("planStepPrompt must restate the blocked-check principle (same const) for each step turn")
 	}
+	// The step prompt restates the issue #162 review-feedback principle the
+	// same way: a review round's findings are applied on a step turn, and
+	// demotion at the turn boundaries can fold the review out of view, so the
+	// step prompt carries the standing principle — not only the base prompt.
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), reviewFeedbackPrinciple) {
+		t.Error("planStepPrompt must restate the review-feedback principle (same const) for each step turn")
+	}
 }
 
 // TestDefaultPromptEncodesBlockedCheckGuidance pins issue #200's content:
@@ -384,6 +391,123 @@ func TestBlockedCheckPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 	if !strings.Contains(string(data), blockedCheckPrinciple) {
 		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's blocked-check principle verbatim (blockedCheckPrinciple) — the docs and the prompt have drifted apart")
+	}
+}
+
+// TestDefaultPromptEncodesReviewFeedbackGuidance pins issue #162's content:
+// the built-in prompt must tell the model how to account for review findings,
+// and specifically the four ways the self-dev loop failed to (tick
+// 20261001T013107Z: PR #158's docs placeholder surviving rounds 1–2 while
+// every review named it, that PR's deferral note landing in
+// docs/memory-tools.md instead of the commit message/summary asked for, PR
+// #145 following BOTH options offered as alternatives so a complying model
+// printed its summary twice, and PR #143 patching one more flag spelling each
+// round instead of closing the class).
+//
+// The keyword assertions run against reviewFeedbackPrinciple ITSELF, and each
+// absence-checked keyword is additionally asserted ABSENT from the full prompt
+// with the principle stripped — so every subtest actually rides on the new
+// principle rather than on text that was already there (the same
+// rewrite-tolerant, absence-verified style as
+// TestDefaultPromptEncodesBlockedCheckGuidance). Keywords that occur
+// elsewhere in the prompt are checked in the const only, with checkAbsence
+// false: "dropped" appears in tools' test-loss wording and "review" in "Test
+// integrity", so pinning them against the whole prompt would pass with the
+// principle removed and pin nothing.
+func TestDefaultPromptEncodesReviewFeedbackGuidance(t *testing.T) {
+	// The full prompt with the principle removed: its splice site is its own
+	// paragraph, so strip exactly the paragraph plus one surrounding separator,
+	// leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		"\n\n"+reviewFeedbackPrinciple, "", 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the review-feedback principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		// 1. Per-finding accounting: the whole point of the principle — a
+		// finding with no disposition was dropped, invisibly to the next round.
+		{"owed", "every finding is owed an explicit disposition", true},
+		{"addressed", "the first disposition", true},
+		{"deferred with a reason", "the second disposition: deferral must be stated, not silent", true},
+		{"disputed", "the third disposition: disagreeing openly beats ignoring", true},
+		{"dropped", "no disposition means the finding was dropped", false}, // also in tools' test-loss wording
+		{"invisible to the next round", "the cost is that the drop cannot be seen", false},
+		// 2. Alternatives are a choice, not a list to satisfy in full (PR #145).
+		{"alternatives", "the trigger: several options offered as alternatives", true},
+		{"pick one and say which", "the ask: choose exactly one and name it", false},
+		// 3. Example instances stand for a class (PR #143's one-spelling-per-round).
+		{"underlying class", "the ask: fix the class, not the listed instances", true},
+		{"instances", "the trigger: a reviewer listing example instances", false},
+		// 4. Placement the reviewer named (PR #158's deferral note in a doc).
+		{"put it there", "the ask: something goes where the reviewer said", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(reviewFeedbackPrinciple), tt.keyword) {
+				t.Errorf("reviewFeedbackPrinciple no longer encodes the review-feedback guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
+// TestReviewFeedbackPrinciplePosition pins where the issue #162 principle
+// sits: in the "# How you work" block, as its own paragraph after
+// failingTestPrinciple (issue #177's) and before debugWorkingStylePrinciple
+// (issue #154's) — a position check, not a content check, mirroring
+// TestBlockedCheckPrinciplePosition. The placement matters: the principle
+// belongs with the accountability principles (test integrity, tests-as-
+// evidence) that say state what you took away, and ahead of the working-style
+// principles, so a model reading the block meets it with the review round in
+// view.
+func TestReviewFeedbackPrinciplePosition(t *testing.T) {
+	i := strings.Index(SystemPrompt, reviewFeedbackPrinciple)
+	if i < 0 {
+		t.Fatal("the review-feedback principle is not in the built-in prompt")
+	}
+	if f := strings.Index(SystemPrompt, failingTestPrinciple); f < 0 || i < f {
+		t.Error("the review-feedback principle must sit after the failing-test principle")
+	}
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the review-feedback principle must sit before the debugging principle")
+	}
+	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the review-feedback principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+	// Its own paragraph, not spliced mid-line into another principle: the
+	// strip in TestDefaultPromptEncodesReviewFeedbackGuidance assumes it.
+	if n := strings.Count(SystemPrompt, "\n\n"+reviewFeedbackPrinciple+"\n\n"); n != 1 {
+		t.Errorf("the review-feedback principle must be exactly one own paragraph in the built-in prompt, found %d", n)
+	}
+}
+
+// TestReviewFeedbackPrincipleMirroredInClaudeMD is the issue #162 consistency
+// tripwire, mirroring TestBlockedCheckPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints" section must carry the EXACT text the model receives
+// (reviewFeedbackPrinciple) so docs and prompt can't drift apart. Beyond the
+// contains check it pins the mirror as the doc's ONLY copy and as its own
+// paragraph: a mirror embedded in another paragraph, or duplicated, reads as
+// guidance the doc never intended to give twice.
+func TestReviewFeedbackPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	doc := string(data)
+	if !strings.Contains(doc, reviewFeedbackPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints\" section no longer mirrors the built-in prompt's review-feedback principle verbatim (reviewFeedbackPrinciple) — the docs and the prompt have drifted apart")
+	}
+	if n := strings.Count(doc, reviewFeedbackPrinciple); n != 1 {
+		t.Errorf("CLAUDE.md mirrors the review-feedback principle %d times, want exactly 1 (a duplicated mirror drifts one copy at a time)", n)
+	}
+	if !strings.Contains(doc, "\n\n"+reviewFeedbackPrinciple+"\n\n") {
+		t.Error("CLAUDE.md's mirrored review-feedback principle must be its own paragraph (blank-line separated), not spliced into another")
 	}
 }
 

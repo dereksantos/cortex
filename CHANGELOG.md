@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Review-feedback accountability (#162): a new built-in principle
+  (`reviewFeedbackPrinciple` in `cmd/cortex/prompt.go`) tells the model that
+  every finding a review raises is owed an explicit disposition — addressed,
+  deferred with a reason, or disputed — so a dropped finding is visible instead
+  of silently vanishing; that several options offered as *alternatives* mean
+  picking one and saying which, never applying them all; that listed example
+  instances stand for an underlying class to fix, not the only instances to
+  patch; and that something goes where the reviewer said it should, not in a
+  nearby file. It rides in the base system prompt (so every turn sees it,
+  including the self-dev loop's ordinary step turns) and is restated in each
+  plan step prompt, where a review round's findings are actually applied and
+  turn-boundary demotion can otherwise fold the review out of view. It answers
+  the self-dev loop's reviews of PRs #158, #145, and #143, where review asks
+  survived several rounds unfixed, notes asked to be kept were dropped, both
+  offered alternatives were applied (printing one summary twice), and each
+  round patched one more example instead of closing the class. Mirrored
+  verbatim in `CLAUDE.md`'s "Constraints" section, restated in each
+  plan step prompt, and pinned by content, position, and mirror tests.
 - Journaled commit attribution (#146): a new machine-level `attribution`
   writer-class (`attribution.commit`, `~/.cortex/journal/attribution/`) records
   every `git commit` the harness sees and whether it carried the attribution

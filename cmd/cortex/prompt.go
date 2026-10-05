@@ -31,6 +31,8 @@ Test integrity. Removing or changing an existing test to make a failing build pa
 
 ` + failingTestPrinciple + `
 
+` + reviewFeedbackPrinciple + `
+
 ` + debugWorkingStylePrinciple + `
 
 ` + locateFirstPrinciple + `
@@ -96,6 +98,38 @@ const blockedCheckPrinciple = "A check that was blocked, refused, or declined le
 // ` + failingTestPrinciple + ` above), keeping it in the "# How you work"
 // block, before debugWorkingStylePrinciple.
 const failingTestPrinciple = "Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification."
+
+// reviewFeedbackPrinciple is the issue #162 review-feedback principle — a
+// const so CLAUDE.md's "Constraints" section mirrors the EXACT same text
+// (the docs describe the guidance the model actually receives, so the two
+// can't drift apart — the same mirror pattern as blockedCheckPrinciple,
+// failingTestPrinciple, and debugWorkingStylePrinciple). It is spliced into
+// SystemPrompt as its own paragraph after failingTestPrinciple and before
+// debugWorkingStylePrinciple, so every turn sees it: REPL turns, headless
+// turns, plan-mode turns, and the self-dev loop's ordinary step turns, which
+// never go through TurnWithPlan's prompts (the same delivery reasoning as
+// verifyBeforeFixPrinciple).
+//
+// It exists because review rounds burned whole extra cycles on four distinct
+// ways of not applying what a reviewer asked (three PRs across four ticks, the
+// self-dev loop's tick 20261001T013107Z): PR #158 left a docs placeholder
+// uncorrected for two rounds after every review named it, and in its final
+// round put a deferral note in a doc file instead of the commit message the
+// reviewer had asked for; PR #145 followed BOTH options a reviewer had offered
+// as alternatives, so a complying model printed its summary twice; PR #143
+// patched exactly the flag spellings each previous review listed, adding one
+// spelling per round instead of closing the class of bad spellings. Each
+// failure is a finding that was silently dropped rather than consciously
+// declined — the cost is not the drop itself but that nobody could see it,
+// which is why the principle asks for an explicit disposition per finding.
+//
+// Deliberately a principle, not a recipe: no file paths, no list of incident
+// PRs, no checklist format — the tick specifics (a '~len/4 tokens'
+// placeholder, a denylist of flag spellings) were the incidents, not the
+// guidance. It extends the per-item accounting idea of #128 from issue
+// requirements to review findings, and stays silent on how to record the
+// dispositions, because the shape belongs to whoever drives the round.
+const reviewFeedbackPrinciple = "Every finding a review raises is owed an explicit disposition: addressed, deferred with a reason, or disputed. A finding left with none of these is a finding you dropped, and a dropped finding is invisible to the next round, so it comes back. When a reviewer offers several options as alternatives, pick one and say which — applying all of them is not thoroughness, it stacks behaviour the reviewer meant as a choice. When a reviewer gives example instances, name and fix the underlying class rather than only the instances listed: a fix that covers the examples and not the class needs another round for the next example. Where the reviewer asked for something to live, put it there — a note the reviewer asked to keep belongs in the place they named, not in a nearby file that happens to be open."
 
 // memoryPromptSection is the full memory guidance — the four bullets plus the
 // outline/recall paragraph — appended to the system prompt only when there's
