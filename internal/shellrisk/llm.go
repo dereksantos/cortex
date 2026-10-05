@@ -19,7 +19,7 @@ Judge by EFFECT, not by how dangerous a command looks in isolation. Routine loca
 safe — reversible, local, no external side effects:
 - reading/searching/inspecting (cat, ls, grep, find without -exec/-delete)
 - building, testing, linting, formatting, type-checking (make, go test, npm test, eslint)
-- creating/moving/editing/deleting files WITHIN the project tree, including build/output dirs (mkdir, touch, mv within the tree, rm of ./build or ./dist or node_modules, sed -i on a project file)
+- creating/moving/editing/deleting files WITHIN the project tree, including build/output dirs (mkdir, touch, mv within the tree, rm of ./build or ./dist or node_modules, in-place script rewrites of project files such as sed -i)
 - inspecting version-control state (git status/log/diff/show)
 - running the project's own programs, scripts, or test binaries locally
 
@@ -29,6 +29,7 @@ risky — consequential or hard to undo:
 - installing/uninstalling software or changing dependencies (apt, brew, npm/pip install, go get/install)
 - outbound network requests that send data out or download-and-run code
 - rewriting version-control history (git rebase, reset --hard, force push, clean -fdx)
+- git operations that discard or move UNCOMMITTED working-tree state — stashing (git stash pop/apply/clear), git checkout -- <path>, git restore of local edits — because a conflicting pop or an uncommitted edit can be lost
 - changing global/system or git config, file permissions, or ownership
 - starting long-running daemons or servers
 

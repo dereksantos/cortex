@@ -383,6 +383,16 @@ func lastPathElement(s string) string {
 //	                      approximation — see its case comment); `git
 //	                      reset -- <path>` is the unstage form and is NOT in
 //	                      the class.
+//	git-stash            `git stash` and `git stash <sub>` for every sub
+//	                      EXCEPT `show` and `list`. The mutating stash
+//	                      subcommands all risk the working tree: push
+//	                      records work away (losing it from the tree),
+//	                      pop/apply/branch write it back, drop/clear
+//	                      discard it, store writes it; a bare `git stash`
+//	                      is the push form. `show` and `list` only read.
+//	                      (Issue #201: a stash/pop round-trip used to check
+//	                      pre-existing failures risks losing uncommitted
+//	                      work if the pop conflicts.)
 //
 // Detection is deliberately coarse: it over-approximates "same effect" so a
 // plausible variant of a blocked action is caught, at the cost of lumping a
@@ -391,26 +401,38 @@ func lastPathElement(s string) string {
 // commit` or `svn commit` is a different tool's action, not the git history
 // write this class names).
 //
-// For the per-turn same-action ledger, the two classes act as ONE barred
-// group (EffectClasses: a blocked command bars every class in the set that
-// contains its class): `git commit --no-verify` and `git -c
+// For the per-turn same-action ledger the classes group as follows
+// (EffectClasses: a blocked command bars every class in the set that
+// contains its class): `git-history-write` and `hook-disabling` act as ONE
+// barred group — `git commit --no-verify` and `git -c
 // core.hooksPath=… commit` are BOTH history writes AND hook-disabling
 // spells of exactly the workaround the issue names — a commit that skipped
 // hooks after a blocked commit — so a hook-disabling variant must not re-
-// enter the classifier after a blocked plain commit.
+// enter the classifier after a blocked plain commit. `git-stash` is its OWN
+// group (issue #201): a declined `git stash pop` bars a later `git stash
+// push` in the same turn, but it must NOT bar an unrelated `git commit` —
+// a stash is not a way to re-route a commit, and lumping it with the
+// history-write group over-blocked legitimate work. Making the stash class
+// Risky at all is a CLASSIFIER decision (the prompt marks git operations
+// that discard working-tree state risky); the effect class only keeps a
+// declined stash from re-entering as another stash form.
 const (
 	EffectGitHistoryWrite = "git-history-write"
 	EffectHookDisabling   = "hook-disabling"
+	EffectGitStash        = "git-stash"
 )
 
 // EffectClasses returns the effect classes a command's class bars for the
-// per-turn same-action ledger (issue #169). The two git classes are one
-// barred group (see EffectClass); a class with no grouping — or no class at
-// all — bars itself / nothing.
+// per-turn same-action ledger (issue #169). git-history-write and
+// hook-disabling are one barred group (see EffectClass); git-stash bars
+// only itself (a declined stash must not bar an unrelated commit); a class
+// with no grouping — or no class at all — bars itself / nothing.
 func EffectClasses(effectClass string) []string {
 	switch effectClass {
 	case EffectGitHistoryWrite, EffectHookDisabling:
 		return []string{EffectGitHistoryWrite, EffectHookDisabling}
+	case EffectGitStash:
+		return []string{EffectGitStash}
 	case "":
 		return nil
 	default:
@@ -503,6 +525,27 @@ func effectClassOfPart(part string) string {
 	if historySubRe.MatchString(sub) {
 		return EffectGitHistoryWrite
 	}
+	// rest is the arguments AFTER the subcommand: the subcommand token
+	// itself (and any `-C dir` value before it) is not a form argument, so a
+	// form walk starts after it. (The reset case below reuses it.)
+	rest := args
+	if i := indexOf(rest, sub); i >= 0 {
+		rest = rest[i+1:]
+	}
+	// `git stash` and every mutating `git stash <sub>` form — push records
+	// work away, pop/apply/branch write it back, drop/clear discard it —
+	// risk the working tree: a conflicting pop can lose uncommitted work
+	// (issue #201). A bare `git stash` (no sub) is the push form. The
+	// read-only forms `git stash show` and `git stash list` are NOT in the
+	// class.
+	if sub == "stash" {
+		if len(rest) == 0 {
+			return EffectGitStash
+		}
+		if next, ok := firstSubcommand(rest); ok && next != "show" && next != "list" {
+			return EffectGitStash
+		}
+	}
 	// update-ref and reset are git subcommands (bin is "git" above).
 	switch sub {
 	case "update-ref":
@@ -510,13 +553,9 @@ func effectClassOfPart(part string) string {
 		// class is about the subcommand's capability, not one call's args.
 		return EffectGitHistoryWrite
 	case "reset":
-		// Only the arguments AFTER the subcommand decide the form: the
-		// subcommand token itself (and any `-C dir` value before it) is not a
-		// form argument, so the walk starts after it.
-		rest := args
-		if i := indexOf(rest, sub); i >= 0 {
-			rest = rest[i+1:]
-		}
+		// rest is already the arguments AFTER the subcommand (see the stash
+		// block above): the subcommand token itself (and any `-C dir` value
+		// before it) is not a form argument, so the walk starts after it.
 		seenCommit := false
 		inPathspec := false
 		for _, a := range rest {

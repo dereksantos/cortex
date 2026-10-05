@@ -139,6 +139,7 @@ type loopStats struct {
 	OutputTokens     int
 	Cost             float64
 	LastPromptTokens int  // most recent prompt_tokens (the live context gauge)
+	LastOutputTokens int  // most recent completion_tokens (the live context gauge's "out" side)
 	LastCachedTokens int  // most recent provider-reported cached prompt tokens (0 if unreported)
 	PeakOutputTokens int  // max completion tokens on any single request
 	MaxTokensClamped bool // any request hit Bounds.MaxTokens (runaway tripwire)
@@ -392,7 +393,7 @@ const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewr
 // its own request. req is the caller's request, re-sent (grown) each round.
 // onStatusUpdate is an optional callback invoked after each iteration to update
 // the display with the current context usage (for interactive REPL).
-func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b Bounds, p Progress, appendMsg func(Message), onStatusUpdate func(lastPromptTokens int, maxTokens int)) (string, loopStats, error) {
+func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b Bounds, p Progress, appendMsg func(Message), onStatusUpdate func(lastPromptTokens, lastOutputTokens, maxTokens int)) (string, loopStats, error) {
 	var stats loopStats
 	req.Tools = ts.Tools
 	if b.MaxTokens > 0 {
@@ -458,7 +459,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 
 		// Update display with current context usage (for interactive REPL)
 		if onStatusUpdate != nil {
-			onStatusUpdate(stats.LastPromptTokens, req.MaxTokens)
+			onStatusUpdate(stats.LastPromptTokens, stats.LastOutputTokens, req.MaxTokens)
 		}
 
 		// D11's per-loop-firing token budget (0 = unbounded for every other
@@ -1047,6 +1048,7 @@ func accountUsage(s *loopStats, res *AgentResponse, maxTokens int) {
 	s.Cost += res.Usage.Cost
 	s.ReasoningTokens += res.Usage.ReasoningTokens()
 	s.LastPromptTokens = res.Usage.PromptTokens
+	s.LastOutputTokens = res.Usage.CompletionTokens
 	s.LastCachedTokens = res.Usage.CachedPromptTokens()
 	if res.Usage.CompletionTokens > s.PeakOutputTokens {
 		s.PeakOutputTokens = res.Usage.CompletionTokens

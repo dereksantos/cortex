@@ -386,6 +386,112 @@ func TestEditFileNotFoundCarriesClosestLineHint(t *testing.T) {
 	if !strings.Contains(got, "  >2: func Chdir(root string) {}") {
 		t.Errorf("error should point at line 2; got: %q", got)
 	}
+	// Issue #201: a not-found failure must steer the model back to the edit
+	// tools instead of scripting the change through bash.
+	if !strings.Contains(got, "do not script this change through bash") {
+		t.Errorf("error should carry the no-bash directive; got: %q", got)
+	}
+	if !strings.Contains(got, "retry edit_file") || !strings.Contains(got, "write_file") {
+		t.Errorf("directive should name the edit tools; got: %q", got)
+	}
+}
+
+// TestEditFileNotFoundHintAnchorsOnBestLine proves nearMissHint scores EVERY
+// line of old against the file (not just the first): when the model's
+// old_string begins with a context line that is no longer in the file — a
+// stale span from a view the turn itself replaced — the hint still anchors
+// on the line the span's other lines point at, so the model re-reads the
+// right region instead of switching to a sed/awk/python script. Issue #201.
+func TestEditFileNotFoundHintAnchorsOnBestLine(t *testing.T) {
+	// The file's line 2 is the only place the span could plausibly land.
+	// The model's old_string is a multi-line span whose FIRST line is
+	// absent (a guess, or a stale view) but whose second line is an exact
+	// match — the hint must anchor on line 2.
+	before := "package main\nfunc Chdir(root string) {}\n\nvar x int\n"
+	path := seedEditFile(t, "f.go", before)
+
+	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+		"path":       path,
+		"old_string": "func Changed(root string) int {\nfunc Chdir(root string) {}\n",
+		"new_string": "x",
+	}), headlessDeps{})
+	if err == nil {
+		t.Fatalf("stale-span edit should error, got none")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "not found") {
+		t.Errorf("error should say not found; got: %q", got)
+	}
+	if !strings.Contains(got, "closest region") {
+		t.Errorf("error should carry the closest-region hint; got: %q", got)
+	}
+	if !strings.Contains(got, "  >2: func Chdir(root string) {}") {
+		t.Errorf("error should anchor on the best line (line 2); got: %q", got)
+	}
+	if strings.Contains(got, "  >1: ") {
+		t.Errorf("error must not anchor on the absent first line; got: %q", got)
+	}
+}
+
+// TestEditFileNotFoundDirectiveTable pins the self-correction directive on
+// every not-found failure path (issue #201): the span the model sent is
+// absent and similar enough to earn a hint, AND absent with NO similar line
+// at all. Both must carry the steer-away-from-bash text so a failure — the
+// moment the model is tempted to reach for sed — always points it back at
+// read_file + edit_file (or write_file for a whole-file rewrite).
+func TestEditFileNotFoundDirectiveTable(t *testing.T) {
+	cases := []struct {
+		name     string
+		before   string
+		old      string
+		wantHint bool // true → the closest-region hint is also present
+	}{
+		{
+			name:     "absent span with a close line (hint + directive)",
+			before:   "package main\nfunc Chdir(root string) {}\n",
+			old:      "func Chdir(root string) int {}\nreturn 1\n",
+			wantHint: true,
+		},
+		{
+			name:     "absent span, nothing similar (directive only)",
+			before:   "package main\nfunc Chdir(root string) {}\n",
+			old:      "const zzq zzq2 zzq3\nzzq4 zzq5\n",
+			wantHint: false,
+		},
+		{
+			name:     "span longer than the file (directive only)",
+			before:   "package main\n",
+			old:      "line one\nline two\nline three\nline four\nline five\n",
+			wantHint: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := seedEditFile(t, "f.go", tc.before)
+			_, err := Execute(context.Background(), editArgs(t, map[string]any{
+				"path": path, "old_string": tc.old, "new_string": "x",
+			}), headlessDeps{})
+			if err == nil {
+				t.Fatalf("edit should error, got none")
+			}
+			got := err.Error()
+			if !strings.Contains(got, "old_string not found") {
+				t.Errorf("error should be the not-found failure; got: %q", got)
+			}
+			if !strings.Contains(got, "do not script this change through bash") {
+				t.Errorf("directive missing from not-found failure; got: %q", got)
+			}
+			if !strings.Contains(got, "use read_file to re-read the current span") {
+				t.Errorf("directive should say to re-read; got: %q", got)
+			}
+			if tc.wantHint && !strings.Contains(got, "closest region") {
+				t.Errorf("hint expected but missing; got: %q", got)
+			}
+			if !tc.wantHint && strings.Contains(got, "closest region") {
+				t.Errorf("hint present but not expected; got: %q", got)
+			}
+		})
+	}
 }
 
 // TestEditFileTolerantMatchPreservesFileLineContent locks in a tier-2

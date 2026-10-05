@@ -120,8 +120,9 @@ commands are the `input ==` checks inside the REPL's input loop (`for {`).
 session's two-zone context window (docs/context-architecture.md) as a fixed
 8×16 glyph grid spanning the whole model window — one glyph per component
 (system prompt, outline, memory index, skills index, workspace note, hydrated
-tail, free space), a demote-watermark tick, and a legend — under a header and a
-prefix-cache health headline. On an interactive TTY that map opens in the
+tail, free space), a demote-watermark tick, and a legend — under a header
+(carrying the session's cumulative in/out tokens and, when reported, cost)
+and a prefix-cache health headline. On an interactive TTY that map opens in the
 **inspector** (`internal/lineedit/inspect.go`): an alternate-screen, scrollable
 view that restores the user's scrollback byte-for-byte on exit. The REPL stays
 scrollback-native by default; the inspector is the on-demand escape hatch for
@@ -171,10 +172,22 @@ The REPL is plain-text by decision (2026-07-19): no icon set (the old
 ❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
 actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s
 `printToolAction`); role lines are colored by their timestamp instead of a
-per-role icon (`cmd/cortex/display.go`'s `gutter`); the "thinking" indicator
-is a static label with only its elapsed-seconds tick moving (no animated
-spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and
-the anchored status row (`internal/lineedit/live.go`). Two things print
+per-role icon (`cmd/cortex/display.go`'s `gutter`); the plain spinner
+(`internal/loopui/spinner.go`) is a static label with only its
+elapsed-seconds tick moving (no animated spinner frames). The anchored
+status row (`internal/lineedit/live.go`, issue #109) appends live stats to
+the activity label, refreshed per model round-trip: the coding model's name,
+the context-window fill (`ctx %`), the last request's billed `in / out`
+tokens (the in side is the last request's prompt, the out side the last
+response's completion — both refreshed per request, so they pair the same
+turn, not two different turns), the session's cumulative cost — shown only
+when the backend actually reported one, never estimated — and the turn's
+elapsed seconds. The row shows ONE elapsed counter: when the activity label
+already carries its own seconds tick (the thinking indicator), the
+turn-elapsed segment is dropped so the row never shows two disagreeing
+counters. When the row exceeds the available width it trims right to left —
+cost drops first, then the token counts, then the context fill — with the
+model name kept last. Two things print
 *under* a tool line, both plain-text by the same rule (`+`/`-`,
 indentation, and color only — no connectors or box-drawing):
 `edit_file`/`write_file` render the change as a bounded unified diff
@@ -221,12 +234,17 @@ the model-driven memory tools
   (issue #142).
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
   over `write_file` for edits. Failure results are self-correcting: an
-  ambiguous match lists every occurrence's line number, a not-found match
-  carries a bounded snippet of the closest region in the file (line-numbered,
-  so the model can anchor on actual content without a separate read). A
-  successful result appends the current changed region (added lines marked
-  `>`, removed `-`, context unmarked, capped at 12 lines) so the model's view
-  of the file stays in sync (#173).
+  ambiguous match lists every occurrence's line number. A not-found match
+  scores EVERY line of the old block against the file and anchors a bounded
+  snippet of the closest region on the best-scoring line (not just the first,
+  so a multi-line span whose first line is absent still finds the region its
+  other lines point at); it also appends a directive to re-read the current
+  span and retry `edit_file` — or use `write_file` for a whole-file rewrite —
+  rather than scripting the change through `bash` (sed/awk/python) (#201:
+  scripted multi-line edits corrupt files and skip the diff display + post-
+  edit hook). A successful result appends the current changed region (added
+  lines marked `>`, removed `-`, context unmarked, capped at 12 lines) so the
+  model's view of the file stays in sync (#173).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
@@ -255,6 +273,31 @@ the model-driven memory tools
   about what the command was for: if it was meant to check something, that
   result is still unknown — don't guess it, don't substitute a check of
   something else, mark it unverified.
+  The gate also tracks "same-action" effect classes so a blocked
+  action can't be re-routed in a later command: `git-history-write` and
+  `hook-disabling` act as one barred group (a refused `git commit` can't
+  re-enter as `--no-verify`), and `git-stash` is its OWN group — it covers
+  `git stash`/`git stash <sub>` for every mutating sub —
+  push/pop/apply/branch/drop/clear/store, bare `git stash` included — with
+  the read-only `show` and `list` excluded, and a refused `git stash pop`
+  bars a later `git stash push` but NOT an unrelated `git commit` (#201).
+  Whether a stash is Risky at all is a classifier decision: the prompt marks
+  working-tree-discarding git operations (stash pop/apply/clear,
+  `checkout --`, restore) risky because they can lose uncommitted work.
+  Separately, when a command rewrites
+  a file in place (`sed -i`, `ed -s`, `perl -pi`, gawk's `awk -i inplace`,
+  an interpreter `-c` script string, or a redirect/append target —
+  quote-aware; plain awk only READS its file list), the tool appends a note
+  naming each touched target (workdir-relative when a workdir is anchored) and
+  steering to `edit_file`/`write_file`, whose diff display and post-edit hook
+  scripted edits skip (#201). When such a rewrite targets a workdir path, the
+  same format-only post-edit hook `write_file`/`edit_file` run is run on it
+  and its note folded into the result, so script-edits get the same format
+  coverage as tool edits (only on the success path — a refused command made no
+  change; untrusted/no-format-command no-ops). The hook never runs on a
+  script-form target: a `-c` program's arguments are only a guess at the file
+  it opens, so the steering note names it but the formatter is not pointed
+  at it.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;
