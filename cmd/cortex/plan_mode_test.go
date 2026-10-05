@@ -171,6 +171,13 @@ func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
 	if !strings.Contains(got, blockedCheckPrinciple) {
 		t.Errorf("planStepPrompt does not restate the blocked-check principle (blockedCheckPrinciple):\n%s", got)
 	}
+	// And the issue #162 review-feedback principle: a step turn is where a
+	// review round's findings land, and demotion at the turn boundaries can
+	// fold the review itself out of view — so the step prompt carries the
+	// per-finding-accounting principle verbatim (same const as the base prompt).
+	if !strings.Contains(got, reviewFeedbackPrinciple) {
+		t.Errorf("planStepPrompt does not restate the review-feedback principle (reviewFeedbackPrinciple):\n%s", got)
+	}
 	// And the convention and the probe agree on the same phrase: the marker
 	// the model is told to use is the prefix noReproNote anchors on, so a
 	// reply that follows the convention is recognized (round-2 review: the
@@ -289,9 +296,9 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
 		},
 		{
-			name:     "step prompt carries the original task, the principle, the blocked-check principle, and the no-repro marker",
+			name:     "step prompt carries the original task, the principle, the blocked-check principle, the review-feedback principle, and the no-repro marker",
 			prompt:   users[1],
-			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", blockedCheckPrinciple, noReproMarker},
+			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", blockedCheckPrinciple, reviewFeedbackPrinciple, "owed an explicit disposition", noReproMarker},
 		},
 	}
 	for _, tt := range tests {
