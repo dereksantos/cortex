@@ -247,7 +247,7 @@ default to today's hardcoded value.
 | `max_tokens` | Per-request output-token cap. Defaults: 16384 (code), 8192 (study). |
 | `temperature` | Overrides `backend`/global temperature for this role. |
 | `key_env` / `key_service` | Per-role auth override (see Auth above). |
-| `thinking` | Reasoning-effort intent — `false`/`true` (legacy bool), a level string (`"off"`/`"on"`/`"low"`/`"medium"`/`"high"`), or `{"budget": N}`. See `docs/thinking-models.md`. Both live roles default to `"on"`. |
+| `thinking` | Reasoning-effort intent — `false`/`true` (legacy bool), a level string (`"off"`/`"on"`/`"omit"`/`"low"`/`"medium"`/`"high"`), or `{"budget": N}`. See `docs/thinking-models.md`. Both live roles default to `"on"`. `"omit"` is the explicit send-nothing state: it sends no reasoning field at all, and the catalog/fleet cannot override it (unlike every other ask) — use it for providers or models that reject the reasoning parameter (an endpoint with parameter checks enabled 404s on it). It differs from leaving `thinking` unset, which still applies the role's default (`"on"`). |
 | `request_timeout_sec` | Per-request HTTP timeout for this role's model calls. Precedence: this field → `CORTEX_COMPAT_TIMEOUT_SEC` (env) → the historical default (10 min for the coder/subagent transport path, `models.study`'s summarizer/shell-risk sub-calls included). |
 | `max_send_attempts` | Retry ceiling for a transient failure (transport error, 429/5xx) on this role's calls. Default 3. |
 | `retry_backoff_ms` | Base linear-backoff delay between retries (`attempt × retry_backoff_ms`). Default 500ms. |

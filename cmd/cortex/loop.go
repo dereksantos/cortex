@@ -203,11 +203,21 @@ type loopStats struct {
 
 var errNoChoices = errors.New("no choices in model response")
 
-// maxRepeatedToolCalls bounds byte-identical consecutive tool-call batches before
-// the no-progress guard intervenes: a weak model can re-issue the same call until
-// it burns the turn (observed: 68 identical greps, 2026-06-14). On the penultimate
-// repeat the engine nudges; on the next it finalizes. Defined here with its sole
-// user (the guard in runLoop).
+// maxRepeatedToolCalls bounds how long the no-progress guard (issue #132) lets
+// a model re-issue the same tool-call batch before intervening. A weak model
+// can re-issue the same call until it burns the turn (observed: 68 identical
+// greps, 2026-06-14). A batch is "no progress" when it is byte-identical to
+// the previous one AND the previous batch's observation carried no new
+// information for that call: an error (an identical failing call is no
+// progress from the first repeat) or unchanged from the batch before that
+// (the re-read yields the same thing). The guard compares one observation per
+// BATCH — the round's dispatch observations joined with \x00 — collected
+// inside the dispatch loop (the transcript cannot supply it: a repeated batch
+// reuses the same tool-call IDs, and the stuck hint / cap warning appended
+// after the tool results would shift a transcript tail-slice); the
+// observation belongs to the same batch the signature describes, never to a
+// sibling call or another round.
+// On the penultimate repeat the engine nudges; on the next it finalizes.
 const maxRepeatedToolCalls = 3
 
 const (
@@ -259,7 +269,7 @@ func stuckHint(class string) string {
 // noProgressNudge is injected one repeat short of the cap so a stuck model can
 // change course before the guard breaks the loop. Engine-level (every caller),
 // not a main-loop special case.
-const noProgressNudge = "Harness note: that tool call was byte-identical to the previous one and produced the same result. Repeating it will not yield new information — try a different command or approach, or stop and report what you've found."
+const noProgressNudge = "Harness note: that tool call repeated the previous one without new information — the same result or the same error keeps coming back. Repeating it will not yield new information — re-read the span or state, try a different command or approach, or stop and report what you've found."
 
 // toolCapWarningRounds is the distance-to-the-cap at which runLoop starts
 // warning the model (issue #161): on the first tool round where the number of
@@ -400,14 +410,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		req.MaxTokens = b.MaxTokens
 	}
 
-	var lastSig string
-	var repeats int             // consecutive batches identical to lastSig, including current
+	var repeats int             // consecutive batches identical to prevBatchSig, including current
 	errSeen := map[string]int{} // error-class → times seen this turn (survives interleaved reads)
 	jitter := false             // perturb temperature on the next send (set when stuck)
 	baseTemp := req.Temperature // restore after a one-shot jitter
 	stop := ""
-	lastObservation := ""
-	capWarned := false // the cap-approaching note fired (at most once per turn, issue #161)
+	var prevBatchSig, prevBatchObs string // the previous round's batch: signature + joined observations (no-progress guard)
+	lastObservation := ""                 // the last round's joined batch observation (also feeds salvageObservationFinalize)
+	capWarned := false                    // the cap-approaching note fired (at most once per turn, issue #161)
 	for i := 0; i < b.MaxIter; i++ {
 		stats.Iterations = i + 1
 		var restoreEffort func()
@@ -473,9 +483,11 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		}
 
 		msg := res.Choices[0].Message
-		// Recover Qwen-native XML tool calls the proxy didn't normalize, so a
-		// call isn't silently lost (empty tool_calls reads as a final answer).
-		recoverXMLToolCalls(&msg)
+		// Recover tool calls the model wrote into its text instead of
+		// emitting as structured tool_calls (Qwen XML or Hermes
+		// <function_calls> tags), so a call isn't silently lost (empty
+		// tool_calls reads as a final answer).
+		recoverTextToolCalls(&msg)
 		// This round's assistant message is appended at the dispatch point
 		// below (before any tool results) — UNLESS it's an empty natural finish
 		// that the issue #149 off-retry may replace: in that case only the
@@ -635,14 +647,28 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// API ordering invariant).
 		appendMsg(msg)
 
-		// No-progress guard: a weak model can re-issue the identical batch
-		// forever. Track consecutive repeats and break before it burns the run.
-		if sig := toolCallSignature(msg.ToolCalls); sig == lastSig {
-			repeats++
-		} else {
-			lastSig, repeats = sig, 1
+		sig := toolCallSignature(msg.ToolCalls)
+		// The guard compares BATCHES, not individual calls: the previous
+		// round's signature (prevBatchSig) and the previous round's joined
+		// observation (prevBatchObs) both belong to that round's batch, so the
+		// observation judged is always the same call's — never a sibling call's
+		// or another round's. (The transcript cannot supply the previous
+		// observation: a repeated batch reuses the same tool-call IDs, so the
+		// prior round's tool-result message — already appended by its dispatch
+		// — would masquerade as this round's.)
+		//
+		// A batch that is NOT byte-identical to the previous one starts its own
+		// streak fresh. Whether an identical batch is "no progress" is decided
+		// at the END of the round, after dispatch, when this round's own
+		// observation is known: an erroring or unchanged observation is no
+		// progress (re-reading yields nothing new); a changed observation is
+		// progress (the re-read yielded new information) and resets the streak.
+		// Deciding post-dispatch is what lets a changed observation count:
+		// pre-dispatch the guard only sees the previous observation and cannot
+		// tell whether this round will re-yield it.
+		if sig != prevBatchSig || len(msg.ToolCalls) == 0 {
+			repeats = 1 // a new batch starts its own streak
 		}
-
 		if ts.BeforeBatch != nil {
 			ts.BeforeBatch()
 		}
@@ -650,10 +676,20 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// AFTER all tool results (the API requires tool results to follow the
 		// assistant message before any user turn).
 		hintClass := ""
+		// One batch observation: this round's dispatch observations joined, compared
+		// as a unit against the previous round's at the end of the round (the
+		// no-progress guard, issue #132). Collected INSIDE the dispatch loop —
+		// in the same order and with the same pairing as the tool-result
+		// messages it appends — because the transcript cannot supply it: a
+		// repeated batch reuses the same tool-call IDs, and the stuck hint or
+		// the cap-approaching warning appended after the tool results (the API
+		// requires them to follow) would shift any transcript tail-slice away
+		// from this round's own results.
+		batchObs := make([]string, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
 			countTool(&stats, call.Function.Name)
 			obs := ts.Dispatch.Dispatch(ctx, call)
-			lastObservation = obs
+			batchObs = append(batchObs, obs)
 			// Stuck detector: count by ERROR CLASS, not byte-identical call, so a
 			// recurring failure is caught even when the model interleaves read_file
 			// calls (which slip past the no-progress guard). First crossing → an
@@ -713,14 +749,45 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				capWarned = true
 			}
 		}
+		lastObservation = strings.Join(batchObs, "\x00")
+		// No-progress decision (issue #132), made HERE — after dispatch — where
+		// this round's own observation (lastObservation) and the previous
+		// round's (prevBatchObs) are both fresh. An identical batch is no
+		// progress when its observation carried no new information: an error
+		// (an identical failing call re-yields the same failure) or unchanged
+		// from the previous round (the re-read yields the same thing). A
+		// changed observation is progress: the re-read yielded new information,
+		// so the streak starts over. prevBatchObs keeps its own copy of the
+		// join: lastObservation is also read on the natural-finish path (the
+		// empty-answer observation salvage) and the finalize, where it must be
+		// the LAST round's value — so the decision reads prevBatchObs (the
+		// previous round) against lastObservation (this round), then the trail
+		// advances below.
+		if sig == prevBatchSig && len(msg.ToolCalls) > 0 {
+			switch {
+			case errorClass(lastObservation) != "":
+				repeats++ // an identical failing call is no progress from the first repeat
+			case lastObservation == prevBatchObs:
+				repeats++ // the observation didn't change (re-read the same thing)
+			default:
+				repeats = 1 // an identical batch whose observation changed is progress
+			}
+		}
+		// Advance the guard's batch trail at the end of the round, once the
+		// whole batch has been dispatched: the next round's batch-identity
+		// check compares its signature against this round's.
+		prevBatchSig = sig
+		prevBatchObs = lastObservation
+
 		// The redirect didn't take and the same error keeps recurring — stop thrashing
 		// and finalize from what's gathered.
 		if stop == "stuck" {
 			break
 		}
 
-		// The same batch repeated past the cap: the model won't recover on its
-		// own (the nudge below already gave it a chance). Finalize.
+		// The same batch repeated past the cap without new information: the
+		// model won't recover on its own (the nudge below already gave it a
+		// chance). Finalize.
 		if repeats >= maxRepeatedToolCalls {
 			stop = "no-progress"
 			break
@@ -798,7 +865,30 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 			answer = a2
 		}
 	}
-	return answer, *stats, nil
+	return reportWithheldToolCalls(answer), *stats, nil
+}
+
+// reportWithheldToolCalls is the forced-wrap-up half of issue #132's text
+// tool-call recovery. When the tools-withheld finalize reply carries tool-call
+// markup in its text — the model "reaching for" the edit it would have made
+// (the recorded qwen3-coder <tool_call> shape) — the intended action is reported in the
+// completion receipt instead of being dropped: the transcript keeps the model's
+// prose (markup stripped) and the receipt leads with what it intended to do.
+// Prose-only replies pass through untouched.
+func reportWithheldToolCalls(answer string) string {
+	calls := parseToolCallsFromContent(answer)
+	if len(calls) == 0 {
+		return answer
+	}
+	prose := strings.TrimSpace(stripToolMarkup(answer))
+	var b strings.Builder
+	for _, c := range calls {
+		b.WriteString("Intended action not executed (tools are withheld during wrap-up): " + c.ActivityLabel() + "\n")
+	}
+	if prose != "" {
+		b.WriteString(prose)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func salvageObservationFinalize(obs string, stats *loopStats) string {
@@ -823,7 +913,7 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 // byte-identically — a trailing empty turn would not be the same request.
 //
 // The result is the whole retry message, not just its text, with the SAME
-// Qwen-XML tool-call recovery the main round applies (recoverXMLToolCalls):
+// text-form tool-call recovery the main round applies (recoverTextToolCalls):
 // for exactly the Qwen models this issue targets, a reasoning-off retry can
 // answer with native <tool_call> markup rather than structured
 // tool_calls, and without the recovery that markup would be returned as the
@@ -839,7 +929,7 @@ func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequ
 	}
 	accountUsage(stats, res, req.MaxTokens)
 	msg := res.Choices[0].Message
-	recoverXMLToolCalls(&msg)
+	recoverTextToolCalls(&msg)
 	return &msg
 }
 
@@ -949,20 +1039,22 @@ func forcedFinalizeHookRound(ctx context.Context, send Sender, req *AgentRequest
 	return answer
 }
 
-// recoverXMLToolCalls recovers Qwen-native XML tool calls the proxy didn't
-// normalize into structured tool_calls, in place: when the message carries no
-// tool calls but its content parses as <tool_call>…</tool_call> markup,
-// the parsed calls become the message's tool calls and the raw markup is
-// stripped from the content. Shared by the main round (runLoop) and the issue
-// #149 off-retry (salvageEmptyReasoningRetry) so a Qwen model that answers
-// either with native XML gets its calls dispatched rather than returned as
-// prose. A no-op when the message already has tool calls or the content has
-// no parseable calls.
-func recoverXMLToolCalls(msg *Message) {
+// recoverTextToolCalls recovers tool calls the model wrote into its reply
+// text instead of emitting as structured tool_calls, in place: when the
+// message carries no tool calls but its content parses as tool-call markup —
+// the Qwen-native <tool_call>…</tool_call> shape or Hermes-style
+// <function_calls>JSON</function_calls> tags (parseToolCallsFromContent) — the
+// parsed calls become the message's tool calls and the raw markup is stripped
+// from the content. Shared by the main round (runLoop) and the issue #149
+// off-retry (salvageEmptyReasoningRetry) so a model that answers either with
+// text-form calls gets them dispatched rather than returned as prose. A no-op
+// when the message already has tool calls or the content has no parseable
+// calls.
+func recoverTextToolCalls(msg *Message) {
 	if msg == nil || len(msg.ToolCalls) > 0 {
 		return
 	}
-	if calls := parseXMLToolCalls(msg.Content); len(calls) > 0 {
+	if calls := parseToolCallsFromContent(msg.Content); len(calls) > 0 {
 		msg.ToolCalls = calls
 		msg.Content = stripToolMarkup(msg.Content)
 	}
@@ -1151,7 +1243,7 @@ func (cs *CortexSession) coderSender() Sender {
 func printCoderProse(msg Message) {
 	content := msg.Content
 	if len(msg.ToolCalls) == 0 {
-		if calls := parseXMLToolCalls(content); len(calls) > 0 {
+		if calls := parseToolCallsFromContent(content); len(calls) > 0 {
 			content = stripToolMarkup(content)
 		}
 	}

@@ -96,6 +96,12 @@ existing bool (accept both; bool maps to `"off"`/`"on"`):
   off).
 - `"low" | "medium" | "high"` — effort levels, for dialects that have them.
 - `{ "budget": N }` — token budget, for dialects that have that.
+- `"omit"` — the explicit send-nothing state (issue #132): it sends no
+  reasoning field at all, and the catalog/fleet cannot override it (unlike
+  every other ask — `degradeForThinkingMode` passes it through in every
+  mode). Use it for providers or models that reject the reasoning parameter
+  (an endpoint with parameter checks enabled 404s on it). It differs from
+  leaving `thinking` unset, which still applies the role's default (`"on"`).
 
 Levels degrade gracefully: a dialect with no levels treats `low/medium/high`
 as `on`; a dialect with budgets maps levels to fixed budget tiers. The spec

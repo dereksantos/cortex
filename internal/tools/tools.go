@@ -1752,7 +1752,7 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 		return "", 0, fmt.Errorf("old_string must not be empty")
 	}
 	if old == new {
-		return "", 0, fmt.Errorf("old_string and new_string are identical; nothing to change")
+		return "", 0, fmt.Errorf("old_string and new_string are identical; nothing to change. Re-read the span to see its current state rather than re-issuing the same edit")
 	}
 	if n := strings.Count(content, old); n > 0 {
 		if replaceAll {
@@ -2351,12 +2351,143 @@ func ParseXMLToolCalls(content string) []ToolCall {
 	return calls
 }
 
-// StripToolMarkup removes Qwen tool-call XML from content so we don't print the
-// raw markup after converting it to tool calls. Any genuine prose preamble
-// around the markup is preserved.
+// stripToolMarkup removes tool-call markup from content so we don't print the
+// raw markup after converting it to tool calls: Qwen XML blocks, any
+// <function_call(s)> tags — closed or truncated — and any orphaned tag that
+// a truncated reply left open (the opener with no closer). Any genuine prose
+// preamble or trailing text around the markup is preserved.
 func StripToolMarkup(s string) string {
 	s = fnRe.ReplaceAllString(s, "")
+	// A Hermes tag with a closing tag: strip the whole block.
+	s = tagClosedRe.ReplaceAllString(s, "")
+	// The Qwen3-Coder <tool_call> wrapper is NOT a recovery target (the payload
+	// inside is the native XML shape fnRe already stripped above) — it is
+	// display-only, so drop the bare wrapper markers here. Without this, a
+	// reply whose content is prose + an XML block wrapped in the tags
+	// would print the leftover empty wrapper after the XML strip.
 	s = strings.ReplaceAll(s, "<tool_call>", "")
 	s = strings.ReplaceAll(s, "</tool_call>", "")
+	// A truncated tag: drop everything from the orphaned opener on — its
+	// payload is the model's intended call, already recovered (or reported),
+	// and keeping it would leak raw markup into the display.
+	s = tagOrphanRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
+}
+
+// tagClosedRe is a complete Hermes-style call tag (for display stripping).
+var tagClosedRe = regexp.MustCompile(`(?is)<function_calls?>([\s\S]*?)</function_calls?>`)
+
+// tagOrphanRe is a Hermes-style opening tag with no matching close (a
+// truncated reply): it eats the opener and everything after it.
+var tagOrphanRe = regexp.MustCompile(`(?is)<function_calls?>[\s\S]*$`)
+
+// ToolCallsFromContent is the single entry point for recovering tool calls a
+// model wrote into its reply text instead of emitting as structured
+// tool_calls: the Qwen3-Coder native XML shape (ParseXMLToolCalls) and
+// Hermes-style JSON calls in <function_calls> tags (ParseFunctionCallsTags).
+// Returns nil when the content carries neither — a plain prose answer. The
+// engine (cmd/cortex's runLoop) calls it at every response that has no
+// structured tool_calls.
+func ToolCallsFromContent(content string) []ToolCall {
+	if calls := ParseXMLToolCalls(content); len(calls) > 0 {
+		return calls
+	}
+	return ParseFunctionCallsTags(content)
+}
+
+// tagOpenRe matches a Hermes-style function-call OPENING tag:
+//
+//	<function_calls>
+//	  {"name": "bash", "arguments": {"command": "ls"}}
+//	</function_calls>
+//
+// (and the singular <function_call> spelling some gateways emit). Unlike the
+// Qwen XML shape — <function=NAME><parameter=P> — the call is a JSON object
+// with a "name" field and an "arguments" field that is an object (not the
+// JSON-encoded string the OpenAI wire uses). The regex matches the opener only,
+// without requiring the closing tag: an open model can emit the opener and its
+// payload and then stop (truncated reply), and the JSON inside is still
+// recoverable. ParseFunctionCallsTags decodes the JSON after each opener and
+// bounds it at the next closing tag (tagCloseRe) or the end of content;
+// StripToolMarkup handles the display removal (closed or orphaned tag).
+var tagOpenRe = regexp.MustCompile(`(?is)<function_calls?>`)
+
+// tagCloseRe matches a Hermes-style function-call CLOSING tag.
+var tagCloseRe = regexp.MustCompile(`(?is)</function_calls?>`)
+
+// hermesCall is one call from a Hermes-style tag: the wire names plus an
+// arguments field as a JSON object.
+type hermesCall struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+// ParseFunctionCallsTags extracts Hermes-style tool calls from raw content.
+// Returns nil if no tag (or no parseable call inside a tag) is present.
+// Each call is normalized into the same ToolCall shape the OpenAI path
+// produces — arguments re-marshaled into the JSON-ENCODED-STRING Arguments
+// field the wire uses — so a parsed call flows through Execute unchanged.
+// The arguments object is re-marshaled as-is (its own JSON types survive):
+// a string arg lands as a JSON string, a number as a JSON number — the same
+// shape a native tool call's Arguments would carry.
+//
+// The decoder tolerates the shapes an open model actually emits: one object,
+// several objects, or a JSON array, and it stops at the first non-JSON token
+// or at a closing tag, so trailing prose (even with braces), a second tag,
+// or a truncated closer can't sink the parse.
+func ParseFunctionCallsTags(content string) []ToolCall {
+	var calls []ToolCall
+	n := 0
+	for {
+		// Locate the next tag opener; everything after it is the payload
+		// (a greedy tail — the decoder below bounds the actual JSON).
+		m := tagOpenRe.FindStringIndex(content)
+		if m == nil {
+			return calls
+		}
+		rest := content[m[1]:]
+		// A closing tag bounds the JSON: a second tag or trailing markup must
+		// not be parsed with this block's calls.
+		if end := tagCloseRe.FindStringIndex(rest); end != nil {
+			rest = rest[:end[0]]
+		}
+		d := json.NewDecoder(strings.NewReader(rest))
+		var callsHere []hermesCall
+		// One object, several objects, or a JSON array — decode whichever
+		// shape starts (leading whitespace skipped), then stop at the first
+		// non-JSON token.
+		t := strings.TrimLeft(rest, " \t\r\n")
+		if strings.HasPrefix(t, "[") {
+			_ = d.Decode(&callsHere)
+		} else {
+			for {
+				var c hermesCall
+				if err := d.Decode(&c); err != nil {
+					break
+				}
+				callsHere = append(callsHere, c)
+			}
+		}
+		for _, c := range callsHere {
+			if c.Name == "" {
+				continue // no name: not a call (or a truncated payload)
+			}
+			n++
+			raw, err := json.Marshal(c.Arguments)
+			if err != nil {
+				continue
+			}
+			if string(raw) == "null" {
+				raw = []byte("{}") // missing or null arguments: an empty object
+			}
+			calls = append(calls, ToolCall{
+				ID:       fmt.Sprintf("fc-%d", n),
+				Type:     "function",
+				Function: FunctionCall{Name: c.Name, Arguments: string(raw)},
+			})
+		}
+		// Continue past this block so a second tag after trailing prose is
+		// still recovered; a block with no parseable call simply advances.
+		content = content[m[1]:]
+	}
 }

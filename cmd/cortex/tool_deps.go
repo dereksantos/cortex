@@ -69,6 +69,7 @@ type ToolCall = tools.ToolCall
 type FunctionCall = tools.FunctionCall
 
 var parseXMLToolCalls = tools.ParseXMLToolCalls
+var parseToolCallsFromContent = tools.ToolCallsFromContent
 var stripToolMarkup = tools.StripToolMarkup
 
 // effortOffKwargs is pinned (not routed through cs.Study.TemplateKwargs) at

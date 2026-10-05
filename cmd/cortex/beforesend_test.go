@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,10 +17,11 @@ import (
 
 // TestRunLoopBeforeSendFiresOncePerIteration locks the seam: a hook that
 // mutates the request is observed by send.Send on the SAME round it fired —
-// and exactly once per main-loop iteration. The model issues two distinct tool
-// calls (so no-progress never trips), then finalizes; the hook must have fired
-// once before each of the three main-loop sends (two tool rounds + the
-// finalize round is NOT a main-loop send — see the assertion below).
+// and exactly once per main-loop iteration. The model issues one tool call
+// per round, each on a DIFFERENT path (so the no-progress guard never trips),
+// then the iteration cap forces a tools-withheld finalize; the hook must have
+// fired once before each of the three main-loop sends, and must NOT fire for
+// the forced-finalize send.
 func TestRunLoopBeforeSendFiresOncePerIteration(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
@@ -32,8 +34,9 @@ func TestRunLoopBeforeSendFiresOncePerIteration(t *testing.T) {
 			return fakeResp("forced", nil, 1, 1), false, nil
 		}
 		i++
-		// Record the request the hook left in place this round.
-		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), "f")}, 8, 4), false, nil
+		// Distinct paths (the guard's signature is name+args): the calls are
+		// NOT identical batches, so the no-progress guard never trips.
+		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), fmt.Sprintf("f%d", i))}, 8, 4), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 	hook := func(r *AgentRequest) {
@@ -45,18 +48,60 @@ func TestRunLoopBeforeSendFiresOncePerIteration(t *testing.T) {
 	}
 	_, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp, BeforeSend: hook},
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	// Two tool rounds + the cap-forced boundary = 3 main-loop iterations. The
+	// hook fires once per iteration: the forced finalize (tools withheld,
+	// r.Tools==nil) is a SEPARATE send inside finalizeLoop, which the hook
+	// must NOT see — so hookCalls equals the iteration count, not the send
+	// count.
+	if stats.Iterations != 3 {
+		t.Fatalf("iterations = %d, want 3 (two tool rounds + the cap-forced boundary)", stats.Iterations)
+	}
+	if hookCalls != stats.Iterations {
+		t.Errorf("hook fired %d times, want %d (once per main-loop iteration, never for the forced finalize)", hookCalls, stats.Iterations)
+	}
+}
+
+// TestRunLoopBeforeSendCleanFinalize is the clean-finalize counterpart of
+// TestRunLoopBeforeSendFiresOncePerIteration: the model answers on round 3
+// (no tool calls), so the turn ends through the main loop's clean-finalize
+// path — the 3rd main-loop send is the answer, and there is no forced
+// finalize at all. The hook must still fire exactly once per iteration.
+func TestRunLoopBeforeSendCleanFinalize(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	var i int
+	var hookCalls int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil {
+			t.Fatal("a tools-withheld send must not happen on a clean-finalize turn")
+		}
+		i++
+		if i >= 3 {
+			return fakeResp("answer", nil, 1, 1), false, nil
+		}
+		// Distinct paths (the guard's signature is name+args): the calls are
+		// NOT identical batches, so the no-progress guard never trips.
+		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), fmt.Sprintf("f%d", i))}, 8, 4), false, nil
+	})
+	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
+	hook := func(r *AgentRequest) {
+		hookCalls++
+	}
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp, BeforeSend: hook},
 		Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
-	// Two tool rounds + one no-tool finalize = 3 main-loop iterations. The
-	// hook fires once per iteration. The finalize round is the 3rd send — it
-	// still goes through the main loop (the model answered with no tool calls
-	// on round 3), so it too is preceded by a hook call. The forced finalize
-	// (tools withheld, r.Tools==nil) is a SEPARATE send inside finalizeLoop,
-	// which the hook must NOT see.
-	if stats.Iterations != 3 {
-		t.Fatalf("iterations = %d, want 3 (two tool rounds + a no-tool finalize round)", stats.Iterations)
+	if stats.StopReason != "clean-finalize" {
+		t.Fatalf("stop = %q, want clean-finalize", stats.StopReason)
+	}
+	if content != "answer" {
+		t.Errorf("content = %q, want answer", content)
 	}
 	if hookCalls != stats.Iterations {
 		t.Errorf("hook fired %d times, want %d (once per main-loop iteration)", hookCalls, stats.Iterations)
@@ -91,7 +136,9 @@ func TestRunLoopBeforeSendNilIsByteForByte(t *testing.T) {
 			return fakeResp("forced", nil, 1, 1), false, nil
 		}
 		i++
-		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), "f")}, 8, 4), false, nil
+		// Distinct paths (the guard's signature is name+args): the calls are
+		// NOT identical batches, so the no-progress guard never trips.
+		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), fmt.Sprintf("f%d", i))}, 8, 4), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 	_, _, err := runLoop(context.Background(), send, req,

@@ -358,8 +358,14 @@ func discoverFleet(ctx context.Context, endpoint string) Fleet {
 // dropped to unset; "hybrid" (an on/off toggle, no real levels) degrades a
 // level or budget ask to plain "on"; "always" (can never stop reasoning)
 // degrades an explicit "off" ask to "on"; "levels" (and any unrecognized
-// mode) needs no degradation.
+// mode) needs no degradation. EffortOmit (issue #132) passes through in every
+// mode: it is the explicit send-nothing state, and the catalog has no reason
+// to second-guess a decision to send nothing (its wire translation is
+// already nothing).
 func degradeForThinkingMode(e llm.Effort, mode string) llm.Effort {
+	if e.Level == llm.EffortOmit {
+		return e
+	}
 	switch mode {
 	case "none":
 		return llm.Effort{}
@@ -1040,6 +1046,18 @@ func (c *Config) backendEndpoint() string {
 	return defaultEndpoint
 }
 
+// resolveBinding resolves one role's ModelSpec: role policy first, config
+// override second, and the backend's catalog (fleet) last — the catalog
+// only degrades what the role or config decided is unsendable (a level ask
+// on a hybrid toggle, any ask at all on a non-thinker; see
+// applyFleet/degradeForThinkingMode). It has no opinion of its own about
+// whether to send reasoning: a backend whose catalog is absent (a hosted
+// OpenRouter endpoint, a pinned model the fleet doesn't know) can't say
+// whether the model supports the field, so the role's "on" default is what
+// ships — and that is precisely what breaks when the model doesn't
+// support it (issue #132: every request 404'd on a provider with parameter
+// checks enabled). The escape hatch is explicit: config "thinking": "omit"
+// (llm.EffortOmit) says send nothing and survives the catalog untouched.
 func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	pol := rolePolicies[role]
 	spec := ModelSpec{Endpoint: c.backendEndpoint(), Thinking: pol.effort}

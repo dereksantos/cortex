@@ -42,6 +42,15 @@ const (
 	EffortLow    EffortLevel = "low"
 	EffortMedium EffortLevel = "medium"
 	EffortHigh   EffortLevel = "high"
+	// EffortOmit is the explicit send-nothing state (issue #132): unlike
+	// EffortUnset — "never set; a caller's default may still fill it in" —
+	// EffortOmit is an INTENT: "send nothing, and don't let a default fill
+	// it in." The wire translation is identical to EffortUnset (no field),
+	// but the resolution layer treats it as a decided value. It exists for
+	// providers whose models do not support the reasoning field at all —
+	// an endpoint with parameter checks enabled 404s on it — so the operator
+	// can say "send nothing" from config and every request stays clean.
+	EffortOmit EffortLevel = "omit"
 )
 
 // Level→budget tiers used when a dialect needs a token budget but the
@@ -67,7 +76,8 @@ type Effort struct {
 
 // IsZero reports whether e carries no explicit intent at all (JSON key
 // absent, or the legacy bool never set) — the state a role-policy default or
-// a config override should still be free to fill in.
+// a config override should still be free to fill in. EffortOmit is NOT zero:
+// it is an explicit decision to send nothing, which must survive resolution.
 func (e Effort) IsZero() bool { return e.Level == EffortUnset && e.Budget == 0 }
 
 // BudgetTier maps a level to a fixed token-budget tier (the strawman values
@@ -90,9 +100,10 @@ func (e Effort) BudgetTier() int {
 	}
 }
 
-// UnmarshalJSON accepts the three JSON shapes docs/thinking-models.md §1
+// UnmarshalJSON accepts the four JSON shapes docs/thinking-models.md §1
 // declares: a legacy bool (false→off, true→on), a level string
-// ("off"/"on"/"low"/"medium"/"high"), or {"budget": N}.
+// ("off"/"on"/"low"/"medium"/"high"), {"budget": N}, and "omit" (issue
+// #132: the explicit send-nothing state).
 func (e *Effort) UnmarshalJSON(data []byte) error {
 	var b bool
 	if err := json.Unmarshal(data, &b); err == nil {
@@ -106,11 +117,11 @@ func (e *Effort) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
 		switch EffortLevel(s) {
-		case EffortOff, EffortOn, EffortLow, EffortMedium, EffortHigh:
+		case EffortOff, EffortOn, EffortLow, EffortMedium, EffortHigh, EffortOmit:
 			*e = Effort{Level: EffortLevel(s)}
 			return nil
 		default:
-			return fmt.Errorf("invalid thinking level %q (want off, on, low, medium, or high)", s)
+			return fmt.Errorf("invalid thinking level %q (want off, on, omit, low, medium, or high)", s)
 		}
 	}
 	var obj struct {
@@ -185,8 +196,9 @@ func Translate(d Dialect, e Effort) (kwargs map[string]any, reasoning *Reasoning
 		switch {
 		case e.Level == EffortOff:
 			return map[string]any{"enable_thinking": false}, nil
-		case e.Level == EffortUnset && e.Budget == 0:
-			// Unset: send nothing — the model's own default.
+		case (e.Level == EffortUnset || e.Level == EffortOmit) && e.Budget == 0:
+			// Unset (never decided) and Omit (decided: send nothing) both send
+			// nothing — the model's own default (issue #132).
 			return nil, nil
 		default:
 			// On, every level, and a bare budget all AFFIRMATIVELY enable —
@@ -211,7 +223,10 @@ func Translate(d Dialect, e Effort) (kwargs map[string]any, reasoning *Reasoning
 		case e.Level == EffortUnset && e.Budget > 0:
 			return nil, &Reasoning{MaxTokens: e.Budget}
 		default:
-			// EffortUnset: no reasoning field at all — model default.
+			// EffortUnset and EffortOmit (issue #132): no reasoning field at
+			// all — model default / nothing sent. A Qwen3-Coder endpoint with
+			// provider parameter checks 404s on the field, so "send nothing"
+			// must be reachable from config.
 			return nil, nil
 		}
 	default:
