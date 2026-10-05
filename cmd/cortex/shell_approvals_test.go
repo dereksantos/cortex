@@ -20,10 +20,10 @@ import (
 // when it ends in "*"; "y" once runs without recording anything, so the
 // same command prompts again.
 func TestShellApprovals(t *testing.T) {
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test: always risky", nil
 	}
-	stubBlocked := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubBlocked := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Blocked, "test: blocked", nil
 	}
 
@@ -105,6 +105,25 @@ func TestShellApprovals(t *testing.T) {
 		}
 		if _, ok := cs.gateShell(context.Background(), "rm -f build/ x"); ok {
 			t.Error("exact * approval must not act as a word prefix (ran without a prompt)")
+		}
+	})
+
+	t.Run("a stored approval does not run on a tainted turn", func(t *testing.T) {
+		// Issue #102: once untrusted content entered the turn, every Risky
+		// command needs an explicit answer for the rest of it — a stored
+		// "always" (#107) must not carry injected text past that bar.
+		cs := riskyBlockedSession()
+		cs.turnNo = 1
+		cs.ApproveShell("prefix", "make test*", "make test", "test: always risky")
+		cs.recordUntrustedContent("fetch_url")
+		if got, ok := cs.gateShell(context.Background(), "make test"); ok {
+			t.Errorf("tainted turn: a stored approval must not auto-run (no approver), got (%q, %v)", got, ok)
+		}
+		asked := false
+		cs.quiet = false
+		cs.confirmRisky = func(string) lineedit.ConfirmChoice { asked = true; return lineedit.ConfirmYes }
+		if _, ok := cs.gateShell(context.Background(), "make test"); !ok || !asked {
+			t.Errorf("tainted turn: the human must be asked and a yes must run (asked=%v ran=%v)", asked, ok)
 		}
 	})
 

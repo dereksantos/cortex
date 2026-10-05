@@ -9,7 +9,7 @@ import (
 
 // stubFn builds a ClassifyFn that always returns the given verdict.
 func stubFn(lvl Level, reason string, err error) ClassifyFn {
-	return func(_ context.Context, _ string) (Level, string, error) {
+	return func(_ context.Context, _, _ string) (Level, string, error) {
 		return lvl, reason, err
 	}
 }
@@ -44,7 +44,7 @@ func TestClassify_DenyFloor(t *testing.T) {
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
-			v := Classify(context.Background(), cmd, waveThrough)
+			v := Classify(context.Background(), cmd, "", waveThrough)
 			if v.Level != Blocked {
 				t.Errorf("Classify(%q) = %s (tier %s, %q), want blocked", cmd, v.Level, v.Tier, v.Reason)
 			}
@@ -58,7 +58,7 @@ func TestClassify_DenyFloor(t *testing.T) {
 func TestClassify_SafePath_NoModelCall(t *testing.T) {
 	// A classifier that fails the test if it is ever consulted — the safe path
 	// must short-circuit before tier 3.
-	mustNotCall := func(_ context.Context, cmd string) (Level, string, error) {
+	mustNotCall := func(_ context.Context, cmd, _ string) (Level, string, error) {
 		t.Fatalf("classifier called for safe-path command %q", cmd)
 		return Risky, "", nil
 	}
@@ -85,7 +85,7 @@ func TestClassify_SafePath_NoModelCall(t *testing.T) {
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
-			v := Classify(context.Background(), cmd, mustNotCall)
+			v := Classify(context.Background(), cmd, "", mustNotCall)
 			if v.Level != Safe {
 				t.Errorf("Classify(%q) = %s (%q), want safe", cmd, v.Level, v.Reason)
 			}
@@ -100,7 +100,7 @@ func TestClassify_SafePath_Excludes(t *testing.T) {
 	// Commands that LOOK like a safe binary but carry write/exec or shell
 	// control must NOT take the safe path — they go to the classifier.
 	sawClassifier := false
-	spy := func(_ context.Context, _ string) (Level, string, error) {
+	spy := func(_ context.Context, _, _ string) (Level, string, error) {
 		sawClassifier = true
 		return Risky, "spy", nil
 	}
@@ -122,7 +122,7 @@ func TestClassify_SafePath_Excludes(t *testing.T) {
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
 			sawClassifier = false
-			v := Classify(context.Background(), cmd, spy)
+			v := Classify(context.Background(), cmd, "", spy)
 			if v.Tier == "safe-path" {
 				t.Errorf("Classify(%q) took safe-path, want classifier", cmd)
 			}
@@ -134,7 +134,7 @@ func TestClassify_SafePath_Excludes(t *testing.T) {
 }
 
 func TestClassify_GrayZone_PassesThroughVerdict(t *testing.T) {
-	v := Classify(context.Background(), "git push origin main", stubFn(Risky, "publishes commits", nil))
+	v := Classify(context.Background(), "git push origin main", "", stubFn(Risky, "publishes commits", nil))
 	if v.Level != Risky || v.Tier != "classified" {
 		t.Errorf("got %s/%s, want risky/classified", v.Level, v.Tier)
 	}
@@ -142,7 +142,7 @@ func TestClassify_GrayZone_PassesThroughVerdict(t *testing.T) {
 		t.Errorf("reason = %q, want passthrough", v.Reason)
 	}
 
-	v = Classify(context.Background(), "mv a.txt b.txt", stubFn(Safe, "local rename", nil))
+	v = Classify(context.Background(), "mv a.txt b.txt", "", stubFn(Safe, "local rename", nil))
 	if v.Level != Safe || v.Tier != "classified" {
 		t.Errorf("got %s/%s, want safe/classified", v.Level, v.Tier)
 	}
@@ -150,7 +150,7 @@ func TestClassify_GrayZone_PassesThroughVerdict(t *testing.T) {
 
 func TestClassify_GrayZone_ClampsBlockedToRisky(t *testing.T) {
 	// Only the deny-floor may Block. A classifier returning Blocked is clamped.
-	v := Classify(context.Background(), "git push", stubFn(Blocked, "model says block", nil))
+	v := Classify(context.Background(), "git push", "", stubFn(Blocked, "model says block", nil))
 	if v.Level != Risky {
 		t.Errorf("got %s, want risky (classifier may not block)", v.Level)
 	}
@@ -158,13 +158,13 @@ func TestClassify_GrayZone_ClampsBlockedToRisky(t *testing.T) {
 
 func TestClassify_FailsClosed(t *testing.T) {
 	// Classifier error → Risky, not Safe.
-	v := Classify(context.Background(), "mv a b", stubFn(Safe, "ignored", errors.New("backend down")))
+	v := Classify(context.Background(), "mv a b", "", stubFn(Safe, "ignored", errors.New("backend down")))
 	if v.Level != Risky || v.Tier != "fail-closed" {
 		t.Errorf("got %s/%s, want risky/fail-closed", v.Level, v.Tier)
 	}
 
 	// Nil classifier → Risky, not Safe.
-	v = Classify(context.Background(), "mv a b", nil)
+	v = Classify(context.Background(), "mv a b", "", nil)
 	if v.Level != Risky || v.Tier != "fail-closed" {
 		t.Errorf("nil fn: got %s/%s, want risky/fail-closed", v.Level, v.Tier)
 	}
@@ -187,7 +187,7 @@ func TestClassify_DenyFloor_NoFalsePositives(t *testing.T) {
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
-			v := Classify(context.Background(), cmd, spy)
+			v := Classify(context.Background(), cmd, "", spy)
 			if v.Level == Blocked || v.Tier == "deny-floor" {
 				t.Errorf("Classify(%q) = blocked by deny-floor (%q); want it to reach the classifier", cmd, v.Reason)
 			}
@@ -196,14 +196,14 @@ func TestClassify_DenyFloor_NoFalsePositives(t *testing.T) {
 }
 
 func TestClassify_Empty(t *testing.T) {
-	if v := Classify(context.Background(), "   ", nil); v.Level != Blocked {
+	if v := Classify(context.Background(), "   ", "", nil); v.Level != Blocked {
 		t.Errorf("empty command = %s, want blocked", v.Level)
 	}
 }
 
 func TestClassify_DenyFloorBeatsSafeLooking(t *testing.T) {
 	// A deny-floor match inside an otherwise safe-looking command still blocks.
-	v := Classify(context.Background(), "echo hi > /etc/hosts", nil)
+	v := Classify(context.Background(), "echo hi > /etc/hosts", "", nil)
 	if v.Level != Blocked || v.Tier != "deny-floor" {
 		t.Errorf("got %s/%s, want blocked/deny-floor", v.Level, v.Tier)
 	}
@@ -282,6 +282,7 @@ func TestRefusalMessagesCarryUnknownClause(t *testing.T) {
 		{"RefusedMessage", RefusedMessage("test")},
 		{"SameActionBlockedMessage", SameActionBlockedMessage(EffectGitHistoryWrite)},
 		{"DeclinedMessage", DeclinedMessage()},
+		{"TaintBlockedMessage", TaintBlockedMessage("fetch_url")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -316,6 +317,20 @@ func TestSameActionBlockedMessage(t *testing.T) {
 	want := "blocked (same action: git-history-write): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
 	if got != want {
 		t.Errorf("SameActionBlockedMessage(git-history-write) =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestTaintBlockedMessage pins the exact wording the untrusted-content taint
+// returns for a Risky command with no reachable approver (issue #102) —
+// headless, subagent, or approver timeout. Like its siblings it is the
+// single shared constructor for the wording (its call site is cmd/cortex's
+// gateShell), names WHY the bar is raised (the turn read web content, so the
+// judge's verdict does not count), and carries the unknown-value tail.
+func TestTaintBlockedMessage(t *testing.T) {
+	got := TaintBlockedMessage("fetch_url, web_search")
+	want := "blocked (untrusted content this turn: fetch_url, web_search): a command needing approval cannot run in a turn that read web content, because that content could have shaped this request — the risk judge's safe verdict does not count here; only a human decision would. Continue without it, and say in your final answer what you couldn't do. If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
+	if got != want {
+		t.Errorf("TaintBlockedMessage(\"fetch_url, web_search\") =\n%q\nwant\n%q", got, want)
 	}
 }
 

@@ -223,7 +223,7 @@ func TestTestwatchTurnReceiptBashArmsWorkspace(t *testing.T) {
 	// command would never execute and the snapshot would never see a
 	// removal). This mirrors a real turn where the classifier judged the
 	// rewrite safe.
-	cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Safe, "test stub", nil
 	}
 	h := &testwatchHarness{cs: cs}
@@ -271,7 +271,7 @@ func TestTestwatchNoDoubleReportAcrossArms(t *testing.T) {
 	}
 	cs := newTestwatchSession(t, root)
 	cs.workspace = mustWorkspace(t, root)
-	cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Safe, "test stub", nil
 	}
 	h := &testwatchHarness{cs: cs}
@@ -819,7 +819,7 @@ func TestArmTestwatch(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 		// Two test definitions in a scratch- AND test-named file.
@@ -958,7 +958,7 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 		// A workspace with MORE than testwatchMaxFiles (the old 32-file
@@ -1003,7 +1003,7 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 		// A large workspace: the FIRST bash call in the turn arms the
@@ -1064,7 +1064,7 @@ func TestArmTestwatchCoversLargeWorkspace(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 		// Fill the baseline budget PLUS one: the (testwatchMaxBashBaselines +
@@ -1184,7 +1184,7 @@ func TestTestwatchTurnReceiptLeftoverScratchFile(t *testing.T) {
 	}
 	cs := newTestwatchSession(t, root)
 	cs.workspace = mustWorkspace(t, root)
-	cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Safe, "test stub", nil
 	}
 	h := &testwatchHarness{cs: cs}
@@ -1253,7 +1253,7 @@ func TestTestwatchScratchCreatedThenRemovedBash(t *testing.T) {
 	root := t.TempDir()
 	cs := newTestwatchSession(t, root)
 	cs.workspace = mustWorkspace(t, root)
-	cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Safe, "test stub", nil
 	}
 	h := &testwatchHarness{cs: cs}
@@ -1803,7 +1803,7 @@ func TestDebugReceiptEndToEnd(t *testing.T) {
 		}
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 		h := &testwatchHarness{cs: cs}
@@ -1871,7 +1871,7 @@ func TestDebugReceiptEndToEnd(t *testing.T) {
 		// The bash call's shell command would otherwise be risk-classified
 		// through the real study-model classifier (a scripted stub keeps the
 		// test hermetic — the command is a trivial printf redirect, Safe).
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 
@@ -1918,7 +1918,7 @@ func TestDebugReceiptEndToEnd(t *testing.T) {
 		root := t.TempDir()
 		cs := newTestwatchSession(t, root)
 		cs.workspace = mustWorkspace(t, root)
-		cs.classifyShell = func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 			return shellrisk.Safe, "test stub", nil
 		}
 		h := &testwatchHarness{cs: cs}
