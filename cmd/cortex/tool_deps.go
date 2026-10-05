@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/redact"
@@ -512,6 +514,80 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 	return rendered, nil
 }
 
+// ApproveShell records a session-scoped bash approval (issue #107) — the
+// user chose "always this session" at the risky-command prompt — and
+// journals the event so a review of the session shows what was auto-allowed.
+// kind is "exact" or "prefix"; pattern is the stored pattern (the exact
+// command for "exact", the command with "*" appended for "prefix"). command
+// is the exact command that earned the approval; reason is the classifier's
+// reason for it.
+func (cs *CortexSession) ApproveShell(kind, pattern, command, reason string) {
+	if cs == nil || kind == "" || pattern == "" {
+		return
+	}
+	cs.shellApprovals = append(cs.shellApprovals, pattern)
+	cs.journalShellApproval(kind, pattern, command, reason)
+}
+
+// journalShellApproval appends one shell.approval event to the project
+// journal's "shell" class dir (issue #107's "approvals are journaled"
+// acceptance item). Mirrors appendModelSubstitution's write path —
+// journal.NewWriter with FsyncPerBatch, best-effort: a journal failure
+// never affects the approval itself, only the record of it. Nil-safe so a
+// hand-built test session (no ContextDir) records the approval in memory
+// without a journal.
+func (cs *CortexSession) journalShellApproval(kind, pattern, command, reason string) {
+	dir := filepath.Join(cs.ContextDir(), "journal", "shell")
+	entry, err := journal.NewShellApprovalEntry(journal.ShellApprovalPayload{
+		Kind:    kind,
+		Pattern: pattern,
+		Command: command,
+		Reason:  reason,
+		Turn:    cs.turns,
+	})
+	if err != nil {
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: dir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return
+	}
+}
+
+// shellApprovalPatterns returns the session's current approval patterns
+// (exact commands and "*" globs, issue #107). Empty when none were chosen.
+func (cs *CortexSession) shellApprovalPatterns() []string {
+	if cs == nil {
+		return nil
+	}
+	return cs.shellApprovals
+}
+
+// shellApprovalMatches reports whether command matches any of the session's
+// approval patterns (issue #107): an exact pattern must equal the command
+// byte for byte, and a pattern ending in "*" matches every command that
+// starts with the prefix before the "*". Patterns not ending in "*" are
+// exact — only an explicit exact match approves, so a prefix approval
+// "make test*" never matches "make testX" or "make build".
+func shellApprovalMatches(patterns []string, command string) bool {
+	for _, p := range patterns {
+		if strings.HasSuffix(p, "*") {
+			if strings.HasPrefix(command, strings.TrimSuffix(p, "*")) {
+				return true
+			}
+			continue
+		}
+		if p == command {
+			return true
+		}
+	}
+	return false
+}
+
 func (cs *CortexSession) gateShell(ctx context.Context, command string) (string, bool) {
 	// Per-turn same-action gate (issue #169): if this command's effect
 	// class was already Blocked in the current turn, refuse it before
@@ -554,13 +630,39 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			cs.recordSameActionBlock(command)
 			return blocked, false
 		}
+		// Session-scoped approvals (issue #107): a Risky command the user
+		// already chose "always this session" for — exact (y/a) or by prefix
+		// (p, stored as "cmd*") — runs without re-prompting. Checked HERE,
+		// after the Blocked arm of the switch, on purpose: a Blocked command
+		// takes the arm above and never reaches this line, so no approval can
+		// ever override a Blocked verdict (Blocked stays Blocked).
+		if shellApprovalMatches(cs.shellApprovalPatterns(), command) {
+			return "", true
+		}
 		if !cs.quiet && cs.confirmRisky != nil {
-			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y/N] ", v.Reason, command)
-			if cs.confirmRisky(q) {
+			// The question carries the classifier's reason on its own line
+			// above the command (issue #107's "show why it was flagged") and
+			// ends with the choices: y once, n, a always this session (this
+			// exact command), p always this session (this command's prefix).
+			// The body lines scroll away; the ask line stays on the status
+			// row. Non-TTY / CORTEX_LOOP_RENDER=0 sessions take the
+			// confirmRisky hook's ReadLine fallback with the SAME question —
+			// plain text, the pre-change path unchanged.
+			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y once | a this command | p prefix | n] ", v.Reason, command)
+			choice := cs.confirmRisky(q)
+			switch choice {
+			case lineedit.ConfirmAlwaysExact:
+				cs.ApproveShell("exact", command, command, v.Reason)
 				return "", true
+			case lineedit.ConfirmAlwaysPrefix:
+				cs.ApproveShell("prefix", command+"*", command, v.Reason)
+				return "", true
+			case lineedit.ConfirmYes:
+				return "", true
+			default:
+				cs.recordSameActionBlock(command)
+				return shellrisk.DeclinedMessage(), false
 			}
-			cs.recordSameActionBlock(command)
-			return shellrisk.DeclinedMessage(), false
 		}
 		// approveRisky is Discord's non-terminal-but-human-present approval
 		// path (docs/cortex-web.md Phase 7) — checked independently of
