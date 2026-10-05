@@ -69,6 +69,53 @@ func TestProviderClassifier_TransportError(t *testing.T) {
 	}
 }
 
+// TestClassifierPrompt pins the classifier prompt's boundaries (issue #201):
+// the prompt is the whole contract for the gray zone, so its two load-bearing
+// decisions must not drift — in-place script rewrites of PROJECT files stay
+// in the safe list (the bash tool's steering note + post-edit hook is the
+// mechanism; a refusal in a headless session would block ordinary work),
+// and git operations that discard uncommitted working-tree state (stash
+// pop/apply/clear, checkout --, restore) are named risky (a conflicting pop
+// can lose uncommitted work).
+func TestClassifierPrompt(t *testing.T) {
+	safeIdx := strings.Index(classifierSystemPrompt, "safe —")
+	riskyIdx := strings.Index(classifierSystemPrompt, "risky —")
+	if safeIdx < 0 || riskyIdx < 0 {
+		t.Fatalf("prompt must keep its safe/risky sections: safe at %d, risky at %d", safeIdx, riskyIdx)
+	}
+	if riskyIdx < safeIdx {
+		t.Fatalf("prompt layout drifted: safe section (%d) must come before risky section (%d)", safeIdx, riskyIdx)
+	}
+	safe := classifierSystemPrompt[safeIdx:riskyIdx]
+	risky := classifierSystemPrompt[riskyIdx:]
+
+	t.Run("in-place script rewrites of project files stay safe", func(t *testing.T) {
+		for _, sub := range []string{"editing", "sed -i"} {
+			if !strings.Contains(safe, sub) {
+				t.Errorf("safe section should still cover in-place project-file rewrites (missing %q) — a headless session refusing ordinary `sed -i` on a project file would block routine work: %q", sub, safe)
+			}
+		}
+	})
+
+	t.Run("working-tree-discarding git operations are named risky", func(t *testing.T) {
+		for _, sub := range []string{"UNCOMMITTED working-tree state", "stash", "checkout --", "restore"} {
+			if !strings.Contains(risky, sub) {
+				t.Errorf("risky section should name working-tree-discarding git operations (missing %q): %q", sub, risky)
+			}
+		}
+		// The principle, not just the exemplars: it must say WHY.
+		if !strings.Contains(risky, "can be lost") {
+			t.Errorf("risky section should state that uncommitted work can be lost: %q", risky)
+		}
+	})
+
+	t.Run("a working-tree-discarding git op is NOT listed as safe", func(t *testing.T) {
+		if strings.Contains(safe, "stash pop") || strings.Contains(safe, "checkout --") {
+			t.Errorf("safe section must not list working-tree-discarding git operations as safe: %q", safe)
+		}
+	})
+}
+
 // End-to-end through Classify: an LLM that says "safe" on a gray-zone command
 // is honored, but the deny-floor still wins.
 func TestProviderClassifier_ThroughClassify(t *testing.T) {

@@ -271,12 +271,14 @@ func TestBashGrepNoMatch(t *testing.T) {
 // in the same class is refused before classification, an unrelated Safe
 // command still runs, and the ledger resets on a new turn.
 //
-// The stub classifyShell returns Risky for every git-history-write and
-// hook-disabling command (so the first is blocked by the risk gate,
-// recording its effect class in the ledger) but Safe for everything else
-// (so an unrelated command still runs). Every later same-class command is
-// refused by the ledger — not re-classified — and carries the same-action
-// refusal; the first block of each class carries the shared risk message.
+// The stub classifyShell returns Risky for every tracked effect class
+// (git-history-write, hook-disabling, git-stash) so the first is blocked by
+// the risk gate, recording its effect class in the ledger, but Safe for
+// everything else (so an unrelated command still runs). Every later
+// same-group command is refused by the ledger — not re-classified — and
+// carries the same-action refusal; the first block of each class carries the
+// shared risk message. git-stash is its OWN group (issue #201): a declined
+// stash bars another stash form in the turn, but NOT a git commit.
 func TestSameActionLedger(t *testing.T) {
 	// Risky for the two tracked effect classes and for the network-access
 	// control (curl), Safe for the rest — this mirrors the real gate's shape
@@ -348,6 +350,26 @@ func TestSameActionLedger(t *testing.T) {
 				{command: "git status", wantRun: true, wantMarker: ""},
 				// A same-class command after the Safe interlude is still refused.
 				{command: "git commit --amend", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+			},
+		},
+		{
+			// Issue #201: git-stash is its OWN effect class. A declined risky
+			// `git stash` bars another stash form in the same turn (the ledger
+			// keeps a refused stash from re-entering as a different stash
+			// spelling), but it must NOT bar an unrelated `git commit` — a
+			// stash is not a way to re-route a commit, and the shared-barred-
+			// group over-blocking was the bug this scenario used to pin.
+			name: "a blocked git stash bars other stash forms, not commits",
+			steps: []step{
+				{command: "git stash pop", wantRun: false, wantMarker: "blocked (risk:"},
+				{command: "git stash push -m wip", wantRun: false, wantMarker: "same action as an earlier blocked command in this turn"},
+				// An unrelated history write is NOT in the stash class — it
+				// re-enters the risk gate (the stub classifies it Risky) and is
+				// blocked there with the shared risk message, not the ledger's
+				// same-action refusal.
+				{command: "git commit -m x", wantRun: false, wantMarker: "blocked (risk:"},
+				// A read-only stash form is NOT in the class — it runs.
+				{command: "git stash list", wantRun: true, wantMarker: ""},
 			},
 		},
 	}

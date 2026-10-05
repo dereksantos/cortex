@@ -396,6 +396,84 @@ func TestEffectClass_HookDisabling(t *testing.T) {
 	}
 }
 
+// TestEffectClass_GitStash pins the working-tree stash detector (issue #201):
+// every `git stash` form that mutates the working tree (a conflicting pop
+// can lose uncommitted work) is in the class, and only the read-only forms
+// `git stash show` and `git stash list` clear it.
+func TestEffectClass_GitStash(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"bare stash (push form)", "git stash", EffectGitStash},
+		{"stash push", "git stash push", EffectGitStash},
+		{"stash push -m", "git stash push -m wip", EffectGitStash},
+		{"stash pop", "git stash pop", EffectGitStash},
+		{"stash apply", "git stash apply stash@{0}", EffectGitStash},
+		{"stash branch", "git stash branch feature", EffectGitStash},
+		{"stash drop", "git stash drop", EffectGitStash},
+		{"stash clear", "git stash clear", EffectGitStash},
+		{"stash store", "git stash store -m wip sha", EffectGitStash},
+		{"stash list (read-only)", "git stash list", ""},
+		{"stash show (read-only)", "git stash show -p", ""},
+		{"stash show with flag (read-only)", "git stash show --patch", ""},
+		{"stash with -C path", "git -C sub stash pop", EffectGitStash},
+		{"chained: stash then checkout", "git stash && git checkout -- file.go", EffectGitStash},
+		{"chained: checkout then stash pop", "git checkout main && git stash pop", EffectGitStash},
+		{"semicoloned stash", "git status; git stash", EffectGitStash},
+		{"make stash (not git)", "make stash", ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EffectClass(tt.cmd)
+			if got != tt.want {
+				t.Errorf("EffectClass(%q) = %q, want %q", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEffectClass_Grouping pins the same-action ledger grouping (issue #169;
+// git-stash split out in issue #201): git-history-write and hook-disabling
+// bar each other (a blocked commit must not re-enter as a hook-disabling
+// spelling), while git-stash bars ONLY itself — a declined `git stash pop`
+// must not refuse an unrelated `git commit` for the rest of the turn.
+func TestEffectClass_Grouping(t *testing.T) {
+	cases := []struct {
+		cls  string
+		want []string
+	}{
+		{EffectGitHistoryWrite, []string{EffectGitHistoryWrite, EffectHookDisabling}},
+		{EffectHookDisabling, []string{EffectGitHistoryWrite, EffectHookDisabling}},
+		{EffectGitStash, []string{EffectGitStash}},
+		{"some-other-class", []string{"some-other-class"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cls, func(t *testing.T) {
+			got := EffectClasses(tc.cls)
+			if len(got) != len(tc.want) {
+				t.Fatalf("EffectClasses(%q) = %v, want %v", tc.cls, got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("EffectClasses(%q) = %v, want %v", tc.cls, got, tc.want)
+				}
+			}
+		})
+	}
+	// A blocked git-stash must not bar the history-write group (the
+	// over-blocking the #201 review caught): neither class may appear in
+	// the stash class's barred set, and the commit side stays its own group.
+	for _, banned := range []string{EffectGitHistoryWrite, EffectHookDisabling} {
+		for _, c := range EffectClasses(EffectGitStash) {
+			if c == banned {
+				t.Errorf("EffectClasses(%q) must not bar %q: %v", EffectGitStash, banned, EffectClasses(EffectGitStash))
+			}
+		}
+	}
+}
+
 // TestEffectClass_NoMatch pins that routine, harmless commands do not get
 // lumped into a same-effect class.
 func TestEffectClass_NoMatch(t *testing.T) {
@@ -417,7 +495,8 @@ func TestEffectClass_NoMatch(t *testing.T) {
 		{"revert", "git revert HEAD"},
 		{"cherry-pick", "git cherry-pick abc123"},
 		{"add", "git add ."},
-		{"stash", "git stash push"},
+		{"stash show (read-only)", "git stash show -p"},
+		{"stash list (read-only)", "git stash list"},
 		{"clean", "git clean -fd"},
 		{"commit-verbose (not commit)", "git commit-verbose"},
 		{"commit-msg-hook (not commit)", "git commit-msg-hook"},
