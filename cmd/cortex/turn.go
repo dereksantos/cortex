@@ -197,6 +197,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// turn; the explicit clear here mirrors testwatchDrop's lifecycle and
 	// keeps the ledger's lifetime obvious at the turn boundary.
 	cs.sameActionBlocked = nil
+	// Issue #102: the same turn-boundary drop for the untrusted-content
+	// taint — a fetch in turn N must not raise the approval bar for turn
+	// N+1, and a turn that died before its end must not leak its taint.
+	// (turnNo is already stamped to the new value above, so a fresh taint
+	// starts each turn; the explicit nil mirrors sameActionBlocked's reset
+	// and keeps the taint's lifetime obvious at the turn boundary.)
+	cs.taint = nil
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
 	// the working set engages wherever turn content happens to start.
 	if cs.ws == nil {

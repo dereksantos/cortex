@@ -528,12 +528,56 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	if cs != nil {
 		fn = cs.classifyShell
 		if fn == nil {
-			fn = func(ctx context.Context, command string) (shellrisk.Level, string, error) {
-				return shellrisk.ProviderClassifierWithLimit(cs.reasoner(), cs.turnIntent, cs.Config.maxTaskContextChars())(ctx, command)
-			}
+			fn = cs.riskJudge()
 		}
 	}
-	v := shellrisk.Classify(ctx, command, fn)
+	// Issue #102: the taint's source list rides into the classifier as the
+	// untrustedContent note, so the intent judge can never wave a command
+	// through on a fetched page's say-so — it sees that the task context and
+	// the request the command serves may have been steered by web content.
+	// (The judge's own teeth are advisory; the mechanical ones — the
+	// re-examination below and the git-push floor — are the harness's.)
+	note := cs.untrustedClassifierNote()
+	v := shellrisk.Classify(ctx, command, note, fn)
+	// Issue #102 (taint): once untrusted web content entered the turn, a
+	// Safe verdict from the gray-zone judge no longer waves a command
+	// through unexamined — the judge may have been shaped by the injected
+	// content itself (its task context is the turn intent a poisoned page
+	// could have steered; its own verdict, in the worst case, is text the
+	// page dictated upstream). So on a tainted turn every gray-zone verdict
+	// is re-examined by the judge (riskJudge, the same wiring the first pass
+	// used): anything it now calls Risky — a miss it corrects, or an error it
+	// fails closed on — is gated here even though the same first verdict
+	// would have run it in an untainted turn. A verdict the judge holds Safe
+	// both times still runs (the acceptance shape: an unambiguous Safe
+	// command like `ls` is unaffected). Deny-floor Blocked is never re-
+	// consulted — its refusal stands below, untouched. `tainted` is sampled
+	// once and shared by the re-check above and the approval wording below
+	// (the gate is single-goroutine within the turn's tool batch; naming the
+	// fact once keeps the classify-time and gate-time halves of the rule
+	// reading as one decision).
+	tainted := cs.untrustedContentActive()
+	// The taint-only git-push floor (issue #102): after untrusted web
+	// content, a push publishes whatever the tainted turn produced — a
+	// page that steered the turn must not get an outbound publish waved
+	// through by the judge. Any Safe verdict on a git-push command
+	// (safe-path or gray-zone alike) is RAISED to Risky here: never
+	// Blocked, so the push may still run on a human's explicit approval,
+	// but no push is ever auto-approved after untrusted content. A
+	// classifier-flagged Risky push needs no raising; deny-floor Blocked
+	// stands untouched below. Placed before the re-examination so the
+	// floor's reason wins over the judge's for the prompt line.
+	if tainted && v.Level == shellrisk.Safe && shellrisk.IsGitPush(command) {
+		v = shellrisk.Verdict{Level: shellrisk.Risky, Reason: shellrisk.GitPushTaintReason, Tier: "taint-floor"}
+	}
+	if tainted && v.Tier == "classified" && v.Level == shellrisk.Safe {
+		if raised, reason, cerr := cs.riskJudge()(ctx, command, note); cerr != nil || raised == shellrisk.Risky {
+			if cerr != nil {
+				reason = "classifier unavailable under untrusted-content taint (" + cerr.Error() + "); gated for safety"
+			}
+			v = shellrisk.Verdict{Level: shellrisk.Risky, Reason: reason, Tier: "classified-tainted"}
+		}
+	}
 	switch v.Level {
 	case shellrisk.Safe:
 		return "", true
@@ -545,8 +589,21 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		// (internal/shellrisk.BlockedMessage, issue #169): a Risky command with
 		// no interactive approver, a Risky command inside a subagent, and a
 		// Risky command whose approver timed out all read identically to the
-		// model.
+		// model. Under a taint (issue #102) the no-approver refusal is the
+		// taint-specific shared message instead — the headless Blocked stance
+		// is unchanged, the wording says why the bar is raised this turn.
 		blocked := shellrisk.BlockedMessage(v.Reason)
+		reason := v.Reason
+		if tainted {
+			blocked = shellrisk.TaintBlockedMessage(strings.Join(cs.taintSources(), ", "))
+			reason = v.Reason + "; " + cs.taintSourceNote()
+			// Telemetry (issue #102): the raised bar engaged — a Risky
+			// command reached the gate on a tainted turn. One receipt per
+			// turn regardless of how many commands or which approval path
+			// (prompt, decline, headless block) answers it; the gate is
+			// recorded BEFORE the decision so a decline counts too.
+			cs.recordRiskyGateUnderTaint()
+		}
 		// A subagent (depth >= 1) has no human operator mid-loop — Risky is
 		// treated as Blocked, same as a headless session. Only the coder's own
 		// top-level bash call (depth 0) gets an interactive approval path.
@@ -555,7 +612,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			return blocked, false
 		}
 		if !cs.quiet && cs.confirmRisky != nil {
-			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y/N] ", v.Reason, command)
+			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y/N] ", reason, command)
 			if cs.confirmRisky(q) {
 				return "", true
 			}
@@ -567,7 +624,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		// cs.quiet so a quiet served/headless session stays exactly as
 		// blocked as it is today unless it explicitly wires an approver.
 		if cs.approveRisky != nil {
-			approved, timedOut := cs.approveRisky(ctx, v.Reason, command)
+			approved, timedOut := cs.approveRisky(ctx, reason, command)
 			if approved {
 				return "", true
 			}
@@ -581,6 +638,29 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		cs.recordSameActionBlock(command)
 		return blocked, false
 	}
+}
+
+// riskJudge resolves the tier-3 classifier exactly as gateShell builds it
+// inline (the injected classifyShell seam, else the provider-backed one over
+// the reasoner) — factored out so the tainted re-check in gateShell uses the
+// SAME judge rather than duplicating its wiring.
+func (cs *CortexSession) riskJudge() shellrisk.ClassifyFn {
+	if cs.classifyShell != nil {
+		return cs.classifyShell
+	}
+	return shellrisk.ProviderClassifierWithLimit(cs.reasoner(), cs.turnIntent, cs.Config.maxTaskContextChars())
+}
+
+// untrustedClassifierNote is the classifier-facing taint note for the
+// current turn (issue #102): shellrisk.TaintNote over this turn's sources,
+// "" when the turn is clean. Threaded through every classifier call so
+// the intent judge can never wave a command through on a fetched page's
+// say-so — it sees that the task context itself may have been steered.
+func (cs *CortexSession) untrustedClassifierNote() string {
+	if !cs.untrustedContentActive() {
+		return ""
+	}
+	return shellrisk.TaintNote(cs.taintSources())
 }
 
 // sameActionBlockedInTurn reports whether effectClass was already Blocked

@@ -167,7 +167,7 @@ func riskyBashTurnTestSessionFactory(t *testing.T) (sessionFactory, func() *Cort
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"could not run that command"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3}}`))
 	}))
 	t.Cleanup(srv.Close)
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test: risky", nil
 	}
 	var last *CortexSession

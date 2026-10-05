@@ -18,7 +18,7 @@ import (
 // ranged read is clamped to this). ~200 lines ≈ one screenful.
 const maxReadLines = 200
 
-// ConfinePath is the door guard: it vets the path arg of every path-taking tool
+// ConfinePath is the door guard: it vets the path arg of every path-taking read tool
 // (outline, grep, read_file) exactly once, rejecting absolute paths and `..`
 // escapes and requiring the resolved path stay within the workspace root. It is
 // SEPARATE from remove_path's delete-protection: reads must ALLOW .cortex/journal

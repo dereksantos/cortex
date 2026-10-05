@@ -82,9 +82,16 @@ func webSearch(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) 
 		return "", fmt.Errorf("parse search response: %w", err)
 	}
 	if len(results) == 0 {
-		return "(no search results)", nil
+		// Issue #102: even the empty result is framed — the marker is the
+		// uniform signal that this result came off the web, so the taint
+		// detector sees it on every web_search outcome, not only the ones
+		// that carried content.
+		return wrapUntrusted("(no search results)"), nil
 	}
-	return formatSearchResults(results), nil
+	// Issue #102: search snippets are attacker-controllable text (anyone can
+	// seed what a result title/snippet says), so the result list goes back
+	// framed as untrusted data — see untrusted.go.
+	return wrapUntrusted(formatSearchResults(results)), nil
 }
 
 func parseSearchResults(body []byte, maxResults int) ([]webSearchResult, error) {

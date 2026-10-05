@@ -273,6 +273,21 @@ type CortexSession struct {
 	// outside a turn.
 	sameActionBlocked map[string]bool
 
+	// taint is the per-turn untrusted-content taint (issue #102): set when
+	// attacker-controllable web content (a fetch_url / web_search result,
+	// detected by its framing marker in coderDispatcher, loop.go) enters the
+	// conversation. While the turn is tainted, gateShell raises the bar for
+	// Risky shell commands: an interactive approver is asked with the taint
+	// reason appended (the intent judge's Safe verdict no longer waves a
+	// Risky command through — see tool_deps.go), and with no approver
+	// reachable (headless, subagent, timeout) the command is blocked with
+	// shellrisk.TaintBlockedMessage. Same lifecycle as sameActionBlocked
+	// (issue #169): inert outside a turn (turnNo == 0 — record drops, the
+	// gate never consults it), explicitly cleared at the START of every
+	// turn in turn.go so a turn that errored or was interrupted before its
+	// end cannot leak the taint into the next one. Nil between turns.
+	taint *untrustedTaint
+
 	sessionStart    time.Time
 	turnStart       time.Time // in-flight turn's start (issue #109: the status row's elapsed clock); zero between turns
 	turns           int
@@ -609,6 +624,31 @@ func (cs *CortexSession) AttributionProject() string {
 // ValidateToolCall provides dynamic validation for tool calls beyond config.
 // Returns (true, "") if valid, (false, message) if invalid.
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
+	// Issue #102: the taint-time pre-execution gates ride the validator
+	// because it runs on EVERY Execute path — the coder dispatcher AND the
+	// in-process subagent dispatch (RunSubagent reuses this session as the
+	// child's ToolDeps). The bash gate itself stays in gateShell (it owns
+	// the effect-class ledger, the approver flow, the receipts); this is
+	// the same-taint floor for the paths gateShell cannot see — the
+	// in-process subagent dispatch (a subagent of a tainted turn carries
+	// the tainted intent, and gateShell's bash leg does not run through
+	// this validator at all).
+	//   - write_file / edit_file / remove_path: confined to the workspace
+	//     root (ConfineWrites' shape + the taint reason). The tools' own
+	//     in-tool checks stay as the defense-in-depth copy for direct
+	//     package callers; here the check catches subagent dispatch.
+	// Bash pushes need nothing extra here: the bash tool runs every command
+	// through deps.GateShell (gateShell's git-push floor covers both the
+	// coder and subagent legs), and ConfinePath's sibling confinedPath
+	// already keeps remove/delete inside its root.
+	if cs.untrustedContentActive() {
+		switch tc.Function.Name {
+		case tools.FunctionWriteFile, tools.FunctionEditFile, tools.FunctionRemove:
+			if err := tools.ConfineWrites(tc, cs); err != nil {
+				return false, err.Error()
+			}
+		}
+	}
 	switch tc.Function.Name {
 	case "context_adjust_watermarks":
 		// Validate watermarks are within bounds (±highWM/2 — mirrors
