@@ -211,9 +211,12 @@ var errNoChoices = errors.New("no choices in model response")
 // information for that call: an error (an identical failing call is no
 // progress from the first repeat) or unchanged from the batch before that
 // (the re-read yields the same thing). The guard compares one observation per
-// BATCH — the round's dispatch observations joined with \x00 — taken at the
-// end of each round, after dispatch; the observation belongs to the same
-// batch the signature describes, never to a sibling call or another round.
+// BATCH — the round's dispatch observations joined with \x00 — collected
+// inside the dispatch loop (the transcript cannot supply it: a repeated batch
+// reuses the same tool-call IDs, and the stuck hint / cap warning appended
+// after the tool results would shift a transcript tail-slice); the
+// observation belongs to the same batch the signature describes, never to a
+// sibling call or another round.
 // On the penultimate repeat the engine nudges; on the next it finalizes.
 const maxRepeatedToolCalls = 3
 
@@ -673,9 +676,20 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// AFTER all tool results (the API requires tool results to follow the
 		// assistant message before any user turn).
 		hintClass := ""
+		// One batch observation: this round's dispatch observations joined, compared
+		// as a unit against the previous round's at the end of the round (the
+		// no-progress guard, issue #132). Collected INSIDE the dispatch loop —
+		// in the same order and with the same pairing as the tool-result
+		// messages it appends — because the transcript cannot supply it: a
+		// repeated batch reuses the same tool-call IDs, and the stuck hint or
+		// the cap-approaching warning appended after the tool results (the API
+		// requires them to follow) would shift any transcript tail-slice away
+		// from this round's own results.
+		batchObs := make([]string, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
 			countTool(&stats, call.Function.Name)
 			obs := ts.Dispatch.Dispatch(ctx, call)
+			batchObs = append(batchObs, obs)
 			// Stuck detector: count by ERROR CLASS, not byte-identical call, so a
 			// recurring failure is caught even when the model interleaves read_file
 			// calls (which slip past the no-progress guard). First crossing → an
@@ -733,21 +747,6 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			if remaining := b.MaxIter - i; remaining <= toolCapWarningRounds {
 				appendMsg(Message{Role: RoleUser, Content: toolCapWarning(remaining)})
 				capWarned = true
-			}
-		}
-		// One batch observation: this round's dispatch observations joined,
-		// compared as a unit against the previous round's at the start of the
-		// next round (the no-progress guard, issue #132). Built here, at the
-		// end of the round, after dispatch, so each round's observation is
-		// paired with its own batch's signature; the guard's error-class check
-		// and the unchanged-observation check both read it against the SAME
-		// call's previous observation — never a sibling call's or another
-		// round's. A repeated batch reuses tool-call IDs, so the transcript
-		// cannot supply it.
-		batchObs := make([]string, 0, len(msg.ToolCalls))
-		for _, m := range req.Messages[len(req.Messages)-len(msg.ToolCalls):] {
-			if m.Role == RoleTool {
-				batchObs = append(batchObs, m.Content)
 			}
 		}
 		lastObservation = strings.Join(batchObs, "\x00")

@@ -4,7 +4,8 @@
 // and reportWithheldToolCalls (the forced-wrap-up receipt: a tools-withheld
 // finalize reply carrying markup reports the intended action instead of
 // dropping it). The parser itself (ParseFunctionCallsTags) and the display
-// strip (StripToolMarkup) are covered in internal/tools.
+// strip (StripToolMarkup) are covered in internal/tools
+// (function_calls_test.go).
 package main
 
 import (

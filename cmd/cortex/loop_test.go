@@ -204,6 +204,7 @@ func TestRunLoopNoProgress(t *testing.T) {
 	type step struct {
 		obs   string // the round's dispatch observation
 		nudge bool   // the nudge was injected after this round
+		warn  bool   // the cap-approaching warning was injected after this round
 		stop  string // the loop broke at this round with this stop reason
 	}
 	cases := []struct {
@@ -242,6 +243,28 @@ func TestRunLoopNoProgress(t *testing.T) {
 			wantStop:   "max-iter",
 			wantFinal:  true,
 			wantToolRd: 5,
+		},
+		{
+			// Identical batch, unchanged observation, with the cap-approaching
+			// warning (issue #161) appended after the tool results mid-streak:
+			// MaxIter is just above toolCapWarningRounds, so the warning fires
+			// on the LAST round, after dispatch. The guard must be immune to
+			// the extra user message it appends: an identical call whose
+			// observation is unchanged is no progress across the warning
+			// round — nudge at the first repeat, finalize at the second — and
+			// the round's observation stays its own dispatch result, not ""
+			// (the pre-fix transcript tail-slice took the warning in place of
+			// the tool result and reset the streak).
+			name: "identical call, unchanged observation, across the cap warning",
+			steps: []step{
+				{obs: "same"},
+				{obs: "same", nudge: true},
+				{obs: "same", warn: true, stop: "no-progress"},
+			},
+			maxIter:    toolCapWarningRounds + 2,
+			wantStop:   "no-progress",
+			wantFinal:  true,
+			wantToolRd: 3,
 		},
 		{
 			// Identical batch returning an error: no progress from the FIRST
@@ -330,9 +353,23 @@ func TestRunLoopNoProgress(t *testing.T) {
 					nudges++
 				}
 			}
+			var capWarnings int
+			for _, m := range req.Messages {
+				if m.Role == RoleUser && strings.HasPrefix(m.Content, "Harness note: you have ") {
+					capWarnings++
+				}
+			}
 			for i, s := range tc.steps {
 				if s.nudge {
 					wantNudges++
+				}
+				if s.warn {
+					if i != tc.wantToolRd-1 {
+						t.Errorf("cap warning landed on tool round %d, want round %d", i+1, tc.wantToolRd)
+					}
+					if capWarnings != 1 {
+						t.Errorf("cap warnings = %d, want 1", capWarnings)
+					}
 				}
 				if s.stop != "" && i != tc.wantToolRd-1 {
 					t.Errorf("stop %q landed on tool round %d, want round %d", s.stop, i+1, tc.wantToolRd)

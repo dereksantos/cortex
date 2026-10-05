@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -16,10 +17,11 @@ import (
 
 // TestRunLoopBeforeSendFiresOncePerIteration locks the seam: a hook that
 // mutates the request is observed by send.Send on the SAME round it fired —
-// and exactly once per main-loop iteration. The model issues two distinct tool
-// calls (so no-progress never trips), then the iteration cap forces a
-// tools-withheld finalize; the hook must have fired once before each of the
-// three main-loop sends, and must NOT fire for the forced-finalize send.
+// and exactly once per main-loop iteration. The model issues one tool call
+// per round, each on a DIFFERENT path (so the no-progress guard never trips),
+// then the iteration cap forces a tools-withheld finalize; the hook must have
+// fired once before each of the three main-loop sends, and must NOT fire for
+// the forced-finalize send.
 func TestRunLoopBeforeSendFiresOncePerIteration(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
@@ -32,8 +34,9 @@ func TestRunLoopBeforeSendFiresOncePerIteration(t *testing.T) {
 			return fakeResp("forced", nil, 1, 1), false, nil
 		}
 		i++
-		// Record the request the hook left in place this round.
-		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), "f")}, 8, 4), false, nil
+		// Distinct paths (the guard's signature is name+args): the calls are
+		// NOT identical batches, so the no-progress guard never trips.
+		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), fmt.Sprintf("f%d", i))}, 8, 4), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 	hook := func(r *AgentRequest) {
@@ -80,8 +83,9 @@ func TestRunLoopBeforeSendCleanFinalize(t *testing.T) {
 		if i >= 3 {
 			return fakeResp("answer", nil, 1, 1), false, nil
 		}
-		// Distinct calls so the no-progress guard never trips.
-		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), "f")}, 8, 4), false, nil
+		// Distinct paths (the guard's signature is name+args): the calls are
+		// NOT identical batches, so the no-progress guard never trips.
+		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), fmt.Sprintf("f%d", i))}, 8, 4), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 	hook := func(r *AgentRequest) {
@@ -132,7 +136,9 @@ func TestRunLoopBeforeSendNilIsByteForByte(t *testing.T) {
 			return fakeResp("forced", nil, 1, 1), false, nil
 		}
 		i++
-		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), "f")}, 8, 4), false, nil
+		// Distinct paths (the guard's signature is name+args): the calls are
+		// NOT identical batches, so the no-progress guard never trips.
+		return fakeResp("", []ToolCall{readCall("c"+strings.Repeat("x", i), fmt.Sprintf("f%d", i))}, 8, 4), false, nil
 	})
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 	_, _, err := runLoop(context.Background(), send, req,
