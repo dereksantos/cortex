@@ -461,6 +461,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	// the anchor's pipe). Always streaming here (anchored mode requires it).
 	if cs.live != nil {
 		cs.live.SetThinking(true, "")
+		cs.live.SetStatus(cs.statusStats()) // issue #109: publish the row's figures before the first send
 		// Wrap the anchor's own SetThinking so the state light tracks the same
 		// on/off transition: on -> thinking (reasoning), off -> streaming (the
 		// answer has started). This fires on every tick and reasoning chunk;
@@ -572,6 +573,11 @@ func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed stri
 	realStdout := os.Stdout
 	os.Stdout = w
 	session.live = anchor
+	// Issue #109: push the row's figures at anchor creation so the FIRST turn
+	// shows the row immediately — the turn's own startActivity/send pushes
+	// refresh it as the turn runs. This is the one cross-goroutine read of
+	// session state (the turn's goroutine hasn't started yet, so it's clean).
+	anchor.SetStatus(session.statusStats())
 
 	drained := make(chan struct{})
 	go func() {
