@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,6 +189,159 @@ func TestCoderLoopNoProgressFinalizes(t *testing.T) {
 	}
 	if nudges != 1 {
 		t.Errorf("nudges = %d, want 1", nudges)
+	}
+}
+
+// TestRunLoopNoProgress is the issue #132 no-progress guard, table-driven:
+// the guard compares BATCHES — this round's batch (its signature and the
+// dispatch observations joined) against the PREVIOUS round's batch — so the
+// observation it reads is always the same call's, never a sibling call's or
+// another round's. Each case script-calls one batch per round and records what
+// the guard did in each round (nudge and/or finalize) plus where the turn
+// ended. A finalize lands on the round after the LAST scripted batch (the
+// forced finalize's send has tools withheld).
+func TestRunLoopNoProgress(t *testing.T) {
+	type step struct {
+		obs   string // the round's dispatch observation
+		nudge bool   // the nudge was injected after this round
+		stop  string // the loop broke at this round with this stop reason
+	}
+	cases := []struct {
+		name       string
+		steps      []step
+		maxIter    int
+		wantStop   string
+		wantFinal  bool // a forced finalize ran (tools withheld)
+		wantToolRd int  // rounds that dispatched a tool batch
+	}{
+		{
+			// Identical batch, unchanged observation: a plain re-read. No
+			// progress from the second batch on (first repeat → streak 2 →
+			// nudge; second repeat → streak 3 → finalize).
+			name: "identical call, unchanged observation",
+			steps: []step{
+				{obs: "same"},
+				{obs: "same", nudge: true},
+				{obs: "same", stop: "no-progress"},
+			},
+			maxIter:    100,
+			wantStop:   "no-progress",
+			wantFinal:  true,
+			wantToolRd: 3,
+		},
+		{
+			// Identical batch whose observation changes EVERY round: each
+			// re-read yields new information (progress), so the streak
+			// resets every round and the guard never finalizes — the turn
+			// runs to the iteration cap.
+			name: "identical call, observation changes every round",
+			steps: []step{
+				{obs: "a"}, {obs: "b"}, {obs: "c"}, {obs: "d"}, {obs: "e"},
+			},
+			maxIter:    5,
+			wantStop:   "max-iter",
+			wantFinal:  true,
+			wantToolRd: 5,
+		},
+		{
+			// Identical batch returning an error: no progress from the FIRST
+			// repeat (the nudge fires on the first repeat; the one after
+			// finalizes). On main this run got three repeats and a finalize
+			// with no nudge. Each round's error keeps a distinct class so the
+			// stuck detector (the same error class recurring) never fires
+			// first: the no-progress guard is under test alone.
+			name: "identical call returning an error",
+			steps: []step{
+				{obs: "Error: no such file alpha"},
+				{obs: "Error: no such file beta", nudge: true},
+				{obs: "Error: no such file gamma", stop: "no-progress"},
+			},
+			maxIter:    100,
+			wantStop:   "no-progress",
+			wantFinal:  true,
+			wantToolRd: 3,
+		},
+		{
+			// A different call's error (round 1) must not poison the guard for
+			// the next call: the guard only reads the PREVIOUS batch's own
+			// observation. Round 2 (first sighting of the new call) starts a
+			// streak; round 3 (its first repeat, unchanged obs) is no progress
+			// (streak 2 → nudge); round 4 (second repeat) reaches the cap and
+			// finalizes.
+			name: "different call errored earlier, then a repeat",
+			steps: []step{
+				{obs: "Error: b failed"},
+				{obs: "ok"},
+				{obs: "ok", nudge: true},
+				{obs: "ok", stop: "no-progress"},
+			},
+			maxIter:    100,
+			wantStop:   "no-progress",
+			wantFinal:  true,
+			wantToolRd: 4,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+			appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+			var round int
+			var sawNoTools bool
+			send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+				if r.Tools == nil { // the forced finalize
+					sawNoTools = true
+					return fakeResp("forced answer", nil, 1, 1), false, nil
+				}
+				// Distinct IDs, same path: the signature is name+args, so the
+				// same path is the identical batch the guard is about. (The
+				// tool-call ID stays unique to this response: reused IDs would
+				// masquerade as the previous round's batch on the wire.)
+				call := readCall(fmt.Sprintf("c%d", round), "f")
+				if tc.name == "different call errored earlier, then a repeat" && round == 0 {
+					call = readCall("c0", "b") // round 1 is a DIFFERENT call
+				}
+				round++
+				return fakeResp("", []ToolCall{call}, 1, 1), false, nil
+			})
+			disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return tc.steps[round-1].obs })
+
+			_, stats, err := runLoop(context.Background(), send, req,
+				Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+				Bounds{MaxTokens: 100, MaxIter: tc.maxIter}, nil, appendMsg, nil)
+			if err != nil {
+				t.Fatalf("runLoop: %v", err)
+			}
+			if stats.StopReason != tc.wantStop {
+				t.Fatalf("stop = %q, want %q", stats.StopReason, tc.wantStop)
+			}
+			if (stats.FinalizeForced && sawNoTools) != tc.wantFinal {
+				t.Errorf("forced finalize ran = %v (tools withheld seen = %v), want %v",
+					stats.FinalizeForced, sawNoTools, tc.wantFinal)
+			}
+			if round != tc.wantToolRd {
+				t.Errorf("tool rounds dispatched = %d, want %d", round, tc.wantToolRd)
+			}
+			// Per-round expectations: a nudge after each round flagged in the
+			// script, and the stop lands on the round flagged (that batch was
+			// dispatched; the next send is the forced finalize, tools withheld).
+			var nudges, wantNudges int
+			for _, m := range req.Messages {
+				if m.Role == RoleUser && m.Content == noProgressNudge {
+					nudges++
+				}
+			}
+			for i, s := range tc.steps {
+				if s.nudge {
+					wantNudges++
+				}
+				if s.stop != "" && i != tc.wantToolRd-1 {
+					t.Errorf("stop %q landed on tool round %d, want round %d", s.stop, i+1, tc.wantToolRd)
+				}
+			}
+			if nudges != wantNudges {
+				t.Errorf("nudges = %d, want %d", nudges, wantNudges)
+			}
+		})
 	}
 }
 

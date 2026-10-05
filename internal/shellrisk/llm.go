@@ -146,11 +146,22 @@ var classifyRetryBaseDelay = 250 * time.Millisecond
 // error: a context error, a *net.Error (EOF, refused/reset connections — the
 // recorded shape), or a net.Error wrapped in another error. Context
 // cancellation is never retried: the turn is over, and retrying would just
-// delay the interrupt. Non-transport errors (an HTTP 4xx, a parse failure) are
-// returned immediately — retrying a rejected request burns budget without
-// changing the answer. When the attempts run out, the LAST attempt's error is
-// returned so Classify's fail-closed verdict names what actually happened.
+// delay the interrupt — so a cancelled context is checked FIRST, before the
+// attempt runs, and when it is cancelled the first attempt's result is
+// reported as-is (its error, if any, standing in for the cancel: the attempt
+// itself already saw the context die). Non-transport errors (an HTTP 4xx, a
+// parse failure) are returned immediately — retrying a rejected request burns
+// budget without changing the answer. When the attempts run out, the LAST
+// attempt's error is returned so Classify's fail-closed verdict names what
+// actually happened.
 func classifyWithRetry(ctx context.Context, attempt func() (string, error)) (string, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		raw, err := attempt()
+		if err == nil {
+			return raw, nil
+		}
+		return "", ctxErr
+	}
 	raw, err := attempt()
 	if err == nil || !isTransientClassifierError(ctx, err) {
 		return raw, err

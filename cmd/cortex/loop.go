@@ -203,15 +203,18 @@ type loopStats struct {
 
 var errNoChoices = errors.New("no choices in model response")
 
-// maxRepeatedToolCalls bounds consecutive no-progress tool-call batches before
-// the no-progress guard intervenes: a weak model can re-issue the same call
-// until it burns the turn (observed: 68 identical greps, 2026-06-14). A batch
-// is "no progress" when it is byte-identical to the previous one AND its
-// previous observation carried no new information — an error (issue #132: an
-// identical failing call is no progress from the first repeat) or the
-// observation two batches back (the model is re-reading something it already
-// read). On the penultimate repeat the engine nudges; on the next it
-// finalizes.
+// maxRepeatedToolCalls bounds how long the no-progress guard (issue #132) lets
+// a model re-issue the same tool-call batch before intervening. A weak model
+// can re-issue the same call until it burns the turn (observed: 68 identical
+// greps, 2026-06-14). A batch is "no progress" when it is byte-identical to
+// the previous one AND the previous batch's observation carried no new
+// information for that call: an error (an identical failing call is no
+// progress from the first repeat) or unchanged from the batch before that
+// (the re-read yields the same thing). The guard compares one observation per
+// BATCH — the round's dispatch observations joined with \x00 — taken at the
+// end of each round, after dispatch; the observation belongs to the same
+// batch the signature describes, never to a sibling call or another round.
+// On the penultimate repeat the engine nudges; on the next it finalizes.
 const maxRepeatedToolCalls = 3
 
 const (
@@ -404,15 +407,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		req.MaxTokens = b.MaxTokens
 	}
 
-	var lastSig string
-	var repeats int             // consecutive batches identical to lastSig, including current
+	var repeats int             // consecutive batches identical to prevBatchSig, including current
 	errSeen := map[string]int{} // error-class → times seen this turn (survives interleaved reads)
 	jitter := false             // perturb temperature on the next send (set when stuck)
 	baseTemp := req.Temperature // restore after a one-shot jitter
 	stop := ""
-	prevBatchObs := ""    // this call's observation from the PREVIOUS round (the guard compares it to lastObservation, the round before that's)
-	lastObservation := "" // the last dispatch's observation; one round behind prevBatchObs (set in the prior round's dispatch)
-	capWarned := false    // the cap-approaching note fired (at most once per turn, issue #161)
+	var prevBatchSig, prevBatchObs string // the previous round's batch: signature + joined observations (no-progress guard)
+	lastObservation := ""                 // the last round's joined batch observation (also feeds salvageObservationFinalize)
+	capWarned := false                    // the cap-approaching note fired (at most once per turn, issue #161)
 	for i := 0; i < b.MaxIter; i++ {
 		stats.Iterations = i + 1
 		var restoreEffort func()
@@ -642,38 +644,27 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// API ordering invariant).
 		appendMsg(msg)
 
-		// No-progress guard (issue #132): a byte-identical repeat is no
-		// progress when the SAME call's previous observation carried no new
-		// information: an error (an identical failing call is no progress from
-		// the first repeat) or unchanged from the round before (the re-read
-		// yields the same thing). A first sighting (no prior observation) or a
-		// genuinely different observation resets the streak.
-		//
-		// prevBatchObs is the PREVIOUS round's observation for this call (set at
-		// the end of the prior round's dispatch); lastObservation holds the
-		// round before that's — the pair the guard compares. The transcript
-		// cannot supply the previous observation: a repeated batch reuses the
-		// same tool-call IDs, so the prior round's tool-result message (already
-		// appended by its dispatch) would masquerade as this round's and
-		// collapse the comparison.
 		sig := toolCallSignature(msg.ToolCalls)
-		noProgress := false
-		if sig == lastSig && len(msg.ToolCalls) > 0 {
-			if errorClass(prevBatchObs) != "" {
-				noProgress = true // an identical failing call is no progress from the first repeat
-			} else if prevBatchObs != "" && prevBatchObs == lastObservation {
-				noProgress = true // the observation didn't change (re-read the same thing)
-			}
-		}
-		if noProgress {
-			// An erroring or unchanged previous observation is no progress
-			// from the first repeat (issue #132): jump the streak to the cap
-			// so finalize fires now.
-			repeats = maxRepeatedToolCalls
-		} else if sig == lastSig {
-			repeats++
-		} else {
-			lastSig, repeats = sig, 1
+		// The guard compares BATCHES, not individual calls: the previous
+		// round's signature (prevBatchSig) and the previous round's joined
+		// observation (prevBatchObs) both belong to that round's batch, so the
+		// observation judged is always the same call's — never a sibling call's
+		// or another round's. (The transcript cannot supply the previous
+		// observation: a repeated batch reuses the same tool-call IDs, so the
+		// prior round's tool-result message — already appended by its dispatch
+		// — would masquerade as this round's.)
+		//
+		// A batch that is NOT byte-identical to the previous one starts its own
+		// streak fresh. Whether an identical batch is "no progress" is decided
+		// at the END of the round, after dispatch, when this round's own
+		// observation is known: an erroring or unchanged observation is no
+		// progress (re-reading yields nothing new); a changed observation is
+		// progress (the re-read yielded new information) and resets the streak.
+		// Deciding post-dispatch is what lets a changed observation count:
+		// pre-dispatch the guard only sees the previous observation and cannot
+		// tell whether this round will re-yield it.
+		if sig != prevBatchSig || len(msg.ToolCalls) == 0 {
+			repeats = 1 // a new batch starts its own streak
 		}
 		if ts.BeforeBatch != nil {
 			ts.BeforeBatch()
@@ -701,12 +692,6 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			}
 			stats.ReadBytes += len(obs)
 			appendMsg(Message{Role: RoleTool, ToolCallID: call.ID, Content: obs})
-			// The no-progress guard reads the PREVIOUS round's observation
-			// (prevBatchObs) at the top of the next round; shift the trail
-			// here, at the dispatch, so it does. prevBatchObs gets the
-			// PREVIOUS round's observation (lastObservation before the update).
-			prevBatchObs = lastObservation
-			lastObservation = obs
 			if ts.AfterToolResult != nil {
 				ts.AfterToolResult()
 			}
@@ -750,6 +735,51 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				capWarned = true
 			}
 		}
+		// One batch observation: this round's dispatch observations joined,
+		// compared as a unit against the previous round's at the start of the
+		// next round (the no-progress guard, issue #132). Built here, at the
+		// end of the round, after dispatch, so each round's observation is
+		// paired with its own batch's signature; the guard's error-class check
+		// and the unchanged-observation check both read it against the SAME
+		// call's previous observation — never a sibling call's or another
+		// round's. A repeated batch reuses tool-call IDs, so the transcript
+		// cannot supply it.
+		batchObs := make([]string, 0, len(msg.ToolCalls))
+		for _, m := range req.Messages[len(req.Messages)-len(msg.ToolCalls):] {
+			if m.Role == RoleTool {
+				batchObs = append(batchObs, m.Content)
+			}
+		}
+		lastObservation = strings.Join(batchObs, "\x00")
+		// No-progress decision (issue #132), made HERE — after dispatch — where
+		// this round's own observation (lastObservation) and the previous
+		// round's (prevBatchObs) are both fresh. An identical batch is no
+		// progress when its observation carried no new information: an error
+		// (an identical failing call re-yields the same failure) or unchanged
+		// from the previous round (the re-read yields the same thing). A
+		// changed observation is progress: the re-read yielded new information,
+		// so the streak starts over. prevBatchObs keeps its own copy of the
+		// join: lastObservation is also read on the natural-finish path (the
+		// empty-answer observation salvage) and the finalize, where it must be
+		// the LAST round's value — so the decision reads prevBatchObs (the
+		// previous round) against lastObservation (this round), then the trail
+		// advances below.
+		if sig == prevBatchSig && len(msg.ToolCalls) > 0 {
+			switch {
+			case errorClass(lastObservation) != "":
+				repeats++ // an identical failing call is no progress from the first repeat
+			case lastObservation == prevBatchObs:
+				repeats++ // the observation didn't change (re-read the same thing)
+			default:
+				repeats = 1 // an identical batch whose observation changed is progress
+			}
+		}
+		// Advance the guard's batch trail at the end of the round, once the
+		// whole batch has been dispatched: the next round's batch-identity
+		// check compares its signature against this round's.
+		prevBatchSig = sig
+		prevBatchObs = lastObservation
+
 		// The redirect didn't take and the same error keeps recurring — stop thrashing
 		// and finalize from what's gathered.
 		if stop == "stuck" {
