@@ -344,11 +344,13 @@ func (l *rowList) Accept()            { l.accepted++ }
 func TestSelectableBodyRowsAreAllPickable(t *testing.T) {
 	out := &strings.Builder{}
 	v := &rowList{rows: []string{"row-a", "row-b", "row-c"}, cursor: -1}
-	// The Enter must end the run: the trailing down-arrow is there to be eaten by
-	// a run that keeps going, which would move the cursor onto row 1 — the very
+	// The Enter must end the run: the trailing Home is there to be eaten by
+	// a run that keeps going, which would move the cursor onto row 0 — the very
 	// bug this pins (Enter only stopped scrolling, so the run ran on to EOF and
-	// the keystrokes after the pick kept editing the view).
-	if err := runInspect(out, script("G\r\x1b[B"), fixedSize(60, 10), v); err != nil {
+	// the keystrokes after the pick kept editing the view). Home is used rather
+	// than a down-arrow because a down-arrow from the last row clamps back to it
+	// and so would be a silent no-op either way.
+	if err := runInspect(out, script("G\r\x1b[H"), fixedSize(60, 10), v); err != nil {
 		t.Fatalf("runInspect = %v, want nil", err)
 	}
 	if v.accepted != 1 {
