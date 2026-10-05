@@ -133,7 +133,7 @@ type CortexSession struct {
 	deleteRoot    string
 	allowDelete   bool
 	quiet         bool
-	confirmRisky  func(question string) bool
+	confirmRisky  func(question string) lineedit.ConfirmChoice
 	classifyShell shellrisk.ClassifyFn
 	turnIntent    string
 	// onThinking, when set, is invoked with active=true on the first
@@ -156,10 +156,26 @@ type CortexSession struct {
 	// default, including every REPL/serve session) leaves gateShell's
 	// existing headless-Blocked fallback untouched.
 	approveRisky func(ctx context.Context, reason, command string) (approved, timedOut bool)
-	SessionID    string
-	transcript   *os.File
-	capturer     *capture.Capture
-	memory       *memory.Store // project-tier notes (.cortex/memory)
+
+	// shellApprovals is the session-scoped bash approval list (issue #107):
+	// the records the user chose "always this session" for at the
+	// risky-command prompt — an exact command (chosen "a") or a derived
+	// prefix (chosen "p", the program plus one subcommand + "*", e.g.
+	// "make test*" for "make test ./pkg/..."). The kind rides with each
+	// record on purpose: an exact approval of a command that ends in "*"
+	// (e.g. "rm -f build/*") must keep comparing byte for byte — it must
+	// never be re-read as a prefix by the pattern string alone. It is
+	// memory-only by design: a fresh session starts with an empty list, and
+	// persisting it to the config (a `tools.shell_allow` list) is a
+	// separate decision. gateShell checks it for Risky verdicts only —
+	// after classification, never before — so an approval can never
+	// override a Blocked command.
+	shellApprovals []shellApproval
+
+	SessionID  string
+	transcript *os.File
+	capturer   *capture.Capture
+	memory     *memory.Store // project-tier notes (.cortex/memory)
 	// userMemory is the cross-project tier (~/.cortex/memory, via
 	// internal/userhome) — the SAME internal/memory.Store type as memory,
 	// pointed at the user's home instead of the project's .cortex dir

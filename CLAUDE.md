@@ -268,7 +268,14 @@ the model-driven memory tools
   (per-edit / turn-end / never / inactive).
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked. Every refusal (blocked, refused, or declined) carries the shared
+  Blocked. The Risky prompt shows the classifier's reason above the command
+  and offers `y` (once), `n`, `a` (always this session, exact command), and
+  `p` (always this session, command prefix, e.g. `make test*`) (issue #107).
+  Session approvals are memory-only — a fresh session starts with none —
+  and are journaled to `.cortex/journal/shell/` as `shell.approval` entries.
+  Approvals never override a Blocked verdict: the gate checks approvals
+  after classification, so a Blocked command takes its own arm first.
+  Every refusal (blocked, refused, or declined) carries the shared
   unknown-value tail from the shellrisk constructors (issue #200), neutral
   about what the command was for: if it was meant to check something, that
   result is still unknown — don't guess it, don't substitute a check of

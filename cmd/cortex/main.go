@@ -528,14 +528,16 @@ func main() {
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
 			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
-			// Risky-command confirmation reads a y/N line from the editor. Tool
-			// calls run synchronously on this goroutine between ReadLine calls,
-			// so there's no concurrent reader to fight. Headless/piped sessions
-			// leave this nil and the gate blocks risky commands instead.
-			session.confirmRisky = func(question string) bool {
+			// Risky-command confirmation reads the answer through the anchor's
+			// key loop (issue #107: y once / n / a always this command / p
+			// always this command prefix). Tool calls run synchronously on
+			// this goroutine between ReadLine calls, so there's no
+			// concurrent reader to fight. Headless/piped sessions leave this
+			// nil and the gate blocks risky commands instead.
+			session.confirmRisky = func(question string) lineedit.ConfirmChoice {
 				// During an anchored turn the Anchor's key loop owns the terminal;
 				// a second reader (editor.ReadLine) fights it for the keystroke and
-				// the y/N never lands — the user can't approve and resorts to Ctrl-C.
+				// the answer never lands — the user can't approve and resorts to Ctrl-C.
 				// Route the confirm through the anchor, which serves it from the same
 				// loop. Fall back to a direct read only when no turn is pinned.
 				if a := session.live; a != nil {
@@ -543,13 +545,17 @@ func main() {
 				}
 				ans, err := editor.ReadLine(question)
 				if err != nil {
-					return false
+					return lineedit.ConfirmNo
 				}
 				switch strings.ToLower(strings.TrimSpace(ans)) {
 				case "y", "yes":
-					return true
+					return lineedit.ConfirmYes
+				case "a", "always":
+					return lineedit.ConfirmAlwaysExact
+				case "p", "prefix":
+					return lineedit.ConfirmAlwaysPrefix
 				default:
-					return false
+					return lineedit.ConfirmNo
 				}
 			}
 			// Stray stdlib-logger output (any subsystem that calls log.Printf)
