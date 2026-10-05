@@ -47,10 +47,9 @@ const (
 	// EffortOmit is an INTENT: "send nothing, and don't let a default fill
 	// it in." The wire translation is identical to EffortUnset (no field),
 	// but the resolution layer treats it as a decided value. It exists for
-	// backends with no catalog (a hosted OpenRouter endpoint, a pinned
-	// model) whose models may not support the reasoning field at all: the
-	// operator (or the no-catalog default) says "send nothing" and every
-	// request stays clean.
+	// providers whose models do not support the reasoning field at all —
+	// an endpoint with parameter checks enabled 404s on it — so the operator
+	// can say "send nothing" from config and every request stays clean.
 	EffortOmit EffortLevel = "omit"
 )
 
@@ -227,7 +226,7 @@ func Translate(d Dialect, e Effort) (kwargs map[string]any, reasoning *Reasoning
 			// EffortUnset and EffortOmit (issue #132): no reasoning field at
 			// all — model default / nothing sent. A Qwen3-Coder endpoint with
 			// provider parameter checks 404s on the field, so "send nothing"
-			// must be reachable from config and from the no-catalog default.
+			// must be reachable from config.
 			return nil, nil
 		}
 	default:

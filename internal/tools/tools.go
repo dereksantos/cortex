@@ -1733,7 +1733,7 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 		return "", 0, fmt.Errorf("old_string must not be empty")
 	}
 	if old == new {
-		return "", 0, fmt.Errorf("old_string and new_string are identical — the file already has this content, so the edit is not needed. Read the file to confirm its current state instead of re-issuing this edit")
+		return "", 0, fmt.Errorf("old_string and new_string are identical; nothing to change. Re-read the span to see its current state rather than re-issuing the same edit")
 	}
 	if n := strings.Count(content, old); n > 0 {
 		if replaceAll {
@@ -2369,7 +2369,7 @@ func ToolCallsFromContent(content string) []ToolCall {
 	return ParseFunctionCallsTags(content)
 }
 
-// tagRe matches a Hermes-style function-call tag:
+// tagOpenRe matches a Hermes-style function-call OPENING tag:
 //
 //	<function_calls>
 //	  {"name": "bash", "arguments": {"command": "ls"}}
@@ -2378,13 +2378,16 @@ func ToolCallsFromContent(content string) []ToolCall {
 // (and the singular <function_call> spelling some gateways emit). Unlike the
 // Qwen XML shape — <function=NAME><parameter=P> — the call is a JSON object
 // with a "name" field and an "arguments" field that is an object (not the
-// JSON-encoded string the OpenAI wire uses). tagRe anchors on the OPENING tag
-// only, without requiring the closing tag: an open model can emit the opener
-// and its payload and then stop (truncated reply), and the JSON inside is
-// still recoverable. ParseFunctionCallsTags bounds the JSON at the object's
-// own closing brace; StripToolMarkup handles the display removal (closed or
-// orphaned tag).
-var tagRe = regexp.MustCompile(`(?is)<function_calls?>([\s\S]*)`)
+// JSON-encoded string the OpenAI wire uses). The regex matches the opener only,
+// without requiring the closing tag: an open model can emit the opener and its
+// payload and then stop (truncated reply), and the JSON inside is still
+// recoverable. ParseFunctionCallsTags decodes the JSON after each opener and
+// bounds it at the next closing tag (tagCloseRe) or the end of content;
+// StripToolMarkup handles the display removal (closed or orphaned tag).
+var tagOpenRe = regexp.MustCompile(`(?is)<function_calls?>`)
+
+// tagCloseRe matches a Hermes-style function-call CLOSING tag.
+var tagCloseRe = regexp.MustCompile(`(?is)</function_calls?>`)
 
 // hermesCall is one call from a Hermes-style tag: the wire names plus an
 // arguments field as a JSON object.
@@ -2401,39 +2404,64 @@ type hermesCall struct {
 // The arguments object is re-marshaled as-is (its own JSON types survive):
 // a string arg lands as a JSON string, a number as a JSON number — the same
 // shape a native tool call's Arguments would carry.
+//
+// The decoder tolerates the shapes an open model actually emits: one object,
+// several objects, or a JSON array, and it stops at the first non-JSON token
+// or at a closing tag, so trailing prose (even with braces), a second tag,
+// or a truncated closer can't sink the parse.
 func ParseFunctionCallsTags(content string) []ToolCall {
-	tagMatches := tagRe.FindAllStringSubmatch(content, -1)
-	if len(tagMatches) == 0 {
-		return nil
-	}
 	var calls []ToolCall
-	for i, tm := range tagMatches {
-		// Bound the JSON at the object's own closing brace: the tag's capture
-		// runs to end of content, so anything after the call (prose, a
-		// truncated closer) must not be parsed with it.
-		end := strings.LastIndexByte(tm[1], '}')
-		if end < 0 {
-			continue // truncated before the JSON object closed: no recoverable call
+	n := 0
+	for {
+		// Locate the next tag opener; everything after it is the payload
+		// (a greedy tail — the decoder below bounds the actual JSON).
+		m := tagOpenRe.FindStringIndex(content)
+		if m == nil {
+			return calls
 		}
-		var call hermesCall
-		if err := json.Unmarshal([]byte(strings.TrimSpace(tm[1][:end+1])), &call); err != nil {
-			continue // malformed JSON inside a tag: no recoverable call
+		rest := content[m[1]:]
+		// A closing tag bounds the JSON: a second tag or trailing markup must
+		// not be parsed with this block's calls.
+		if end := tagCloseRe.FindStringIndex(rest); end != nil {
+			rest = rest[:end[0]]
 		}
-		if call.Name == "" {
-			continue
+		d := json.NewDecoder(strings.NewReader(rest))
+		var callsHere []hermesCall
+		// One object, several objects, or a JSON array — decode whichever
+		// shape starts (leading whitespace skipped), then stop at the first
+		// non-JSON token.
+		t := strings.TrimLeft(rest, " \t\r\n")
+		if strings.HasPrefix(t, "[") {
+			_ = d.Decode(&callsHere)
+		} else {
+			for {
+				var c hermesCall
+				if err := d.Decode(&c); err != nil {
+					break
+				}
+				callsHere = append(callsHere, c)
+			}
 		}
-		raw, err := json.Marshal(call.Arguments)
-		if err != nil {
-			continue
+		for _, c := range callsHere {
+			if c.Name == "" {
+				continue // no name: not a call (or a truncated payload)
+			}
+			n++
+			raw, err := json.Marshal(c.Arguments)
+			if err != nil {
+				continue
+			}
+			if string(raw) == "null" {
+				raw = []byte("{}") // missing or null arguments: an empty object
+			}
+			calls = append(calls, ToolCall{
+				ID:       fmt.Sprintf("fc-%d", n),
+				Type:     "function",
+				Function: FunctionCall{Name: c.Name, Arguments: string(raw)},
+			})
 		}
-		if string(raw) == "null" {
-			raw = []byte("{}")
-		}
-		calls = append(calls, ToolCall{
-			ID:       fmt.Sprintf("fc-%d", i+1),
-			Type:     "function",
-			Function: FunctionCall{Name: call.Name, Arguments: string(raw)},
-		})
+		// Continue past this block so a second tag after trailing prose is
+		// still recovered; a block with no parseable call simply advances.
+		content = content[m[1]:]
 	}
-	return calls
 }

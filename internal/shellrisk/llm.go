@@ -105,16 +105,19 @@ func ProviderClassifierWithLimit(p llm.Provider, taskContext string, maxContextC
 	}
 }
 
-// classifyRetryAttempts / classifyRetryBaseDelay are the classifier's retry
+// classifyRetryAttempts / classifyRetryJitterFull are the classifier's retry
 // policy (issue #132): two retries (three sends total) on jittered linear
 // backoff. Bounded on purpose — the classifier's whole job is to unblock a
 // routine command quickly, so the fail-closed cost of a truly dead backend
 // stays at most one short backoff, not a long stall in the tool loop.
 const (
 	classifyRetryAttempts   = 2
-	classifyRetryBaseDelay  = 250 * time.Millisecond
 	classifyRetryJitterFull = 1 // jitter uniform in [0.5, 1.5] × the base delay
 )
+
+// classifyRetryBaseDelay is the base of the retry's linear backoff. A var
+// (not a const) so tests can zero it to skip the sleep.
+var classifyRetryBaseDelay = 250 * time.Millisecond
 
 // classifyWithRetry runs attempt once, re-running it on a transient transport
 // error: a context error, a *net.Error (EOF, refused/reset connections — the
@@ -148,10 +151,10 @@ func classifyWithRetry(ctx context.Context, attempt func() (string, error)) (str
 }
 
 // isTransientClassifierError reports whether err is the kind of transport
-// hiccup a retry can plausibly fix (context alive required). isContextError
-// short-circuits a wrapped context error first so a cancelled ctx is never
-// mistaken for a network hiccup; net.Error covers EOF and the like directly
-// and also through any wrapper that carries it in an errors chain.
+// hiccup a retry can plausibly fix (context alive required). A cancelled ctx
+// is never transient — the turn is over, and retrying would just delay the
+// interrupt; net.Error covers EOF and the like directly and also through any
+// wrapper that carries it in an errors chain.
 func isTransientClassifierError(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
 		return false

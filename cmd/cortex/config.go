@@ -1057,10 +1057,7 @@ func (c *Config) backendEndpoint() string {
 // ships — and that is precisely what breaks when the model doesn't
 // support it (issue #132: every request 404'd on a provider with parameter
 // checks enabled). The escape hatch is explicit: config "thinking": "omit"
-// (llm.EffortOmit) says send nothing and survives the catalog untouched;
-// there is deliberately no fleet-absent default, because a catalog-bearing
-// backend (a local fleet that knows its models can think) must keep the
-// role's deliberation-by-default.
+// (llm.EffortOmit) says send nothing and survives the catalog untouched.
 func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	pol := rolePolicies[role]
 	spec := ModelSpec{Endpoint: c.backendEndpoint(), Thinking: pol.effort}
