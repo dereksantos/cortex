@@ -93,7 +93,7 @@ func TestAgentToolEndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test-fixture: always risky", nil
 	}
 	cs := &CortexSession{

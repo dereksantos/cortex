@@ -57,6 +57,30 @@ func TestWebSearchReturnsRankedResults(t *testing.T) {
 			t.Errorf("result missing %q:\n%s", want, got)
 		}
 	}
+	// Issue #102: the whole result list is framed as untrusted data.
+	if !strings.HasPrefix(got, UntrustedMarker) || !strings.HasSuffix(got, untrustedFooter) {
+		t.Errorf("search result is not framed as untrusted content:\n%s", got)
+	}
+}
+
+// TestWebSearchFramesEmptyResultAsUntrusted pins the uniform taint signal
+// (issue #102): even a no-results outcome carries the marker, so the
+// turn-taint detector in cmd/cortex sees web-path content on every search,
+// not only the ones that carried hits.
+func TestWebSearchFramesEmptyResultAsUntrusted(t *testing.T) {
+	oldClient := fetchHTTPClient
+	t.Cleanup(func() { fetchHTTPClient = oldClient })
+	fetchHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Status: "200 OK", Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader("<html><body></body></html>")), Request: req}, nil
+	})}
+
+	got, err := webSearch(context.Background(), searchCall("nothing exists at all", 0), headlessDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wrapUntrusted("(no search results)") {
+		t.Errorf("empty result = %q, want the framed %q", got, wrapUntrusted("(no search results)"))
+	}
 }
 
 func TestWebSearchValidatesArguments(t *testing.T) {

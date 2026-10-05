@@ -50,7 +50,7 @@ func TestProviderClassifier_Parsing(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			fn := ProviderClassifier(fakeProvider{resp: c.resp}, "")
-			lvl, _, err := fn(context.Background(), "some command")
+			lvl, _, err := fn(context.Background(), "some command", "")
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
 			}
@@ -63,7 +63,7 @@ func TestProviderClassifier_Parsing(t *testing.T) {
 
 func TestProviderClassifier_TransportError(t *testing.T) {
 	fn := ProviderClassifier(fakeProvider{err: errors.New("backend down")}, "")
-	_, _, err := fn(context.Background(), "git push")
+	_, _, err := fn(context.Background(), "git push", "")
 	if err == nil {
 		t.Fatal("want transport error surfaced (so Classify fails closed)")
 	}
@@ -121,13 +121,13 @@ func TestClassifierPrompt(t *testing.T) {
 func TestProviderClassifier_ThroughClassify(t *testing.T) {
 	saysSafe := ProviderClassifier(fakeProvider{resp: `{"risk":"safe","reason":"fine"}`}, "")
 
-	v := Classify(context.Background(), "mv a.txt b.txt", saysSafe)
+	v := Classify(context.Background(), "mv a.txt b.txt", "", saysSafe)
 	if v.Level != Safe || v.Tier != "classified" {
 		t.Errorf("gray-zone safe: got %s/%s, want safe/classified", v.Level, v.Tier)
 	}
 
 	// Deny-floor command never reaches the (safe-saying) classifier.
-	v = Classify(context.Background(), "rm -rf /", saysSafe)
+	v = Classify(context.Background(), "rm -rf /", "", saysSafe)
 	if v.Level != Blocked || v.Tier != "deny-floor" {
 		t.Errorf("deny-floor: got %s/%s, want blocked/deny-floor", v.Level, v.Tier)
 	}
@@ -137,7 +137,7 @@ func TestProviderClassifier_TaskContext(t *testing.T) {
 	t.Run("context is folded into the prompt", func(t *testing.T) {
 		var got string
 		fn := ProviderClassifier(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, "clean up the build directory")
-		if _, _, err := fn(context.Background(), "rm -rf ./build"); err != nil {
+		if _, _, err := fn(context.Background(), "rm -rf ./build", ""); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(got, "clean up the build directory") {
@@ -151,7 +151,7 @@ func TestProviderClassifier_TaskContext(t *testing.T) {
 	t.Run("empty context omits the task section", func(t *testing.T) {
 		var got string
 		fn := ProviderClassifier(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, "   ")
-		if _, _, err := fn(context.Background(), "ls"); err != nil {
+		if _, _, err := fn(context.Background(), "ls", ""); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(got, "Task the agent is working on") {
@@ -163,7 +163,7 @@ func TestProviderClassifier_TaskContext(t *testing.T) {
 		var got string
 		long := strings.Repeat("x", DefaultMaxTaskContextChars+500)
 		fn := ProviderClassifier(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, long)
-		if _, _, err := fn(context.Background(), "ls"); err != nil {
+		if _, _, err := fn(context.Background(), "ls", ""); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Count(got, "x") > DefaultMaxTaskContextChars {
@@ -178,7 +178,7 @@ func TestProviderClassifier_TaskContext(t *testing.T) {
 		var got string
 		long := strings.Repeat("x", 400)
 		fn := ProviderClassifierWithLimit(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, long, 100)
-		if _, _, err := fn(context.Background(), "ls"); err != nil {
+		if _, _, err := fn(context.Background(), "ls", ""); err != nil {
 			t.Fatal(err)
 		}
 		if n := strings.Count(got, "x"); n > 100 {
@@ -190,7 +190,7 @@ func TestProviderClassifier_TaskContext(t *testing.T) {
 		var got string
 		long := strings.Repeat("x", DefaultMaxTaskContextChars+500)
 		fn := ProviderClassifierWithLimit(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, long, 0)
-		if _, _, err := fn(context.Background(), "ls"); err != nil {
+		if _, _, err := fn(context.Background(), "ls", ""); err != nil {
 			t.Fatal(err)
 		}
 		if n := strings.Count(got, "x"); n > DefaultMaxTaskContextChars {

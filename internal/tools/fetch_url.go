@@ -39,6 +39,18 @@ func fetchMaxTextBytes() int { return active.MaxToolOutput }
 
 var fetchHTTPClient = newSafeHTTPClient()
 
+// SetHTTPClientForTest swaps the package's fetch client for a test (the
+// same seam the package's own tests use by assigning fetchHTTPClient
+// directly — exported so cmd/cortex's end-to-end dispatcher test can run
+// the REAL coderDispatcher → Execute → fetchURL → framing chain with no
+// network). Returns the restore func; call it via t.Cleanup. Production
+// code must never call this.
+func SetHTTPClientForTest(c *http.Client) (restore func()) {
+	old := fetchHTTPClient
+	fetchHTTPClient = c
+	return func() { fetchHTTPClient = old }
+}
+
 type fetchURLArgs struct {
 	URL string `json:"url"`
 }
@@ -112,7 +124,12 @@ func fetchURL(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if truncated {
 		out.WriteString("\n\n[truncated: use a more specific URL or another source]")
 	}
-	return out.String(), nil
+	// Issue #102: the fetched page is attacker-controllable text, so it goes
+	// back framed as untrusted data — the marker banner tells the model (and
+	// the turn-taint detector in cmd/cortex) that nothing inside it is an
+	// instruction. Wrapped last, after the truncation note, so the framing
+	// encloses everything this result carries.
+	return wrapUntrusted(out.String()), nil
 }
 
 func newSafeHTTPClient() *http.Client {

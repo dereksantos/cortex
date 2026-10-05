@@ -118,6 +118,85 @@ func SameActionBlockedMessage(effectClass string) string {
 	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
 }
 
+// TaintBlockedMessage is the message a Risky command returns to the model
+// when untrusted web content entered the current turn (issue #102) and the
+// taint rule took over approval: the command's own classifier verdict no
+// longer matters, the verdict that gets a pass is the human's, not the
+// judge's. A Risky command WITH a reachable approver prompts with the
+// taint reason appended (see gateShell); this is what the model reads when
+// the prompt cannot happen — a headless session, a subagent, an approver
+// timeout — so like the sibling constructors it is the single shared source
+// for the wording. The framing states why the bar is raised this turn (the
+// turn's intent judge is no longer trusted to wave this through, because
+// attacker-controllable content helped shape the request), so the model
+// understands a refusal here is not the ordinary Risky gate repeating
+// itself. It carries the same neutral unknown-value tail as BlockedMessage.
+func TaintBlockedMessage(sources string) string {
+	return "blocked (untrusted content this turn: " + sources + "): a command needing approval cannot run in a turn that read web content, because that content could have shaped this request — the risk judge's safe verdict does not count here; only a human decision would. Continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
+}
+
+// TaintNote renders the classifier-facing note for a turn's taint sources
+// (issue #102): the sentence cmd/cortex threads through ClassifyFn's
+// untrustedContent argument so the intent judge knows the task context and
+// the request it serves may have been steered by web content. Sources are
+// joined verbatim, first-seen order — the same single ordering rule the
+// prompt and blocked messages follow (rendering lives here, in the package
+// that reads the note, so producer and consumer can't drift).
+func TaintNote(sources []string) string {
+	return "untrusted web content entered this turn (" + strings.Join(sources, ", ") + ")"
+}
+
+// GitPushTaintReason names the taint-only git-push floor for the prompt
+// line and the reason a Safe verdict was raised (see IsGitPush): a push
+// publishes whatever the tainted turn produced, so after untrusted content
+// it needs a human, whatever the judge says. Shared wording between the
+// floor's raise in gateShell and any reader of the verdict.
+const GitPushTaintReason = "git push after untrusted web content: an outbound publish of whatever this turn produced; a human decision is required"
+
+// IsGitPush reports whether the command pushes a git remote — any git
+// invocation whose subcommand begins with "push", git-scoped and
+// boundary-split exactly like EffectClass (a chained/piped command is seen
+// as the sequence of simple commands it is; a non-git binary never
+// matches, so `docker push` is this floor's blind spot, not its target —
+// the classifier still sees it). Unlike EffectClass it is not a same-action
+// ledger class: git-push is a TAINT-ONLY floor (issue #102) — a
+// command it matches reads as Risky on a tainted turn even when the
+// classifier holds it Safe, and is judged normally when the turn is clean.
+// It never Blocks: the push may still run on a human's explicit approval,
+// which is the whole point — after untrusted content no push is ever
+// auto-approved.
+func IsGitPush(command string) bool {
+	for _, part := range strings.FieldsFunc(command, func(r rune) bool {
+		return r == '|' || r == '&' || r == ';' || r == '\n'
+	}) {
+		fields := strings.Fields(part)
+		if len(fields) == 0 {
+			continue
+		}
+		// Same rule as effectClassOfPart: an env-mutated invocation's
+		// identity cannot be determined reliably from tokens alone; leave
+		// it to the classifier (and remember an env prefix never changes
+		// what `git push` does downstream of itself).
+		if strings.Contains(fields[0], "=") {
+			continue
+		}
+		if lastPathElement(fields[0]) != "git" {
+			continue
+		}
+		sub, ok := firstSubcommand(fields[1:])
+		if !ok {
+			continue
+		}
+		// "push" and every push-spelling subcommand (e.g. nothing in git
+		// today, but a future `push-something` is still a push) begin with
+		// the word; the floor names the effect, not one exact token.
+		if strings.HasPrefix(sub, "push") {
+			return true
+		}
+	}
+	return false
+}
+
 // DeclinedMessage is the message a Risky command returns to the model when
 // the interactive approver said no (issue #200). It used to be duplicated
 // inline in cmd/cortex's gateShell (the confirmRisky and approveRisky paths);
@@ -133,12 +212,23 @@ func DeclinedMessage() string {
 // (never Blocked — the deny-floor owns catastrophe) plus a reason. An error
 // makes Classify fail closed to Risky. ProviderClassifier builds the
 // LLM-backed implementation; tests inject their own.
-type ClassifyFn func(ctx context.Context, command string) (Level, string, error)
+//
+// untrustedContent is "" on an ordinary turn, or a human-readable note that
+// untrusted web content entered the current turn (issue #102) — the judge
+// context the session threads in so the classifier can never wave a command
+// through on a fetched page's say-so. A classifier that ignores it is
+// permitted (the harness's own floors — the git-push floor, the gray-zone
+// raise in gateShell — cover the gap); one that honors it judges
+// the command under the raised bar.
+type ClassifyFn func(ctx context.Context, command, untrustedContent string) (Level, string, error)
 
 // Classify runs the three tiers in safety order and returns the verdict.
 // fn may be nil (no classifier wired) — gray-zone commands then fail closed
-// to Risky so they are gated rather than silently run.
-func Classify(ctx context.Context, command string, fn ClassifyFn) Verdict {
+// to Risky so they are gated rather than silently run. untrustedContent is
+// the issue #102 taint note threaded to fn ("" when the turn is clean); it
+// changes nothing about the tiers themselves — the taint's mechanical teeth
+// are the caller's (the git-push floor, the gray-zone raise in gateShell).
+func Classify(ctx context.Context, command, untrustedContent string, fn ClassifyFn) Verdict {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" {
 		return Verdict{Level: Blocked, Reason: "empty command", Tier: "deny-floor"}
@@ -159,7 +249,7 @@ func Classify(ctx context.Context, command string, fn ClassifyFn) Verdict {
 	if fn == nil {
 		return Verdict{Level: Risky, Reason: "no classifier available; gated for safety", Tier: "fail-closed"}
 	}
-	lvl, reason, err := fn(ctx, cmd)
+	lvl, reason, err := fn(ctx, cmd, untrustedContent)
 	if err != nil {
 		return Verdict{Level: Risky, Reason: "classifier unavailable (" + err.Error() + "); gated for safety", Tier: "fail-closed"}
 	}

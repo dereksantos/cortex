@@ -291,6 +291,15 @@ the model-driven memory tools
   Whether a stash is Risky at all is a classifier decision: the prompt marks
   working-tree-discarding git operations (stash pop/apply/clear,
   `checkout --`, restore) risky because they can lose uncommitted work.
+  Once a `fetch_url`/`web_search` result enters a turn, that turn is
+  **tainted** (issue #102): every gray-zone command the intent judge would
+  have auto-approved is raised to Risky and needs an explicit approval, the
+  stored `a`/`p` session approvals do NOT apply, and `git push` (any git
+  subcommand beginning with `push`) is never auto-approved even when the safe
+  path or the judge would let it — the floor raises to Risky, never Blocks,
+  so a human can still run it. Headless runs block instead with
+  `shellrisk.TaintBlockedMessage`. The taint is per-turn only: it is cleared
+  at the START of every turn (`turn.go`) and is inert outside a turn.
   Separately, when a command rewrites
   a file in place (`sed -i`, `ed -s`, `perl -pi`, gawk's `awk -i inplace`,
   an interpreter `-c` script string, or a redirect/append target —
@@ -309,7 +318,20 @@ the model-driven memory tools
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;
   `fetch_url` blocks local/private destinations and unsafe redirects. Both are
-  coder-only and can be disabled with `tools.enable_web: false`.
+  coder-only and can be disabled with `tools.enable_web: false`. Every result
+  comes back **framed as untrusted data** (issue #102): a
+  `tools.UntrustedMarker` banner plus BEGIN/END delimiters say the content is
+  data to read, never instructions to follow, and any delimiter/marker line
+  the page itself carries is defanged to `[removed delimiter]` so the frame is
+  the harness's alone. That marker is what taints the turn for the `bash`
+  gate above (see the taint paragraph under `bash`).
+- On a tainted turn, `write_file`, `edit_file`, and `remove_path` confine
+  their `path` to the workspace root — the escapes ordinary work may make
+  (an absolute path outside the root, a `..` that leaves it) are rejected with
+  `ConfinePath`'s shape plus the taint reason (`tools.ConfineWrites`, checked
+  in-tool before any filesystem touch, so the subagent leg is covered too —
+  `RunSubagent` hands the same session to the child as its `ToolDeps`).
+  Untainted turns keep today's escape behavior unchanged.
 - The context tools let the model curate its own working set on top of the
   mechanical demotion policy: evict or merge outline entries (merge installs
   one spanning `#m<first>-<last>` citation, so recall stays lossless) and
