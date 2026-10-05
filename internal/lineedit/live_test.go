@@ -180,13 +180,15 @@ func TestAnchorConfirmAnswers(t *testing.T) {
 	cases := []struct {
 		name string
 		key  byte
-		want bool
+		want ConfirmChoice
 	}{
-		{"y accepts", 'y', true},
-		{"Y accepts", 'Y', true},
-		{"n declines", 'n', false},
-		{"enter declines", '\r', false},
-		{"ctrl-c declines", 0x03, false},
+		{"y accepts", 'y', ConfirmYes},
+		{"Y accepts", 'Y', ConfirmYes},
+		{"n declines", 'n', ConfirmNo},
+		{"enter declines", '\r', ConfirmNo},
+		{"ctrl-c declines", 0x03, ConfirmNo},
+		{"a approves the exact command for the session", 'a', ConfirmAlwaysExact},
+		{"p approves the command prefix for the session", 'p', ConfirmAlwaysPrefix},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,8 +197,10 @@ func TestAnchorConfirmAnswers(t *testing.T) {
 			var canceled bool
 			a.cancel = func() { canceled = true }
 
-			result := make(chan bool, 1)
-			go func() { result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y/N] ") }()
+			result := make(chan ConfirmChoice, 1)
+			go func() {
+				result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y once | a this command | p always \"cmd*\" | n] ")
+			}()
 
 			// Spin until Confirm has registered its pending state, then feed the key.
 			deadline := time.Now().Add(time.Second)
@@ -232,12 +236,104 @@ func TestAnchorConfirmAnswers(t *testing.T) {
 	}
 }
 
+// TestHandleConfirmByte is the acceptance item for issue #107's table-driven
+// key handling: every byte's confirm behavior is asserted — the answer keys
+// (y/Y once, n/N/Enter decline, a/A always-exact, p/P always-prefix, Ctrl-C
+// decline-and-cancel) deliver their ConfirmChoice, clear the pending confirm,
+// and cancel the turn only for Ctrl-C; every other byte is ignored (no
+// answer, confirm still pending, turn not canceled); and a byte with no
+// pending confirm is inert.
+func TestHandleConfirmByte(t *testing.T) {
+	answerKeys := []byte{'y', 'Y', 'n', 'N', '\r', '\n', 'a', 'A', 'p', 'P', 0x03}
+	strayKeys := []byte{'x', ' ', 'q', 'e', '1', ';', 0x7f, 0x1b, 0x04}
+	keyName := func(b byte) string {
+		switch b {
+		case '\r':
+			return "cr"
+		case '\n':
+			return "lf"
+		case 0x03:
+			return "ctrl-c"
+		case 0x7f:
+			return "del"
+		case 0x1b:
+			return "esc"
+		case 0x04:
+			return "ctrl-d"
+		case ' ':
+			return "space"
+		default:
+			return string(rune(b))
+		}
+	}
+	for _, key := range append(append([]byte{}, answerKeys...), strayKeys...) {
+		t.Run(keyName(key), func(t *testing.T) {
+			a, _ := newTestAnchor("> ", "", 80)
+			a.stop = make(chan struct{})
+			var canceled bool
+			a.cancel = func() { canceled = true }
+
+			v, isAnswer := confirmKeyAction[key]
+			wantChoice, wantCancel := v.choice, v.cancel
+			result := make(chan ConfirmChoice, 1)
+			a.mu.Lock()
+			a.confirm = &confirmState{ask: "run it? [y/N]", res: result}
+			a.mu.Unlock()
+			a.handleConfirmByte(key)
+			a.mu.Lock()
+			pending := a.confirm != nil
+			a.mu.Unlock()
+
+			if isAnswer {
+				select {
+				case got := <-result:
+					if got != wantChoice {
+						t.Errorf("choice = %v, want %v", got, wantChoice)
+					}
+				case <-time.After(100 * time.Millisecond):
+					t.Fatal("answer key delivered no choice")
+				}
+				if pending {
+					t.Error("answer key must clear the pending confirm")
+				}
+				if canceled != wantCancel {
+					t.Errorf("canceled = %v, want %v (only Ctrl-C cancels the turn)", canceled, wantCancel)
+				}
+			} else {
+				if !pending {
+					t.Error("stray key must leave the confirm pending")
+				}
+				select {
+				case <-result:
+					t.Fatal("stray key must not deliver an answer")
+				case <-time.After(50 * time.Millisecond):
+				}
+				if canceled {
+					t.Error("stray key must not cancel the turn")
+				}
+			}
+		})
+	}
+
+	t.Run("no pending confirm is inert", func(t *testing.T) {
+		a, _ := newTestAnchor("> ", "", 80)
+		var canceled bool
+		a.cancel = func() { canceled = true }
+		a.handleConfirmByte('y') // no confirm in flight — must be a no-op
+		if canceled {
+			t.Error("byte without a pending confirm must not cancel")
+		}
+	})
+}
+
 func TestAnchorConfirmIgnoresUnrelatedKeys(t *testing.T) {
 	a, _ := newTestAnchor("> ", "", 80)
 	a.stop = make(chan struct{})
 
-	result := make(chan bool, 1)
-	go func() { result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y/N] ") }()
+	result := make(chan ConfirmChoice, 1)
+	go func() {
+		result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y once | a this command | p always \"cmd*\" | n] ")
+	}()
 	deadline := time.Now().Add(time.Second)
 	for {
 		a.mu.Lock()
@@ -258,8 +354,8 @@ func TestAnchorConfirmIgnoresUnrelatedKeys(t *testing.T) {
 	a.handleByte('y') // now answer
 	select {
 	case got := <-result:
-		if !got {
-			t.Error("Confirm() = false, want true after y")
+		if got != ConfirmYes {
+			t.Errorf("Confirm() = %v, want ConfirmYes after y", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Confirm did not return after y")

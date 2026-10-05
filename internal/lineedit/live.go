@@ -111,21 +111,37 @@ func (a *Anchor) Width() int { return a.widthFn() }
 // resolved answer is delivered on res.
 type confirmState struct {
 	ask string
-	res chan bool
+	res chan ConfirmChoice
 }
 
-// Confirm pauses live editing to ask a yes/no question, reading the answer
-// through the key loop that already owns the terminal (never a competing
-// reader). The question's context lines are emitted into scrollback; only the
-// final "run it? [y/N]" line sits on the status row above the prompt. Returns
-// true only on an explicit y/Y; n/N/Enter decline, Ctrl-C declines and cancels
-// the turn. Safe to call from the turn goroutine while the key loop runs.
-func (a *Anchor) Confirm(question string) bool {
+// ConfirmChoice is the outcome of a confirmation (issue #107): Confirm
+// answers the question with more than a bool — y approves once, a approves
+// the exact command for the rest of the session, p approves the command's
+// prefix. The caller (cmd/cortex's confirmRisky wiring) decides what
+// AlwaysExact/AlwaysPrefix mean; lineedit itself only reports the key.
+type ConfirmChoice int
+
+const (
+	ConfirmNo ConfirmChoice = iota
+	ConfirmYes
+	ConfirmAlwaysExact
+	ConfirmAlwaysPrefix
+)
+
+// Confirm pauses live editing to ask a yes/no/more question, reading the
+// answer through the key loop that already owns the terminal (never a
+// competing reader). The question's context lines are emitted into
+// scrollback; only the final "run it? …" line sits on the status row above
+// the prompt. y/Y answers ConfirmYes; n/N/Enter answer ConfirmNo; a/A
+// answers ConfirmAlwaysExact; p/P answers ConfirmAlwaysPrefix; Ctrl-C
+// answers ConfirmNo and cancels the turn. Safe to call from the turn
+// goroutine while the key loop runs.
+func (a *Anchor) Confirm(question string) ConfirmChoice {
 	body, ask := splitConfirm(question)
 	for _, line := range body {
 		a.EmitLine(line)
 	}
-	res := make(chan bool, 1)
+	res := make(chan ConfirmChoice, 1)
 	a.mu.Lock()
 	a.confirm = &confirmState{ask: ask, res: res}
 	a.eraseLocked()
@@ -133,7 +149,7 @@ func (a *Anchor) Confirm(question string) bool {
 	a.mu.Unlock()
 	select {
 	case <-a.stop: // turn ended without an answer → treat as declined
-		return false
+		return ConfirmNo
 	case v := <-res:
 		return v
 	}
@@ -154,21 +170,15 @@ func splitConfirm(q string) (body []string, ask string) {
 	return body, ask
 }
 
-// handleConfirmByte folds one key into an in-flight confirmation. Only y/N,
-// Enter, and Ctrl-C are meaningful; any other key is ignored so a stray
-// keystroke can't be misread as an answer.
+// handleConfirmByte folds one key into an in-flight confirmation. Only the
+// confirm answer keys are meaningful (see confirmKeyAction's table); any
+// other key is ignored so a stray keystroke can't be misread as an answer.
 func (a *Anchor) handleConfirmByte(b byte) {
-	var answer, cancel bool
-	switch b {
-	case 'y', 'Y':
-		answer = true
-	case 'n', 'N', '\r', '\n':
-		answer = false
-	case 0x03: // Ctrl-C: decline this command and cancel the turn
-		answer, cancel = false, true
-	default:
+	v, ok := confirmKeyAction[b]
+	if !ok {
 		return // not an answer — keep waiting
 	}
+	choice, cancel := v.choice, v.cancel
 	a.mu.Lock()
 	c := a.confirm
 	a.confirm = nil
@@ -183,7 +193,30 @@ func (a *Anchor) handleConfirmByte(b byte) {
 	if cancel && a.cancel != nil {
 		a.cancel()
 	}
-	c.res <- answer
+	c.res <- choice
+}
+
+// confirmKeyAction is the single source of truth for which key maps to which
+// confirm answer (issue #107): y/Y once, n/N/Enter decline, a/A always this
+// session for the exact command, p/P always this session for the command's
+// prefix, Ctrl-C declines and cancels the turn. The table is what the
+// table-driven tests assert against; anything not in the table is not an
+// answer.
+var confirmKeyAction = map[byte]struct {
+	choice ConfirmChoice
+	cancel bool
+}{
+	'y':  {choice: ConfirmYes},
+	'Y':  {choice: ConfirmYes},
+	'n':  {choice: ConfirmNo},
+	'N':  {choice: ConfirmNo},
+	'\r': {choice: ConfirmNo},
+	'\n': {choice: ConfirmNo},
+	'a':  {choice: ConfirmAlwaysExact},
+	'A':  {choice: ConfirmAlwaysExact},
+	'p':  {choice: ConfirmAlwaysPrefix},
+	'P':  {choice: ConfirmAlwaysPrefix},
+	0x03: {choice: ConfirmNo, cancel: true}, // Ctrl-C: decline this command and cancel the turn
 }
 
 // suspendState is an in-flight inspector lease. The anchor's key loop already

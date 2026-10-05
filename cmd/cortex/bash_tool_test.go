@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 )
@@ -65,7 +66,7 @@ func TestBashShellSyntax(t *testing.T) {
 	})
 
 	t.Run("risky command runs after interactive yes", func(t *testing.T) {
-		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return true }}
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }}
 		args, _ := json.Marshal(map[string]string{"command": "echo confirmed | cat"})
 		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
@@ -77,7 +78,7 @@ func TestBashShellSyntax(t *testing.T) {
 	})
 
 	t.Run("risky command refused after interactive no", func(t *testing.T) {
-		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return false }}
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmNo }}
 		args, _ := json.Marshal(map[string]string{"command": "echo nope | cat"})
 		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
@@ -93,7 +94,7 @@ func TestBashShellSyntax(t *testing.T) {
 
 	t.Run("risky command blocked when headless (no approver)", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
-			confirmRisky: func(string) bool { return true }} // present but ignored when quiet
+			confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }} // present but ignored when quiet
 		args, _ := json.Marshal(map[string]string{"command": "echo headless | cat"})
 		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
@@ -111,9 +112,9 @@ func TestBashShellSyntax(t *testing.T) {
 	// mid-loop — Risky must fall straight to the headless-blocked shape, never
 	// the interactive confirm prompt, regardless of confirmRisky/quiet.
 	t.Run("risky command blocked inside a subagent regardless of confirmRisky", func(t *testing.T) {
-		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool {
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice {
 			t.Fatal("confirmRisky must not be invoked for a subagent-depth call")
-			return true
+			return lineedit.ConfirmYes
 		}}
 		ctx := withSubagentDepth(context.Background(), 1)
 		args, _ := json.Marshal(map[string]string{"command": "echo nested | cat"})
@@ -137,7 +138,7 @@ func TestBashShellSyntax(t *testing.T) {
 	// Control: an explicit depth-0 context (the coder's own top-level call)
 	// keeps the interactive confirm path unchanged.
 	t.Run("risky command at depth 0 still uses interactive confirm", func(t *testing.T) {
-		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return true }}
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }}
 		ctx := withSubagentDepth(context.Background(), 0)
 		args, _ := json.Marshal(map[string]string{"command": "echo depth-zero | cat"})
 		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)

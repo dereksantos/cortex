@@ -9,7 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/redact"
@@ -512,6 +515,159 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 	return rendered, nil
 }
 
+// shellApproval is one session-scoped bash approval (issue #107): the kind
+// chosen at the risky-command prompt ("exact" or "prefix") plus the stored
+// pattern. The kind rides with the pattern on purpose: an EXACT approval
+// whose command ends in "*" (e.g. "rm -f build/*") must stay a byte-for-byte
+// exact match, and the matcher (shellApprovalMatches) keys on the kind,
+// never on the pattern string's shape.
+type shellApproval struct {
+	Kind    string // "exact" or "prefix"
+	Pattern string
+}
+
+// ApproveShell records a session-scoped bash approval (issue #107) — the
+// user chose "always this session" at the risky-command prompt — and
+// journals the event so a review of the session shows what was auto-allowed.
+// kind is "exact" or "prefix" and rides with the pattern (shellApproval),
+// so the matcher never infers prefix-ness from the pattern string: an
+// EXACT approval of a command that ends in "*" (e.g. "rm -f build/*")
+// compares byte for byte and never widens into a word prefix. For "exact",
+// pattern is the exact command as approved; for "prefix", it is the derived
+// word prefix — commandPrefixPattern(command), the program plus one
+// subcommand + "*", e.g. "make test*" for "make test ./pkg/..." — shown to
+// the user in the prompt before they choose p, so what is approved is what
+// is stored. command is the exact command that earned the approval; reason
+// is the classifier's reason for it.
+func (cs *CortexSession) ApproveShell(kind, pattern, command, reason string) {
+	if cs == nil || kind == "" || pattern == "" {
+		return
+	}
+	cs.shellApprovals = append(cs.shellApprovals, shellApproval{Kind: kind, Pattern: pattern})
+	cs.journalShellApproval(kind, pattern, command, reason)
+}
+
+// commandPrefixPattern derives the stored prefix pattern for a command the
+// user approved "always this session" by prefix (issue #107): the program
+// plus one subcommand + "*" — "make test*" for "make test ./pkg/..." (the
+// issue's example), "git*" for bare "git". The single-token form is a bare
+// "prog*" (not "prog *") so it matches the command itself as well as the
+// command with further arguments — prefixMatches' word boundary still keeps
+// "git*" from matching "github" (a longer word glued onto the prefix). An
+// empty command yields "*", whose prefix is empty: prefixMatches treats an
+// empty prefix as no-match, so a bare "*" approval auto-runs nothing.
+func commandPrefixPattern(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "*"
+	}
+	if len(fields) == 1 {
+		return fields[0] + "*"
+	}
+	return fields[0] + " " + fields[1] + "*"
+}
+
+// journalShellApproval appends one shell.approval event to the project
+// journal's "shell" class dir (issue #107's "approvals are journaled"
+// acceptance item). Mirrors appendModelSubstitution's write path —
+// journal.NewWriter with FsyncPerBatch, best-effort: a journal failure
+// never affects the approval itself, only the record of it. A session with
+// no workspace (cs.workspace == nil — hand-built test sessions) records
+// the approval in memory only: there is no ContextDir to journal to, and
+// the CWD-implicit fallback would write into whatever directory the test
+// happens to run from.
+func (cs *CortexSession) journalShellApproval(kind, pattern, command, reason string) {
+	if cs.workspace == nil {
+		return
+	}
+	dir := filepath.Join(cs.workspace.ContextDir(), "journal", "shell")
+	entry, err := journal.NewShellApprovalEntry(journal.ShellApprovalPayload{
+		Kind:    kind,
+		Pattern: pattern,
+		Command: command,
+		Reason:  reason,
+		Turn:    cs.turns,
+	})
+	if err != nil {
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: dir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return
+	}
+}
+
+// shellApprovalPatterns returns the session's current approval records
+// (issue #107): each carries the KIND chosen at the prompt alongside the
+// pattern, so matching keys on the kind, never on the pattern string. Empty
+// when none were chosen.
+func (cs *CortexSession) shellApprovalPatterns() []shellApproval {
+	if cs == nil {
+		return nil
+	}
+	return cs.shellApprovals
+}
+
+// shellApprovalMatches reports whether command matches any of the session's
+// approval records (issue #107). An EXACT record must equal the command
+// byte for byte — even when it ends in "*" (e.g. "rm -f build/*"): the
+// kind, not the pattern's shape, decides, so an exact approval never
+// re-interprets as a prefix. A PREFIX record is a WORD prefix — it matches
+// the prefix itself or the prefix followed by whitespace, and NEVER a
+// longer word glued onto the prefix ("make test*" does not match "make
+// testX") or a command that chains, pipes, redirects, or substitutes after
+// it ("make test; rm -rf x", "make test | cat", "make test$(evil)"): the
+// remainder after the prefix must start with whitespace and contain no
+// shell control character (; & | ` $ ( < >), newline, or quote. A bare
+// HasPrefix is not safe enough — approving "make test" must not auto-run
+// "make test && git push --force".
+func shellApprovalMatches(records []shellApproval, command string) bool {
+	for _, r := range records {
+		if r.Kind == "prefix" {
+			if strings.HasSuffix(r.Pattern, "*") && prefixMatches(r.Pattern[:len(r.Pattern)-1], command) {
+				return true
+			}
+			continue
+		}
+		if r.Pattern == command {
+			return true
+		}
+	}
+	return false
+}
+
+// prefixMatches reports whether command matches the word prefix: command
+// starts with prefix and the remainder is empty, starts with whitespace, and
+// carries no shell control or substitution syntax (see
+// shellApprovalMatches). An empty prefix matches nothing — a bare "*"
+// approval would auto-run any Risky command, so it is not a match. The
+// "remainder is empty" arm is what makes a single-token prefix ("git*")
+// match the bare command it was granted for.
+func prefixMatches(prefix, command string) bool {
+	if prefix == "" || !strings.HasPrefix(command, prefix) {
+		return false
+	}
+	rest := command[len(prefix):]
+	if rest == "" {
+		return true
+	}
+	if !unicode.IsSpace(rune(rest[0])) {
+		return false // glued onto the prefix ("make testX") — not a match
+	}
+	return !containsShellControl(rest)
+}
+
+// containsShellControl reports whether s contains shell control or
+// substitution syntax that would let a prefix approval silently widen into a
+// chained command: ; & | ` $( < >, a newline, or any quote.
+func containsShellControl(s string) bool {
+	return strings.ContainsAny(s, ";&|`<>\"'\n") || strings.Contains(s, "$(")
+}
+
 func (cs *CortexSession) gateShell(ctx context.Context, command string) (string, bool) {
 	// Per-turn same-action gate (issue #169): if this command's effect
 	// class was already Blocked in the current turn, refuse it before
@@ -549,18 +705,51 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		blocked := shellrisk.BlockedMessage(v.Reason)
 		// A subagent (depth >= 1) has no human operator mid-loop — Risky is
 		// treated as Blocked, same as a headless session. Only the coder's own
-		// top-level bash call (depth 0) gets an interactive approval path.
+		// top-level bash call (depth 0) gets an interactive approval path —
+		// and this check stands BEFORE the session-approval match below, so a
+		// subagent never auto-runs on a stored approval either.
 		if subagentDepth(ctx) != 0 || cs == nil {
 			cs.recordSameActionBlock(command)
 			return blocked, false
 		}
+		// Session-scoped approvals (issue #107): a Risky command the user
+		// already chose "always this session" for — exact (a, byte for
+		// byte, even when the command ends in "*") or by prefix (p, the
+		// derived word prefix shown in the prompt) — runs without
+		// re-prompting. Checked HERE, after the Blocked arm of the switch,
+		// on purpose: a Blocked command takes the arm above and never
+		// reaches this line, so no approval can ever override a Blocked
+		// verdict (Blocked stays Blocked).
+		if shellApprovalMatches(cs.shellApprovalPatterns(), command) {
+			return "", true
+		}
 		if !cs.quiet && cs.confirmRisky != nil {
-			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y/N] ", v.Reason, command)
-			if cs.confirmRisky(q) {
+			// The question carries the classifier's reason on its own line
+			// above the command (issue #107's "show why it was flagged")
+			// and ends with the choices: y once, n, a always this session
+			// (this exact command), p always this session (this command's
+			// prefix — the derived pattern, shown, not just named: what the
+			// user sees is what ApproveShell stores). The body lines scroll
+			// away; the ask line stays on the status row. Non-TTY /
+			// CORTEX_LOOP_RENDER=0 sessions take the confirmRisky hook's
+			// ReadLine fallback with the SAME question — plain text, the
+			// pre-change path unchanged.
+			prefix := commandPrefixPattern(command)
+			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y once | a this command | p always %q | n] ", v.Reason, command, prefix)
+			choice := cs.confirmRisky(q)
+			switch choice {
+			case lineedit.ConfirmAlwaysExact:
+				cs.ApproveShell("exact", command, command, v.Reason)
 				return "", true
+			case lineedit.ConfirmAlwaysPrefix:
+				cs.ApproveShell("prefix", prefix, command, v.Reason)
+				return "", true
+			case lineedit.ConfirmYes:
+				return "", true
+			default:
+				cs.recordSameActionBlock(command)
+				return shellrisk.DeclinedMessage(), false
 			}
-			cs.recordSameActionBlock(command)
-			return shellrisk.DeclinedMessage(), false
 		}
 		// approveRisky is Discord's non-terminal-but-human-present approval
 		// path (docs/cortex-web.md Phase 7) — checked independently of

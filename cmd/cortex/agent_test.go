@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 )
@@ -98,9 +99,9 @@ func TestAgentToolEndToEnd(t *testing.T) {
 	cs := &CortexSession{
 		quiet:         true,
 		classifyShell: stubRisky,
-		confirmRisky: func(string) bool {
+		confirmRisky: func(string) lineedit.ConfirmChoice {
 			t.Fatal("confirmRisky must not be invoked for a call at subagent depth")
-			return true
+			return lineedit.ConfirmYes
 		},
 		Request: &AgentRequest{
 			Model:    "coder-m",
