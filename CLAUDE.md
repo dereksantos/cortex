@@ -95,7 +95,7 @@ Three capabilities distinguish it:
 | Command | Purpose |
 |---|---|
 | `cortex` | Interactive REPL (default) |
-| `cortex resume [id]` | Resume a prior session (default: latest); its resume banner goes to stderr (issue #118) |
+| `cortex resume [id]` | Resume a prior session — with no id on an interactive TTY, opens the session picker first (ESC falls back to latest; non-TTY / `NO_COLOR` / `CORTEX_LOOP_RENDER=0` take latest directly); its resume banner goes to stderr (issue #118) |
 | `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); the verify-before-fix principle rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence — the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118) |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
@@ -134,6 +134,20 @@ scrolling report, byte for byte. While a turn's pinned prompt is live the
 inspector does not open a competing reader — the anchor is suspended and its
 key loop forwards raw bytes, the same "serve it from the loop that owns the
 terminal" rule `Anchor.Confirm` follows.
+
+`/sessions` (`cmd/cortex/session_picker.go`) is the inspector's second consumer,
+and the first that is **interactive** rather than read-only: the harness grew a
+cursor plus `Selecter`/`Cursorer`/`Accepter`/`Filterer` view interfaces so typed
+text reaches the view instead of quitting, Enter reports acceptance, and the
+caller reads the pick after the screen closes. The picker filters by prompt, id,
+and model (case-insensitive substring, newest-first preserved) and resumes on
+Enter; ESC leaves the current session alone. It carries the same strict
+enhancement gate as `/context` (`sessionsInspectable` mirrors
+`contextInspectable`), so a pipe, `NO_COLOR`, or `CORTEX_LOOP_RENDER=0` prints the
+plain list exactly as before. `cortex resume` with no id opens the same picker at
+startup (`resumePickerUsable` + `pickSessionAtStartup`), cancelling there falls
+through to today's latest-session resume. `main.go` reaches the harness through
+one seam, `var inspectSession`, so tests can capture the view without a TTY.
 Memory is model-driven — ask in natural language ("remember that …" /
 "forget the … note") and the agent calls the memory tools; the old
 `/remember` and `/forget` slash commands were removed with the mechanical

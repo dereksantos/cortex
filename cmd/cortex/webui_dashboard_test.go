@@ -25,7 +25,7 @@ func buildDashboardGoldenJSON(blogRoot, cortexRoot string) string {
 	return `{"projects":[` +
 		`{"name":"blog","root":"` + jsonEscape(blogRoot) + `",` +
 		`"branch":"main","active_change":false,"clean":true,` +
-		`"sessions":[{"id":"20260101-000000","mod_time":"2026-01-01T00:00:00Z","messages":1,"first":"hello"}]},` +
+		`"sessions":[{"id":"20260101-000000","mod_time":"2026-01-01T00:00:00Z","messages":1,"first":"hello","turns":1}]},` +
 		`{"name":"cortex","root":"` + jsonEscape(cortexRoot) + `",` +
 		`"branch":"cortex/fix-login","active_change":true,"clean":false,` +
 		`"sessions":[]}` +

@@ -250,7 +250,7 @@ var helpLines = []string{
 	"/compact           distill the session via study, freeing context",
 	"/plan <task>       plan-then-execute: one planning turn, then each step as its own turn",
 	"/clear             reset the conversation and start a fresh session",
-	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
+	"/sessions          pick a saved session to resume (plain list when not a TTY)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
 	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
@@ -271,7 +271,7 @@ func printHelp() {
 // without pinning the prose.
 var usageLines = []string{
 	"cortex                                    interactive REPL (default)",
-	"cortex resume [id]                        resume a prior session (default: latest)",
+	"cortex resume [id]                        resume a prior session (no id: pick one on a TTY, else latest)",
 	"cortex turn [--session id] [--plan] [--json] ...   headless turn; --plan runs plan-then-execute; session id to stderr",
 	"cortex study <path> [goal...]             one-off study; prints the digest",
 	"cortex learn [--project <name>]           background learning pass over the journal",
@@ -472,6 +472,19 @@ func main() {
 		id := ""
 		if len(rest) >= 1 {
 			id = rest[0]
+		}
+		// `cortex resume` with no id picks interactively (issue #110) rather than
+		// silently taking the latest: the user sees what they are resuming. An
+		// explicit id is never second-guessed. The gate is the same one /sessions
+		// uses (interactive stdin, rich-render stdout), and first-run bootstrap is
+		// excluded because a user who has not configured a backend yet has no
+		// sessions worth picking — that path must reach the setup flow. Leaving the
+		// picker without choosing (ESC, or a harness failure) falls through to
+		// today's latest-session resume; "cancel" is not "quit".
+		if id == "" && resumePickerUsable() {
+			if picked, ok := pickSessionAtStartup(session); ok {
+				id = picked
+			}
 		}
 		if err := session.ResumeTranscript(id); err != nil {
 			fmt.Printf("resume: %v - starting fresh\n", err)
@@ -686,8 +699,23 @@ func main() {
 		}
 
 		// /sessions lists saved sessions so their ids are discoverable from
-		// inside the REPL (resuming still happens at startup).
+		// inside the REPL. On an interactive TTY it opens the picker instead
+		// (issue #110): typing filters, Enter resumes, ESC leaves the listing
+		// alone. Piped stdout, NO_COLOR, or CORTEX_LOOP_RENDER=0 keep the plain
+		// list, and so does a harness failure — see session_picker.go. Resuming
+		// is deferred until after the picker closes, so a failed resume cannot
+		// strand the user inside a full-screen view; a resume that fails reopens
+		// the session the user was on rather than copying it into a new one.
 		if input == "/sessions" {
+			if sessionsInspectable(editor) {
+				picker := NewSessionPicker(listSessionsOrEmpty(session.SessionsDir()))
+				if err := inspectSession(editor, picker); err == nil && picker.Accepted() {
+					if id := picker.SelectedID(); id != "" {
+						resumeFromSessionPicker(session, id)
+					}
+				}
+				continue
+			}
 			session.printSessions()
 			continue
 		}
