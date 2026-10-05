@@ -35,12 +35,6 @@ type sessionPickerView struct {
 	accepted bool
 }
 
-// sessionPickerFooter is the one-line hint under the rows. It states the keys
-// the harness binds (typing filters, Enter picks, ESC leaves) because the
-// harness paints no help of its own — a picker nobody can operate without
-// reading the source is not usable.
-const sessionPickerFooter = "type to filter · enter resume · esc quit"
-
 // sessionsInspectable reports whether the session listing should open as the
 // full-screen interactive picker rather than print the plain list. The gate is
 // the same strict enhancement gate as /context's (context_view.go): it needs an
@@ -141,6 +135,36 @@ func resumeSessionFromPicker(cs *CortexSession, id string) error {
 	return nil
 }
 
+// resumeFromSessionPicker switches the live session to the one the user picked
+// from inside the REPL, and is what the /sessions branch calls: a resume that
+// fails reopens the session the user was already on, so a bad id cannot lose or
+// duplicate the conversation (see resumeOnPickerFailure).
+func resumeFromSessionPicker(cs *CortexSession, id string) error {
+	return resumeOnPickerFailure(cs, resumeSessionFromPicker(cs, id))
+}
+
+// resumeOnPickerFailure keeps a failed resume from costing the user their
+// conversation. resumeSessionFromPicker closes the transcript that was open
+// before it tries, so when the resume fails the session is left with no handle
+// and the previous conversation still in memory: reopening prev is the only way
+// to stay on it, because StartTranscript would write those same messages into a
+// brand-new session file (and lose the pointer to the old one).
+//
+// It returns the resume error so the caller can still report it; when reopening
+// prev also fails, that error is the more alarming one and is reported instead.
+func resumeOnPickerFailure(cs *CortexSession, resumeErr error) error {
+	if resumeErr == nil {
+		return nil
+	}
+	prev := cs.SessionID
+	fmt.Printf("resume: %v - staying on %s\n", resumeErr, prev)
+	if err := cs.ResumeTranscript(prev); err != nil {
+		fmt.Printf("resume: %v\n", err)
+		return err
+	}
+	return resumeErr
+}
+
 // NewSessionPicker builds the picker over a session listing. The caller has
 // already ordered it newest-first (listSessions does); the view preserves that
 // order through any filter.
@@ -148,12 +172,19 @@ func NewSessionPicker(infos []sessionInfo) *sessionPickerView {
 	return &sessionPickerView{all: infos, cursor: -1}
 }
 
-// Title implements lineedit.View. Fixed, because the filter is rendered as the
-// body's first row rather than folded into the title: the harness passes the
-// title through one painting path and the body through another, and keeping the
-// filter in the body means one filter row in every frame, styled like the rest
-// of the view's own text.
-func (p *sessionPickerView) Title() string { return "resume session" }
+// Title implements lineedit.View: the prompt plus the filter text the user has
+// typed so far. The filter lives here rather than in the body because the body
+// must contain only selectable rows: the harness clamps its cursor against
+// len(Lines()) and reports "row N of len(Lines())", so a filter row or a hint
+// row inside the body would count as a selectable row and put the highlight, the
+// footer's row number, and SelectedID out of step with each other. The harness's
+// own footer already names the keys (type to filter, enter picks, esc cancels).
+func (p *sessionPickerView) Title() string {
+	if p.filter == "" {
+		return "resume session"
+	}
+	return "resume session — filter: " + p.filter
+}
 
 // Filter implements lineedit.Filterer.
 func (p *sessionPickerView) Filter() string { return p.filter }
@@ -176,12 +207,16 @@ func (p *sessionPickerView) SetFilter(s string) {
 }
 
 // SetCursor implements lineedit.Cursorer. The harness clamps the index to the
-// row count it just read, so the only judgement left here is the empty list,
-// where there is no row to highlight.
+// row count it just read — which for this view is exactly the number of matching
+// sessions, since the body holds nothing but rows — so the only judgement left
+// here is the empty list, where there is no row to highlight.
 func (p *sessionPickerView) SetCursor(i int) {
 	if len(p.match()) == 0 {
 		p.cursor = -1
 		return
+	}
+	if i > len(p.match())-1 {
+		i = len(p.match()) - 1
 	}
 	p.cursor = i
 }
@@ -192,11 +227,11 @@ func (p *sessionPickerView) SetCursor(i int) {
 // all (inspectRun.selectable is set by the type assertion), so the signature is
 // the harness's and returns a row index.
 //
-// The step asked for "Selected() returns the selected session's id"; that is
-// SelectedID below. The two cannot share a name — Go has no overloading, and
-// renaming the harness's method would break every other view — so the row index
-// keeps the interface name and the id, which is the picker-specific answer, is
-// the differently-named accessor the caller of Inspect reads after Accept.
+// The id the row stands for is the picker-specific answer, and it has its own
+// accessor: SelectedID below. The two cannot share a name — Go has no
+// overloading, and renaming the harness's method would break every other view —
+// so the row index keeps the interface name and the caller of Inspect reads the
+// id after the harness returns.
 func (p *sessionPickerView) Selected() int { return p.cursor }
 
 // SelectedID reports the session id the cursor is on — "" when nothing matches,
@@ -221,32 +256,20 @@ func (p *sessionPickerView) Accept() { p.accepted = true }
 // with ESC.
 func (p *sessionPickerView) Accepted() bool { return p.accepted }
 
-// Lines implements lineedit.View: a dim filter row, one row per matching
-// session, and a dim footer hint — always three more rows than the sessions, so
-// the harness's chrome sits outside a body that never depends on the screen
-// height. Rows are clamped to width: a session id is 15 characters and the
+// Lines implements lineedit.View: one row per matching session, and nothing
+// else. The contract that matters is the row count — every line the body returns
+// is a row the harness can highlight and count, so the filter text and the key
+// hints stay out of it (the title carries the filter, the harness's footer names
+// the keys). Rows are clamped to width: a session id is 15 characters and the
 // prompt preview takes what is left, never more, so a row cannot wrap and break
 // the harness's line accounting (its frame test pins the same rule for
 // /context's view).
 func (p *sessionPickerView) Lines(width int) []string {
 	matches := p.match()
-	rows := make([]string, 0, len(matches)+2)
-	filterRow := "filter: " + p.filter
-	if r := []rune(filterRow); width > 0 && len(r) > width {
-		filterRow = trimRunes(filterRow, width)
-	}
-	rows = append(rows, withColor(filterRow, gray))
+	rows := make([]string, 0, len(matches))
 	for i, s := range matches {
 		rows = append(rows, p.row(s, i == p.cursor, width))
 	}
-	// The footer is clamped like every other row: a row wider than the terminal
-	// wraps, and a wrapped row breaks the harness's line accounting (it paints
-	// one row per entry and reserves a fixed number of chrome rows).
-	footer := sessionPickerFooter
-	if r := []rune(footer); width > 0 && len(r) > width {
-		footer = trimRunes(footer, width)
-	}
-	rows = append(rows, withColor(footer, gray))
 	return rows
 }
 

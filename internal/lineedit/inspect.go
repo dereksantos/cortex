@@ -118,9 +118,11 @@ const (
 	inspectPageDown
 	inspectTop
 	inspectBottom
-	// inspectEnter is the acceptance key. The harness always stops scrolling on
-	// it and hands the action to an Accepter; nothing else about it is
-	// harness-level, because "what does accepting mean" is the view's business.
+	// inspectEnter is the acceptance key. For a view that is both an Accepter and a
+	// Selecter it is also the leaving key: the harness calls Accept and closes the
+	// screen, so one keystroke both records the pick and returns control to the
+	// caller. Otherwise it stops scrolling and does nothing else, which is what
+	// keeps Enter inert on a plain page.
 	inspectEnter
 	// inspectBackspace edits the view's filter leftward (Filterer).
 	inspectBackspace
@@ -135,15 +137,24 @@ const (
 type inspectEvent struct {
 	action inspectAction
 	r      rune
+	// accepted marks the event that closed the run: Enter on a view implementing
+	// Accepter and Selecter, after that view's Accept has been called. The action
+	// alone cannot say it, because Enter on a plain view is inert and must keep the
+	// screen up.
+	accepted bool
 }
 
 // Accepter is an optional view interface for the acceptance key. A view that
-// implements it is told when the user hit Enter, so it can treat the selected
-// row as a choice rather than as text on a page — typically by leaving (a
-// picker cancels the inspector the way Escape does) or by recording the pick
-// for its builder to read afterwards. There is deliberately no return channel:
-// a harness that reported a value would have to decide what acceptance means,
-// which is the mistake this seam exists to avoid.
+// implements it together with Selecter — that is, a view whose rows are choices
+// — is told when the user hit Enter and the run then ends, so the caller of
+// Inspect reads the view's result (which row was accepted, whether any) the
+// moment the screen closes: one keystroke picks. Accepting is thus a second way
+// to leave an inspector, alongside ESC, and the one that means "choose" rather
+// than "cancel". A view that merely displays — no Selecter, or neither — is told
+// if it implements Accepter but the screen stays up, and for a view with neither
+// Enter is inert. There is deliberately no return channel: a harness that
+// reported a value would have to decide what accepting means, which is the
+// mistake this seam exists to avoid.
 type Accepter interface {
 	Accept()
 }
@@ -214,10 +225,9 @@ type inspectRun struct {
 }
 
 // runInspect drives one inspector to completion, returning when the user quits
-// (q / ESC / Ctrl-C / Ctrl-D) or the input stream ends. Enter is not one of
-// them: on Enter the harness tells an Accepter to accept and keeps the screen
-// up, so a view that picks does its own leaving, and one that does not simply
-// ignores the key.
+// (q / ESC / Ctrl-C / Ctrl-D), picks a row (Enter on a view that is an Accepter
+// and a Selecter), or the input stream ends. Enter on anything else is inert:
+// the key exists for pickers, and a page with nothing to pick simply ignores it.
 //
 // A panic in the view is recovered and returned as an error rather than
 // unwound: the caller's deferred restore would put the terminal back either
@@ -238,6 +248,11 @@ func runInspect(out io.Writer, src pollSource, sizeFn func() (int, int), v View)
 // loop paints the first frame, then folds keystrokes until the user leaves. An
 // idle tick repaints (picking up a resize or fresher view content); the frame
 // cache in render makes that free when nothing actually moved.
+//
+// Quit and acceptance both end the run, and they are the only two: decode
+// reports the acceptance by returning it with accepted set, so the caller of
+// Inspect gets one return path for "the user is done with this screen" and can
+// then ask the view what it decided.
 func (r *inspectRun) loop() error {
 	r.render()
 	for {
@@ -252,7 +267,7 @@ func (r *inspectRun) loop() error {
 			r.render()
 			continue
 		}
-		if r.decode(b).action == inspectQuit {
+		if ev := r.decode(b); ev.action == inspectQuit || ev.accepted {
 			return nil
 		}
 		r.render()
@@ -260,7 +275,8 @@ func (r *inspectRun) loop() error {
 }
 
 // decode maps one first-byte to an event and applies it. Returns inspectQuit
-// when the user asked to leave. Escape sequences are decoded through the
+// when the user asked to leave, and an event with accepted set when the view
+// took the row under the cursor as its answer (see loop, which ends on either). Escape sequences are decoded through the
 // package's shared decoder (keys.go), so arrows/PgUp/PgDn/Home/End behave
 // identically here and at the prompt.
 //
@@ -413,11 +429,17 @@ func actionForKey(k keyKind) inspectAction {
 func (r *inspectRun) apply(e inspectEvent) inspectEvent {
 	switch e.action {
 	case inspectEnter:
-		// The view decides what acceptance means; all the harness does is stop
-		// here instead of scrolling. A view with no Accept is a plain list, for
-		// which Enter is simply inert.
-		if a, ok := r.view.(Accepter); ok {
+		// The view decides what acceptance means; the harness's half is to tell it
+		// and then hand the terminal back, so the caller reads the pick as soon as
+		// the screen closes. A view with no Accept is a plain list, for which the
+		// key stops scrolling and is otherwise inert.
+		//
+		// A pick is only a pick if there is a row to pick: Enter leaves for a view
+		// that is both an Accepter and a Selecter, which is what makes Enter inert
+		// for a plain page and for an Accepter that has no rows to choose from.
+		if a, ok := r.view.(Accepter); ok && r.selectable {
 			a.Accept()
+			e.accepted = true
 		}
 		return e
 	case inspectRune:

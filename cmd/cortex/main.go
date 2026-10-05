@@ -698,16 +698,14 @@ func main() {
 		// alone. Piped stdout, NO_COLOR, or CORTEX_LOOP_RENDER=0 keep the plain
 		// list, and so does a harness failure — see session_picker.go. Resuming
 		// is deferred until after the picker closes, so a failed resume cannot
-		// strand the user inside a full-screen view.
+		// strand the user inside a full-screen view; a resume that fails reopens
+		// the session the user was on rather than copying it into a new one.
 		if input == "/sessions" {
 			if sessionsInspectable(editor) {
 				picker := NewSessionPicker(listSessionsOrEmpty(session.SessionsDir()))
 				if err := inspectSession(editor, picker); err == nil && picker.Accepted() {
 					if id := picker.SelectedID(); id != "" {
-						if err := resumeSessionFromPicker(session, id); err != nil {
-							fmt.Printf("resume: %v - starting fresh\n", err)
-							session.StartTranscript()
-						}
+						resumeFromSessionPicker(session, id)
 					}
 				}
 				continue

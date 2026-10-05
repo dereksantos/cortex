@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -28,24 +30,33 @@ func pickerFixture() []sessionInfo {
 func TestSessionPickerLinesShape(t *testing.T) {
 	p := NewSessionPicker(pickerFixture())
 	rows := p.Lines(120)
-	// filter row + three sessions + footer.
-	if len(rows) != 5 {
-		t.Fatalf("len(Lines) = %d, want 5 (filter row + 3 sessions + footer)", len(rows))
+	// Every body row is a selectable session row: no filter row, no hint row.
+	// The harness clamps its cursor against len(Lines()) and reports "row N of
+	// len(Lines())", so anything else in here would be a row the user could land
+	// on and nothing could resume.
+	if len(rows) != 3 {
+		t.Fatalf("len(Lines) = %d, want 3 (one per session, nothing else)", len(rows))
 	}
-	if !strings.HasPrefix(stripANSI(rows[0]), "filter:") {
-		t.Errorf("first row = %q, want the filter row", rows[0])
+	for i, row := range rows {
+		if strings.HasPrefix(stripANSI(row), "filter:") {
+			t.Errorf("row %d = %q, want no filter row in the body — it belongs in the title", i, row)
+		}
 	}
-	if got := stripANSI(rows[len(rows)-1]); got != sessionPickerFooter {
-		t.Errorf("last row = %q, want the footer hint", got)
+	// The typed filter is visible in the title, where the harness paints it.
+	if got := p.Title(); got != "resume session" {
+		t.Errorf("Title = %q, want the bare prompt with an empty filter", got)
+	}
+	p.SetFilter("login")
+	if got := stripANSI(p.Title()); !strings.Contains(got, "filter: login") {
+		t.Errorf("Title = %q, want it to echo the typed filter", got)
 	}
 	// Newest first, and each session row carries id, turns, model, prompt.
-	body := rows[1 : len(rows)-1]
 	for i, want := range []struct{ id, prompt string }{
 		{"20260202-000002", "fix login redirect"},
 		{"20260102-000001", "Add tests for grep"},
 		{"20260101-000000", ""},
 	} {
-		got := stripANSI(body[i])
+		got := stripANSI(rows[i])
 		if !strings.Contains(got, want.id) {
 			t.Errorf("row %d = %q, want id %s (newest-first order)", i, got, want.id)
 		}
@@ -55,7 +66,7 @@ func TestSessionPickerLinesShape(t *testing.T) {
 	}
 	// The row with no prompt says nothing rather than printing empty columns,
 	// and an unknown model is a dash, not a gap.
-	last := stripANSI(body[2])
+	last := stripANSI(rows[2])
 	if strings.HasSuffix(last, " ") {
 		t.Errorf("row with no prompt ends in whitespace: %q", last)
 	}
@@ -68,8 +79,7 @@ func TestSessionPickerSelectionMark(t *testing.T) {
 	p := NewSessionPicker(pickerFixture())
 	p.SetCursor(1)
 	rows := p.Lines(120)
-	body := rows[1 : len(rows)-1]
-	for i, row := range body {
+	for i, row := range rows {
 		plain := stripANSI(row)
 		wantMark := "  "
 		if i == 1 {
@@ -81,15 +91,15 @@ func TestSessionPickerSelectionMark(t *testing.T) {
 	}
 	// The highlight must survive color being off: a plain terminal still shows
 	// which row is picked, because the mark is ASCII and not only bold.
-	if strings.Contains(stripANSI(body[1]), "\x1b") {
+	if strings.Contains(stripANSI(rows[1]), "\x1b") {
 		t.Error("stripped row still contains an escape")
 	}
 	// With color on, the selected row is the only one wrapped in bold.
-	if !strings.HasPrefix(body[1], "\x1b[1m") {
-		t.Errorf("selected row = %q, want it bolded", body[1])
+	if !strings.HasPrefix(rows[1], "\x1b[1m") {
+		t.Errorf("selected row = %q, want it bolded", rows[1])
 	}
-	if strings.Contains(body[0], "\x1b[1m") {
-		t.Errorf("unselected row = %q, must not be bolded", body[0])
+	if strings.Contains(rows[0], "\x1b[1m") {
+		t.Errorf("unselected row = %q, must not be bolded", rows[0])
 	}
 }
 
@@ -114,12 +124,11 @@ func TestSessionPickerFilterNarrowing(t *testing.T) {
 			p := NewSessionPicker(pickerFixture())
 			p.SetFilter(tc.filter)
 			rows := p.Lines(120)
-			body := rows[1 : len(rows)-1]
-			if len(body) != tc.wantRows {
-				t.Fatalf("visible session rows = %d, want %d (%v)", len(body), tc.wantRows, body)
+			if len(rows) != tc.wantRows {
+				t.Fatalf("visible session rows = %d, want %d (%v)", len(rows), tc.wantRows, rows)
 			}
 			for i, want := range tc.wantIDs {
-				if got := stripANSI(body[i]); !strings.Contains(got, want) {
+				if got := stripANSI(rows[i]); !strings.Contains(got, want) {
 					t.Errorf("row %d = %q, want id %s", i, got, want)
 				}
 			}
@@ -164,14 +173,14 @@ func TestSessionPickerNoMatchHasNoSelection(t *testing.T) {
 	if got := p.SelectedID(); got != "" {
 		t.Errorf("SelectedID = %q, want empty", got)
 	}
-	// The body is the filter row plus the footer, and the filter text is
-	// visible so the user can see what they typed.
+	// The body is empty and the filter text is visible in the title, so the user
+	// can see what they typed.
 	rows := p.Lines(120)
-	if len(rows) != 2 {
-		t.Fatalf("len(Lines) = %d, want 2 (filter row + footer)", len(rows))
+	if len(rows) != 0 {
+		t.Fatalf("len(Lines) = %d, want no rows at all", len(rows))
 	}
-	if !strings.Contains(stripANSI(rows[0]), "nothing matches this") {
-		t.Errorf("filter row = %q, want the typed text echoed", rows[0])
+	if !strings.Contains(stripANSI(p.Title()), "nothing matches this") {
+		t.Errorf("title = %q, want the typed text echoed", p.Title())
 	}
 	// A cursor key must not manufacture a selection out of an empty list.
 	p.SetCursor(0)
@@ -199,7 +208,7 @@ func TestSessionPickerWidthClamping(t *testing.T) {
 	}
 	// A cut prompt says it was cut.
 	rows = p.Lines(40)
-	body := stripANSI(rows[1])
+	body := stripANSI(rows[0])
 	if !strings.HasSuffix(body, "…") {
 		t.Errorf("clamped row = %q, want it to end with an ellipsis", body)
 	}
@@ -227,8 +236,8 @@ func TestSessionPickerAccept(t *testing.T) {
 func TestSessionPickerEmptyListing(t *testing.T) {
 	p := NewSessionPicker(nil)
 	rows := p.Lines(80)
-	if len(rows) != 2 {
-		t.Fatalf("len(Lines) = %d, want 2 (filter row + footer, no sessions)", len(rows))
+	if len(rows) != 0 {
+		t.Fatalf("len(Lines) = %d, want no rows for an empty listing", len(rows))
 	}
 	if got := p.Selected(); got >= 0 {
 		t.Errorf("Selected = %d, want negative on an empty listing", got)
@@ -397,7 +406,35 @@ func TestInspectSessionDefaultIsTheRealMethod(t *testing.T) {
 	}
 }
 
-// --- step 5: the resume helper and the startup gate ---------------------
+// TestSessionPickerBodyRowsMatchHarnessCursor is the harness/view row-contract
+// test the reviewer asked for: a harness cursor of len(Lines())-1 — which is
+// where G puts it — resolves to the last session, and every index the harness
+// can produce resolves to some session rather than to nothing. It held only
+// because the body is exactly the matching rows; with a filter or hint row in
+// the body, the top indices pointed past the list and Enter resumed nothing.
+func TestSessionPickerBodyRowsMatchHarnessCursor(t *testing.T) {
+	infos := pickerFixture()
+	p := NewSessionPicker(infos)
+	if got, want := len(p.Lines(120)), len(infos); got != want {
+		t.Fatalf("len(Lines) = %d, want %d — the harness clamps its cursor to this count", got, want)
+	}
+	for i := 0; i < len(infos); i++ {
+		p.SetCursor(i)
+		if got := p.SelectedID(); got != infos[i].ID {
+			t.Errorf("cursor %d -> SelectedID = %q, want %s", i, got, infos[i].ID)
+		}
+	}
+	p.SetCursor(len(infos) - 1)
+	if got := p.SelectedID(); got != "20260101-000000" {
+		t.Errorf("last cursor -> SelectedID = %q, want the oldest session", got)
+	}
+	// A cursor beyond the end (a stale harness index after the list narrowed)
+	// must be pulled back rather than resolve to nothing.
+	p.SetCursor(len(infos))
+	if got := p.SelectedID(); got != "20260101-000000" {
+		t.Errorf("out-of-range cursor -> SelectedID = %q, want clamped to the last row", got)
+	}
+}
 
 func TestResumeSessionFromPickerSwitchesTranscript(t *testing.T) {
 	cs := newTestSession(t)
@@ -457,6 +494,46 @@ func TestResumeSessionFromPickerMissingIDLeavesNoHandle(t *testing.T) {
 	cs.StartTranscript()
 	if cs.transcript == nil {
 		t.Error("StartTranscript after a failed resume did not open a transcript")
+	}
+}
+
+// TestResumeFromSessionPickerKeepsSessionOnFailure pins the REPL fallback: a
+// resume that fails must leave the session on the id and the transcript file it
+// was already on. Before this, the failure path fell through to StartTranscript,
+// which copied the whole in-memory conversation into a brand-new session file —
+// neither "starting fresh" nor staying put, and a duplicate of the transcript.
+func TestResumeFromSessionPickerKeepsSessionOnFailure(t *testing.T) {
+	cs := newTestSession(t)
+	wantID := cs.SessionID
+	cs.Append(Message{Role: RoleUser, Content: "keep this conversation"})
+
+	err := resumeFromSessionPicker(cs, "does-not-exist")
+	if err == nil {
+		t.Fatal("resuming a nonexistent id returned nil error")
+	}
+	if cs.SessionID != wantID {
+		t.Errorf("SessionID = %q after a failed resume, want the original %q", cs.SessionID, wantID)
+	}
+	if cs.transcript == nil {
+		t.Fatal("transcript is nil after a failed resume — the session was left without a handle")
+	}
+	if got := filepath.Base(cs.transcript.Name()); got != wantID+".jsonl" {
+		t.Errorf("transcript = %q, want still the original %s.jsonl", got, wantID)
+	}
+	// Nothing new was written anywhere: exactly the session the user was on, not
+	// a copy of it under a fresh id.
+	infos := listSessionsOrEmpty(cs.SessionsDir())
+	if len(infos) != 1 {
+		t.Fatalf("sessions on disk = %d, want 1 — a failed resume must not create a session", len(infos))
+	}
+	// And the reopened handle still appends to the right file.
+	cs.Append(Message{Role: RoleUser, Content: "after the failed resume"})
+	body, err := os.ReadFile(cs.transcript.Name())
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if !strings.Contains(string(body), "keep this conversation") || !strings.Contains(string(body), "after the failed resume") {
+		t.Errorf("transcript = %q, want both the earlier and the post-failure message", string(body))
 	}
 }
 
