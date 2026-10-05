@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
@@ -518,26 +519,53 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 // user chose "always this session" at the risky-command prompt — and
 // journals the event so a review of the session shows what was auto-allowed.
 // kind is "exact" or "prefix"; pattern is the stored pattern (the exact
-// command for "exact", the command with "*" appended for "prefix"). command
-// is the exact command that earned the approval; reason is the classifier's
-// reason for it.
+// command for "exact", the leading tokens + "*" for "prefix": the program
+// plus one subcommand, e.g. "make test*" for "make test ./pkg/..." — a
+// WORD prefix, not a byte prefix, so it cannot widen into chained commands;
+// a single-token command yields "cmd *"). command is the exact command that
+// earned the approval; reason is the classifier's reason for it.
 func (cs *CortexSession) ApproveShell(kind, pattern, command, reason string) {
 	if cs == nil || kind == "" || pattern == "" {
 		return
 	}
+	if kind == "prefix" && command != "" {
+		pattern = commandPrefixPattern(command)
+	}
 	cs.shellApprovals = append(cs.shellApprovals, pattern)
 	cs.journalShellApproval(kind, pattern, command, reason)
+}
+
+// commandPrefixPattern derives the stored prefix pattern for a command the
+// user approved "always this session" by prefix (issue #107): the program
+// plus one subcommand + "*" — "make test" for "make test ./pkg/..." (the
+// issue's example), "git*" for bare "git". Single-token commands get
+// "cmd *" (prefix "cmd "), which matches the command itself or further
+// arguments but never a glued-on longer word ("git*" vs "github").
+func commandPrefixPattern(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "*"
+	}
+	if len(fields) == 1 {
+		return fields[0] + " *"
+	}
+	return fields[0] + " " + fields[1] + "*"
 }
 
 // journalShellApproval appends one shell.approval event to the project
 // journal's "shell" class dir (issue #107's "approvals are journaled"
 // acceptance item). Mirrors appendModelSubstitution's write path —
 // journal.NewWriter with FsyncPerBatch, best-effort: a journal failure
-// never affects the approval itself, only the record of it. Nil-safe so a
-// hand-built test session (no ContextDir) records the approval in memory
-// without a journal.
+// never affects the approval itself, only the record of it. A session with
+// no workspace (cs.workspace == nil — hand-built test sessions) records
+// the approval in memory only: there is no ContextDir to journal to, and
+// the CWD-implicit fallback would write into whatever directory the test
+// happens to run from.
 func (cs *CortexSession) journalShellApproval(kind, pattern, command, reason string) {
-	dir := filepath.Join(cs.ContextDir(), "journal", "shell")
+	if cs.workspace == nil {
+		return
+	}
+	dir := filepath.Join(cs.workspace.ContextDir(), "journal", "shell")
 	entry, err := journal.NewShellApprovalEntry(journal.ShellApprovalPayload{
 		Kind:    kind,
 		Pattern: pattern,
@@ -569,14 +597,19 @@ func (cs *CortexSession) shellApprovalPatterns() []string {
 
 // shellApprovalMatches reports whether command matches any of the session's
 // approval patterns (issue #107): an exact pattern must equal the command
-// byte for byte, and a pattern ending in "*" matches every command that
-// starts with the prefix before the "*". Patterns not ending in "*" are
-// exact — only an explicit exact match approves, so a prefix approval
-// "make test*" never matches "make testX" or "make build".
+// byte for byte. A pattern ending in "*" is a WORD prefix — it matches the
+// prefix itself or the prefix followed by whitespace, and NEVER a longer
+// word glued onto the prefix ("make test*" does not match "make testX") or
+// a command that chains, pipes, redirects, or substitutes after it ("make
+// test; rm -rf x", "make test | cat", "make test$(evil)"): the remainder
+// after the prefix must start with whitespace and contain no shell control
+// character (; & | ` $ ( < >), newline, or quote. A bare HasPrefix is not
+// safe enough — approving "make test" must not auto-run
+// "make test && git push --force".
 func shellApprovalMatches(patterns []string, command string) bool {
 	for _, p := range patterns {
 		if strings.HasSuffix(p, "*") {
-			if strings.HasPrefix(command, strings.TrimSuffix(p, "*")) {
+			if prefixMatches(p[:len(p)-1], command) {
 				return true
 			}
 			continue
@@ -586,6 +619,32 @@ func shellApprovalMatches(patterns []string, command string) bool {
 		}
 	}
 	return false
+}
+
+// prefixMatches reports whether command matches the word prefix: command
+// starts with prefix and the remainder is empty, starts with whitespace, and
+// carries no shell control or substitution syntax (see
+// shellApprovalMatches). An empty prefix matches nothing — a bare "*"
+// approval would auto-run any Risky command, so it is not a match.
+func prefixMatches(prefix, command string) bool {
+	if prefix == "" || !strings.HasPrefix(command, prefix) {
+		return false
+	}
+	rest := command[len(prefix):]
+	if rest == "" {
+		return true
+	}
+	if !unicode.IsSpace(rune(rest[0])) {
+		return false // glued onto the prefix ("make testX") — not a match
+	}
+	return !containsShellControl(rest)
+}
+
+// containsShellControl reports whether s contains shell control or
+// substitution syntax that would let a prefix approval silently widen into a
+// chained command: ; & | ` $( < >, a newline, or any quote.
+func containsShellControl(s string) bool {
+	return strings.ContainsAny(s, ";&|`<>\"'\n") || strings.Contains(s, "$(")
 }
 
 func (cs *CortexSession) gateShell(ctx context.Context, command string) (string, bool) {

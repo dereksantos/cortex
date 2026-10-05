@@ -27,9 +27,13 @@ func TestShellApprovals(t *testing.T) {
 
 	// riskyBlockedSession builds a session whose classifier returns Risky for
 	// every command but has no approver (quiet) — the production shape of a
-	// session where Risky commands are gated.
+	// session where Risky commands are gated. The workspace points at a temp
+	// dir so ApproveShell journals into the test's own tree, never the repo's
+	// working directory (journalShellApproval skips journaling without a
+	// workspace).
 	riskyBlockedSession := func() *CortexSession {
-		return &CortexSession{classifyShell: stubRisky, quiet: true}
+		return &CortexSession{classifyShell: stubRisky, quiet: true,
+			workspace: &Workspace{Root: t.TempDir()}}
 	}
 
 	t.Run("prefix approval matches only commands with that prefix", func(t *testing.T) {
@@ -38,14 +42,22 @@ func TestShellApprovals(t *testing.T) {
 		if got, ok := cs.gateShell(context.Background(), "make test"); !ok || got != "" {
 			t.Errorf("approved prefix command should run without prompting: (%q, %v)", got, ok)
 		}
+		if got, ok := cs.gateShell(context.Background(), "make test -v"); !ok || got != "" {
+			t.Errorf("prefix + whitespace + further args must match the approval: (%q, %v)", got, ok)
+		}
 		if got, ok := cs.gateShell(context.Background(), "make build"); ok {
 			t.Errorf("unrelated command should still be blocked (no approver): %q", got)
 		}
-		// Note: "make testX" DOES match the prefix "make test*" (it starts
-		// with "make test"). This is the expected behavior of a prefix
-		// approval — it matches any command that starts with the prefix.
-		// The acceptance criterion is that it matches "only commands with
-		// that prefix", not that it does word-boundary matching.
+		// The prefix is a WORD boundary, not a byte boundary: a longer word
+		// glued onto the prefix ("make testX") is a different command, and
+		// nothing may chain, pipe, redirect, or substitute after it — the
+		// whole point of issue #107's approval is that the user approved
+		// "make test", not "make test" + arbitrary shell.
+		for _, cmd := range []string{"make testX", "make test; rm -rf x", "make test && echo hi", "make test|cat"} {
+			if _, ok := cs.gateShell(context.Background(), cmd); ok {
+				t.Errorf("prefix approval must not match %q (no approver): it ran without a prompt", cmd)
+			}
+		}
 	})
 
 	t.Run("prefix approval never matches a Blocked command", func(t *testing.T) {
@@ -79,6 +91,7 @@ func TestShellApprovals(t *testing.T) {
 
 	t.Run("y once runs without recording an approval", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky,
+			workspace:    &Workspace{Root: t.TempDir()},
 			confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }}
 		if _, ok := cs.gateShell(context.Background(), "make test"); !ok {
 			t.Fatal("y should allow the command")
@@ -98,7 +111,12 @@ func TestShellApprovals(t *testing.T) {
 		root := t.TempDir()
 		cs := &CortexSession{classifyShell: stubRisky, workspace: &Workspace{Root: root},
 			confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmAlwaysPrefix }}
-		cs.ApproveShell("prefix", "make test*", "make test", "test: always risky")
+		if _, ok := cs.gateShell(context.Background(), "make test"); !ok {
+			t.Fatal("p should allow the command")
+		}
+		if len(cs.shellApprovals) != 1 || cs.shellApprovals[0] != "make test*" {
+			t.Fatalf("p must record the leading-tokens prefix pattern, got %v", cs.shellApprovals)
+		}
 		cs.ApproveShell("exact", "make lint", "make lint", "test: always risky")
 		dir := filepath.Join(root, ".cortex", "journal", "shell")
 		r, err := journal.NewReader(dir)
