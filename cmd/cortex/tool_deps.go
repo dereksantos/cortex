@@ -696,22 +696,23 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	note := cs.untrustedClassifierNote()
 	v := shellrisk.Classify(ctx, command, note, fn)
 	// Issue #102 (taint): once untrusted web content entered the turn, a
-	// Safe verdict from the gray-zone judge no longer waves a command
-	// through unexamined — the judge may have been shaped by the injected
+	// gray-zone verdict held only by the judge's judgement no longer waves a
+	// command through — that judge may have been shaped by the injected
 	// content itself (its task context is the turn intent a poisoned page
 	// could have steered; its own verdict, in the worst case, is text the
-	// page dictated upstream). So on a tainted turn every gray-zone verdict
-	// is re-examined by the judge (riskJudge, the same wiring the first pass
-	// used): anything it now calls Risky — a miss it corrects, or an error it
-	// fails closed on — is gated here even though the same first verdict
-	// would have run it in an untainted turn. A verdict the judge holds Safe
-	// both times still runs (the acceptance shape: an unambiguous Safe
-	// command like `ls` is unaffected). Deny-floor Blocked is never re-
-	// consulted — its refusal stands below, untouched. `tainted` is sampled
-	// once and shared by the re-check above and the approval wording below
-	// (the gate is single-goroutine within the turn's tool batch; naming the
-	// fact once keeps the classify-time and gate-time halves of the rule
-	// reading as one decision).
+	// page dictated upstream). So mechanically: on a tainted turn every
+	// "classified" Safe verdict is RAISED to Risky, keeping the judge's own
+	// reason and naming the taint source. Nothing is re-asked — a second call
+	// to the same judge with the same input answers the same way, so it would
+	// only double the classifier's latency and cost while changing nothing.
+	// Safe-PATH verdicts (an allowlisted `ls`, `git status`: a different tier,
+	// not "classified") are untouched, and deny-floor Blocked is never
+	// re-consulted — its refusal stands below. Interactive sessions then
+	// prompt and headless ones block with the taint message.
+	//   `tainted` is sampled once and shared by the floor above and the
+	// approval wording below (the gate is single-goroutine within the turn's
+	// tool batch; naming the fact once keeps the classify-time and gate-time
+	// halves of the rule reading as one decision).
 	tainted := cs.untrustedContentActive()
 	// The taint-only git-push floor (issue #102): after untrusted web
 	// content, a push publishes whatever the tainted turn produced — a
@@ -727,12 +728,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		v = shellrisk.Verdict{Level: shellrisk.Risky, Reason: shellrisk.GitPushTaintReason, Tier: "taint-floor"}
 	}
 	if tainted && v.Tier == "classified" && v.Level == shellrisk.Safe {
-		if raised, reason, cerr := cs.riskJudge()(ctx, command, note); cerr != nil || raised == shellrisk.Risky {
-			if cerr != nil {
-				reason = "classifier unavailable under untrusted-content taint (" + cerr.Error() + "); gated for safety"
-			}
-			v = shellrisk.Verdict{Level: shellrisk.Risky, Reason: reason, Tier: "classified-tainted"}
-		}
+		v = shellrisk.Verdict{Level: shellrisk.Risky, Reason: v.Reason + "; " + cs.taintSourceNote(), Tier: "classified-tainted"}
 	}
 	switch v.Level {
 	case shellrisk.Safe:

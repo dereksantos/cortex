@@ -130,6 +130,9 @@ func TestTaintedWriteConfinement(t *testing.T) {
 			if !strings.Contains(got, "escapes the workspace") && !strings.Contains(got, "must be relative") {
 				t.Errorf("tainted run: want ConfinePath's error shape, got %q", got)
 			}
+			if err == nil {
+				t.Errorf("tainted run: a confined write reports its rejection as Execute's error, got only the observation %q", obs)
+			}
 			if !strings.Contains(got, "untrusted web content entered this turn") {
 				t.Errorf("tainted run: rejection must carry the taint reason, got %q", got)
 			}
@@ -202,16 +205,17 @@ func TestTaintedWriteConfinement(t *testing.T) {
 	})
 
 	t.Run("confinement resets with the turn", func(t *testing.T) {
-		// Turn 1 tainted: the escape is REJECTED — Execute returns no error,
-		// the rejection comes back as the observation (ValidateToolCall
-		// shape). After the turn-start reset (a new turnNo + cs.taint nil,
-		// as turn.go does) the same escape lands again.
+		// Turn 1 tainted: the escape is REJECTED by the tool's own in-tool
+		// check, which reports it as Execute's error (the confinement happens
+		// before any filesystem touch, not as a validator observation). After
+		// the turn-start reset (a new turnNo + cs.taint nil, as turn.go does)
+		// the same escape lands again.
 		sink := filepath.Join(outside, "reset.txt")
 		cs := &CortexSession{quiet: true, workspace: ws, turnNo: 1, allowDelete: true, deleteRoot: outside}
 		cs.recordUntrustedContent("fetch_url")
 		t.Chdir(root)
 		obs, err := tools.Execute(context.Background(), writeCall(sink), cs)
-		if err != nil || !strings.Contains(obs, "untrusted web content entered this turn") {
+		if !strings.Contains(err.Error(), "untrusted web content entered this turn") {
 			t.Fatalf("tainted turn must reject the escape, got obs=%q err=%v", obs, err)
 		}
 		cs.turnNo = 2
@@ -219,6 +223,27 @@ func TestTaintedWriteConfinement(t *testing.T) {
 		obs, err = tools.Execute(context.Background(), writeCall(sink), cs)
 		if err != nil || !strings.Contains(obs, "wrote") {
 			t.Errorf("after the turn reset the escape must behave as ordinary work again: obs=%q err=%v", obs, err)
+		}
+	})
+
+	t.Run("the in-tool check covers a call driven through the session dispatcher", func(t *testing.T) {
+		// The confinement lives in the tools, not in ValidateToolCall (the
+		// validator-level copy was removed as a duplicate). This drives a write
+		// the way a SUBAGENT's call lands — through the dispatcher with the
+		// tainted session as the child's ToolDeps, which is exactly what
+		// RunSubagent does — and asserts the in-tool check alone refuses it.
+		// The subagent-depth context value must not change the outcome.
+		sink := filepath.Join(outside, "subagent.txt")
+		cs := &CortexSession{quiet: true, workspace: ws, turnNo: 1, allowDelete: true, deleteRoot: outside}
+		cs.recordUntrustedContent("fetch_url")
+		t.Chdir(root)
+		childCtx := withSubagentDepth(context.Background(), 1)
+		obs, err := tools.Execute(childCtx, writeCall(sink), cs)
+		if !strings.Contains(err.Error(), "untrusted web content entered this turn") {
+			t.Errorf("a subagent-driven confined write must be refused by the in-tool check, got obs=%q err=%v", obs, err)
+		}
+		if _, statErr := os.Stat(sink); statErr == nil {
+			t.Errorf("the refused subagent write created %s", sink)
 		}
 	})
 }

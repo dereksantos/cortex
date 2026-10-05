@@ -640,31 +640,11 @@ func (cs *CortexSession) AttributionProject() string {
 // ValidateToolCall provides dynamic validation for tool calls beyond config.
 // Returns (true, "") if valid, (false, message) if invalid.
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
-	// Issue #102: the taint-time pre-execution gates ride the validator
-	// because it runs on EVERY Execute path — the coder dispatcher AND the
-	// in-process subagent dispatch (RunSubagent reuses this session as the
-	// child's ToolDeps). The bash gate itself stays in gateShell (it owns
-	// the effect-class ledger, the approver flow, the receipts); this is
-	// the same-taint floor for the paths gateShell cannot see — the
-	// in-process subagent dispatch (a subagent of a tainted turn carries
-	// the tainted intent, and gateShell's bash leg does not run through
-	// this validator at all).
-	//   - write_file / edit_file / remove_path: confined to the workspace
-	//     root (ConfineWrites' shape + the taint reason). The tools' own
-	//     in-tool checks stay as the defense-in-depth copy for direct
-	//     package callers; here the check catches subagent dispatch.
-	// Bash pushes need nothing extra here: the bash tool runs every command
-	// through deps.GateShell (gateShell's git-push floor covers both the
-	// coder and subagent legs), and ConfinePath's sibling confinedPath
-	// already keeps remove/delete inside its root.
-	if cs.untrustedContentActive() {
-		switch tc.Function.Name {
-		case tools.FunctionWriteFile, tools.FunctionEditFile, tools.FunctionRemove:
-			if err := tools.ConfineWrites(tc, cs); err != nil {
-				return false, err.Error()
-			}
-		}
-	}
+	// Issue #102's taint rules live at the tools themselves, not here:
+	// write_file / edit_file / remove_path each confine their path with
+	// tools.ConfineWrites before touching the filesystem, and RunSubagent
+	// hands this session to the child as its ToolDeps — so the in-tool check
+	// covers the subagent leg too, and bash pushes are gateShell's floor.
 	switch tc.Function.Name {
 	case "context_adjust_watermarks":
 		// Validate watermarks are within bounds (±highWM/2 — mirrors

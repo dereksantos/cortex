@@ -87,25 +87,50 @@ func TestGitPushTaintFloor(t *testing.T) {
 		}
 	})
 
-	t.Run("non-push commands are untouched by the floor", func(t *testing.T) {
-		cs := &CortexSession{turnNo: 5, classifyShell: judgeSafeEverywhere, quiet: true}
-		cs.recordUntrustedContent("fetch_url")
-		// docker/npm are not git-scoped (the floor's detector is git-only,
-		// like EffectClass), and the judge holds them Safe, so they run —
-		// pinning that the FLOOR claims only git pushes and cannot balloon
-		// into blocking every outbound command on a taint.
-		for _, cmd := range []string{"ls", "git status", "docker push img", "npm publish", "git log push"} {
-			if msg, ok := cs.gateShell(context.Background(), cmd); !ok {
-				t.Errorf("%q: a judge-held-safe non-push must still run on a tainted turn, got %q", cmd, msg)
+	t.Run("the floor claims only git pushes", func(t *testing.T) {
+		// The floor's detector is git-only (like EffectClass): a docker push or
+		// an npm publish is the classifier's business, so neither may carry the
+		// floor's reason. On a tainted turn the gray-zone raise still gates
+		// them (the judge's word alone no longer runs a command), which is why
+		// each is answered by an approver here; the point is WHAT the prompt
+		// line says.
+		for _, cmd := range []string{"docker push img", "npm publish"} {
+			var question string
+			prompted := false
+			session := &CortexSession{turnNo: 5, classifyShell: judgeSafeEverywhere}
+			session.recordUntrustedContent("fetch_url")
+			session.confirmRisky = confirmFromBool(func(q string) bool { question = q; prompted = true; return false })
+			if msg, ok := session.gateShell(context.Background(), cmd); ok {
+				t.Errorf("%q: the gray-zone raise must gate a judge-held-safe command on a tainted turn, got %q", cmd, msg)
+			}
+			if !prompted {
+				t.Fatalf("%q: expected an interactive prompt", cmd)
+			}
+			if strings.Contains(question, shellrisk.GitPushTaintReason) {
+				t.Errorf("%q: only a git push may carry the floor's reason: %q", cmd, question)
+			}
+			if !strings.Contains(question, "untrusted web content entered this turn (fetch_url)") {
+				t.Errorf("%q: prompt must name the taint: %q", cmd, question)
+			}
+		}
+		// `git log push` names push without pushing: it stays on the safe
+		// path, so the floor (and the raise) claim neither — no approver is
+		// wired here, so a prompt would mean it did.
+		safePath := &CortexSession{turnNo: 5, classifyShell: judgeSafeEverywhere, quiet: true}
+		safePath.recordUntrustedContent("fetch_url")
+		for _, cmd := range []string{"ls", "git status", "git log push"} {
+			if msg, ok := safePath.gateShell(context.Background(), cmd); !ok {
+				t.Errorf("%q: a safe-path command must still run on a tainted turn, got %q", cmd, msg)
 			}
 		}
 	})
 }
 
 // TestClassifierNoteThreading pins that the session threads the taint's
-// source list into every classifier call: the gray-zone judge sees the
-// shellrisk.TaintNote on a tainted turn and "" on a clean one, on the
-// first pass and on the tainted re-examination alike.
+// source list into the classifier call: the gray-zone judge sees the
+// shellrisk.TaintNote on a tainted turn and "" on a clean one. Exactly one
+// call per command — the taint's teeth are mechanical (the gray-zone raise
+// below), never a second, redundant pass through the same judge.
 func TestClassifierNoteThreading(t *testing.T) {
 	var notes []string
 	recordJudge := func(_ context.Context, _, note string) (shellrisk.Level, string, error) {
@@ -124,16 +149,14 @@ func TestClassifierNoteThreading(t *testing.T) {
 	notes = nil
 	cs.recordUntrustedContent("fetch_url")
 	cs.recordUntrustedContent("web_search")
-	if _, ok := cs.gateShell(context.Background(), "mv a.txt b.txt"); !ok {
-		t.Fatal("tainted gray-zone command still runs while the judge holds it Safe")
+	if _, ok := cs.gateShell(context.Background(), "mv a.txt b.txt"); ok {
+		t.Fatal("a tainted gray-zone command must be gated, not run on the judge's word")
 	}
 	want := shellrisk.TaintNote([]string{"fetch_url", "web_search"})
-	if len(notes) < 2 {
-		t.Fatalf("a tainted turn re-examines the gray-zone verdict: want at least 2 classifier calls, got %d", len(notes))
+	if len(notes) != 1 {
+		t.Fatalf("one command must reach the classifier exactly once, got %d calls", len(notes))
 	}
-	for i, n := range notes {
-		if n != want {
-			t.Errorf("classifier call %d on the tainted turn saw note %q, want %q", i, n, want)
-		}
+	if notes[0] != want {
+		t.Errorf("the classifier call saw note %q, want %q", notes[0], want)
 	}
 }

@@ -77,7 +77,7 @@ const untrustedContentContextMaxChars = 400
 // the command serves — may have been steered by attacker-controllable
 // content, so the task's own say-so is not grounds to call a command safe.
 // (The mechanical teeth live in the caller: the git-push floor and the
-// tainted re-examination in gateShell. This note makes the judge a willing
+// gray-zone raise in gateShell. This note makes the judge a willing
 // participant rather than a foolable one.)
 //
 // Failure is fail-closed by construction: a transport error or an unparseable

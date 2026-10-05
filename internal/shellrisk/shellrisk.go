@@ -217,8 +217,8 @@ func DeclinedMessage() string {
 // untrusted web content entered the current turn (issue #102) — the judge
 // context the session threads in so the classifier can never wave a command
 // through on a fetched page's say-so. A classifier that ignores it is
-// permitted (the harness's own floors — the git-push floor, the tainted
-// re-examination in gateShell — cover the gap); one that honors it judges
+// permitted (the harness's own floors — the git-push floor, the gray-zone
+// raise in gateShell — cover the gap); one that honors it judges
 // the command under the raised bar.
 type ClassifyFn func(ctx context.Context, command, untrustedContent string) (Level, string, error)
 
@@ -227,7 +227,7 @@ type ClassifyFn func(ctx context.Context, command, untrustedContent string) (Lev
 // to Risky so they are gated rather than silently run. untrustedContent is
 // the issue #102 taint note threaded to fn ("" when the turn is clean); it
 // changes nothing about the tiers themselves — the taint's mechanical teeth
-// are the caller's (the git-push floor, the tainted re-examination).
+// are the caller's (the git-push floor, the gray-zone raise in gateShell).
 func Classify(ctx context.Context, command, untrustedContent string, fn ClassifyFn) Verdict {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" {

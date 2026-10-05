@@ -34,15 +34,53 @@ const (
 	untrustedFooter = "\n----- END UNTRUSTED CONTENT -----"
 )
 
+// untrustedDelimiters are the framing lines a wrapped result carries: the
+// BEGIN/END delimiters and the marker token that opens the banner. Content
+// is scrubbed of them before framing (see wrapUntrusted) so the frame a
+// result wears is the ONLY one of its shape in the observation — a fetched
+// page cannot close its own frame early and leave the rest of its text
+// reading as if it sat outside the untrusted block, nor mint a banner of its
+// own. Matching is on the exact line text, which is what both
+// ObservationIsUntrustedContent and any downstream reader keys on.
+var untrustedDelimiters = []string{
+	"----- BEGIN UNTRUSTED CONTENT -----",
+	"----- END UNTRUSTED CONTENT -----",
+	UntrustedMarker,
+}
+
+// UntrustedDelimiters exposes the framing lines wrapUntrusted scrubs out of
+// content (issue #102), so a test outside this package — one driving the
+// real fetch path, whose body text arrives on its own lines — can assert
+// what must never appear more than once in a wrapped observation. The
+// delimiters themselves stay unexported: only the wrapper and this accessor
+// name them.
+func UntrustedDelimiters() []string {
+	out := make([]string, len(untrustedDelimiters))
+	copy(out, untrustedDelimiters)
+	return out
+}
+
+// untrustedDefanged replaces a delimiter or banner occurrence inside
+// attacker-supplied content: visibly removed, never silently, so a reader
+// can tell the page carried framing text rather than nothing being there.
+const untrustedDefanged = "[removed delimiter]"
+
 // wrapUntrusted frames fetched/web content as data with the marker banner.
 // Wrapping is unconditional — both tools' every content-bearing result,
 // "no results" included — so the marker is a uniform signal that the result
 // went through the web path, never something content can opt out of by
-// looking inert. The result is trimmed so framing never lands on stray
+// looking inert. The content is first defanged of any delimiter/banner line
+// it carries (untrustedDefanged), which is what makes the frame un-forgeable
+// from the inside: exactly one BEGIN line, one END line, and the marker only
+// in the banner. The result is trimmed so framing never lands on stray
 // whitespace; empty content still comes back framed (the marker, not the
 // content, is what matters downstream).
 func wrapUntrusted(content string) string {
-	return untrustedBanner + strings.TrimSpace(content) + untrustedFooter
+	cleaned := strings.TrimSpace(content)
+	for _, delim := range untrustedDelimiters {
+		cleaned = strings.ReplaceAll(cleaned, delim, untrustedDefanged)
+	}
+	return untrustedBanner + cleaned + untrustedFooter
 }
 
 // WriteConferrer is an OPTIONAL ToolDeps capability (asserted dynamically,

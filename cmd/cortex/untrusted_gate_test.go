@@ -24,14 +24,12 @@ import (
 // classifyShell stubs mirror the real gate's tiers: nil (no classifier — the
 // gray zone fails closed to Risky, which in an interactive session is
 // exactly the "released only by approval" path) and judgeSafe (the intent
-// judge waving the gray-zone command through). A gray-zone stub itself is
-// deliberately absent from the scenarios: on a tainted turn the gate
-// re-examines gray-zone verdicts with the judge (riskJudge), so a stub's
-// first-pass answer cannot be pinned against what the re-check would say —
-// judgeSafe pins that the re-check does NOT override Safe into Risky, and
-// the fail-closed case pins what tainting guarantees regardless of any
-// judge. Safe-path commands (`ls`, `git status`) never consult the judge, so
-// they pin "Safe is unaffected" cleanly on every scenario.
+// judge waving the gray-zone command through). judgeSafe is the acceptance
+// case: a command the judge AUTO-APPROVES must switch to a prompt once a
+// fetch taints the turn, because a verdict the judge reached on a turn a
+// page could have steered is not grounds to run it — only a human decision
+// is. Safe-path commands (`ls`, `git status`) never consult the judge, so
+// they pin "the safe path is unaffected" cleanly on every scenario.
 func TestUntrustedTaintGate(t *testing.T) {
 	judgeSafe := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Safe, "test: safe", nil
@@ -86,17 +84,29 @@ func TestUntrustedTaintGate(t *testing.T) {
 			},
 		},
 		{
-			// The judge's Safe verdict stands on a tainted turn: the taint
-			// raises the bar for approval-requiring commands, it never turns
-			// Safe into Risky — a taint that blocked the project's own
-			// build/test commands mid-task would be the over-blocking this
-			// pins against.
-			name:  "judge-held safe runs tainted and untainted alike",
+			// THE acceptance criterion (#102): a gray-zone command the intent
+			// judge auto-approves runs on a clean turn, and on a tainted one
+			// the very same command must reach an EXPLICIT approval — the
+			// prompt naming the taint, a yes releasing it — while a session
+			// with no approver blocks with the taint message. Safe-path
+			// commands stay untouched throughout, so the raised bar never
+			// stalls the project's own read-only work.
+			name:  "judge-held-safe gray-zone command prompts once the turn is tainted",
 			judge: judgeSafe,
 			steps: []step{
+				// Untainted: the judge's Safe verdict runs it, no prompt.
 				{approver: approveNone, command: "npm test", wantRunI: true, wantRunH: true, wantNoPrompt: true},
 				{record: "fetch_url"},
-				{approver: approveNone, command: "npm test", wantRunI: true, wantRunH: true, wantNoPrompt: true},
+				// Tainted: the same judge, the same command — now a prompt that
+				// names the taint, released by a yes.
+				{approver: approveYes, command: "npm test", wantRunI: true, wantPrompt: "untrusted web content entered this turn (fetch_url)"},
+				// ... and with no approver at all, the headless taint block.
+				{approver: approveNone, command: "npm test", wantRunI: false, wantRunH: false, wantMarkerH: "blocked (untrusted content this turn: fetch_url)"},
+				// A declining human still reads "declined" interactively.
+				{approver: approveNo, command: "npm test", wantMarkerI: "declined", wantMarkerH: "blocked (untrusted content this turn: fetch_url)"},
+				// Safe-path commands need no approver, tainted or not.
+				{approver: approveNone, command: "ls", wantRunI: true, wantRunH: true, wantNoPrompt: true},
+				{approver: approveNone, command: "git status", wantRunI: true, wantRunH: true, wantNoPrompt: true},
 			},
 		},
 	}
