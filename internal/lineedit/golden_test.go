@@ -74,7 +74,7 @@ const statusLabel = "thinking about the change, verifying each step against the 
 // choices line of issue #107 — and is longer than 40 columns, so the w40
 // case records the truncated form, and fits the wider sweeps (w80 and w200)
 // unclipped.
-const confirmAsk = "run it? [y once | a this command | p prefix | n]"
+const confirmAsk = `run it? [y once | a this command | p always "npm install*" | n]`
 
 // statusFrame builds an anchor with the given width and activity label, runs
 // the exact draw/erase/draw sequence the real tick loop performs for a status

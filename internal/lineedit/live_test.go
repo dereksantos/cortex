@@ -199,7 +199,7 @@ func TestAnchorConfirmAnswers(t *testing.T) {
 
 			result := make(chan ConfirmChoice, 1)
 			go func() {
-				result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y once | a this command | p prefix | n] ")
+				result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y once | a this command | p always \"cmd*\" | n] ")
 			}()
 
 			// Spin until Confirm has registered its pending state, then feed the key.
@@ -332,7 +332,7 @@ func TestAnchorConfirmIgnoresUnrelatedKeys(t *testing.T) {
 
 	result := make(chan ConfirmChoice, 1)
 	go func() {
-		result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y once | a this command | p prefix | n] ")
+		result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y once | a this command | p always \"cmd*\" | n] ")
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {

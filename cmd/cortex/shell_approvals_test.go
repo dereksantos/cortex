@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/journal"
@@ -15,8 +16,9 @@ import (
 // scoped approvals. The gate is tested directly (gateShell), because the
 // tool-level path would actually execute the command. A "p" (prefix)
 // approval matches only commands with that prefix and never a Blocked
-// command; an "a" (exact) approval matches only that exact command; "y"
-// once runs without recording anything, so the same command prompts again.
+// command; an "a" (exact) approval matches only that exact command — even
+// when it ends in "*"; "y" once runs without recording anything, so the
+// same command prompts again.
 func TestShellApprovals(t *testing.T) {
 	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test: always risky", nil
@@ -66,7 +68,7 @@ func TestShellApprovals(t *testing.T) {
 		// A Blocked command must stay blocked even with a matching prefix
 		// approval. The classifier returns Blocked for "rm -rf /".
 		cs2 := &CortexSession{classifyShell: stubBlocked, quiet: true,
-			shellApprovals: []string{"rm -rf /"}}
+			shellApprovals: []shellApproval{{Kind: "exact", Pattern: "rm -rf /"}}}
 		if _, ok := cs2.gateShell(context.Background(), "rm -rf /"); ok {
 			t.Error("Blocked command must stay blocked even with a matching approval")
 		}
@@ -89,6 +91,23 @@ func TestShellApprovals(t *testing.T) {
 		}
 	})
 
+	t.Run("exact approval of a star-terminated command stays exact", func(t *testing.T) {
+		// The kind rides with the pattern: an EXACT approval of a command
+		// that ends in "*" (the shell glob, expanded by the shell before
+		// cortex ever sees it) must compare byte for byte, not be re-read as
+		// a prefix. Without the kind, "rm -f build/*" would be stored as the
+		// word prefix "rm -f build/" and silently auto-allow
+		// "rm -f build/ ../other".
+		cs := riskyBlockedSession()
+		cs.ApproveShell("exact", "rm -f build/*", "rm -f build/*", "test: always risky")
+		if got, ok := cs.gateShell(context.Background(), "rm -f build/*"); !ok || got != "" {
+			t.Errorf("exact approval of a * command must match that command: (%q, %v)", got, ok)
+		}
+		if _, ok := cs.gateShell(context.Background(), "rm -f build/ x"); ok {
+			t.Error("exact * approval must not act as a word prefix (ran without a prompt)")
+		}
+	})
+
 	t.Run("y once runs without recording an approval", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky,
 			workspace:    &Workspace{Root: t.TempDir()},
@@ -107,15 +126,56 @@ func TestShellApprovals(t *testing.T) {
 		}
 	})
 
+	t.Run("p stores exactly the prefix shown in the prompt", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky,
+			workspace: &Workspace{Root: t.TempDir()},
+			confirmRisky: func(q string) lineedit.ConfirmChoice {
+				want := commandPrefixPattern("make test ./pkg/...")
+				if !strings.Contains(q, `p always "`+want+`"`) {
+					t.Errorf("prompt must show the derived prefix %q: %q", want, q)
+				}
+				return lineedit.ConfirmAlwaysPrefix
+			}}
+		if _, ok := cs.gateShell(context.Background(), "make test ./pkg/..."); !ok {
+			t.Fatal("p should allow the command")
+		}
+		if len(cs.shellApprovals) != 1 ||
+			cs.shellApprovals[0].Kind != "prefix" ||
+			cs.shellApprovals[0].Pattern != commandPrefixPattern("make test ./pkg/...") {
+			t.Fatalf("p must store the shown prefix as kind=prefix, got %+v", cs.shellApprovals)
+		}
+	})
+
+	t.Run("p for a single-token command covers the command itself", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, quiet: true}
+		cs.ApproveShell("prefix", commandPrefixPattern("git"), "git", "test: always risky")
+		if got, ok := cs.gateShell(context.Background(), "git"); !ok || got != "" {
+			t.Errorf("a p approval of bare git must cover git itself: (%q, %v)", got, ok)
+		}
+		if got, ok := cs.gateShell(context.Background(), "git status"); !ok || got != "" {
+			t.Errorf("a p approval of bare git must cover git with further args: (%q, %v)", got, ok)
+		}
+		if _, ok := cs.gateShell(context.Background(), "github"); ok {
+			t.Error("git* must not match github (word boundary)")
+		}
+	})
+
 	t.Run("approvals are journaled", func(t *testing.T) {
 		root := t.TempDir()
 		cs := &CortexSession{classifyShell: stubRisky, workspace: &Workspace{Root: root},
-			confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmAlwaysPrefix }}
-		if _, ok := cs.gateShell(context.Background(), "make test"); !ok {
+			confirmRisky: func(q string) lineedit.ConfirmChoice {
+				if !strings.Contains(q, `p always "git*"`) {
+					t.Errorf("prompt must show the derived prefix git*: %q", q)
+				}
+				return lineedit.ConfirmAlwaysPrefix
+			}}
+		if _, ok := cs.gateShell(context.Background(), "git"); !ok {
 			t.Fatal("p should allow the command")
 		}
-		if len(cs.shellApprovals) != 1 || cs.shellApprovals[0] != "make test*" {
-			t.Fatalf("p must record the leading-tokens prefix pattern, got %v", cs.shellApprovals)
+		if len(cs.shellApprovals) != 1 ||
+			cs.shellApprovals[0].Kind != "prefix" ||
+			cs.shellApprovals[0].Pattern != "git*" {
+			t.Fatalf("p must record the derived prefix, got %+v", cs.shellApprovals)
 		}
 		cs.ApproveShell("exact", "make lint", "make lint", "test: always risky")
 		dir := filepath.Join(root, ".cortex", "journal", "shell")
@@ -142,8 +202,8 @@ func TestShellApprovals(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("want 2 journaled approvals, got %d: %v", len(got), got)
 		}
-		if got[0].Kind != "prefix" || got[0].Pattern != "make test*" {
-			t.Errorf("first approval = %+v, want prefix/make test*", got[0])
+		if got[0].Kind != "prefix" || got[0].Pattern != "git*" {
+			t.Errorf("first approval = %+v, want prefix/git*", got[0])
 		}
 		if got[1].Kind != "exact" || got[1].Pattern != "make lint" {
 			t.Errorf("second approval = %+v, want exact/make lint", got[1])
@@ -152,7 +212,7 @@ func TestShellApprovals(t *testing.T) {
 
 	t.Run("approvals are session-scoped (memory only)", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
-			shellApprovals: []string{"make test*"}}
+			shellApprovals: []shellApproval{{Kind: "prefix", Pattern: "make test*"}}}
 		if got, ok := cs.gateShell(context.Background(), "make test"); !ok || got != "" {
 			t.Errorf("approved prefix command should run: (%q, %v)", got, ok)
 		}
@@ -162,4 +222,28 @@ func TestShellApprovals(t *testing.T) {
 			t.Error("fresh session must not inherit approvals")
 		}
 	})
+}
+
+// TestCommandPrefixPattern pins the stored prefix for a "p" (prefix)
+// approval (issue #107): the program plus one subcommand + "*" — the issue's
+// "make test" example yields "make test*" — while a single-token command
+// yields "prog*" (matching the command itself and its arguments, but never
+// a longer glued word), and an empty command yields "*" (a bare "*" prefix
+// matches nothing, so it is harmless).
+func TestCommandPrefixPattern(t *testing.T) {
+	for _, tc := range []struct {
+		cmd  string
+		want string
+	}{
+		{"make test ./pkg/...", "make test*"},
+		{"make test", "make test*"},
+		{"git", "git*"},
+		{"", "*"},
+	} {
+		t.Run(tc.cmd, func(t *testing.T) {
+			if got := commandPrefixPattern(tc.cmd); got != tc.want {
+				t.Errorf("commandPrefixPattern(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
 }

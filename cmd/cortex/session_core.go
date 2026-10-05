@@ -158,15 +158,19 @@ type CortexSession struct {
 	approveRisky func(ctx context.Context, reason, command string) (approved, timedOut bool)
 
 	// shellApprovals is the session-scoped bash approval list (issue #107):
-	// the patterns the user chose "always this session" for at the
-	// risky-command prompt — an exact command (chosen "a") or a
-	// shell-style glob ending in "*", e.g. "make test*" (chosen "p"). It is
+	// the records the user chose "always this session" for at the
+	// risky-command prompt — an exact command (chosen "a") or a derived
+	// prefix (chosen "p", the program plus one subcommand + "*", e.g.
+	// "make test*" for "make test ./pkg/..."). The kind rides with each
+	// record on purpose: an exact approval of a command that ends in "*"
+	// (e.g. "rm -f build/*") must keep comparing byte for byte — it must
+	// never be re-read as a prefix by the pattern string alone. It is
 	// memory-only by design: a fresh session starts with an empty list, and
 	// persisting it to the config (a `tools.shell_allow` list) is a
 	// separate decision. gateShell checks it for Risky verdicts only —
 	// after classification, never before — so an approval can never
 	// override a Blocked command.
-	shellApprovals []string
+	shellApprovals []shellApproval
 
 	SessionID  string
 	transcript *os.File
