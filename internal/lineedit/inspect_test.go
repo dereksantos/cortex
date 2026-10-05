@@ -324,16 +324,17 @@ func (p *pickerList) Accept() { p.accepted++ }
 type rowList struct {
 	rows     []string
 	cursor   int
-	accepted bool
+	accepted int
+	cursorEd []int
 }
 
 func (l *rowList) Title() string      { return "rows" }
 func (l *rowList) Lines(int) []string { return l.rows }
 func (l *rowList) Selected() int      { return l.cursor }
-func (l *rowList) SetCursor(i int)    { l.cursor = i }
+func (l *rowList) SetCursor(i int)    { l.cursorEd = append(l.cursorEd, i); l.cursor = i }
 func (l *rowList) Filter() string     { return "" }
 func (l *rowList) SetFilter(string)   {}
-func (l *rowList) Accept()            { l.accepted = true }
+func (l *rowList) Accept()            { l.accepted++ }
 
 // TestSelectableBodyRowsAreAllPickable pins the harness/view row contract from
 // the harness side: with a body of only selectable rows, G lands the cursor on
@@ -343,18 +344,23 @@ func (l *rowList) Accept()            { l.accepted = true }
 func TestSelectableBodyRowsAreAllPickable(t *testing.T) {
 	out := &strings.Builder{}
 	v := &rowList{rows: []string{"row-a", "row-b", "row-c"}, cursor: -1}
-	// Nothing after the Enter: the run must end there. A harness that only stops
-	// scrolling would keep reading (the source ends, so no failure is reported)
-	// and leave the view un-accepted, which is exactly what a user saw when Enter
-	// did nothing and only ESC afterwards resumed.
-	if err := runInspect(out, script("G\r"), fixedSize(60, 10), v); err != nil {
+	// The Enter must end the run: the trailing down-arrow is there to be eaten by
+	// a run that keeps going, which would move the cursor onto row 1 — the very
+	// bug this pins (Enter only stopped scrolling, so the run ran on to EOF and
+	// the keystrokes after the pick kept editing the view).
+	if err := runInspect(out, script("G\r\x1b[B"), fixedSize(60, 10), v); err != nil {
 		t.Fatalf("runInspect = %v, want nil", err)
 	}
-	if !v.accepted {
-		t.Error("Enter after G did not reach Accept — the last row is not pickable")
+	if v.accepted != 1 {
+		t.Errorf("Accept() calls = %d, want 1 — Enter must accept once and end the run", v.accepted)
 	}
 	if got := v.Selected(); got != 2 {
-		t.Errorf("Selected() = %d, want the last of 3 rows", got)
+		t.Errorf("Selected() = %d, want the last of 3 rows — a keystroke after the Enter was consumed, so the run did not end at the pick", got)
+	}
+	// SetCursor is where the cursor lives: the highlight must be parked on the
+	// last row and the keystroke after the Enter must never have reached it.
+	if n := len(v.cursorEd); n == 0 || v.cursorEd[n-1] != 2 {
+		t.Errorf("last SetCursor = %v, want it to end on row 2 — Enter must accept once and end the run", v.cursorEd)
 	}
 	fs := frames(out.String())
 	last := strings.Split(stripANSI(fs[len(fs)-1]), "\r\n")
@@ -513,35 +519,47 @@ func TestInspectFilterKeepsQuitKeys(t *testing.T) {
 }
 
 // TestInspectEnterReachesAccepter pins the acceptance key: Enter is delivered to
-// an Accepter and ends the run, so a picker needs one keystroke to pick, and a
-// view with no Accept is left alone (Enter stays inert and the run continues).
+// an Accepter exactly once and ends the run there — proven by keystrokes fed
+// after the Enter that a live run would consume and an ended one never sees —
+// while a view with no Selecter is left alone (Enter stays inert and the run
+// continues).
 func TestInspectEnterReachesAccepter(t *testing.T) {
 	out := &strings.Builder{}
 	v := &pickerList{body: numberedBody(5)}
-	// One Enter is the whole interaction: nothing follows it, so a run that keeps
-	// going after the pick ends by EOF with Accept never called — the old
+	// One Enter is the whole pick: the trailing down-arrow belongs to a run that
+	// kept going, so if it is consumed the highlight moves to row 1 — the old
 	// behavior, where Enter did nothing visible and ESC was needed next.
-	if err := runInspect(out, script("\r"), fixedSize(40, 10), v); err != nil {
+	if err := runInspect(out, script("\r\x1b[B"), fixedSize(40, 10), v); err != nil {
 		t.Fatalf("runInspect = %v, want nil", err)
 	}
 	if v.accepted != 1 {
 		t.Errorf("Accept() calls = %d, want 1 — Enter on an Accepter must end the run", v.accepted)
 	}
-	// Enter lands on the row the cursor was moved to, so a pick is the row under
-	// the highlight and not whatever the view defaults to.
+	if got := v.Selected(); got != 0 {
+		t.Errorf("Selected() = %d, want row 0 — a keystroke after the Enter was consumed, so the run did not end at the pick", got)
+	}
+	// Enter lands on the row the cursor was moved to, and again the keystrokes
+	// after the pick must go unseen: another Enter would accept a second time and
+	// a down-arrow would move the highlight off the accepted row.
 	moved := &pickerList{body: numberedBody(5)}
-	if err := runInspect(&strings.Builder{}, script("\x1b[B\r"), fixedSize(40, 10), moved); err != nil {
+	if err := runInspect(&strings.Builder{}, script("\x1b[B\r\r\x1b[B"), fixedSize(40, 10), moved); err != nil {
 		t.Fatalf("runInspect = %v, want nil", err)
 	}
 	if moved.accepted != 1 || moved.Selected() != 1 {
-		t.Errorf("accepted %d times with cursor on row %d, want 1 accept on row 1", moved.accepted, moved.Selected())
+		t.Errorf("accepted %d times with cursor on row %d, want 1 accept on row 1",
+			moved.accepted, moved.Selected())
 	}
-	// A plain list must survive Enter too: the key exists, so an older view
-	// cannot be allowed to trip over it — and it must still be driven to its
-	// normal quit (the trailing q), proving Enter did not close the screen.
+	// A plain view must survive Enter too, in both directions: it is never told
+	// (a view whose rows are not choices has nothing to accept) and the screen
+	// stays up — the down-arrows after the Enter scroll it, which only a run
+	// that kept going can do.
 	plain := &strings.Builder{}
-	if err := runInspect(plain, script("\rq"), fixedSize(40, 10), staticView{title: "t", body: numberedBody(3)}); err != nil {
+	if err := runInspect(plain, script("\r\x1b[B\x1b[Bq"), fixedSize(40, 10), staticView{title: "t", body: numberedBody(30)}); err != nil {
 		t.Fatalf("runInspect on a plain view = %v, want nil", err)
+	}
+	fs := frames(plain.String())
+	if first := firstOr(bodyRows(fs[len(fs)-1])); first != "line-03" {
+		t.Errorf("first visible line = %q, want %q — Enter on a plain view must be inert and leave the screen up", first, "line-03")
 	}
 }
 

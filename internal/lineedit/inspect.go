@@ -121,8 +121,8 @@ const (
 	// inspectEnter is the acceptance key. For a view that is both an Accepter and a
 	// Selecter it is also the leaving key: the harness calls Accept and closes the
 	// screen, so one keystroke both records the pick and returns control to the
-	// caller. Otherwise it stops scrolling and does nothing else, which is what
-	// keeps Enter inert on a plain page.
+	// caller. Otherwise it stops scrolling and does nothing else — Enter is inert
+	// on a plain page and on a view with no rows to pick.
 	inspectEnter
 	// inspectBackspace edits the view's filter leftward (Filterer).
 	inspectBackspace
@@ -150,11 +150,11 @@ type inspectEvent struct {
 // Inspect reads the view's result (which row was accepted, whether any) the
 // moment the screen closes: one keystroke picks. Accepting is thus a second way
 // to leave an inspector, alongside ESC, and the one that means "choose" rather
-// than "cancel". A view that merely displays — no Selecter, or neither — is told
-// if it implements Accepter but the screen stays up, and for a view with neither
-// Enter is inert. There is deliberately no return channel: a harness that
-// reported a value would have to decide what accepting means, which is the
-// mistake this seam exists to avoid.
+// than "cancel". A pick needs a row to pick, so Enter reaches Accept only on a
+// Selecter: a view that merely displays — Accepter or not — is never told, and
+// Enter leaves the screen up. There is deliberately no return channel: a
+// harness that reported a value would have to decide what accepting means,
+// which is the mistake this seam exists to avoid.
 type Accepter interface {
 	Accept()
 }
@@ -276,9 +276,9 @@ func (r *inspectRun) loop() error {
 
 // decode maps one first-byte to an event and applies it. Returns inspectQuit
 // when the user asked to leave, and an event with accepted set when the view
-// took the row under the cursor as its answer (see loop, which ends on either). Escape sequences are decoded through the
-// package's shared decoder (keys.go), so arrows/PgUp/PgDn/Home/End behave
-// identically here and at the prompt.
+// took the row under the cursor as its answer (see loop, which ends on either).
+// Escape sequences are decoded through the package's shared decoder (keys.go),
+// so arrows/PgUp/PgDn/Home/End behave identically here and at the prompt.
 //
 // The routing rule for a view that filters is the whole difference between a
 // picker and a page: a letter belongs to the filter box, so it must not scroll.
