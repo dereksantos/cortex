@@ -178,6 +178,20 @@ type CortexSession struct {
 	// override a Blocked command.
 	shellApprovals []shellApproval
 
+	// pendingImage is the image attachment read_file just recorded on
+	// THIS session via the ImageSink seam (#217): a per-session field, so
+	// concurrent sessions (serve, discord) can never take each other's
+	// image. spliceImageResult consumes it onto the tool-result message.
+	// pendingImageSet distinguishes "an image is parked" from the zero
+	// value. pendingSideCar is the same part parked one step further —
+	// from the splice until the engine's append-time side-car write
+	// (writeImageSideCarAt) consumes it. Tool dispatch within a session
+	// is sequential (one tool batch at a time), so no lock is needed.
+	pendingImage      tools.ImagePart
+	pendingImageSet   bool
+	pendingSideCar    tools.ImagePart
+	pendingSideCarSet bool
+
 	SessionID  string
 	transcript *os.File
 	capturer   *capture.Capture

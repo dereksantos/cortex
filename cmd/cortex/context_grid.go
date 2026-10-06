@@ -35,6 +35,7 @@ const (
 	glyphMemory    = '▒'
 	glyphSkills    = '░'
 	glyphWorkspace = '▔'
+	glyphImages    = '▕'
 	glyphTail      = '■'
 	glyphFree      = '·'
 )

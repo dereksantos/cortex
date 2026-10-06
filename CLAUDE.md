@@ -249,7 +249,26 @@ the model-driven memory tools
   Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers.
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
-  redirects to `study`; large Go files return a declaration skeleton. A
+  redirects to `study`; large Go files return a declaration skeleton. An
+  image file (png/jpeg/gif/webp, by extension or magic bytes) read whole
+  attaches as an image content part for vision models (issue #217): the
+  observation is a short `[image: …]` marker and the bytes ride the
+  tool-result message's wire Parts (spliced by the coder Toolset's
+  `SpliceImages` hook, `cmd/cortex/image_input.go`), with a side-car copy
+  beside the transcript that `recall` names after demotion. The
+  attachment is handed off through the `ImageSink` seam onto the
+  dispatching session's own field — never process-global state, so
+  concurrent sessions (serve, discord) can't take each other's image. A
+  text-only model (the #216 verdict, exposed to the tools as
+  `ImageInputEnabled`), a file over `tools.read.image_max_bytes`, or a
+  read inside a subagent (whose engine never splices Parts) gets a short
+  refusal naming the file type; a ranged read of an image is refused.
+  Images with wire Parts count toward the window at a documented
+  per-image estimate (`tools.ImageTokensOf`, decoded bytes ÷ 3) booked in
+  `estTurnTokens`, shown by `/context`'s images legend row, and demoted
+  to an outline line naming the image with a recallable citation — never
+  kept in the prompt forever. A resumed marker-only result books no
+  image tokens (nothing is on the wire for it). A
   directory returns a bounded listing (directories marked `/`) plus a pointer
   to `outline`, and a missing path returns an oriented error: it points at
   `outline`/`grep` instead of guessing, states the workspace root for
