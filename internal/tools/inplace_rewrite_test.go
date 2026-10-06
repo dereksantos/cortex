@@ -751,7 +751,7 @@ func TestBashReadNoHookEndToEnd(t *testing.T) {
 	}{
 		{"cat runs no hook on the file it reads", `cat main.go`, false},
 		{"grep runs no hook on the file it reads", `grep -n Foo main.go`, false},
-		{"sed -i runs the hook on the file it rewrites", `sed -i 's/x/y/' main.go`, true},
+		{"sed -i runs the hook on the file it rewrites", `sed -i.bak 's/x/y/' main.go`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			wd := t.TempDir()
