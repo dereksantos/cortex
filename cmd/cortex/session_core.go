@@ -384,6 +384,10 @@ func (cs *CortexSession) SetModel(model string) {
 		window = info.MaxInput
 	}
 	applyEffort(cs.Request, dialect, effort)
+	// #216: a /model switch changes the vision verdict too — a fleet-known
+	// model's advert decides; anything else is unknown, which the gate
+	// resolves to "refuse" (never a silent drop).
+	cs.Request.Vision = false
 	cs.Window = window
 }
 
@@ -487,6 +491,7 @@ func NewCortexSession() *CortexSession {
 	req.Timeout = code.timeout(requestTimeout)
 	req.MaxAttempts = code.maxAttempts(maxSendAttempts)
 	req.Backoff = code.backoff(retryBackoff)
+	req.Vision = code.VisionEnabled()
 
 	// network.compat_timeout_sec is the config surface for the existing
 	// CORTEX_COMPAT_TIMEOUT_SEC env var's fallback default (pkg/llm's

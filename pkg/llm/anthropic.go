@@ -27,6 +27,7 @@ type AnthropicClient struct {
 	model      string
 	maxTokens  int
 	httpClient *http.Client
+	vision     bool
 }
 
 // NewAnthropicClient creates a new Anthropic client
@@ -56,10 +57,13 @@ type anthropicRequest struct {
 	Messages  []anthropicMessage `json:"messages"`
 }
 
-// anthropicMessage represents a message in the conversation
+// anthropicMessage represents a message in the conversation. Content is
+// either the plain string form (all text-only requests, unchanged) or
+// Anthropic's structured content-block form, which is what an image must
+// travel in (AnthropicImageContent in content.go builds the block).
 type anthropicMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
 }
 
 // anthropicResponse represents a response from the Anthropic API
@@ -124,8 +128,46 @@ func (c *AnthropicClient) GenerateWithStats(ctx context.Context, prompt string) 
 	return c.generate(ctx, prompt, "")
 }
 
+// Vision reports whether this client's model is permitted to receive image
+// content blocks (issue #216's gate; cmd/cortex stamps it from the role
+// binding's resolved verdict). Default false: images are refused with a
+// clear error naming the model, never dropped.
+func (c *AnthropicClient) Vision() bool { return c.vision }
+
+// SetVision declares whether this client's model accepts image content.
+func (c *AnthropicClient) SetVision(v bool) { c.vision = v }
+
+// GenerateWithImages issues one Messages-API turn whose user content is
+// the given content parts (text + image; AnthropicImageContent
+// translates image parts into Anthropic's native image block). The gate
+// refuses image parts for a non-vision model. Text-only callers should
+// keep using Generate — the string-content shape is unchanged there.
+func (c *AnthropicClient) GenerateWithImages(ctx context.Context, parts []ContentPart) (string, GenerationStats, error) {
+	if err := GateImages(parts, c.model, c.vision); err != nil {
+		return "", GenerationStats{}, err
+	}
+	blocks := make([]any, 0, len(parts))
+	for _, p := range parts {
+		if p.HasImage() {
+			if blk, ok := AnthropicImageContent(p); ok {
+				blocks = append(blocks, blk)
+			}
+			continue
+		}
+		blocks = append(blocks, map[string]any{"type": "text", "text": p.Text})
+	}
+	return c.generateBlocks(ctx, blocks, "")
+}
+
 // generate calls the Anthropic Messages API
 func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (string, GenerationStats, error) {
+	return c.generateBlocks(ctx, prompt, system)
+}
+
+// generateBlocks is the shared Messages-API round trip: content is either
+// a plain string (text-only, the historical shape) or a slice of content
+// blocks (Anthropic's structured form).
+func (c *AnthropicClient) generateBlocks(ctx context.Context, content any, system string) (string, GenerationStats, error) {
 	if c.apiKey == "" {
 		return "", GenerationStats{}, fmt.Errorf("anthropic API key not configured")
 	}
@@ -135,7 +177,7 @@ func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (
 		MaxTokens: c.maxTokens,
 		System:    system,
 		Messages: []anthropicMessage{
-			{Role: "user", Content: prompt},
+			{Role: "user", Content: content},
 		},
 	}
 

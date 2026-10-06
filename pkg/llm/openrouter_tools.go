@@ -66,6 +66,66 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
+	// Parts is the structured (OpenAI content-parts) form of the
+	// message: text + image_url parts (issue #216). When non-empty it
+	// replaces Content on the wire; Content stays the default shape, so
+	// every text-only request serializes byte for byte as before.
+	// Image parts require a vision-capable model — GateImages is the gate.
+	Parts []ContentPart `json:"-"`
+}
+
+// MarshalJSON emits Content as the parts array when Parts is set, and
+// the plain string form otherwise (the alias below reproduces today's
+// bytes exactly — no Parts, no change).
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	if len(m.Parts) == 0 {
+		type alias ChatMessage
+		return json.Marshal(alias(m))
+	}
+	return json.Marshal(struct {
+		Role       string        `json:"role"`
+		Content    []ContentPart `json:"content"`
+		ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+		ToolCallID string        `json:"tool_call_id,omitempty"`
+		Name       string        `json:"name,omitempty"`
+	}{
+		Role:       m.Role,
+		Content:    m.Parts,
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+		Name:       m.Name,
+	})
+}
+
+// UnmarshalJSON accepts both wire shapes — `"content":"text"` and
+// `"content":[{...}]` — so a serialized request decodes back into the
+// same ChatMessage it came from.
+func (m *ChatMessage) UnmarshalJSON(data []byte) error {
+	type wireMessage struct {
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
+		Name       string          `json:"name,omitempty"`
+	}
+	var w wireMessage
+	if err := json.Unmarshal(data, &w); err != nil {
+		return fmt.Errorf("chat message: %w", err)
+	}
+	m.Role = w.Role
+	m.ToolCalls = w.ToolCalls
+	m.ToolCallID = w.ToolCallID
+	m.Name = w.Name
+	if len(w.Content) == 0 {
+		return nil
+	}
+	if w.Content[0] == '[' {
+		if err := json.Unmarshal(w.Content, &m.Parts); err != nil {
+			return fmt.Errorf("chat message: content parts: %w", err)
+		}
+		return nil
+	}
+	return json.Unmarshal(w.Content, &m.Content)
 }
 
 // ChatResult is GenerateWithTools's structured response. Either
@@ -132,6 +192,12 @@ type orToolsResponse struct {
 func (c *OpenRouterClient) GenerateWithTools(ctx context.Context, msgs []ChatMessage, tools []ToolSpec, toolChoice any) (ChatResult, GenerationStats, error) {
 	if c.apiKey == "" {
 		return ChatResult{}, GenerationStats{}, fmt.Errorf("openrouter: OPEN_ROUTER_API_KEY not set")
+	}
+
+	// Vision gate (#216): image parts only go to a model this client was
+	// told accepts images. Text-only requests skip the check entirely.
+	if err := GateImages(imagePartsOf(msgs), c.model, c.vision); err != nil {
+		return ChatResult{}, GenerationStats{}, err
 	}
 
 	// Normalize toolChoice: empty string -> "auto" (the model decides).

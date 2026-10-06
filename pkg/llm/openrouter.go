@@ -41,6 +41,10 @@ type OpenRouterModel struct {
 	ContextLength     int
 	PricePromptPerTok float64
 	PriceComplPerTok  float64
+	// AcceptsImages is the catalog's verdict (architecture.input_modalities
+	// contains "image") — the primary signal the vision gate in #216 uses
+	// when the catalog is available.
+	AcceptsImages bool
 }
 
 // OpenRouterClient is a Provider for the OpenRouter unified gateway.
@@ -59,7 +63,23 @@ type OpenRouterClient struct {
 
 	lastCostUSD  float64 // surface this via LastCostUSD()
 	lastProvider string  // upstream provider that served the most recent call
+
+	// vision declares whether the current model accepts image content
+	// parts (#216). Set from the OpenRouter catalog's input modalities
+	// when the caller has them, else from `models.<role>.vision`.
+	// Default false: image parts are refused until something says the
+	// model takes them.
+	vision bool
 }
+
+// SetVision declares whether this client's model accepts image content
+// parts. Callers holding the OpenRouter catalog pass its input modalities;
+// cmd/cortex passes the per-role `models.<role>.vision` flag. Text-only
+// requests are unaffected either way.
+func (c *OpenRouterClient) SetVision(v bool) { c.vision = v }
+
+// Vision reports whether image parts are currently permitted on this client.
+func (c *OpenRouterClient) Vision() bool { return c.vision }
 
 // SetTemperature pins this client's sampling temperature, overriding the
 // CORTEX_TEMPERATURE env default read at construction.
@@ -322,6 +342,9 @@ func (c *OpenRouterClient) ListModels(ctx context.Context) ([]OpenRouterModel, e
 				Prompt     string `json:"prompt"`
 				Completion string `json:"completion"`
 			} `json:"pricing"`
+			Architecture struct {
+				InputModalities []string `json:"input_modalities"`
+			} `json:"architecture"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(bb, &payload); err != nil {
@@ -336,6 +359,7 @@ func (c *OpenRouterClient) ListModels(ctx context.Context) ([]OpenRouterModel, e
 			ContextLength:     m.ContextLength,
 			PricePromptPerTok: parseFloatOrZero(m.Pricing.Prompt),
 			PriceComplPerTok:  parseFloatOrZero(m.Pricing.Completion),
+			AcceptsImages:     modelAcceptsImages(m.Architecture.InputModalities),
 		})
 	}
 	return out, nil

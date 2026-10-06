@@ -792,6 +792,7 @@ func (cs *CortexSession) Clear() {
 	cs.Request.Reasoning = old.Reasoning
 	cs.Request.Dialect = old.Dialect
 	cs.Request.Effort = old.Effort
+	cs.Request.Vision = old.Vision
 	cs.Request.MaxTokens = old.MaxTokens
 	cs.ws = cs.newWorkingSet(1)
 	cs.outline = nil

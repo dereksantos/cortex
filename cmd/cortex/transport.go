@@ -84,6 +84,16 @@ type AgentRequest struct {
 	Dialect llm.Dialect `json:"-"`
 	Effort  llm.Effort  `json:"-"`
 
+	// Vision (json:"-") is this request's vision-capability verdict
+	// (issue #216): true only when the target model is known to accept
+	// image content parts (OpenRouter catalog input modalities, else the
+	// per-role `models.<role>.vision` config flag). Stamped from the role
+	// binding at request construction and re-derived on /model switches;
+	// Send refuses any wire message carrying image parts while it is
+	// false — a text-only model gets a clear error naming the model, never
+	// a silent drop.
+	Vision bool `json:"-"`
+
 	// Timeout / MaxAttempts / Backoff (all json:"-") are the P1
 	// timeout-unification transport knobs: the per-request HTTP deadline,
 	// retry-attempt ceiling, and linear-backoff base. Zero means "use the
@@ -192,6 +202,25 @@ func (r *AgentRequest) composeWire() []Message {
 	return out
 }
 
+// checkVision enforces the vision capability gate (#216) on the assembled
+// wire messages: image-bearing content parts may only go to a model whose
+// Vision verdict is true. Text-only requests (no message carries Parts)
+// pass through untouched, byte for byte.
+func (r *AgentRequest) checkVision(msgs []Message) error {
+	for _, m := range msgs {
+		if !llm.HasImageParts(m.Parts) {
+			continue
+		}
+		if err := llm.ValidateContentParts(m.Parts); err != nil {
+			return err
+		}
+		if !r.Vision {
+			return llm.NewVisionUnsupportedError(r.Model)
+		}
+	}
+	return nil
+}
+
 // emptyToolResult stands in for a tool result with no output text.
 const emptyToolResult = "(no output)"
 
@@ -280,6 +309,9 @@ var httpClient = &http.Client{}
 func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
+	if err := r.checkVision(payload.Messages); err != nil {
+		return nil, err
+	}
 	applyPromptCache(payload.Messages, r.Model)
 	b, err := json.Marshal(&payload)
 	if err != nil {
@@ -369,6 +401,9 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning func(string)) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
+	if err := r.checkVision(payload.Messages); err != nil {
+		return nil, err
+	}
 	applyPromptCache(payload.Messages, r.Model)
 	payload.Stream = true
 	payload.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -602,6 +637,17 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 
+	// Parts is the structured OpenAI content-parts form of Content
+	// (issue #216): text + image_url parts. When non-empty it replaces the
+	// string Content on the wire (MarshalJSON below); Content stays the
+	// default shape, so text-only messages serialize byte for byte as
+	// before. Image parts require AgentRequest.Vision — Send refuses them
+	// otherwise. Wire-only in practice: Parts is skipped by the JSON codec
+	// (json:"-"), so session transcripts, redaction, and the token-estimate
+	// math keep seeing the string Content; image-carrying input lands in
+	// later parts of #134 (read_file, REPL/web attach, context accounting).
+	Parts []llm.ContentPart `json:"-"`
+
 	cache *cacheControl
 }
 
@@ -610,28 +656,52 @@ type cacheControl struct {
 	Type string `json:"type"`
 }
 
-// contentPart is the structured content form Anthropic requires.
-type contentPart struct {
-	Type         string        `json:"type"`
-	Text         string        `json:"text"`
-	CacheControl *cacheControl `json:"cache_control,omitempty"`
-}
-
-// MarshalJSON emits normal string-content messages unless a cache breakpoint is
-// set, then emits Anthropic's structured content part shape.
+// MarshalJSON emits normal string-content messages unless a cache breakpoint
+// or structured content parts (issue #216) change the shape; with neither,
+// the alias path emits exactly what it emitted before. A cache breakpoint
+// keeps Anthropic's content-parts form (the breakpoint rides on the text
+// part); parts + breakpoint put the breakpoint on the LAST part, where
+// Anthropic reads it.
 func (m *Message) MarshalJSON() ([]byte, error) {
-	if m.cache == nil {
+	if m.cache == nil && len(m.Parts) == 0 {
 		type alias Message
 		return json.Marshal(alias(*m))
 	}
+	type part struct {
+		Type         string        `json:"type"`
+		Text         string        `json:"text,omitempty"`
+		ImageURL     any           `json:"image_url,omitempty"`
+		CacheControl *cacheControl `json:"cache_control,omitempty"`
+	}
+	var parts []part
+	switch {
+	case len(m.Parts) > 0:
+		parts = make([]part, 0, len(m.Parts))
+		for _, p := range m.Parts {
+			if p.HasImage() {
+				image := map[string]any{"url": p.WireURL()}
+				if p.Detail != "" {
+					image["detail"] = p.Detail
+				}
+				parts = append(parts, part{Type: llm.ContentTypeImageURL, ImageURL: image})
+				continue
+			}
+			parts = append(parts, part{Type: llm.ContentTypeText, Text: p.Text})
+		}
+		if m.cache != nil {
+			parts[len(parts)-1].CacheControl = m.cache
+		}
+	default:
+		parts = []part{{Type: llm.ContentTypeText, Text: m.Content, CacheControl: m.cache}}
+	}
 	return json.Marshal(struct {
-		Role       string        `json:"role"`
-		Content    []contentPart `json:"content"`
-		ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
-		ToolCallID string        `json:"tool_call_id,omitempty"`
+		Role       string     `json:"role"`
+		Content    []part     `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
 	}{
 		Role:       m.Role,
-		Content:    []contentPart{{Type: "text", Text: m.Content, CacheControl: m.cache}},
+		Content:    parts,
 		ToolCalls:  m.ToolCalls,
 		ToolCallID: m.ToolCallID,
 	})

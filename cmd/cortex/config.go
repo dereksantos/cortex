@@ -155,6 +155,14 @@ type ModelSpec struct {
 	// value means "unset" (JSON key absent).
 	Thinking llm.Effort `json:"thinking"`
 
+	// Vision declares that this role's model accepts image content parts
+	// (issue #216's vision gate). Explicit config always wins; when unset
+	// on an OpenRouter backend the model id's capability tags decide
+	// (llm.InferCapabilities / CapVision); anywhere else unset means false
+	// — the gate refuses images with a clear error naming the model rather
+	// than silently dropping them.
+	Vision *bool `json:"vision,omitempty"`
+
 	// RequestTimeoutSec / MaxSendAttempts / RetryBackoffMs are the P1 timeout-
 	// unification config surface (docs/configuration.md): per-role overrides
 	// for the transport knobs that used to be hardcoded (cmd/cortex's
@@ -350,6 +358,16 @@ func discoverFleet(ctx context.Context, endpoint string) Fleet {
 		}
 	}
 	return f
+}
+
+// VisionEnabled resolves this binding's vision verdict (issue #216): an
+// explicit `models.<role>.vision` wins; otherwise a nil verdict means
+// "unknown" and resolves to false — the gate refuses images rather than
+// silently dropping them. Callers that have a stronger signal (the
+// OpenRouter catalog's input modalities, a fleet advert) stamp it into
+// the spec before this is consulted.
+func (s ModelSpec) VisionEnabled() bool {
+	return s.Vision != nil && *s.Vision
 }
 
 // degradeForThinkingMode refuses an effort ask a model's thinking_mode can't
@@ -1085,6 +1103,19 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 			if !m.Thinking.IsZero() {
 				spec.Thinking = m.Thinking
 			}
+			if m.Vision != nil {
+				spec.Vision = m.Vision
+			}
+		}
+		if spec.Vision == nil && c.isOpenRouter() {
+			v := llm.InferCapabilities(spec.Model)
+			yes := false
+			for _, l := range v {
+				if l == llm.CapVision {
+					yes = true
+				}
+			}
+			spec.Vision = &yes
 		}
 		if spec.KeyEnv == "" {
 			spec.KeyEnv = c.Backend.KeyEnv
