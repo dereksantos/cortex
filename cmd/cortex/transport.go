@@ -645,9 +645,10 @@ type Message struct {
 	// default shape, so text-only messages serialize byte for byte as
 	// before. Image parts require AgentRequest.Vision — Send refuses them
 	// otherwise. Wire-only in practice: Parts is skipped by the JSON codec
-	// (json:"-"), so session transcripts, redaction, and the token-estimate
-	// math keep seeing the string Content; image-carrying input lands in
-	// later parts of #134 (read_file, REPL/web attach, context accounting).
+	// (json:"-"), so session transcripts and redaction keep seeing the
+	// string Content — for an image tool result that string is read_file's
+	// short `[image: …]` marker observation, and the demotion/token math
+	// books the image itself through messageImageTokens (#217).
 	Parts []llm.ContentPart `json:"-"`
 
 	cache *cacheControl

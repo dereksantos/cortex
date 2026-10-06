@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // replayWorkingSet rebuilds the demotion state from a resumed transcript.
@@ -184,6 +185,12 @@ func turnOutlineEntry(turn int, span cache.TurnSpan, msgs []Message, sessionID s
 	if len(msgs) > 0 && msgs[0].Role == "user" {
 		userContent = msgs[0].Content
 	}
+	// An image the user attached to the turn would otherwise demote as its
+	// base64 payload (or as nothing at all): name it instead — the citation
+	// below is what brings the bytes back via recall (#217).
+	if len(msgs) > 0 && msgs[0].Role == "user" && hasImageContent(msgs[0]) {
+		userContent = "[attached image — recall the citation below for the raw parts] " + userContent
+	}
 	if r := []rune(userContent); len(r) > outlineUserCap {
 		userContent = string(r[:outlineUserCap]) + "… (truncated; recall the citation below for the rest)"
 	}
@@ -199,19 +206,29 @@ func turnOutlineEntry(turn int, span cache.TurnSpan, msgs []Message, sessionID s
 	// Actions: walk assistant messages in order, collect tool call labels
 	var actions []string
 	for _, msg := range msgs {
-		if msg.Role == "assistant" {
-			for _, call := range msg.ToolCalls {
-				label := call.ActivityLabel()
-				ok, exists := resultMap[call.ID]
-				if !exists {
-					ok = true // default to ok when no result message found
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, call := range msg.ToolCalls {
+			label := call.ActivityLabel()
+			ok, exists := resultMap[call.ID]
+			if !exists {
+				ok = true // default to ok when no result message found
+			}
+			if ok {
+				label += " [ok]"
+			} else {
+				label += " [err]"
+			}
+			actions = append(actions, label)
+			// An image the harness spliced onto the corresponding tool result
+			// (read_file on an image, #217) is named in the same action list —
+			// the demoted entry says an image was in play, and the citation
+			// brings it back; the bytes themselves never enter the outline.
+			for _, im := range msgs {
+				if im.Role == "tool" && im.ToolCallID != "" && im.ToolCallID == call.ID && hasImageContent(im) {
+					actions = append(actions, "image attached")
 				}
-				if ok {
-					label += " [ok]"
-				} else {
-					label += " [err]"
-				}
-				actions = append(actions, label)
 			}
 		}
 	}
@@ -246,7 +263,13 @@ func turnOutlineEntry(turn int, span cache.TurnSpan, msgs []Message, sessionID s
 
 // estTurnTokens estimates the token size of a turn's messages.
 // It sums len(Content) for each message plus len(Function.Name)+len(Function.Arguments)
-// for each ToolCall, then converts to tokens using cache.TokensOf.
+// for each ToolCall, then converts to tokens using cache.TokensOf. Image
+// parts are NOT text in Content (they ride the wire-only Parts field, and
+// the transcript keeps only the short marker string), so each one is
+// booked separately at the documented per-image estimate
+// (tools.ImageTokensOf over its decoded bytes) — an image must count
+// toward the window it occupies or demotion steers by a size the prompt
+// doesn't have (#217). Text-only turns are byte-for-byte unchanged.
 func estTurnTokens(msgs []Message) int {
 	sum := 0
 	for _, msg := range msgs {
@@ -255,7 +278,71 @@ func estTurnTokens(msgs []Message) int {
 			sum += len(call.Function.Name) + len(call.Function.Arguments)
 		}
 	}
-	return cache.TokensOf(sum)
+	return cache.TokensOf(sum) + imageTokensOf(msgs)
+}
+
+// imageTokensOf sums the documented per-image estimate over every image
+// part across msgs: tools.ImageTokensOf (decoded bytes ÷ 3 — the
+// base64-on-the-wire billing rule) per part, plus one marker-text content
+// where a resumed transcript carries only the `[image:` string. Zero for
+// text-only messages, so every existing estimate stays byte-for-byte.
+func imageTokensOf(msgs []Message) int {
+	tokens := 0
+	for _, msg := range msgs {
+		n := 0
+		for _, p := range msg.Parts {
+			if !p.HasImage() {
+				continue
+			}
+			tokens += tools.ImageTokensOf(imageDataURIRawBytes(p.ImageURL))
+			n++
+		}
+		if n == 0 && strings.HasPrefix(msg.Content, tools.ImageObservationMarker()) {
+			// A resumed (wire-Parts-less) image result: book it at the same
+			// per-image figure the live session used for the bytes it no
+			// longer holds in memory — the cap is the honest upper bound.
+			tokens += tools.ImageTokensOf(defaultImageTokenBookingBytes)
+		}
+	}
+	return tokens
+}
+
+// defaultImageTokenBookingBytes is the size a resumed image (marker text
+// only, no in-memory bytes) is booked at: the shipped image cap, so an
+// image never demotes itself out of accounting by being forgotten.
+const defaultImageTokenBookingBytes = 1_500_000
+
+// imageDataURIRawBytes reports how many raw bytes a data-URI image part
+// carries without running the decode (base64: ⌈n/4⌉·3 minus padding). An
+// http(s) image URL (size unknown locally) is booked at the cap.
+func imageDataURIRawBytes(url string) int {
+	i := strings.Index(url, ";base64,")
+	if !strings.HasPrefix(url, "data:") || i < 0 {
+		return defaultImageTokenBookingBytes
+	}
+	b64 := url[i+len(";base64,"):]
+	if b64 == "" {
+		return 0
+	}
+	pad := 0
+	if strings.HasSuffix(b64, "==") {
+		pad = 2
+	} else if strings.HasSuffix(b64, "=") {
+		pad = 1
+	}
+	return (len(b64)+3)/4*3 - pad
+}
+
+// hasImageContent reports whether a message carries image parts on the
+// wire, or the `[image:` marker text (a resumed transcript keeps only the
+// string Content).
+func hasImageContent(msg Message) bool {
+	for _, p := range msg.Parts {
+		if p.HasImage() {
+			return true
+		}
+	}
+	return strings.HasPrefix(msg.Content, tools.ImageObservationMarker())
 }
 
 // outlineUserCap is the maximum runes for a demoted user message to stay verbatim.

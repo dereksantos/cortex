@@ -484,15 +484,39 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 	}
 
 	var b strings.Builder
-	for _, msg := range msgs[start:end] {
+	for i, msg := range msgs[start:end] {
+		abs := start + i
 		b.WriteString(msg.Role)
 		b.WriteString("\n")
 		b.WriteString(msg.Content)
+		if strings.HasPrefix(msg.Content, tools.ImageObservationMarker()) {
+			// An image result demoted as its short marker text (#217): the
+			// bytes live on disk beside the transcript (the dispatcher's
+			// side-car, one file per message index) — recall names the file
+			// so the model can read it again (or hand it to a tool) instead
+			// of getting a marker with no image behind it.
+			if p, ok := imagePathForMsg(cs.SessionsDir(), id, abs); ok {
+				b.WriteString(" (image bytes on disk: " + p + ")")
+			} else {
+				b.WriteString(" (image bytes no longer on disk)")
+			}
+		}
 		if len(msg.ToolCalls) > 0 {
 			for _, call := range msg.ToolCalls {
 				b.WriteString("\n  ▸ ")
 				b.WriteString(call.ActivityLabel())
 			}
+		}
+		// A resumed in-memory message can still hold wire Parts (a turn
+		// demoted in this very session): name the actual part count and the
+		// byte size so recall of a not-yet-resumed image says what was
+		// there, not just that a marker line existed (#217).
+		if imgs := llmImageParts(msg.Parts); len(imgs) > 0 {
+			imgBytes := 0
+			for _, p := range imgs {
+				imgBytes += imageDataURIRawBytes(p.ImageURL)
+			}
+			fmt.Fprintf(&b, "\n  ▸ %d image part(s) attached (%d bytes)", len(imgs), imgBytes)
 		}
 		b.WriteString("\n\n")
 	}

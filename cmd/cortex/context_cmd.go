@@ -56,15 +56,9 @@ func (cs *CortexSession) contextReport() string {
 // report byte for byte: the trailing-blank trim below stands in for the
 // TrimRight the builder form ended with.
 func (cs *CortexSession) contextReportLines() []string {
-	lines := []string{
-		cs.contextHeaderLine(),
-		"",
-		cs.cacheHeadlineLine(),
-		"",
-	}
-
 	win := cs.windowSize()
 	placement := computeContextGrid(cs.gridComponents(), cs.tailTokens(), win)
+	lines := append([]string{}, cs.contextHeaderLine(), "", cs.cacheHeadlineLine(), "")
 	lines = append(lines, coloredContextGridLines(placement, win, cs.gridHighWatermark())...)
 	lines = append(lines, "")
 
@@ -260,6 +254,15 @@ func (cs *CortexSession) gridLegendLines() []string {
 	if t := cs.workspaceTokens(); t > 0 {
 		lines = append(lines, gridLegendRow(glyphWorkspace, cyan, "workspace", t, cs.workspaceLegendDetail()))
 	}
+	// Image parts in the hydrated tail (#217): the documented per-image
+	// estimate (bytes/3), summed over the images still sent verbatim. The
+	// grid itself stays the documented 128-cell frame of the zone-A
+	// components + tail; images ride the tail's space, so the legend is
+	// where their share becomes visible — a row appears only when images
+	// are actually in the window.
+	if t := cs.hydratedImageTokens(); t > 0 {
+		lines = append(lines, gridLegendRow(glyphImages, magenta, "images", t, cs.imagesLegendDetail()))
+	}
 	if cs.ws != nil && cs.ws.TotalTurns() > 0 {
 		lines = append(lines, gridLegendRow(glyphTail, green, "tail", cs.ws.TailTokens(), cs.tailLegendDetail()))
 	}
@@ -268,6 +271,50 @@ func (cs *CortexSession) gridLegendLines() []string {
 	}
 
 	return lines
+}
+
+// hydratedImageTokens is the image share of the hydrated tail: the
+// documented per-image estimate over every image part in messages at or
+// after the demotion frontier (plus resumed marker-only results, booked at
+// the cap). Demoted images are NOT counted here — their outline entry
+// replaced them — matching how the tail figure itself works (#217).
+func (cs *CortexSession) hydratedImageTokens() int {
+	if cs.Request == nil || cs.ws == nil {
+		return 0
+	}
+	msgs := cs.Request.Messages
+	from := cs.ws.FrontierMsg()
+	if from < 0 || from > len(msgs) {
+		return 0
+	}
+	return imageTokensOf(msgs[from:])
+}
+
+// imagesLegendDetail names how many images are in the window.
+func (cs *CortexSession) imagesLegendDetail() string {
+	if cs.Request == nil || cs.ws == nil {
+		return ""
+	}
+	msgs := cs.Request.Messages
+	from := cs.ws.FrontierMsg()
+	if from < 0 || from > len(msgs) {
+		return ""
+	}
+	n := 0
+	for _, m := range msgs[from:] {
+		if hasImageContent(m) {
+			n++
+		}
+	}
+	return fmt.Sprintf("%d image%s in the tail", n, pluralS(n))
+}
+
+// pluralS renders the English plural suffix for a count.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // systemLegendDetail reports which instruction file the seeded system

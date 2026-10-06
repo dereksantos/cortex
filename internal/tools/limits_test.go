@@ -14,6 +14,9 @@ func TestDefaultLimitsMatchHistoricalConstants(t *testing.T) {
 		DefaultRangeLines:    200,
 		MaxRangeLines:        800,
 		MaxReadBytes:         24000,
+		// ImageMaxBytes is new with #217 (not a "historical" constant, but
+		// pinned here too so the shipped image cap can't drift silently).
+		ImageMaxBytes:        defaultImageMaxBytes,
 		GrepMaxHits:          100,
 		GrepLineCap:          1200,
 		GrepMaxOutputBytes:   6000,

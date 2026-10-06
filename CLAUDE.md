@@ -249,7 +249,20 @@ the model-driven memory tools
   Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers.
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
-  redirects to `study`; large Go files return a declaration skeleton. A
+  redirects to `study`; large Go files return a declaration skeleton. An
+  image file (png/jpeg/gif/webp, by extension or magic bytes) read whole
+  attaches as an image content part for vision models (issue #217): the
+  observation is a short `[image: …]` marker and the bytes ride the
+  tool-result message's wire Parts (spliced by the coder Toolset's
+  `SpliceImages` hook, `cmd/cortex/image_input.go`), with a side-car copy
+  beside the transcript that `recall` names after demotion. A text-only
+  model (the #216 verdict, exposed to the tools as `ImageInputEnabled`) or
+  a file over `tools.read.image_max_bytes` gets a short refusal naming the
+  file type; a ranged read of an image is refused. Images count toward the
+  window at a documented per-image estimate (`tools.ImageTokensOf`,
+  decoded bytes ÷ 3) booked in `estTurnTokens`, shown by `/context`'s
+  images legend row, and demoted to an outline line naming the image with
+  a recallable citation — never kept in the prompt forever. A
   directory returns a bounded listing (directories marked `/`) plus a pointer
   to `outline`, and a missing path returns an oriented error: it points at
   `outline`/`grep` instead of guessing, states the workspace root for

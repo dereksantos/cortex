@@ -228,6 +228,7 @@ default to today's hardcoded value.
 | `read.default_range_lines` | 200 | `read_file`'s window when `start` is given without `end`. |
 | `read.max_range_lines` | 800 | Cap on a single ranged `read_file`. |
 | `read.max_read_bytes` | 24000 | Per-read byte ceiling (bounds very-long-line spans the line cap alone can't). |
+| `read.image_max_bytes` | 1500000 | Cap on an image `read_file` may attach as an image content part (issue #217); a larger file is refused with the byte size and cap named. Images count toward the window at a documented per-image estimate (decoded bytes ÷ 3). |
 | `grep.max_hits` | 100 | Cap on `grep` match count. |
 | `grep.line_cap` | 1200 | Window width for a long matching line (centered on the match). |
 | `grep.max_output_bytes` | 6000 | Total-output ceiling for one `grep` call. |

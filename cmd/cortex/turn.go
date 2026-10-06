@@ -346,6 +346,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	ts.BeforeSend = func(req *AgentRequest) {
 		cs.applyInTurnDemotion(req, turnStart)
 	}
+	// Issue #217: an image read_file attached rides the tool-result message
+	// as wire Parts (and its bytes go to the session side-car recall
+	// names); the session resolves the vision verdict itself.
+	ts.SpliceImages = cs.spliceImageResult
+	ts.WriteImageSideCar = cs.writeImageSideCarAt
 	// Issue #141: the model must account for test removals it made. The
 	// receipt is computed at the clean-finalize point (runLoop calls
 	// ts.FinalizeHook exactly when the model answers with no tool calls,
