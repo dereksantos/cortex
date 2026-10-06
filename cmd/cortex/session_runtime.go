@@ -342,6 +342,10 @@ func (cs *CortexSession) Close() {
 		cs.transcript.Close()
 		cs.transcript = nil
 	}
+	// Issue #111: session end drops the undo history — the in-memory stack and
+	// the session's hidden checkpoint refs — so a closed session's refs never
+	// outlive it in the git object store (best-effort, non-fatal).
+	cs.clearCheckpoints()
 }
 
 func (cs *CortexSession) contextStrategy() string {

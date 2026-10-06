@@ -236,6 +236,16 @@ type CortexSession struct {
 	// as senderOverride: drive the REAL turn path with scripted tool results
 	// instead of real file access. Both are nil in every production session.
 	coderDispatcherOverride func() AgentDispatcher
+	// subagentSenderOverride, when non-nil, replaces the subagent's model
+	// round-trip sender (the blockingSender a subagent's runLoop uses) for the
+	// named subagent role — a TEST-ONLY seam (no production code sets it) for
+	// the same class of test as senderOverride: drive the REAL subagent run
+	// (runSubagentStats → runLoop over the real dispatcher) with a scripted
+	// model and zero network. A subagent's model REPLIES (its tool-call and
+	// final-answer rounds) are produced by the sender, not the request, so
+	// scripting them goes through this seam, not through the request. nil in
+	// every production session.
+	subagentSenderOverride map[string]Sender
 
 	// testwatchScratchBefore is the leftover-debug arm's (issue #154)
 	// PRE-bash baseline of scratch-named paths: the set of workdir-relative
@@ -308,6 +318,29 @@ type CortexSession struct {
 	// routing around an earlier block with a same-effect variant. Nil
 	// outside a turn.
 	sameActionBlocked map[string]bool
+
+	// checkpoints is the per-turn undo stack (issue #111): the snapshot
+	// (tree hash + untracked baseline) of each turn that changed the working
+	// tree, in turn order. A snapshot is recorded at the START of every turn
+	// (recordCheckpoint) but committed to this stack only at the turn's END,
+	// and only if the turn actually changed the working tree — commitCheckpoint
+	// re-snapshots the tracked state and the untracked set and compares them
+	// with the pending entry, keeping the checkpoint iff the tree hash differs
+	// or the untracked set differs (so a read-only turn's recorded ref is
+	// dropped instead) — and the stack's depth N always maps to the
+	// Nth-most-recent turn that changed files (the issue's spec). Scoped to
+	// cs.root(), keyed by session id, pruned to the newest maxCheckpointRefs on
+	// append, cleared on /clear and session end (clearCheckpoints). Nil until
+	// the first mutating turn. The turn never fails because of a checkpoint —
+	// recordCheckpoint and commitCheckpoint swallow git errors.
+	checkpoints *checkpointStack
+
+	// pending is the snapshot recordCheckpoint took at the start of the
+	// in-flight turn, not yet on the undo stack: commitCheckpoint at the
+	// turn's end re-snapshots the working tree and commits it (and keeps its
+	// ref) iff the turn changed the tree, else drops the ref. Zero between
+	// turns.
+	pending checkpointEntry
 
 	// taint is the per-turn untrusted-content taint (issue #102): set when
 	// attacker-controllable web content (a fetch_url / web_search result,
