@@ -289,13 +289,34 @@ type CortexSession struct {
 	// outside a turn.
 	sameActionBlocked map[string]bool
 
-	// checkpoints is the per-turn undo stack (issue #111): the snapshot hashes
-	// this session recorded at the start of each turn that mutated the tracked
-	// tree, in turn order. Scoped to cs.root(), keyed by session id, pruned to
-	// the newest maxCheckpointRefs on append, cleared on /clear and session end
-	// (clearCheckpoints). Nil until the first mutating turn. The turn never
-	// fails because of a checkpoint — recordCheckpoint swallows git errors.
+	// checkpoints is the per-turn undo stack (issue #111): the snapshot
+	// (tree hash + untracked baseline) of each turn that mutated files, in
+	// turn order. A snapshot is recorded at the START of every turn
+	// (recordCheckpoint) but committed to this stack only at the turn's END,
+	// and only if the turn ran a file-mutating tool (turnMutated, set by
+	// coderDispatcher) — a read-only turn's recorded ref is dropped instead,
+	// so the stack's depth N always maps to the Nth-most-recent turn that
+	// actually mutated files (the issue's spec). Scoped to cs.root(), keyed
+	// by session id, pruned to the newest maxCheckpointRefs on append, cleared
+	// on /clear and session end (clearCheckpoints). Nil until the first
+	// mutating turn. The turn never fails because of a checkpoint —
+	// recordCheckpoint and commitCheckpoint swallow git errors.
 	checkpoints *checkpointStack
+
+	// pending is the snapshot recordCheckpoint took at the start of the
+	// in-flight turn, not yet on the undo stack: commitCheckpoint at the
+	// turn's end commits it (and keeps its ref) iff turnMutated, else drops
+	// the ref. Zero between turns.
+	pending checkpointEntry
+
+	// turnMutated is the per-turn mutation flag the undo stack's commit
+	// decision reads (issue #111): coderDispatcher sets it when the turn runs
+	// a file-mutating tool (write_file, edit_file, remove_path, or a bash
+	// command) and it is reset at the START of every turn (turn.go), so a
+	// turn that errored or was interrupted before its end cannot leak the
+	// flag into the next one. commitCheckpoint (turn.go's deferred cleanup)
+	// is the only reader.
+	turnMutated bool
 
 	// taint is the per-turn untrusted-content taint (issue #102): set when
 	// attacker-controllable web content (a fetch_url / web_search result,

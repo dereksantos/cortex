@@ -1277,7 +1277,17 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		isBash := call.Function.Name == tools.FunctionBash
 		if isBash {
 			cs.armTestwatch()
-		} else if p := testwatchTouchedPath(call); p != "" {
+		}
+		// Issue #111: mark the turn as file-mutating for the undo stack's
+		// commit decision. write_file, edit_file, and remove_path name the
+		// file they change; a bash command can mutate ANY file in the
+		// workspace (the tool arms testwatch for the same reason), so a bash
+		// call counts as a mutation too. The flag is read once, by
+		// commitCheckpoint at the turn's end (turn.go's deferred cleanup).
+		if isBash || call.Function.Name == tools.FunctionWriteFile || call.Function.Name == tools.FunctionEditFile || call.Function.Name == tools.FunctionRemove {
+			cs.turnMutated = true
+		}
+		if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
 			// Issue #129 piece 3: record the touched file for the turn-end
 			// lint pass (the per-edit hook is format-only; lint runs once at

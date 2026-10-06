@@ -8,28 +8,35 @@
 //
 //  1. It never touches the user's stash list or the index. `git stash create`
 //     commits the current TRACKED working-tree state to a throwaway commit
-//     and prints its hash; it neither writes to `refs/stash` nor rewrites the
-//     index. `git update-ref` records that commit under a hidden
+//     and prints its hash (or an EMPTY line when the tracked tree is clean);
+//     it neither writes to `refs/stash` nor rewrites the index. `git
+//     update-ref` records that commit under a hidden
 //     `refs/cortex/checkpoints/…` ref. A file the turn deleted and staged
 //     stays staged in the index throughout — the ref only names a tree.
 //
-//  2. On a clean tracked tree `git stash create` prints an EMPTY line — it is
-//     a no-op. Only a turn that actually changed the tracked tree yields a
-//     non-empty hash, so only such turns record a restorable checkpoint. That
-//     is exactly the "at the start of each turn that mutates files" clause:
-//     the snapshot is taken at turn start and a turn that never mutates
-//     records nothing.
+//  2. On a clean tracked tree `git stash create` prints an empty line, so
+//     `git rev-parse HEAD` is used as the snapshot commit instead — the
+//     committed base IS the tree. Only whether the turn MUTATES files
+//     decides whether a checkpoint is recorded, and that is decided at TURN
+//     END (the caller keeps the checkpoint only if the turn actually ran a
+//     file-mutating tool), never by the cleanliness of the tree at turn
+//     start: a clean tree at the start tells you nothing about whether the
+//     turn will mutate, and a dirty tree at the start is common for
+//     read-only turns.
 //
-// Restore is worktree-only: it writes each blob in the snapshot tree back to
-// its working-tree path and removes working-tree files that the index still
-// tracks but the snapshot tree no longer does (a tracked file deleted since
-// the snapshot). It never runs `git read-tree` / `checkout` — both of those
-// rewrite the index, which would violate invariant 1 the moment the user had
-// staged anything. Writing a blob to a path that the turn deleted-and-staged
-// re-materialises the file as UNTRACKED (the staged deletion stays put), so
-// the index is left byte-for-byte. Untracked files the turn created, and
-// `.cortex/` (gitignored, #119), are never in the snapshot tree and are
-// never touched.
+// A snapshot therefore carries two facts: the tracked tree (the commit hash)
+// and the set of UNTRACKED, non-ignored files present at snapshot time (the
+// `git ls-files --others --exclude-standard` listing). Restore uses the tree
+// to write tracked files back, and the untracked set to remove the files the
+// turn CREATED — an untracked file present now that was NOT in the set is a
+// turn creation and is deleted, so pre-existing user untracked files and
+// `.cortex/` (ignored) stay untouched.
+//
+// Restore is worktree-only: it never runs `git read-tree` / `checkout` —
+// both of those rewrite the index, which would violate invariant 1 the
+// moment the user had staged anything. Writing a blob to a path that the
+// turn deleted-and-staged re-materialises the file as UNTRACKED (the staged
+// deletion stays put), so the index is left byte-for-byte.
 package checkpoint
 
 import (
@@ -55,9 +62,9 @@ func RefFor(session, turn string) string {
 
 // Sanitize is the ref-safe-token reduction RefFor applies to each of the
 // session id and turn ordinal. It is exported so the REPL can build the same
-// per-session ref prefix RefFor does (e.g. to enumerate or delete a session's
-// checkpoint refs on /clear) without re-deriving the sanitisation — one
-// place owns the rule.
+// per-session ref prefix RefFor does (e.g. to enumerate, prune, or delete a
+// session's checkpoint refs on /clear) without re-deriving the
+// sanitisation — one place owns the rule.
 func Sanitize(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -86,36 +93,54 @@ func Available(dir string) bool {
 }
 
 // Snapshot commits dir's current tracked working-tree state to a throwaway
-// commit via `git stash create` and records it under ref, returning the
-// commit hash. It returns "" (and no error) when the tracked tree is clean —
-// `git stash create` printed nothing — which the caller treats as "this turn
-// has nothing to undo to yet". It never touches the index or the stash list.
-func Snapshot(dir, ref string) (string, error) {
-	snap, err := gitOut(dir, "stash", "create")
+// commit via `git stash create` (falling back to HEAD's commit when the
+// tracked tree is clean — `git stash create` prints nothing there) and
+// records it under ref, returning the commit hash. It also returns the set
+// of untracked, non-ignored paths present at snapshot time (the `git ls-files
+// --others --exclude-standard` listing) — the baseline Restore needs to tell
+// the files THIS turn created apart from pre-existing user files. It never
+// touches the index or the stash list.
+func Snapshot(dir, ref string) (snap string, untracked []string, err error) {
+	out, err := gitOut(dir, "stash", "create")
 	if err != nil {
-		return "", fmt.Errorf("git stash create: %w", err)
+		return "", nil, fmt.Errorf("git stash create: %w", err)
 	}
-	if strings.TrimSpace(snap) == "" {
-		return "", nil // clean tracked tree: nothing to record
+	if strings.TrimSpace(out) == "" {
+		// Clean tracked tree: the committed base IS the tree. Record HEAD's
+		// commit — the caller still decides whether the turn mutated files
+		// (at turn end) and drops the checkpoint if it did not.
+		out, err = gitOut(dir, "rev-parse", "HEAD")
+		if err != nil {
+			return "", nil, fmt.Errorf("git rev-parse HEAD: %w", err)
+		}
 	}
-	if _, err := gitOut(dir, "update-ref", ref, snap); err != nil {
-		return "", fmt.Errorf("git update-ref %s: %w", ref, err)
+	if _, err := gitOut(dir, "update-ref", ref, out); err != nil {
+		return "", nil, fmt.Errorf("git update-ref %s: %w", ref, err)
 	}
-	return snap, nil
+	untracked, err = untrackedPaths(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("git ls-files --others: %w", err)
+	}
+	return out, untracked, nil
 }
 
-// Restore writes the snapshot tree back to dir's working tree and returns the
-// list of files it changed (sorted, relative to dir). It never touches the
-// index or the stash list:
+// Restore writes the snapshot back to dir's working tree and returns the list
+// of files it changed (sorted, relative to dir). It never touches the index
+// or the stash list:
 //
-//   - every blob in the snapshot tree is written to its working-tree path
-//     (re-materialising a file the turn deleted-and-staged as untracked);
+//   - every BLOB in the snapshot tree whose on-disk content differs from the
+//     snapshot's is rewritten (honouring the tree entry's mode — 100755 keeps
+//     its exec bit, 120000 is re-linked as a symlink); a file the turn
+//     deleted-and-staged is re-materialised as UNTRACKED;
 //   - every working-tree file that the index tracks but the snapshot tree
 //     does not is removed (a tracked file the turn deleted without staging);
+//   - every untracked file present now that was NOT in `untracked` (the set
+//     the snapshot recorded) is removed — the files the turn created.
 //
-// Files the turn created untracked (not in the snapshot tree) and `.cortex/`
-// (gitignored) are left alone.
-func Restore(dir, snap string) ([]string, error) {
+// Files already matching the snapshot are not rewritten and do not appear in
+// the changed list; pre-existing untracked user files (they were in
+// `untracked`) and `.cortex/` (gitignored, never listed) are left alone.
+func Restore(dir string, snap string, untracked []string) ([]string, error) {
 	tree, err := treeEntries(dir, snap)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot tree %s: %w", snap, err)
@@ -127,13 +152,18 @@ func Restore(dir, snap string) ([]string, error) {
 
 	changed := make([]string, 0, len(tree))
 	for _, e := range tree {
-		if e.Type != "blob" {
-			continue // subtrees / gitlinks: a file checkpoint is per-blob
+		switch e.Type {
+		case "blob":
+			rewrote, err := restoreBlob(dir, e)
+			if err != nil {
+				return changed, fmt.Errorf("restore %s: %w", e.Path, err)
+			}
+			if rewrote {
+				changed = append(changed, e.Path)
+			}
+		case "commit":
+			// gitlink (submodule): a file checkpoint is per-blob; skip.
 		}
-		if err := writeBlob(dir, e.Path, e.Blob); err != nil {
-			return changed, fmt.Errorf("restore %s: %w", e.Path, err)
-		}
-		changed = append(changed, e.Path)
 	}
 
 	// Remove tracked-but-deleted files: present in the index, absent from the
@@ -154,18 +184,42 @@ func Restore(dir, snap string) ([]string, error) {
 		changed = append(changed, p)
 	}
 
+	// Remove the files THIS turn created: untracked now, but absent from the
+	// snapshot's untracked baseline. Pre-existing user untracked files were
+	// in the baseline and survive; `.cortex/` is gitignored and was never
+	// listed.
+	baseline := make(map[string]bool, len(untracked))
+	for _, p := range untracked {
+		baseline[p] = true
+	}
+	if others, err := untrackedPaths(dir); err == nil {
+		for _, p := range others {
+			if baseline[p] || snapPaths[p] {
+				continue
+			}
+			if err := removePathRecursive(dir, p); err != nil {
+				return changed, fmt.Errorf("remove created %s: %w", p, err)
+			}
+			changed = append(changed, p)
+		}
+	}
+
 	sort.Strings(changed)
 	return changed, nil
 }
 
-// Prune deletes the oldest checkpoint refs under RefPrefix, keeping the last
-// `keep` (newest first). It is best-effort: a missing git or a missing ref
-// neither errors nor panics — checkpoint bookkeeping must never break a turn.
-func Prune(dir string, keep int) {
+// Prune deletes the oldest checkpoint refs for ONE session, keeping the last
+// `keep` (newest first). It is scoped to the session's ref prefix — another
+// session's refs are never touched, so a concurrent (or lower-sorting)
+// session's history survives. It is best-effort: a missing git or a missing
+// ref neither errors nor panics — checkpoint bookkeeping must never break a
+// turn.
+func Prune(dir, session string, keep int) {
 	if keep < 0 {
 		keep = 0
 	}
-	refs, err := listCheckpointRefs(dir)
+	prefix := RefPrefix + Sanitize(session) + "/"
+	refs, err := listCheckpointRefs(dir, prefix)
 	if err != nil || len(refs) <= keep {
 		return
 	}
@@ -175,14 +229,14 @@ func Prune(dir string, keep int) {
 	}
 }
 
-// listCheckpointRefs returns the checkpoint refs under RefPrefix, newest
-// first. `git for-each-ref` lists names lexicographically; a session's turns
-// are named <session>/<turn> with zero-padded ordinals, so within a session
-// the lexicographic order equals creation order. Reversed, the largest name
-// (newest) leads. Prune drops the tail of this single ordered list; callers
-// keep `keep` large enough that cross-session ordering is not the axis.
-func listCheckpointRefs(dir string) ([]string, error) {
-	out, err := gitOut(dir, "for-each-ref", "--format=%(refname)", RefPrefix)
+// listCheckpointRefs returns the checkpoint refs under prefix (normally one
+// session's RefPrefix+Sanitize(id)+"/"), newest first. `git for-each-ref`
+// lists names lexicographically; a session's turns are named
+// <session>/<turn> with zero-padded ordinals, so within a session the
+// lexicographic order equals creation order. Reversed, the largest name
+// (newest) leads.
+func listCheckpointRefs(dir, prefix string) ([]string, error) {
+	out, err := gitOut(dir, "for-each-ref", "--format=%(refname)", prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -232,24 +286,78 @@ func treeEntries(dir, snap string) ([]treeEntry, error) {
 	return entries, nil
 }
 
-// writeBlob materialises blob at dir/path (creating parent dirs), overwriting
-// any existing file. It is the worktree-only half of Restore: it writes to the
-// filesystem and never touches the index. The blob's bytes are fetched raw
-// (gitBlob) — NOT via gitOut's TrimSpace — because a file's trailing newline
-// is content, not formatting.
-func writeBlob(dir, path, blob string) error {
-	dst := filepath.Join(dir, filepath.FromSlash(path))
+// restoreBlob rewrites one snapshot tree entry to its working-tree path,
+// honouring the entry's mode, and reports whether the working tree actually
+// changed. A 100755 blob is written 0o755; a 120000 entry is replaced with a
+// real symlink whose target is the blob's content; anything else is a
+// 0o644 file. The current file's content is compared to the snapshot's blob
+// first — an unchanged file is left byte-for-byte (and not reported as
+// changed).
+func restoreBlob(dir string, e treeEntry) (bool, error) {
+	contents, err := gitBlob(dir, e.Blob)
+	if err != nil {
+		return false, fmt.Errorf("git cat-file blob %s: %w", e.Blob, err)
+	}
+	dst := filepath.Join(dir, filepath.FromSlash(e.Path))
 	if d := filepath.Dir(dst); d != "" && d != dir {
 		if err := os.MkdirAll(d, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", d, err)
+			return false, fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
-	out, err := gitBlob(dir, blob)
-	if err != nil {
-		return fmt.Errorf("git cat-file blob %s: %w", blob, err)
+	if e.Mode == "120000" {
+		// A symlink in the snapshot tree: re-link it. The blob's bytes are
+		// the link target.
+		if target, ok := readLink(dst); ok && target == string(contents) {
+			return false, nil // already the right symlink
+		}
+		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("remove %s: %w", dst, err)
+		}
+		if err := os.Symlink(string(contents), dst); err != nil {
+			return false, fmt.Errorf("symlink %s: %w", dst, err)
+		}
+		return true, nil
 	}
-	if err := os.WriteFile(dst, out, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", dst, err)
+	if existing, err := os.ReadFile(dst); err == nil && string(existing) == string(contents) {
+		// Content matches the snapshot; keep the file as-is (mode and all).
+		return false, nil
+	}
+	mode := os.FileMode(0o644)
+	if e.Mode == "100755" {
+		mode = 0o755
+	}
+	if err := os.WriteFile(dst, contents, mode); err != nil {
+		return false, fmt.Errorf("write %s: %w", dst, err)
+	}
+	// os.WriteFile preserves the existing file's mode when overwriting, so
+	// explicitly chmod to the snapshot's mode — a turn that stripped the
+	// exec bit (or a non-exec file that gained one) is restored to the
+	// snapshot's permission.
+	if err := os.Chmod(dst, mode); err != nil {
+		return false, fmt.Errorf("chmod %s: %w", dst, err)
+	}
+	return true, nil
+}
+
+// readLink returns the symlink's target (and whether dst is a symlink). It is
+// separate from restoreBlob's error path so a missing file reports "not a
+// symlink" rather than a read error.
+func readLink(dst string) (string, bool) {
+	target, err := os.Readlink(dst)
+	if err != nil {
+		return "", false
+	}
+	return target, true
+}
+
+// removePathRecursive removes dir/path from the working tree — a file, or a
+// directory tree (a turn can create whole untracked directories). It never
+// touches the index. A missing path is not an error.
+func removePathRecursive(dir, path string) error {
+	dst := filepath.Join(dir, filepath.FromSlash(path))
+	err := os.RemoveAll(dst)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", path, err)
 	}
 	return nil
 }
@@ -282,6 +390,26 @@ func indexPaths(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// untrackedPaths returns the working tree's untracked, non-ignored paths —
+// the exact `git ls-files --others --exclude-standard` listing, sorted. This
+// is the baseline a snapshot records and Restore diffs against to find the
+// files the turn created. It reads git's output RAW (no trimming): a path
+// that is a single space is a legal file name and must survive.
+func untrackedPaths(dir string) ([]string, error) {
+	out, err := gitOutRaw(dir, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimRight(line, "\r"); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 // gitIn runs `git <args>` in dir and returns an error on non-zero exit.
 // Output is discarded — callers that need it use gitOut.
 func gitIn(dir string, args ...string) error {
@@ -296,13 +424,23 @@ func gitIn(dir string, args ...string) error {
 // gitOut runs `git <args>` in dir and returns the trimmed stdout, or an error
 // carrying the raw error plus whatever stdout held on non-zero exit.
 func gitOut(dir string, args ...string) (string, error) {
+	out, err := gitOutRaw(dir, args...)
+	return strings.TrimSpace(out), err
+}
+
+// gitOutRaw runs `git <args>` in dir and returns the UNTRIMMED stdout, or an
+// error carrying the raw error plus whatever stdout held on non-zero exit.
+// gitOut is the trimmed convenience for single-value outputs (a hash, a ref
+// list); gitOutRaw is for content-accurate outputs where a leading or
+// trailing space in a line is data (the untracked-path listing).
+func gitOutRaw(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return strings.TrimSpace(string(out)), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return string(out), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return string(out), nil
 }
 
 // gitBlob runs `git cat-file blob <hash>` in dir and returns the blob's raw

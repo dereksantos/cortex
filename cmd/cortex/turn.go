@@ -167,16 +167,29 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// message's masked patterns in as they hit the transcript); carried on
 	// TurnResult.Redactions before the turn returns.
 	cs.redactions = 0
+	// Issue #111: reset the per-turn mutation flag the undo stack's commit
+	// decision reads — a turn that errored or was interrupted before its end
+	// must not leak its flag into the next turn (commitCheckpoint is deferred
+	// and runs on every path, including the early returns).
+	cs.turnMutated = false
 
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
-	// Issue #111: snapshot the working tree BEFORE this turn mutates anything,
-	// so /undo can walk this session's turns back in reverse. Guarded and
-	// non-fatal (a checkpoint failure never breaks the turn), and a no-op on a
-	// clean tracked tree — only a turn that actually mutates files records a
-	// ref (checkpoint.Snapshot returns "" otherwise). The turn ordinal is
-	// already stamped above (cs.turnNo), so the ref names this turn.
+	// Issue #111: snapshot the working tree BEFORE this turn mutates anything.
+	// The snapshot names the tree the turn starts from (HEAD's commit on a
+	// clean tree) and records the hidden ref for this turn's ordinal; it is
+	// not yet on the undo stack — commitCheckpoint at the turn's END decides
+	// whether the turn actually mutated files (turnMutated) and either commits
+	// the snapshot to the stack or drops the recorded ref. Guarded and
+	// non-fatal (a checkpoint failure never breaks the turn). The turn ordinal
+	// is already stamped above (cs.turnNo), so the ref names this turn.
 	cs.recordCheckpoint()
+	// Issue #111: commit the turn's checkpoint at its end no matter how the
+	// turn ends (error, interrupt, clean finalize) — the deferred cleanup
+	// consumes the pending snapshot, so a turn that died mid-mutation still
+	// commits a checkpoint (its mutations are on disk) and a read-only turn
+	// drops its ref.
+	defer cs.commitCheckpoint()
 	// Issue #109: stamp the in-flight turn's start — the status row's elapsed
 	// clock (statusStats's TurnStart). It stays set for the whole turn, so the
 	// row's "· 34s" counts up from here; a turn never clears it, and the next
