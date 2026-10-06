@@ -2239,12 +2239,7 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if attributionNote != "" {
 		result += "\n" + attributionNote
 	}
-	// The note (rewrite + read, issues #201/#209) names what the command
-	// touched and steers to the dedicated tools. It must not break the output
-	// size bound: when the result was truncated, the note is skipped — the
-	// model sees the bounded output, and the steering is already in the tool
-	// declaration and the subagent system prompt.
-	if rewriteNote != "" && !strings.Contains(result, "[output truncated]") {
+	if rewriteNote != "" {
 		result += "\n" + rewriteNote
 	}
 	// Post-edit hook for in-place rewrites (issue #201, step 4): the command

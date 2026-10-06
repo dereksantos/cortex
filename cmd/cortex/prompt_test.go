@@ -622,7 +622,7 @@ func TestDebugPrincipleMirroredInClaudeMD(t *testing.T) {
 // where content lives, then read_file only the needed spans), never to invent
 // or guess file paths, never to re-read content already present in context,
 // and never to use bash to READ files (`cat`/`sed`/`head`) or CREATE them
-// (`cat > f`, `<<` heredocs, `tee`, `/tmp` scratch) — pointing at the
+// (`cat > f`, heredocs, `tee`, `/tmp` scratch) — pointing at the
 // dedicated tools: read_file/outline/grep for reads and write_file/edit_file
 // for writes. The check is on loose keywords (the principle, not the exact
 // wording), so a future rewrite can rephrase without breaking this test as
@@ -638,7 +638,7 @@ func TestDefaultPromptEncodesLocateFirst(t *testing.T) {
 		"bash",       // never use bash to read or create files
 		"cat",        // the bash reader to avoid (reads)
 		"create",     // the ban covers file CREATION, not just reads (#209)
-		"heredoc",    // `<<` heredoc file creation (the `<<` form, spelled out)
+		"heredoc",    // heredoc file creation (spelled out)
 		"tee",        // `tee` file creation
 		"/tmp",       // `/tmp` scratch files
 		"write_file", // the dedicated writer to use for creation
@@ -670,7 +670,7 @@ func TestDefaultPromptEncodesLocateFirstPosition(t *testing.T) {
 
 // TestDefaultPromptEncodesLocateFirstCreateBan pins the issue #209 tightening
 // of the locate-first principle's POSITION: the new file-creation bash ban
-// (`cat > f`/`<<` heredocs/`tee`/`/tmp` scratch, steering to write_file/
+// (`cat > f`/heredocs/`tee`/`/tmp` scratch, steering to write_file/
 // edit_file) must sit in the SAME "# How you work" block as the read ban —
 // the principle is one working-style line, not split across sections. It is a
 // position check on the exact new phrasing, complementing
