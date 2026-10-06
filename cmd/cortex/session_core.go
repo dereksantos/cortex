@@ -289,6 +289,14 @@ type CortexSession struct {
 	// outside a turn.
 	sameActionBlocked map[string]bool
 
+	// checkpoints is the per-turn undo stack (issue #111): the snapshot hashes
+	// this session recorded at the start of each turn that mutated the tracked
+	// tree, in turn order. Scoped to cs.root(), keyed by session id, pruned to
+	// the newest maxCheckpointRefs on append, cleared on /clear and session end
+	// (clearCheckpoints). Nil until the first mutating turn. The turn never
+	// fails because of a checkpoint — recordCheckpoint swallows git errors.
+	checkpoints *checkpointStack
+
 	// taint is the per-turn untrusted-content taint (issue #102): set when
 	// attacker-controllable web content (a fetch_url / web_search result,
 	// detected by its framing marker in coderDispatcher, loop.go) enters the

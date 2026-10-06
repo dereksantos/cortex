@@ -170,6 +170,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
+	// Issue #111: snapshot the working tree BEFORE this turn mutates anything,
+	// so /undo can walk this session's turns back in reverse. Guarded and
+	// non-fatal (a checkpoint failure never breaks the turn), and a no-op on a
+	// clean tracked tree — only a turn that actually mutates files records a
+	// ref (checkpoint.Snapshot returns "" otherwise). The turn ordinal is
+	// already stamped above (cs.turnNo), so the ref names this turn.
+	cs.recordCheckpoint()
 	// Issue #109: stamp the in-flight turn's start — the status row's elapsed
 	// clock (statusStats's TurnStart). It stays set for the whole turn, so the
 	// row's "· 34s" counts up from here; a turn never clears it, and the next
