@@ -854,6 +854,9 @@ type ReadConfig struct {
 	DefaultRangeLines int `json:"default_range_lines"`
 	MaxRangeLines     int `json:"max_range_lines"`
 	MaxReadBytes      int `json:"max_read_bytes"`
+	// ImageMaxBytes caps an image read_file may attach as an image part
+	// (issue #217; internal/tools defaultImageMaxBytes).
+	ImageMaxBytes int `json:"image_max_bytes"`
 }
 
 // GrepConfig overrides grep's caps (internal/tools grepMaxHits/grepLineCap/
@@ -1567,6 +1570,7 @@ func validateConfig(cfg *Config) error {
 		"tools.read.default_range_lines":       cfg.Tools.Read.DefaultRangeLines,
 		"tools.read.max_range_lines":           cfg.Tools.Read.MaxRangeLines,
 		"tools.read.max_read_bytes":            cfg.Tools.Read.MaxReadBytes,
+		"tools.read.image_max_bytes":           cfg.Tools.Read.ImageMaxBytes,
 		"tools.grep.max_hits":                  cfg.Tools.Grep.MaxHits,
 		"tools.grep.line_cap":                  cfg.Tools.Grep.LineCap,
 		"tools.grep.max_output_bytes":          cfg.Tools.Grep.MaxOutputBytes,
@@ -1884,6 +1888,7 @@ func mergeRead(base, over ReadConfig) ReadConfig {
 		DefaultRangeLines: mergeIntField(base.DefaultRangeLines, over.DefaultRangeLines),
 		MaxRangeLines:     mergeIntField(base.MaxRangeLines, over.MaxRangeLines),
 		MaxReadBytes:      mergeIntField(base.MaxReadBytes, over.MaxReadBytes),
+		ImageMaxBytes:     mergeIntField(base.ImageMaxBytes, over.ImageMaxBytes),
 	}
 }
 
@@ -2216,6 +2221,7 @@ func (c *Config) toolLimits() tools.Limits {
 		DefaultRangeLines:    resolveInt(c.Tools.Read.DefaultRangeLines, def.DefaultRangeLines),
 		MaxRangeLines:        resolveInt(c.Tools.Read.MaxRangeLines, def.MaxRangeLines),
 		MaxReadBytes:         resolveInt(c.Tools.Read.MaxReadBytes, def.MaxReadBytes),
+		ImageMaxBytes:        resolveInt(c.Tools.Read.ImageMaxBytes, def.ImageMaxBytes),
 		GrepMaxHits:          resolveInt(c.Tools.Grep.MaxHits, def.GrepMaxHits),
 		GrepLineCap:          resolveInt(c.Tools.Grep.LineCap, def.GrepLineCap),
 		GrepMaxOutputBytes:   resolveInt(c.Tools.Grep.MaxOutputBytes, def.GrepMaxOutputBytes),

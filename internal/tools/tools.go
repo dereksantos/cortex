@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -498,7 +499,10 @@ var ReadFile = newTool(FunctionReadFile,
 		"headings/sections with line spans, whatever the file type supports) comes "+
 		"back instead. With start/end: exactly those 1-indexed lines, which bypasses "+
 		"the size limit — the precise way to pull one declaration after a "+
-		"skeleton/outline/study points you at its line span.",
+		"skeleton/outline/study points you at its line span. An image file "+
+		"(png/jpeg/gif/webp) read whole attaches as an image part for vision "+
+		"models (refused for a text-only model or over the size cap); a ranged "+
+		"read of an image is refused.",
 	objectSchema(map[string]any{
 		"path":  stringProp("Path to the file to read, relative to the working directory."),
 		"start": map[string]any{"type": "integer", "description": "Optional: 1-indexed first line to read. When set, only the line range is returned (the size limit does not apply)."},
@@ -1193,6 +1197,14 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// bounded). This is the navigator's precise pull — project_index/study hands
 	// back a line span, and read_file(path, start, end) reads exactly it.
 	if start, ok := tc.IntArg("start"); ok && start > 0 {
+		// A line range over an image is meaningless (binary bytes), and the
+		// image branch below only fires on whole-file reads — refuse the ranged
+		// case explicitly so a model doesn't get base64 sliced mid-frame (#217).
+		if isImagePath(path, fsPath) {
+			printToolAction(deps, fmt.Sprintf("read_file(%s) → image, range refused", path))
+			return imageRefusal(path, imageExtType(path)) +
+				"line ranges are meaningless over image bytes — read it without start/end to attach it as an image part.", nil
+		}
 		end, hasEnd := tc.IntArg("end")
 		if !hasEnd || end < start {
 			end = start + active.DefaultRangeLines - 1
@@ -1234,7 +1246,81 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 		}
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
+	// Image input (issue #217): a detected image never returns as a text
+	// string — three outcomes, all named with the file type (image.go).
+	if mediaType, ok := detectImage(path, data); ok {
+		return imageReadResult(deps, path, mediaType, data)
+	}
 	return string(data), nil
+}
+
+// imageReadResult decides what an image whole-file read hands back (#217):
+//   - inside a subagent (study/agent) → a refusal: the subagent's engine
+//     never splices image parts onto its tool messages, so an "attached"
+//     marker would tell the model about an image it cannot see.
+//   - a deps that records nothing (no ImageSink owner) → the same refusal:
+//     a marker with no attachment behind it is the same lie.
+//   - over tools.image_max_bytes → a refusal naming type, size, and cap,
+//     pointing at downscaling — no attachment, no partial image.
+//   - a text-only model (deps answers ImageGate false) → a refusal naming
+//     the file type and the base64 escape hatch — no attachment.
+//   - otherwise → the short marker observation with the attachment
+//     recorded on the deps' ImageSink (the dispatching session), so the
+//     dispatcher can splice the image part onto the tool-result message
+//     for the vision model.
+func imageReadResult(deps ToolDeps, path, mediaType string, data []byte) (string, error) {
+	if inSubagent() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (subagent)", path))
+		return imageRefusal(path, mediaType) +
+			"image input isn't available inside a subagent — no image part can reach the subagent's model; read it from the main conversation.", nil
+	}
+	sink, ok := deps.(ImageSink)
+	if !ok {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (no attachment owner)", path))
+		return imageRefusal(path, mediaType) +
+			"this dispatch has nowhere to attach an image part, so the bytes are withheld — read it from a session that can carry one.", nil
+	}
+	if max := active.ImageMaxBytes; len(data) > max {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image too large (%d bytes)", path, len(data)))
+		return imageRefusal(path, mediaType) + fmt.Sprintf(
+			"it is %d bytes, over the %d-byte image cap (tools.image_max_bytes) — downscale or crop it with bash and read the smaller file.",
+			len(data), max), nil
+	}
+	if gate, ok := deps.(ImageGate); ok && !gate.ImageInputEnabled() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (text-only model)", path))
+		return imageRefusal(path, mediaType) +
+			"the bound model does not accept image input, so the bytes are withheld — route the turn to a vision-capable model (models.code.vision), or bash `base64 " + path + "` if you only need the raw encoding.", nil
+	}
+	part, obs := imagePartFor(path, mediaType, data)
+	sink.RecordImage(part)
+	return obs, nil
+}
+
+// isImagePath reports whether a file looks like an image by extension or
+// by magic bytes in its first block (the ranged-read refusal probe —
+// cheap, and it must not read a whole multi-MB file just to ask).
+func isImagePath(displayPath, fsPath string) bool {
+	if _, ok := imageMediaTypes[strings.ToLower(filepath.Ext(displayPath))]; ok {
+		return true
+	}
+	f, err := os.Open(fsPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 12)
+	n, _ := io.ReadFull(f, buf)
+	return sniffImageBytes(buf[:n]) != ""
+}
+
+// imageExtType resolves the MIME type a refusal should name for a path
+// already known to be an image; a magic-only file with an unknown
+// extension falls back to the generic image type.
+func imageExtType(displayPath string) string {
+	if mt, ok := imageMediaTypes[strings.ToLower(filepath.Ext(displayPath))]; ok {
+		return mt
+	}
+	return "image"
 }
 
 // directoryListing is the read_file response for a directory (issue #142): a

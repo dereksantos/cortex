@@ -27,6 +27,11 @@ type Limits struct {
 	MaxRangeLines     int
 	MaxReadBytes      int
 
+	// ImageMaxBytes caps the raw size of an image read_file may attach as
+	// an image content part (tools.image_max_bytes, issue #217); a larger
+	// file is refused with the byte size and the cap named.
+	ImageMaxBytes int
+
 	GrepMaxHits        int
 	GrepLineCap        int
 	GrepMaxOutputBytes int
@@ -65,6 +70,8 @@ func DefaultLimits() Limits {
 		MaxRangeLines:     defaultMaxRangeLines,
 		MaxReadBytes:      defaultMaxReadBytes,
 
+		ImageMaxBytes: defaultImageMaxBytes,
+
 		GrepMaxHits:        defaultGrepMaxHits,
 		GrepLineCap:        defaultGrepLineCap,
 		GrepMaxOutputBytes: defaultGrepMaxOutputBytes,
@@ -99,6 +106,8 @@ func Configure(l Limits) {
 		DefaultRangeLines:    orDefault(l.DefaultRangeLines, def.DefaultRangeLines),
 		MaxRangeLines:        orDefault(l.MaxRangeLines, def.MaxRangeLines),
 		MaxReadBytes:         orDefault(l.MaxReadBytes, def.MaxReadBytes),
+
+		ImageMaxBytes:        orDefault(l.ImageMaxBytes, def.ImageMaxBytes),
 		GrepMaxHits:          orDefault(l.GrepMaxHits, def.GrepMaxHits),
 		GrepLineCap:          orDefault(l.GrepLineCap, def.GrepLineCap),
 		GrepMaxOutputBytes:   orDefault(l.GrepMaxOutputBytes, def.GrepMaxOutputBytes),

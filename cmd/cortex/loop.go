@@ -84,6 +84,19 @@ type Toolset struct {
 	// turn has already answered or is being recovered, and there the wire
 	// already carries the demoted stubs from the main loop's hook.
 	BeforeSend func(*AgentRequest)
+	// SpliceImages, when non-nil, is called on every tool-result message
+	// just before it is appended (issue #217): an image observation's
+	// pending attachment (tools.TakeImageObservation) moves onto the
+	// message as wire Parts and to the session's side-car, but only while
+	// the vision verdict (the second argument) holds. nil = image parts
+	// never splice (subagents, tests) — the tool result stays the plain
+	// marker/observation string.
+	SpliceImages func(msg *Message)
+	// WriteImageSideCar is the append-time half of SpliceImages (#217):
+	// called right after it with the index the tool-result message is
+	// about to be appended at, so the image's on-disk side-car lands under
+	// the same citation-space index recall resolves. nil skips the write.
+	WriteImageSideCar func(msg *Message, abs int)
 	// Finalize selects the forced-finalize closing (see FinalizeStyle). Zero
 	// value = FinalizeSubagent, so subagent callers need no change.
 	Finalize FinalizeStyle
@@ -705,7 +718,33 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				}
 			}
 			stats.ReadBytes += len(obs)
-			appendMsg(Message{Role: RoleTool, ToolCallID: call.ID, Content: obs})
+			toolMsg := Message{Role: RoleTool, ToolCallID: call.ID, Content: obs}
+			// Image input (#217): an image observation's attachment (the
+			// data URI read_file recorded for this dispatch) rides the
+			// tool-result message as wire Parts, and its bytes go to the
+			// per-session side-car so recall can name them after the live
+			// Parts are gone. The coder wires this; a text-only model never
+			// got an attachment (the tool refused it) and the wire gate
+			// backstops anything else.
+			if ts.SpliceImages != nil {
+				ts.SpliceImages(&toolMsg)
+				// The side-car key is the index appendMsg is about to give
+				// this message — for the coder (cs.Append) the request's
+				// length BEFORE the append, which equals its transcript
+				// position 1:1; measuring after would be one past it and
+				// recall would look up an index no side-car was written
+				// under (#217).
+				sideCarIdx := len(req.Messages)
+				appendMsg(toolMsg)
+				// The append-time half of the side-car write (#217): with
+				// appendMsg done, write under the index the message
+				// actually landed at — the key recall's citations resolve.
+				if ts.WriteImageSideCar != nil {
+					ts.WriteImageSideCar(&toolMsg, sideCarIdx)
+				}
+			} else {
+				appendMsg(toolMsg)
+			}
 			if ts.AfterToolResult != nil {
 				ts.AfterToolResult()
 			}
