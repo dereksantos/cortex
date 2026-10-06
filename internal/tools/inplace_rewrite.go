@@ -72,6 +72,7 @@ const (
 	rewriteFormRedirect rewriteForm = "redirect"
 	rewriteFormInPlace  rewriteForm = "in-place"
 	rewriteFormScript   rewriteForm = "script"
+	rewriteFormRead     rewriteForm = "read"
 )
 
 type rewriteTarget struct {
@@ -104,7 +105,9 @@ var (
 // detectInPlaceRewrites scans command (already rewritten by the attribution
 // backstop — the command the gate classified is the command that runs) and
 // returns the rewrite targets it can see, in first-occurrence order,
-// de-duplicated by raw path.
+// de-duplicated by raw path. A command whose only form is a READ (plain cat
+// / head / tail / tac, sed/grep without a write flag, a piped head/tail) has
+// NO rewrite targets — its targets carry rewriteFormRead (issue #209).
 func detectInPlaceRewrites(command string) []rewriteTarget {
 	var out []rewriteTarget
 	seen := map[string]bool{}
@@ -128,11 +131,18 @@ func detectInPlaceRewrites(command string) []rewriteTarget {
 	// data, not a redirect), and it runs AFTER the binary/argument scan for
 	// the same command, so targets appear in first-occurrence order within
 	// the command (the sed -i target before the redirect target in
-	// `sed -i 's/x/y/' f.go && cat f.go > copy.go`).
+	// `sed -i 's/x/y/' f.go && cat f.go > copy.go`). The read scan runs in
+	// the same per-part pass, after the rewrite scan: a command that REWRITES
+	// (sed -i, ed, perl -i, gawk -i, a script -c, a redirect) uses no read
+	// binary, so scanReadPart finds nothing to add — and a sed -i's file is
+	// its OUTPUT, never a read target. Only a command that reads (plain cat,
+	// head, tail, tac, sed/grep without a write flag, a piped head/tail) has
+	// a read binary, so its file arguments are named with rewriteFormRead.
 	for _, part := range strings.FieldsFunc(stripQuotedRegions(command), func(r rune) bool {
 		return r == '|' || r == '&' || r == ';' || r == '\n' || r == '\r'
 	}) {
 		scanRewritePart(part, add)
+		scanReadPart(part, add)
 	}
 	// Redirects are scanned on the original (un-stripped) command, split on
 	// the same operators but quote-aware so a `;` inside a quoted script
@@ -417,6 +427,118 @@ func scanScriptC(args []shellWord, add func(string, rewriteForm)) {
 	}
 }
 
+// readBins are the binaries whose FILE arguments are READ (not written): a
+// plain cat / head / tail / tac, and sed / grep without their write forms
+// (sed -i / ed / perl -i / gawk -i are REWRITES, handled by the rewrite
+// scan, so they never reach the read scan as readBins). The read scan names
+// their file arguments with rewriteFormRead (issue #209). `grep` is always a
+// read (it has no in-place mode), and `head`/`tail`/`tac` read their file
+// list (tail -f is excluded by scanReadPart's -f check).
+var readBins = map[string]bool{
+	"cat": true, "head": true, "tail": true, "tac": true,
+	"sed": true, "grep": true,
+}
+
+// scanReadPart scans one simple command's binary + arguments (no shell
+// metacharacters remain — the caller split on them) and names its file
+// arguments as READ targets (rewriteFormRead, issue #209) when the binary is
+// a reader. A command that REWRITES (sed -i, ed, perl -i, gawk -i, a script
+// -c, a redirect) never reaches the read scan: its binary is not a readBin,
+// so nothing is added. The file arguments are the same bare-file words the
+// rewrite scan names (isBareFile), so a sed -i's file (its OUTPUT) is never
+// a read target.
+func scanReadPart(part string, add func(string, rewriteForm)) {
+	words, ok := splitSimpleCommand(part)
+	if !ok {
+		return
+	}
+	if len(words) < 2 {
+		return
+	}
+	// A leading VAR=val is an env-mutated invocation (possibly several);
+	// the binary is the first word without an `=`. Words with an `=` are
+	// never the binary. (The rewrite scan does the same offset.)
+	offset := 0
+	for offset < len(words) && strings.Contains(words[offset].val, "=") {
+		offset++
+	}
+	if offset >= len(words) {
+		return
+	}
+	bin := lastPathElem(words[offset].val)
+	args := words[offset+1:]
+	if !readBins[bin] {
+		return // not a reader (a rewrite, an interpreter, or an unknown bin)
+	}
+	// `head`/`tail`/`tac` consume their leading flags (so `-n 40`'s argument
+	// is not a file); `-f` (tail's follow mode) names no file to read.
+	// `sed`/`grep` consume their leading flags + scripts (so `sed -n '2,4p'`'s
+	// script is not a file). `cat` has no flags that consume a file argument,
+	// so its file list is everything after the binary.
+	i := 0
+	switch bin {
+	case "head", "tail", "tac":
+		for i < len(args) {
+			v := args[i].val
+			if !strings.HasPrefix(v, "-") || v == "-" {
+				break
+			}
+			if v == "-f" {
+				return // tail -f: follow mode, no file to read
+			}
+			// Flags that take a value (-n, -c, -k) consume their argument.
+			if v == "-n" || v == "-c" || v == "-k" || v == "--lines" ||
+				v == "--bytes" || v == "--sleep-interval" || v == "--quiet" ||
+				v == "--silent" || v == "--verbose" {
+				i++
+			}
+			i++
+		}
+	case "sed":
+		for i < len(args) {
+			v := args[i].val
+			if !strings.HasPrefix(v, "-") || v == "-" {
+				break
+			}
+			if v == "-i" || sedInPlaceRe.MatchString(v) || v == "--in-place" || strings.HasPrefix(v, "--in-place=") {
+				return // sed -i: a REWRITE (handled by the rewrite scan)
+			}
+			if (v == "-e" || v == "-f") && i+1 < len(args) {
+				i++ // the script argument
+			}
+			i++
+		}
+	case "grep":
+		hasPatternFlag := false
+		for i < len(args) {
+			v := args[i].val
+			if !strings.HasPrefix(v, "-") || v == "-" {
+				break
+			}
+			// -e/-f take a pattern argument; -A/-B/-C take a line count.
+			if v == "-e" || v == "-f" {
+				hasPatternFlag = true
+				i++ // the pattern argument
+			}
+			if (v == "-A" || v == "-B" || v == "-C") && i+1 < len(args) {
+				i++ // the line-count argument
+			}
+			i++
+		}
+		// The first non-flag word is the PATTERN (unless it came via -e/-f),
+		// so skip it; the rest are the files. `grep -A 5 TODO inspect.go`:
+		// -A eats 5, TODO is the pattern, inspect.go is the file.
+		if !hasPatternFlag && i < len(args) && isBareFile(args[i].val) {
+			i++
+		}
+	}
+	for ; i < len(args); i++ {
+		if isBareFile(args[i].val) {
+			add(args[i].val, rewriteFormRead)
+		}
+	}
+}
+
 // scanRedirects walks one simple command's raw bytes and names the target of
 // every unquoted `> TARGET` / `>> TARGET`. It is separate from
 // splitSimpleCommand, which treats `>` as a shell operator it refuses to
@@ -530,28 +652,199 @@ func rewriteTargetDisplay(raw, workdir string) string {
 	return raw
 }
 
+// hasRewriteTarget reports whether command names at least one target a
+// REWRITE reached (in-place, redirect, or script form) — as opposed to a
+// read-only target (rewriteFormRead). The bash tool's grep no-match
+// special-case ("no matches") is suppressed when a command changed
+// something, but a pure read (cat / head / sed -n / grep -A) changes
+// nothing, so a read-only note must NOT suppress it (issue #209 step 1).
+func hasRewriteTarget(command string) bool {
+	for _, t := range detectInPlaceRewrites(command) {
+		if t.form != rewriteFormRead {
+			return true
+		}
+	}
+	return false
+}
+
+// heredocDataBins are binaries for which a heredoc (`<<`) is PROGRAM DATA, not
+// a file being created: the interpreter/script binaries (python/ruby/node/
+// perl/awk/sed/ed — the heredoc is the source they execute) and tee/cp/mv
+// (whose file arguments are written by their own machinery, not by a heredoc
+// probe). A heredoc on any OTHER binary — a `cat`, a bare shell, a probe
+// (`cat <<'EOF'` to test whether a file exists) — names a file being created
+// and is steered to write_file (issue #209 step 3). A `<<<` here-string is
+// inline input data, never a file, and is never a create target.
+var heredocDataBins = map[string]bool{
+	"python": true, "python2": true, "python3": true,
+	"ruby": true, "node": true, "perl": true,
+	"awk": true, "sed": true, "ed": true,
+	"tee": true, "cp": true, "mv": true,
+}
+
+// hasHeredocCreate reports whether command has a `<<` heredoc in a simple
+// command whose binary is not one of heredocDataBins (issue #209 step 3). It
+// returns true for a `cat <<'EOF'` probe (the model writing a file via the
+// shell) and false for `python3 <<EOF` (the heredoc is the program),
+// `tee file <<EOF`, and a `<<` inside a quoted argument (`git commit -m 'x
+// << y'`). `<<<` here-strings are ignored (inline data, never a file).
+func hasHeredocCreate(command string) bool {
+	// The command scan is per-simple-command, split on the same operators the
+	// rewrite scan uses, but quote-aware (splitQuoteAware) so a `<<` inside a
+	// quoted string — the `git commit -m 'x << y'` case — is data, not a
+	// heredoc. A real heredoc is always unquoted shell syntax, so scanning the
+	// original (un-stripped) parts finds it; the heredoc BODY may itself
+	// contain operators and quoted text, but the `<<` operator precedes the
+	// body, so the binary + `<<` are seen before any body byte.
+	for _, part := range splitQuoteAware(command) {
+		if hasHeredocCreatePart(part) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasHeredocCreatePart reports whether one simple command (already split on
+// the simple-command operators) has an unquoted `<<` heredoc whose binary is
+// not a heredocDataBin. The binary is extracted from the raw first word
+// (past any VAR=val env prefix); the part is then scanned forward from the
+// binary for an unquoted `<<` that is not part of a `<<<` here-string (the
+// third `<` disqualifies it). Quoted regions are skipped (a `<<` inside quotes
+// is data). `splitSimpleCommand` is not used here: it refuses `<` as a shell
+// operator, but a heredoc's `<<` is exactly that.
+func hasHeredocCreatePart(part string) bool {
+	// Extract the binary: the first word without an `=` (a leading VAR=val
+	// env prefix is skipped). We walk the raw bytes — splitSimpleCommand
+	// refuses `<`, which a heredoc's `<<` is.
+	bin := ""
+	i := 0
+	for i < len(part) {
+		for i < len(part) && (part[i] == ' ' || part[i] == '\t') {
+			i++
+		}
+		wstart := i
+		for i < len(part) && part[i] != ' ' && part[i] != '\t' && part[i] != '\n' {
+			i++
+		}
+		word := part[wstart:i]
+		if word == "" {
+			break
+		}
+		if !strings.Contains(word, "=") {
+			// A word containing a heredoc operator (`<<`) is not a binary —
+			// it is the heredoc itself (a bare `<<EOF` with no command). We
+			// cannot name a create without a binary, so return false.
+			if strings.Contains(word, "<<") {
+				return false
+			}
+			bin = word
+			break
+		}
+	}
+	if bin == "" {
+		return false
+	}
+	bin = lastPathElem(bin)
+	if heredocDataBins[bin] {
+		return false // the heredoc is program data, not a file create
+	}
+	// Scan the part for an unquoted `<<` heredoc. The heredoc body may start
+	// on the NEXT line (after a newline), so we walk through newlines and
+	// backslash-continuations until we find a `<<` (not `<<<`) or reach the
+	// end. Quoted regions are skipped.
+	heredoc := false
+	j := 0
+	for j < len(part) {
+		c := part[j]
+		switch c {
+		case '\'':
+			j = skipQuoted(part, j, '\'')
+		case '"':
+			j = skipQuoted(part, j, '"')
+		case '\\':
+			j += 2
+			if j > len(part) {
+				j = len(part)
+			}
+		case '\n', '\r':
+			j++
+		case '<':
+			k := j + 1
+			if k < len(part) && part[k] == '<' {
+				if k+1 < len(part) && part[k+1] == '<' {
+					j = k + 1 // `<<<` here-string: inline data, not a heredoc
+					continue
+				}
+				heredoc = true
+				j = k
+			}
+		}
+		if heredoc {
+			break
+		}
+		j++
+	}
+	return heredoc
+}
+
 // inPlaceRewriteNote renders the model-facing note for one bash command that
-// rewrites files (issue #201): it names the touched targets — workdir-relative
-// when a workdir is anchored, so the model can re-do the change with
-// edit_file/write_file on the same path it uses for every other edit — and
-// steers to the edit tools, whose diff display and post-edit hook a scripted
-// edit skips. "" when the command names no rewrite target; the caller
-// (bash) appends it to the result on both the run and the refused paths.
+// touches files (issue #201 rewrites, issue #209 reads). It names the touched
+// targets — workdir-relative when a workdir is anchored, so the model can act
+// on the same path it uses everywhere — and steers to the right tool for each
+// form: rewrite targets (in-place, redirect, script) steer to
+// edit_file/write_file (diff display + post-edit hook), read targets (plain
+// cat/head/tail/tac/sed/grep) steer to read_file/outline/grep (the dedicated
+// readers a bash shell command skips). One combined note when the command has
+// both kinds. "" when the command names no target at all; the caller (bash)
+// appends it to the result on both the run and the refused paths.
 func inPlaceRewriteNote(deps ToolDeps, command string) string {
 	targets := detectInPlaceRewrites(command)
-	if len(targets) == 0 {
+	// A heredoc create (issue #209 step 3) may fire even when the rewrite
+	// scan names no targets (a `cat <<'EOF'` probe names no read or rewrite
+	// target — the heredoc is the create, not a file argument).
+	heredocCreate := hasHeredocCreate(command)
+	if len(targets) == 0 && !heredocCreate {
 		return ""
+	}
+	var rewriteTargets, readTargets []rewriteTarget
+	for _, t := range targets {
+		if t.form == rewriteFormRead {
+			readTargets = append(readTargets, t)
+		} else {
+			rewriteTargets = append(rewriteTargets, t)
+		}
 	}
 	wd := workdirOf(deps)
 	var b strings.Builder
-	b.WriteString("note: this command rewrites file(s) in place: ")
-	for i, t := range targets {
-		if i > 0 {
-			b.WriteString(", ")
+	if len(rewriteTargets) > 0 {
+		b.WriteString("note: this command rewrites file(s) in place: ")
+		for i, t := range rewriteTargets {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(rewriteTargetDisplay(t.raw, wd))
 		}
-		b.WriteString(rewriteTargetDisplay(t.raw, wd))
+		b.WriteString(" — use edit_file (or write_file for a whole-file rewrite) for file edits: they show the diff and run the post-edit hook, which scripted edits skip.")
 	}
-	b.WriteString(" — use edit_file (or write_file for a whole-file rewrite) for file edits: they show the diff and run the post-edit hook, which scripted edits skip.")
+	if len(readTargets) > 0 {
+		if len(rewriteTargets) > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString("note: this command reads file(s) via the shell: ")
+		for i, t := range readTargets {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(rewriteTargetDisplay(t.raw, wd))
+		}
+		b.WriteString(" — use read_file (or outline/grep) for file reads: they are the dedicated readers, sized and quote-aware, that a bash shell command skips.")
+	}
+	if heredocCreate {
+		if len(rewriteTargets) > 0 || len(readTargets) > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString("note: this command creates a file via a heredoc — use write_file for new files: it shows the diff and runs the post-edit hook, which a heredoc skips.")
+	}
 	return b.String()
 }
 

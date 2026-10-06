@@ -56,12 +56,14 @@ You have a persistent memory: named notes you've written in earlier sessions, ma
 const debugWorkingStylePrinciple = "Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code."
 
 // locateFirstPrinciple is the issue #142 locate-first working-style
-// principle — a const so CLAUDE.md's "The agent's tools" section mirrors the
-// EXACT same text (the docs describe the guidance the model actually
-// receives, so the two can't drift apart). It is spliced into SystemPrompt
-// after the debugging principle (see the ` + locateFirstPrinciple + `
-// above), keeping it in the "# How you work" block.
-const locateFirstPrinciple = "Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers."
+// principle (tightened for issue #209) — a const so CLAUDE.md's "The agent's
+// tools" section mirrors the EXACT same text (the docs describe the guidance
+// the model actually receives, so the two can't drift apart). It is spliced
+// into SystemPrompt after the debugging principle (see the ` +
+// locateFirstPrinciple + ` above), keeping it in the "# How you work" block.
+// The bash ban covers both READS (cat/sed/head) and CREATES (cat > f,
+// heredocs, tee, /tmp scratch), steering to the dedicated tools.
+const locateFirstPrinciple = "Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/`<<` heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers."
 
 // verifyBeforeFixPrinciple is the issue #178 verify-before-fix principle —
 // a const so every surface that restates the same idea (the planning

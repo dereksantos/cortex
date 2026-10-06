@@ -23,7 +23,7 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 		{"sed -i with -e script", `sed -i -e 's/a/b/' f.go g.go`, []string{"f.go", "g.go"}},
 		{"sed -i backup suffix form", `sed -i.bak 's/x/y/' f.go`, []string{"f.go"}},
 		{"sed --in-place", `sed --in-place 's/x/y/' f.go`, []string{"f.go"}},
-		{"sed without -i only reads", `sed -n '2,4p' f.go`, nil},
+		{"sed without -i only reads", `sed -n '2,4p' f.go`, []string{"f.go"}},
 		{"ed in-place", `ed -s f.go`, []string{"f.go"}},
 		{"ed with command args", `ed -s -n f.go`, []string{"f.go"}},
 		{"perl -pi in place", `perl -pi -e 's/x/y/g' internal/tools/golden_test.go`, []string{"internal/tools/golden_test.go"}},
@@ -44,6 +44,23 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 		{"append redirect", `echo x >> log.txt`, []string{"log.txt"}},
 		{"two redirects", `awk '{print}' a > one.txt && awk '{print}' b > two.txt`, []string{"one.txt", "two.txt"}},
 		{"chained sed then redirect", `sed -i 's/x/y/' f.go && cat f.go > copy.go`, []string{"f.go", "copy.go"}},
+		// Issue #209 read paths: plain readers name their file arguments as
+		// read targets (rewriteFormRead), not as rewrites.
+		{"cat reads a file", `cat internal/tools/inplace_rewrite.go`, []string{"internal/tools/inplace_rewrite.go"}},
+		{"cat -A reads a file (issue #207)", `cat -A inspect.go`, []string{"inspect.go"}},
+		{"head -n reads a file", `head -n 40 inspect.go`, []string{"inspect.go"}},
+		{"head with flags", `head -20 inspect.go`, []string{"inspect.go"}},
+		{"tail -f follows, no read target", `tail -f journal.jsonl`, nil},
+		{"tac reads a file", `tac inspect.go`, []string{"inspect.go"}},
+		{"sed -n reads a file (issue #207)", `sed -n '48,65p' inspect.go`, []string{"inspect.go"}},
+		{"sed -n with range flag", `sed -n '10,20p' inspect.go`, []string{"inspect.go"}},
+		{"grep -A reads a file (issue #207)", `grep -A 5 TODO inspect.go`, []string{"inspect.go"}},
+		{"grep -A with file arg after pattern", `grep -A 5 -e TODO inspect.go`, []string{"inspect.go"}},
+		{"grep -C reads a file", `grep -C 3 TODO inspect.go`, []string{"inspect.go"}},
+		{"piped head reads a file (issue #203)", `git log | head -40`, nil},
+		{"sed -i then cat reads both (read+rewrite)", `sed -i 's/x/y/' f.go && cat f.go`, []string{"f.go"}},
+		{"env-prefixed cat reads", `LC_ALL=C cat f.go`, []string{"f.go"}},
+		{"path-qualified cat reads", `/usr/bin/cat f.go`, []string{"f.go"}},
 		{"absolute path target", `sed -i 's/x/y/' /repo/f.go`, []string{"/repo/f.go"}},
 		{"dedupe by raw path", `sed -i 's/x/y/' f.go; sed -i 's/a/b/' f.go`, []string{"f.go"}},
 		{"quoted redirect target keeps quotes in the note", `echo x > "out file.txt"`, []string{`"out file.txt"`}},
@@ -60,6 +77,94 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 				if got[i].raw != w {
 					t.Errorf("target %d = %q, want %q (cmd %q)", i, got[i].raw, w, tc.cmd)
 				}
+			}
+		})
+	}
+}
+
+// TestDetectReadPathsForm pins the FORM of issue #209's read targets: a plain
+// reader names its file arguments as rewriteFormRead, a rewrite names them as
+// an in-place/redirect/script form, and a command that does both (sed -i then
+// cat) carries one of each. Pinning the form (not just the raw path) catches a
+// regression that re-labels a read as a rewrite — the note that steers to
+// read_file/outline/grep (step 2) is keyed on this form, so a mis-label would
+// silently drop the read steer.
+func TestDetectReadPathsForm(t *testing.T) {
+	cases := []struct {
+		name  string
+		cmd   string
+		forms map[string]rewriteForm // raw path -> expected form
+	}{
+		{"cat is a read", `cat inspect.go`, map[string]rewriteForm{"inspect.go": rewriteFormRead}},
+		{"sed -n is a read", `sed -n '48,65p' inspect.go`, map[string]rewriteForm{"inspect.go": rewriteFormRead}},
+		{"grep -A is a read", `grep -A 5 TODO inspect.go`, map[string]rewriteForm{"inspect.go": rewriteFormRead}},
+		{"sed -i is a rewrite, not a read", `sed -i 's/x/y/' inspect.go`, map[string]rewriteForm{"inspect.go": rewriteFormInPlace}},
+		{"perl -pi is a rewrite, not a read", `perl -pi -e 's/x/y/' inspect.go`, map[string]rewriteForm{"inspect.go": rewriteFormInPlace}},
+		{"redirect is a rewrite, not a read", `cat inspect.go > copy.go`, map[string]rewriteForm{"copy.go": rewriteFormRedirect}},
+		{"sed -i then cat: rewrite + read of the same file", `sed -i 's/x/y/' f.go && cat f.go`, map[string]rewriteForm{"f.go": rewriteFormInPlace}},
+		{"python3 -c is a script, not a read", `python3 -c 'open(sys.argv[1],"w")' f.go`, map[string]rewriteForm{"f.go": rewriteFormScript}},
+		{"piped head: no target at all", `git log | head -40`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := detectInPlaceRewrites(tc.cmd)
+			if len(got) != len(tc.forms) {
+				t.Fatalf("detectInPlaceRewrites(%q) = %v, want %v", tc.cmd, got, tc.forms)
+			}
+			for _, tgt := range got {
+				want, ok := tc.forms[tgt.raw]
+				if !ok {
+					t.Errorf("unexpected target %q in %v (cmd %q)", tgt.raw, got, tc.cmd)
+					continue
+				}
+				if tgt.form != want {
+					t.Errorf("target %q form = %q, want %q (cmd %q)", tgt.raw, tgt.form, want, tc.cmd)
+				}
+			}
+		})
+	}
+}
+
+// TestHasHeredocCreate pins issue #209 step 3's create-path scanner: a `<<`
+// heredoc in a simple command whose binary is not a known interpreter/
+// tee/cp/mv (where the heredoc is program data) is a file create and is
+// flagged; a `<<<` here-string, a heredoc on a known interpreter, and a `<<`
+// inside a quoted argument are NOT.
+func TestHasHeredocCreate(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"cat heredoc probe is a create", "cat <<'EOF'\nhello\nEOF", true},
+		{"bare cat heredoc is a create", "cat <<EOF\nhello\nEOF", true},
+		{"echo heredoc is a create", "echo <<'EOF'\ndata\nEOF", true},
+		{"bare-shell heredoc is not flagged (no binary)", "<<EOF\ndata\nEOF", false},
+		{"cat file > x is a redirect, not a heredoc", `cat file > x.txt`, false},
+		// Interpreter/script heredocs: the heredoc is program data, not a file.
+		{"python heredoc is program data", "python3 <<EOF\nprint('x')\nEOF", false},
+		{"awk heredoc is program data", "awk <<'EOF'\nprint(1)\nEOF", false},
+		{"sed heredoc is program data", "sed <<'EOF'\np\nEOF", false},
+		{"perl heredoc is program data", "perl <<'EOF'\nprint 1\nEOF", false},
+		{"node heredoc is program data", "node <<'EOF'\nconsole.log(1)\nEOF", false},
+		{"ed heredoc is program data", "ed <<'EOF'\np\nEOF", false},
+		// tee/cp/mv: the file is written by their own machinery.
+		{"tee heredoc is not a create", "tee out.txt <<EOF\nhello\nEOF", false},
+		{"cp with heredoc is not a create", "cp - <<EOF\nhello\nEOF out.txt", false},
+		{"mv with heredoc is not a create", "mv - <<EOF\nhello\nEOF out.txt", false},
+		// A `<<<` here-string is inline data, never a file.
+		{"here-string is not a create", `echo <<< "data"`, false},
+		// A `<<` inside a quoted argument is data, not a heredoc.
+		{"quoted << is not a heredoc", `git commit -m 'x << y'`, false},
+		// No heredoc at all.
+		{"plain go test", `go test ./...`, false},
+		{"echo without heredoc", `echo hello`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasHeredocCreate(tc.cmd)
+			if got != tc.want {
+				t.Errorf("hasHeredocCreate(%q) = %v, want %v", tc.cmd, got, tc.want)
 			}
 		})
 	}
@@ -84,7 +189,6 @@ func TestDetectInPlaceRewrites_NoFalsePositives(t *testing.T) {
 		{"plain awk only reads its file list", `awk 'NR>3' a.go`},
 		{"awk with -v flag only reads", `awk -v N=3 'NR>N' a.go`},
 		{"perl -c compile-checks (reads) a file, never rewrites", `perl -c f.pl`},
-		{"sed mentioning a file in the script is NOT the target", `sed -n '/def f/:q' f.py`},
 		{"python -c mentioning a path in the script only", `python3 -c 'print(open("internal/tools/attribution.go").read())'`},
 		{"$VAR target is unknowable", `sed -i 's/x/y/' $FILE`},
 		{"empty command", `   `},
@@ -119,6 +223,77 @@ func TestInPlaceRewriteNote(t *testing.T) {
 		{"outside-workdir target keeps raw spelling", `sed -i 's/x/y/' /elsewhere/f.go`, "/repo", []string{"/elsewhere/f.go"}},
 		{"multiple targets in order", `sed -i 's/x/y/' a.go && cat a > b.txt`, "", []string{"a.go", "b.txt"}},
 		{"script target named", `python3 -c 'open(sys.argv[1],"w")' f.go`, "", []string{"f.go"}},
+		// Issue #209 read targets: named and steered to read_file/outline/grep.
+		{"cat read target named", `cat inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+			"outline/grep",
+		}},
+		{"head read target named", `head -n 40 inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+		}},
+		{"sed -n read target named", `sed -n '48,65p' inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+		}},
+		{"grep -A read target named", `grep -A 5 TODO inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+		}},
+		{"tac read target named", `tac inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+		}},
+		{"tail read target named", `tail -n 20 inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+		}},
+		{"cat -A read target named (issue #207)", `cat -A inspect.go`, "", []string{
+			"inspect.go",
+			"read_file",
+		}},
+		{"combined read+rewrite note", `sed -i 's/x/y/' f.go && cat g.go`, "", []string{
+			"rewrites file(s) in place",
+			"read_file",
+			"edit_file",
+		}},
+		// No-false-positives: these are NOT read targets (rewrites or no file).
+		{"perl -pi is a rewrite, not a read", `perl -pi -e 's/x/y/' inspect.go`, "", []string{
+			"edit_file",
+		}},
+		{"sed -i is a rewrite, not a read", `sed -i 's/x/y/' inspect.go`, "", []string{
+			"edit_file",
+		}},
+		{"tail -f is not a read target", `tail -f journal.jsonl`, "", nil},
+		{"> file is a redirect, not a read", `echo x > out.txt`, "", []string{
+			"edit_file",
+		}},
+		{"git show | head is not a read target", `git show | head -40`, "", nil},
+		{"go test is not a read target", `go test ./...`, "", nil},
+		// Issue #209 step 3 heredoc create: a `<<` on a non-interpreter binary
+		// is a file create — steer to write_file.
+		{"cat heredoc probe is a create", "cat <<'EOF'\nhello\nEOF", "", []string{
+			"creates a file via a heredoc",
+			"write_file",
+		}},
+		{"bare cat heredoc is a create", "cat <<EOF\nhello\nEOF", "", []string{
+			"creates a file via a heredoc",
+			"write_file",
+		}},
+		// Not creates: the heredoc is program data (a known interpreter) or a
+		// here-string, or a quoted `<<` (data, not a heredoc), or a redirect
+		// (already covered by the rewrite note).
+		{"interpreter heredoc is not a create", "python3 <<EOF\nprint('x')\nEOF", "", nil},
+		{"awk heredoc is not a create", "awk <<'EOF'\nprint(1)\nEOF", "", nil},
+		{"sed heredoc is not a create", "sed <<'EOF'\np\nEOF", "", nil},
+		{"tee heredoc is not a create", "tee out.txt <<EOF\nhello\nEOF", "", nil},
+		{"cp with heredoc is not a create", "cp - <<EOF\nhello\nEOF out.txt", "", nil},
+		{"here-string is not a create", `echo <<< "data"`, "", nil},
+		{"quoted << is not a heredoc", `git commit -m 'x << y'`, "", nil},
+		{"cat file > x is a redirect, not a heredoc create", `cat file > x.txt`, "", []string{
+			"edit_file",
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -383,6 +558,9 @@ func TestBashInPlaceRewriteNoteEndToEnd(t *testing.T) {
 				if strings.Contains(got, "rewrites file(s) in place") {
 					t.Errorf("read-only command should not carry the rewrite note; got %q", got)
 				}
+				if strings.Contains(got, "reads file(s) via the shell") {
+					t.Errorf("non-reader command should not carry the read note; got %q", got)
+				}
 				return
 			}
 			for _, sub := range tc.wantSubs {
@@ -394,8 +572,108 @@ func TestBashInPlaceRewriteNoteEndToEnd(t *testing.T) {
 	}
 }
 
-// TestBashInPlaceRewriteHookNoteEndToEnd pins that the bash tool actually
-// RUNS the post-edit hook on a workdir target it rewrites in place and folds
+// TestBashReadNoteEndToEnd pins that the bash tool actually APPENDS the read
+// note to its result when a command reads files via the shell — the model sees
+// the steering to read_file/outline/grep (issue #209 step 2).
+func TestBashReadNoteEndToEnd(t *testing.T) {
+	cases := []struct {
+		name     string
+		cmd      string
+		wantSubs []string
+	}{
+		{"cat read note appended on success", `cat /tmp/does-not-matter.go && true`, []string{
+			"note: this command reads file(s) via the shell:",
+			"/tmp/does-not-matter.go",
+			"read_file",
+			"outline/grep",
+		}},
+		{"head read note appended", `head -n 40 /tmp/does-not-matter.go && true`, []string{
+			"reads file(s) via the shell",
+			"/tmp/does-not-matter.go",
+			"read_file",
+		}},
+		{"sed -n read note appended", `sed -n '1,10p' /tmp/does-not-matter.go && true`, []string{
+			"reads file(s) via the shell",
+			"/tmp/does-not-matter.go",
+			"read_file",
+		}},
+		{"grep -A read note appended", `grep -A 5 TODO /tmp/does-not-matter.go`, []string{
+			"reads file(s) via the shell",
+			"/tmp/does-not-matter.go",
+			"read_file",
+		}},
+		{"no read note for a non-reader", `echo hello`, nil},
+		{"no read note for sed -i (a rewrite)", `sed -i 's/x/y/' /tmp/f.go && true`, nil},
+		{"no read note for tail -f", `tail -f /tmp/f.go &`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wd := t.TempDir()
+			got, err := Execute(context.Background(), bashCall(t, tc.cmd), wdNoteDeps{wdDeps{wd: wd}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(tc.wantSubs) == 0 {
+				if strings.Contains(got, "reads file(s) via the shell") {
+					t.Errorf("command %q should not carry the read note; got %q", tc.cmd, got)
+				}
+				return
+			}
+			for _, sub := range tc.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("result %q should contain %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
+// TestBashHeredocCreateNoteEndToEnd pins that the bash tool actually APPENDS
+// the create note to its result when a command creates a file via a heredoc on
+// a non-interpreter binary — the model sees the steering to write_file (issue
+// #209 step 3).
+func TestBashHeredocCreateNoteEndToEnd(t *testing.T) {
+	cases := []struct {
+		name     string
+		cmd      string
+		wantSubs []string
+	}{
+		{"cat heredoc probe note appended", "cat <<'EOF'\nhello\nEOF", []string{
+			"creates a file via a heredoc",
+			"write_file",
+		}},
+		{"echo heredoc note appended", "echo <<'EOF'\ndata\nEOF", []string{
+			"creates a file via a heredoc",
+			"write_file",
+		}},
+		// No create note: the heredoc is program data (an interpreter) or a
+		// here-string, or the command has no heredoc at all.
+		{"no create note for an interpreter heredoc", "python3 <<EOF\nprint('x')\nEOF", nil},
+		{"no create note for a here-string", `echo <<< "data"`, nil},
+		{"no create note for a plain command", `echo hello`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wd := t.TempDir()
+			got, err := Execute(context.Background(), bashCall(t, tc.cmd), wdNoteDeps{wdDeps{wd: wd}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(tc.wantSubs) == 0 {
+				if strings.Contains(got, "creates a file via a heredoc") {
+					t.Errorf("command %q should not carry the create note; got %q", tc.cmd, got)
+				}
+				return
+			}
+			for _, sub := range tc.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("result %q should contain %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
 // the hook note into the result — script-edits get the same format coverage
 // as tool edits (issue #201, step 4).
 func TestBashInPlaceRewriteHookNoteEndToEnd(t *testing.T) {

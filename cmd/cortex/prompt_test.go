@@ -617,24 +617,33 @@ func TestDebugPrincipleMirroredInClaudeMD(t *testing.T) {
 }
 
 // TestDefaultPromptEncodesLocateFirst pins issue #142's locate-first
-// principle in the built-in SystemPrompt: the prompt must tell the model to
-// locate before it reads (outline/grep to find where content lives, then
-// read_file only the needed spans), never to invent or guess file paths,
-// never to re-read content already present in context, and never to read
-// files with bash `cat`/`sed`/`head`. The check is on loose keywords (the
-// principle, not the exact wording), so a future rewrite can rephrase without
-// breaking this test as long as the idea survives — the same loose style as
+// principle in the built-in SystemPrompt (tightened for issue #209): the
+// prompt must tell the model to locate before it reads (outline/grep to find
+// where content lives, then read_file only the needed spans), never to invent
+// or guess file paths, never to re-read content already present in context,
+// and never to use bash to READ files (`cat`/`sed`/`head`) or CREATE them
+// (`cat > f`, `<<` heredocs, `tee`, `/tmp` scratch) — pointing at the
+// dedicated tools: read_file/outline/grep for reads and write_file/edit_file
+// for writes. The check is on loose keywords (the principle, not the exact
+// wording), so a future rewrite can rephrase without breaking this test as
+// long as the idea survives — the same loose style as
 // TestDefaultPromptEncodesDebugGuidance.
 func TestDefaultPromptEncodesLocateFirst(t *testing.T) {
 	lower := strings.ToLower(SystemPrompt)
 	for _, keyword := range []string{
-		"outline", // locate with outline/grep before reading
-		"grep",    // locate with grep before reading
-		"read",    // read only what you need (read_file, re-read)
-		"guess",   // never invent or guess file paths
-		"bash",    // never use bash cat/sed/head to read files
-		"cat",     // the bash readers to avoid
-		"context", // never re-read content already in context
+		"outline",    // locate with outline/grep before reading
+		"grep",       // locate with grep before reading
+		"read",       // read only what you need (read_file, re-read)
+		"guess",      // never invent or guess file paths
+		"bash",       // never use bash to read or create files
+		"cat",        // the bash reader to avoid (reads)
+		"create",     // the ban covers file CREATION, not just reads (#209)
+		"heredoc",    // `<<` heredoc file creation (the `<<` form, spelled out)
+		"tee",        // `tee` file creation
+		"/tmp",       // `/tmp` scratch files
+		"write_file", // the dedicated writer to use for creation
+		"edit_file",  // the dedicated writer to use for edits
+		"context",    // never re-read content already in context
 	} {
 		if !strings.Contains(lower, keyword) {
 			t.Errorf("built-in prompt no longer encodes the locate-first principle (missing %q)", keyword)
@@ -656,6 +665,25 @@ func TestDefaultPromptEncodesLocateFirstPosition(t *testing.T) {
 		t.Fatal("the locate-first working-style principle is not in the built-in prompt")
 	} else if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
 		t.Error("the locate-first working-style principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+}
+
+// TestDefaultPromptEncodesLocateFirstCreateBan pins the issue #209 tightening
+// of the locate-first principle's POSITION: the new file-creation bash ban
+// (`cat > f`/`<<` heredocs/`tee`/`/tmp` scratch, steering to write_file/
+// edit_file) must sit in the SAME "# How you work" block as the read ban —
+// the principle is one working-style line, not split across sections. It is a
+// position check on the exact new phrasing, complementing
+// TestDefaultPromptEncodesLocateFirst (loose keywords for the content) and
+// TestDefaultPromptEncodesLocateFirstPosition (the whole principle's slot).
+func TestDefaultPromptEncodesLocateFirstCreateBan(t *testing.T) {
+	createBan := "never use bash to read or create files"
+	if i := strings.Index(SystemPrompt, createBan); i < 0 {
+		t.Fatal("the locate-first principle's file-creation bash ban (issue #209) is not in the built-in prompt")
+	} else if j := strings.Index(SystemPrompt, "# How you work"); j < 0 {
+		t.Error("the built-in prompt is missing the \"# How you work\" block")
+	} else if k := strings.Index(SystemPrompt, "# How you communicate"); k < 0 || i < j || i >= k {
+		t.Error("the locate-first principle's file-creation bash ban must sit in the \"# How you work\" block, between \"# How you work\" and \"# How you communicate\"")
 	}
 }
 
