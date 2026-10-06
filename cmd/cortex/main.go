@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -250,6 +251,7 @@ var helpLines = []string{
 	"/compact           distill the session via study, freeing context",
 	"/plan <task>       plan-then-execute: one planning turn, then each step as its own turn",
 	"/clear             reset the conversation and start a fresh session",
+	"/undo [N]          revert the Nth-most-recent turn's file changes (default 1)",
 	"/sessions          pick a saved session to resume (plain list when not a TTY)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
 	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
@@ -635,6 +637,26 @@ func main() {
 		}
 		if input == "/compact" {
 			compactNow(session, "manual compact")
+			continue
+		}
+
+		// /undo [N] reverts the Nth-most-recent turn's file changes to the
+		// working tree (issue #111): restore the snapshot, report the files
+		// changed, and record the transcript note so the model learns its
+		// edits were reverted. Not in a git repo or nothing to undo prints a
+		// one-line message.
+		if input == "/undo" || strings.HasPrefix(input, "/undo ") {
+			arg := strings.TrimSpace(strings.TrimPrefix(input, "/undo"))
+			n := 1
+			if arg != "" {
+				if v, err := strconv.Atoi(arg); err == nil && v > 0 {
+					n = v
+				} else {
+					fmt.Println(withColor("usage: /undo [N]  (N is a positive integer, default 1)", gray))
+					continue
+				}
+			}
+			session.undo(n)
 			continue
 		}
 

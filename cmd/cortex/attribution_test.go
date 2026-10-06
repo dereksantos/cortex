@@ -207,6 +207,7 @@ func TestRunLoopFiringJournalsAttributedCommit(t *testing.T) {
 		cs.Request.BaseURL = srv.URL
 		cs.Config = cfg
 		cs.Request.Model = "loop-model"
+		cs.SessionID = "attribution-firing"
 		return cs
 	}
 
