@@ -652,6 +652,9 @@ func TestClearResetsSession(t *testing.T) {
 	if cs.Request.Model != "switched-model" || cs.Request.BaseURL != "http://somewhere:1234" {
 		t.Error("clear must preserve the model binding")
 	}
+	if cs.Request.Vision {
+		t.Error("clear must not assert vision for a model whose verdict was never set")
+	}
 	if cs.LastPromptTokens != 0 {
 		t.Error("clear must reset the gauge")
 	}

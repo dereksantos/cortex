@@ -155,6 +155,11 @@ func (cs *CortexSession) tryHeal(ctx context.Context, role string, req *AgentReq
 		}
 		old := req.Model
 		cs.rebindAfterHeal(req, old, id, window)
+		// The replacement's vision verdict comes from this listing's declared
+		// input modalities (#216), exactly as at startup — and the listing
+		// stays on the session so a later /model switch reads the freshest
+		// catalog it has. No-op for an explicit `models.code.vision`.
+		cs.applyVisionCatalog(served)
 		reportHeal(role, old, id, class, why, cs.healJournalDir())
 
 		res, streamed, err := inner.Send(ctx, req)

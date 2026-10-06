@@ -155,6 +155,17 @@ type ModelSpec struct {
 	// value means "unset" (JSON key absent).
 	Thinking llm.Effort `json:"thinking"`
 
+	// Vision declares that this role's model accepts image content parts
+	// (issue #216's vision gate). Explicit config always wins; when unset
+	// on an OpenRouter backend the live catalog's declared input
+	// modalities decide (stampCatalogVision, fed by the startup
+	// ListModels the preflight already makes), falling back to the
+	// model id's capability tags (llm.InferCapabilities / CapVision)
+	// when the catalog could not be fetched; anywhere else unset means
+	// false — the gate refuses images with a clear error naming the
+	// model rather than silently dropping them.
+	Vision *bool `json:"vision,omitempty"`
+
 	// RequestTimeoutSec / MaxSendAttempts / RetryBackoffMs are the P1 timeout-
 	// unification config surface (docs/configuration.md): per-role overrides
 	// for the transport knobs that used to be hardcoded (cmd/cortex's
@@ -350,6 +361,136 @@ func discoverFleet(ctx context.Context, endpoint string) Fleet {
 		}
 	}
 	return f
+}
+
+// VisionEnabled resolves this binding's vision verdict (issue #216): the
+// verdict stamped on the spec — by explicit `models.<role>.vision`, by
+// applyCatalogVision from the live catalog, or by the name heuristic in
+// resolveBinding — with a nil verdict meaning "unknown", which resolves
+// to false: the gate refuses images rather than silently dropping them.
+// It never infers from the model id, so a caller that knows more about
+// the target (SetModel on a /model switch) can compose its own
+// precedence over it.
+func (s ModelSpec) VisionEnabled() bool {
+	return s.Vision != nil && *s.Vision
+}
+
+// applyCatalogVision stamps binding vision verdicts from the OpenRouter
+// catalog's declared input modalities (issue #216) onto every spec at once,
+// overwriting whatever verdict the spec carried — which is why the only
+// specs it must NOT be handed are the ones config settled explicitly
+// (`models.<role>.vision` on a role pinning that spec's model, per
+// cfgDeclaresVisionFor): the catalog wins over the name heuristic and over
+// any verdict carried over from a model the spec no longer binds, and a
+// model it lists as text-only is stamped false on the spot so the heuristic
+// can never contradict a statement the catalog made about that id.
+//
+// An empty catalog means none was fetched (network down, preflight timeout)
+// or the backend is not OpenRouter: it is a no-op, which is what keeps the
+// name heuristic as the fallback instead of silently asserting "no" for
+// every model.
+func applyCatalogVision(cfg *Config, catalog []llm.OpenRouterModel, specs ...*ModelSpec) {
+	if len(catalog) == 0 {
+		return
+	}
+	byID := make(map[string]bool, len(catalog))
+	for _, m := range catalog {
+		byID[m.ID] = m.AcceptsImages
+	}
+	for _, spec := range specs {
+		if spec == nil || spec.Model == "" {
+			continue
+		}
+		if cfgDeclaresVisionFor(cfg, "", spec.Model) {
+			continue
+		}
+		// An id the listing contains settles to its declared modalities;
+		// an id it doesn't contain settles to false — "not in the served
+		// catalog" is no statement of image support, and this is also what
+		// re-settles a substituted spec whose new id the listing carries.
+		// An unlisted id keeps falling through to the name heuristic in
+		// callers that apply it (applyHeuristicVision, visionForModel) only
+		// when the whole catalog is absent, which the early return above
+		// preserves.
+		if _, listed := byID[spec.Model]; !listed {
+			continue
+		}
+		v := byID[spec.Model]
+		spec.Vision = &v
+	}
+}
+
+// cfgDeclaresVisionFor reports whether config explicitly settled the vision
+// verdict (`models.<role>.vision`) for a role pinning exactly model. role
+// narrows the search to one role; the empty role means "any role", which is
+// what applyCatalogVision wants — a spec handed to it carries a model id but
+// not the role that configured it, and a flag declared against that pin
+// describes the id either way. A model no role configures can have no
+// declared verdict.
+//
+// substituteIfMissing uses the narrowed form (its role is known) to decide
+// whether a spec's carried verdict describes the model being replaced.
+func cfgDeclaresVisionFor(cfg *Config, role, model string) bool {
+	if cfg == nil || model == "" {
+		return false
+	}
+	if role != "" {
+		m, ok := cfg.Models[role]
+		return ok && m.Model == model && m.Vision != nil
+	}
+	for _, m := range cfg.Models {
+		if m.Model == model && m.Vision != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// visionForModel resolves the vision verdict (issue #216) for one model id
+// on a /model-style switch, in the same precedence resolveBinding uses:
+//
+//  1. the code role's explicit `models.code.vision`, when the new model IS
+//     the role's configured model — the config flag describes that pin, so
+//     switching back to it must restore its declared verdict (and its
+//     declared "false", just the same);
+//  2. the live OpenRouter catalog's declared input modalities, when this
+//     process fetched one and lists the id;
+//  3. the model id's capability tags, when the backend is OpenRouter and
+//     the catalog had nothing to say;
+//  4. false otherwise — unknown means the gate refuses images, never
+//     silently drops them.
+//
+// This is the one place that ordering lives, so a /model switch and the
+// role-binding path can never disagree. catalog is the session's fetched
+// catalog (nil when there isn't one, which simply skips step 2).
+func visionForModel(cfg *Config, catalog []llm.OpenRouterModel, model string) bool {
+	if cfg == nil || model == "" {
+		return false
+	}
+	if cfgDeclaresVisionFor(cfg, roleCode, model) {
+		return *cfg.Models[roleCode].Vision
+	}
+	if cfg.isOpenRouter() {
+		spec := ModelSpec{Model: model}
+		applyCatalogVision(cfg, catalog, &spec)
+		if spec.Vision != nil {
+			return *spec.Vision
+		}
+		return modelHasVisionTag(model)
+	}
+	return false
+}
+
+// modelHasVisionTag is the name-heuristic fallback of last resort: an id
+// whose capability tags (llm.InferCapabilities) include CapVision — a
+// `vision`-tagged id, e.g. one containing "vision", "-vl-", or "llava".
+func modelHasVisionTag(model string) bool {
+	for _, l := range llm.InferCapabilities(model) {
+		if l == llm.CapVision {
+			return true
+		}
+	}
+	return false
 }
 
 // degradeForThinkingMode refuses an effort ask a model's thinking_mode can't
@@ -1085,6 +1226,9 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 			if !m.Thinking.IsZero() {
 				spec.Thinking = m.Thinking
 			}
+			if m.Vision != nil {
+				spec.Vision = m.Vision
+			}
 		}
 		if spec.KeyEnv == "" {
 			spec.KeyEnv = c.Backend.KeyEnv
@@ -1121,8 +1265,39 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 		if m, ok := c.Models[role]; ok && !m.Thinking.IsZero() {
 			spec.Thinking = m.Thinking
 		}
+		// Leave the vision verdict UNSET here when config didn't set it
+		// (#216): resolveBinding has no catalog, and stamping a non-nil
+		// name-heuristic verdict here would make applyCatalogVision — which
+		// runs later, once the session's preflight fetched the live listing
+		// — skip this binding entirely, so the startup path would disagree
+		// with the /model switch path. The session settles the verdict after
+		// preflight: catalog where it has one, else applyHeuristicVision.
+		// (Config settling it here at all is what keeps a litellm binding
+		// from carrying a nil verdict out — VisionEnabled reads nil as
+		// false either way.)
 	}
 	return spec
+}
+
+// applyHeuristicVision is the name-heuristic tier of the #216 precedence,
+// applied to finished bindings AFTER the startup preflight had its chance
+// to settle verdicts from the live catalog: an OpenRouter binding whose
+// verdict is still nil — config set no flag and the catalog had nothing to
+// say (or none was fetched) — falls back to the model id's capability tags.
+// A verdict applyCatalogVision settled, or config declared, is left alone.
+// Non-OpenRouter configs are left alone entirely: the heuristic never
+// applied to them (VisionEnabled reads a nil verdict as false).
+func applyHeuristicVision(cfg *Config, specs ...*ModelSpec) {
+	if cfg == nil || !cfg.isOpenRouter() {
+		return
+	}
+	for _, spec := range specs {
+		if spec == nil || spec.Vision != nil {
+			continue
+		}
+		v := modelHasVisionTag(spec.Model)
+		spec.Vision = &v
+	}
 }
 
 // findUp walks upward from the process CWD looking for rel (a name or a

@@ -68,6 +68,12 @@ func (c *OpenAICompatClient) GenerateWithTools(ctx context.Context, msgs []ChatM
 		return ChatResult{}, GenerationStats{}, fmt.Errorf("%s: model not set", c.name)
 	}
 
+	// Vision gate (#216): image parts only reach a model declared
+	// vision-capable; a text-only model gets a clear error naming it.
+	if err := GateImages(imagePartsOf(msgs), c.model, c.vision); err != nil {
+		return ChatResult{}, GenerationStats{}, fmt.Errorf("%s: %w", c.name, err)
+	}
+
 	if s, ok := toolChoice.(string); ok && s == "" {
 		toolChoice = "auto"
 	}
