@@ -295,18 +295,16 @@ type CortexSession struct {
 	// from. receiptModelBash is the bash recorder — the model's own
 	// test/build runs (commands recognized against the project's own
 	// test/build command set) recorded by coderDispatcher's
-	// receiptBash/receiptBashOutcome, in run order; receiptFinal holds the
-	// harness's own final verification runs (receiptFinalVerification,
-	// through the tools.hookRunner seam); receiptUnformatted holds the
-	// files the post-edit format hook knew about this turn (the per-turn
-	// wrapper FormatHook records the hook's note alongside the
-	// model-facing note); receipt is the receipt computed at turn end
-	// (turn.go, after the clean-finalize point). Dropped at the START of
-	// every turn (receiptDrop, turn.go) — an error or interrupt path that
-	// returns before turn end must not leak its measurements into the next
-	// turn (testwatchDrop's lifecycle).
+	// receiptBash/receiptBashOutcome, in run order; receiptUnformatted
+	// holds the files the post-edit format hook reported a problem with
+	// this turn (the per-turn wrapper FormatHook records the hook's
+	// outcome alongside the model-facing note); receipt is the receipt
+	// computed at turn end (turn.go, for a turn that ran tools —
+	// turnUsedTools). Dropped at the START of every turn (receiptDrop,
+	// turn.go) — an error or interrupt path that returns before turn end
+	// must not leak its measurements into the next turn (testwatchDrop's
+	// lifecycle).
 	receiptModelBash   []receiptModelBashRun
-	receiptFinal       []receiptVerification
 	receiptUnformatted []string
 	receipt            turnReceipt
 

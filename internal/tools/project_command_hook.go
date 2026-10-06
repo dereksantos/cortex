@@ -283,7 +283,7 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 	if !trusted {
 		if state != nil && state.inactiveNoteDue() {
 			state.announceInactive()
-			return "post-edit hook inactive: this workspace isn't trusted (`cortex project trust add <root>` to enable)"
+			return HookInactiveNote
 		}
 		return ""
 	}
@@ -352,6 +352,15 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 func RunProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) string {
 	return runProjectCommandHook(ctx, cmds, root, fsPath, trusted, state, mode)
 }
+
+// HookInactiveNote is the one-line note the post-edit hook surfaces on the
+// FIRST write/edit of a session on an untrusted workspace (the "hook
+// inactive" note — the hook did not run at all, and the file is untouched,
+// not unformatted). Exported so a session wrapping the hook per turn (the
+// FormatHookNoter capability) can recognize the note's shape — the receipt's
+// unformatted fact must NOT record a file the hook only announced as
+// inactive for — without string-matching this package's literals.
+const HookInactiveNote = "post-edit hook inactive: this workspace isn't trusted (`cortex project trust add <root>` to enable)"
 
 // RunTurnEndLint is the turn-end lint pass (issue #129, piece 3): lint is
 // slow and noisy per edit (clippy, eslint), so it runs ONCE per turn, here,

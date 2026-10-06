@@ -1329,12 +1329,16 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			cs.sweepScratchFiles()
 		}
 		// Issue #219: record the outcome of a verification bash run (the
-		// exit code the bash tool observed and the wall time of the call) —
-		// receiptBashOutcome is a no-op for a command receiptBash did not
-		// record (a non-verification command).
+		// exit code the bash tool observed — the tool reports a non-zero
+		// exit in its result text, not as the call's error — and the wall
+		// time of the call). resultText is captured BEFORE the err check
+		// below (the err path returns a different string to the model, but
+		// out is the tool's own result text either way). receiptBashOutcome
+		// is a no-op for a command receiptBash did not record (a
+		// non-verification command).
 		if isBash {
-			if cmd, err := call.StringArg("command"); err == nil {
-				cs.receiptBashOutcome(cmd, err, time.Since(bashStart))
+			if cmd, argErr := call.StringArg("command"); argErr == nil {
+				cs.receiptBashOutcome(cmd, out, err, time.Since(bashStart))
 			}
 		}
 		if err != nil {

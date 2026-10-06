@@ -446,17 +446,21 @@ type HookStateProvider interface {
 // hand-built callers) has the hook run directly — the model-facing note is
 // byte-identical, only the receipt recording is skipped.
 type FormatHookNoter interface {
-	FormatHook(ctx context.Context, fsPath string) string
+	FormatHook(ctx context.Context, fsPath string, hookSkip bool) string
 }
 
 // formatHookNote runs the post-edit format hook for fsPath through the
 // session's wrapper when the capability is present, directly otherwise. The
 // note returned is the model-facing one, byte-identical to the direct run
-// in either case — the wrapper only records the note on the session's
-// turn-receipt state alongside returning it.
+// in either case — the wrapper only records the note's outcome on the
+// session's turn-receipt state alongside returning it. hookSkip is the
+// per-call `hook: "skip"` opt-out: the wrapper must fold it into the
+// effective mode the same way the direct run does (effectiveHookMode), or
+// a skip on a session that implements the capability would silently run the
+// formatter anyway.
 func formatHookNote(ctx context.Context, deps ToolDeps, fsPath string, hookSkip bool) string {
 	if noter, ok := deps.(FormatHookNoter); ok {
-		return noter.FormatHook(ctx, fsPath)
+		return noter.FormatHook(ctx, fsPath, hookSkip)
 	}
 	return runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookStateOf(deps), effectiveHookMode(hookStateOf(deps), hookSkip))
 }

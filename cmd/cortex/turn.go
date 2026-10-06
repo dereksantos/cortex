@@ -542,16 +542,24 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// cs.lintReceipt is empty and the pass is simply skipped. Turn it into
 	// the result the same way as the other receipts.
 	// Issue #219: the measurement-only turn receipt (turn_receipt.go) is
-	// computed at the SAME point: after runLoop has settled every tool call,
-	// the workspace is final, so its final verification run (the project's
-	// own test/build commands through the hookRunner seam) sees the settled
-	// tree — and, like the others, it is computed BEFORE the unrecovered-
-	// error return so an interrupted turn still reports its measurements.
-	// Measurement only: the receipt never changes the turn's outcome.
+	// computed at the SAME point, for a turn that RAN TOOLS only
+	// (turnUsedTools) — a planning turn or a tools-less turn has nothing to
+	// measure, and computing it would run git probes the issue's "every
+	// turn that ran tools" wording does not ask for. It is computed BEFORE
+	// the unrecovered-error return so an interrupted turn still reports its
+	// measurements. Measurement only: the receipt never changes the turn's
+	// outcome, and the harness runs no project commands for it (the
+	// verification fact is precisely the model's own test/build runs that
+	// ran this turn — trust is the only gate for executing project-declared
+	// commands, and a measurement path that ran them itself would bypass
+	// that gate).
 	lintReceipt := cs.lintReceipt
 	testReceipt := cs.testwatchTestsReceipt()
 	debugReceipt := cs.testwatchDebugReceipt()
-	turnReceipt := cs.computeReceipt(ctx).render()
+	var turnReceipt string
+	if turnUsedTools(cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages))) {
+		turnReceipt = cs.computeReceipt(ctx).render()
+	}
 	if err != nil {
 		if pf := pendingFailureOf(err); pf != nil {
 			cs.journalModelFailure(pf, err)

@@ -250,14 +250,16 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 	}
 	// Issue #219: the measurement-only turn receipt (turn_receipt.go) — the
 	// harness's own measurement of what the turn left in the workspace (the
-	// git diff --stat block, the project's own test/build exit codes, the
-	// format hook's knowledge). It rides the SAME capture summary (a fourth
-	// fact, joined by " | "), is surfaced on TurnResult.Receipt (turn.go),
-	// appended to the turn's visible reply, and persisted as a kindNote
-	// transcript entry (turn.go) — four surfaces, one fact. It is the
-	// STORED receipt (cs.receipt, computed by turn.go before captureTurn,
-	// or by an earlier turn if this is a captureTurn test that skipped the
-	// compute) rendered here. Best-effort: a turn that measured nothing
+	// git diff --stat block plus the untracked files the turn created, the
+	// exit codes of the verification commands the model ran, the files the
+	// format hook reported a problem with). It rides the SAME capture
+	// summary (a fourth fact, joined by " | "), is surfaced on
+	// TurnResult.Receipt (turn.go), and persisted as a kindNote transcript
+	// entry (turn.go) — the receipt is harness output and is NEVER appended
+	// to the model's reply, which stays verbatim. It is the STORED receipt
+	// (cs.receipt, computed by turn.go before captureTurn for a tools-ran
+	// turn, or by an earlier turn if this is a captureTurn test that skipped
+	// the compute) rendered here. Best-effort: a turn that measured nothing
 	// adds nothing.
 	if receipt := cs.receipt.render(); receipt != "" {
 		if outcome == "" {
