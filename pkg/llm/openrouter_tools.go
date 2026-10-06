@@ -128,6 +128,21 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(w.Content, &m.Content)
 }
 
+// imagePartsOf collects the image parts of every message in a
+// conversation — what the transport-level gate checks, so one image
+// anywhere in the history requires a vision-capable model.
+func imagePartsOf(msgs []ChatMessage) []ContentPart {
+	var out []ContentPart
+	for _, m := range msgs {
+		for _, p := range m.Parts {
+			if p.HasImage() {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
 // ChatResult is GenerateWithTools's structured response. Either
 // ToolCalls is non-empty (model wants the harness to dispatch tools
 // and call again) OR Content is non-empty (model gave a final answer

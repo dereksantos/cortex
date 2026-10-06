@@ -109,8 +109,8 @@ func TestChatMessageMarshalContentParts(t *testing.T) {
 			if len(back.Parts) == 0 {
 				t.Fatalf("round-trip lost parts: %+v", back)
 			}
-			if back.Parts[0].HasImage() && back.Parts[0].WireURL() != tt.msg.Parts[imageIdx(tt.msg.Parts)].WireURL() {
-				t.Errorf("round-trip url: %q", back.Parts[0].WireURL())
+			if back.Parts[0].HasImage() && back.Parts[0].ImageURL != tt.msg.Parts[imageIdx(tt.msg.Parts)].ImageURL {
+				t.Errorf("round-trip url: %q", back.Parts[0].ImageURL)
 			}
 		})
 	}
@@ -148,6 +148,7 @@ func TestValidateContentParts(t *testing.T) {
 		{"empty url rejected", []ContentPart{ImageURLPart("", "")}, "empty url"},
 		{"file scheme rejected", []ContentPart{ImageURLPart("file:///tmp/a.png", "")}, "scheme"},
 		{"non-base64 data uri rejected", []ContentPart{ImageURLPart("data:image/png,AAA", "")}, "base64"},
+		{"data uri without media type rejected", []ContentPart{ImageURLPart("data:;base64,AAA", "")}, "media type"},
 		{"unknown type rejected", []ContentPart{{Type: "audio"}}, "unsupported type"},
 	}
 	for _, tt := range tests {

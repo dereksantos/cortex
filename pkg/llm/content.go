@@ -41,18 +41,23 @@ const (
 	ImageDetailHigh ImageDetail = "high"
 )
 
-// imageURLRef is the nested payload of an image content part. It's a
-// one-field object on the wire (OpenAI's shape), so it stays unexported
-// — callers only ever touch ImageURLPart.
+// imageURLRef is the nested payload of an image content part: exactly
+// OpenAI's wire shape (one object, `url` plus the optional `detail`
+// hint) — nothing non-standard rides here. It stays unexported because
+// callers only ever touch ImageURLPart.
 type imageURLRef struct {
-	URL     string      `json:"url"`
-	Detail  ImageDetail `json:"detail,omitempty"`
-	Headers []string    `json:"headers,omitempty"`
+	URL    string      `json:"url"`
+	Detail ImageDetail `json:"detail,omitempty"`
 }
 
 // ContentPart is one part of a message's structured content. Text is set
-// on a text part; ImageURL on an image part. Detail is the optional
-// fidelity hint for images.
+// on a text part; ImageURL on an image part — always the canonical
+// OpenAI form, an http(s) URL or a base64 `data:` URI (Anthropic's
+// native image block decodes back into it, see UnmarshalJSON). Detail is
+// the optional fidelity hint for images; MediaType is the image's MIME
+// type when the part was decoded from a shape that states it separately
+// (Anthropic's source block) — the OpenAI shape carries it inside the
+// data URI instead.
 //
 // MarshalJSON decides the emitted shape; UnmarshalJSON accepts both the
 // OpenAI and Anthropic request shapes, so a marshaled message round-trips
@@ -61,7 +66,6 @@ type ContentPart struct {
 	Type      string
 	Text      string
 	ImageURL  string
-	URL       string
 	MediaType string
 	Detail    ImageDetail
 }
@@ -81,33 +85,16 @@ func ImageURLPart(url string, detail ImageDetail) ContentPart {
 // HasImage reports whether the part is an image part.
 func (p ContentPart) HasImage() bool { return p.Type == ContentTypeImageURL }
 
-// imageURLValue returns the URL an image part should emit, preferring the
-// OpenAI-shaped ImageURL field and falling back to URL (which is what the
-// part decodes back into from Anthropic's block shape).
-func (p ContentPart) imageURLValue() string {
-	if p.ImageURL != "" {
-		return p.ImageURL
-	}
-	return p.URL
-}
-
-// WireURL returns the URL an image part carries on the wire (ImageURL,
-// falling back to the URL field decoded from Anthropic's block shape).
-// Exported for callers that translate parts into their own wire structs.
-func (p ContentPart) WireURL() string { return p.imageURLValue() }
-
 // MarshalJSON emits the OpenAI content-part shape.
 func (p ContentPart) MarshalJSON() ([]byte, error) {
 	switch p.Type {
 	case ContentTypeImageURL:
 		return json.Marshal(struct {
-			Type      string      `json:"type"`
-			ImageURL  imageURLRef `json:"image_url"`
-			MediaType string      `json:"media_type,omitempty"`
+			Type     string      `json:"type"`
+			ImageURL imageURLRef `json:"image_url"`
 		}{
-			Type:      ContentTypeImageURL,
-			ImageURL:  imageURLRef{URL: p.imageURLValue(), Detail: p.Detail},
-			MediaType: p.MediaType,
+			Type:     ContentTypeImageURL,
+			ImageURL: imageURLRef{URL: p.ImageURL, Detail: p.Detail},
 		})
 	default:
 		return json.Marshal(struct {
@@ -164,10 +151,18 @@ func (p *ContentPart) UnmarshalJSON(data []byte) error {
 		if src.MediaType != "" {
 			p.MediaType = src.MediaType
 		}
-		if src.Type == "base64" {
-			p.URL = "data:" + src.MediaType + ";base64," + src.Data
-		} else {
-			p.URL = src.URL
+		switch src.Type {
+		case "base64":
+			// Rebuild the canonical data URI, so one representation flows
+			// through the gate and the OpenAI translation alike. A base64
+			// source with no media_type can't be rebuilt into one, so it
+			// is rejected here rather than carried as a malformed part.
+			if src.MediaType == "" {
+				return fmt.Errorf("content part: anthropic base64 image source has no media_type")
+			}
+			p.ImageURL = "data:" + src.MediaType + ";base64," + src.Data
+		default:
+			p.ImageURL = src.URL
 		}
 	}
 	return nil
@@ -185,7 +180,7 @@ func ValidateContentParts(parts []ContentPart) error {
 			// Any text, including empty (a leading image part rides
 			// alongside an empty text instruction).
 		case ContentTypeImageURL:
-			if err := validateImageURL(p.imageURLValue()); err != nil {
+			if err := validateImageURL(p.ImageURL); err != nil {
 				return err
 			}
 		default:
@@ -197,7 +192,10 @@ func ValidateContentParts(parts []ContentPart) error {
 
 // validateImageURL accepts http(s) URLs and base64 data URIs, rejecting
 // everything else — a local file path or a javascript:/file: URI must
-// never reach a provider.
+// never reach a provider. A data URI must state its media type: a bare
+// "data:;base64,..." is not something any provider accepts, and taking
+// it would mean AnthropicImageContent had nowhere to get media_type
+// from — i.e. a silent drop waiting to happen.
 func validateImageURL(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("image content part: empty url")
@@ -205,6 +203,9 @@ func validateImageURL(raw string) error {
 	if strings.HasPrefix(raw, "data:") {
 		if !strings.Contains(raw, ";base64,") {
 			return fmt.Errorf("image content part: data uri must be base64-encoded: %s", summarizeURL(raw))
+		}
+		if strings.HasPrefix(raw, "data:;") {
+			return fmt.Errorf("image content part: data uri has no media type (want data:image/<fmt>;base64,...)")
 		}
 		return nil
 	}
@@ -237,25 +238,6 @@ func summarizeURL(raw string) string {
 	return raw
 }
 
-// imagePartsOf collects the image parts of every message in a
-// conversation — what the transport-level gate checks, so one image
-// anywhere in the history requires a vision-capable model.
-func imagePartsOf(msgs []ChatMessage) []ContentPart {
-	var out []ContentPart
-	for _, m := range msgs {
-		for _, p := range m.Parts {
-			if p.HasImage() {
-				out = append(out, p)
-			}
-		}
-	}
-	return out
-}
-
-// HasImageMessages reports whether any message in a conversation carries
-// an image part. Exported for callers that want the cheap pre-check.
-func HasImageMessages(msgs []ChatMessage) bool { return len(imagePartsOf(msgs)) > 0 }
-
 // AnthropicImageContent translates an image content part into Anthropic's
 // native image block ({"type":"image","source":{...}}), the shape the
 // Anthropic Messages API takes in place of OpenAI's image_url part.
@@ -266,7 +248,7 @@ func AnthropicImageContent(p ContentPart) (map[string]any, bool) {
 	if !p.HasImage() {
 		return nil, false
 	}
-	raw := p.imageURLValue()
+	raw := p.ImageURL
 	if strings.HasPrefix(raw, "data:") {
 		rest := strings.TrimPrefix(raw, "data:")
 		media, data, ok := strings.Cut(rest, ",")
@@ -306,10 +288,9 @@ func AnthropicImageContent(p ContentPart) (map[string]any, bool) {
 // Callers match it with errors.Is; the wrapped message names the model.
 var ErrModelNoVision = fmt.Errorf("model does not accept image input")
 
-// NewVisionUnsupportedError builds the gate's error naming the model.
-// sentinelsErr wraps without adding context, so errors.Is(err,
-// ErrModelNoVision) holds and Error() reads as the model-specific
-// sentence (never "model X: model does not accept image input" doubled up).
+// NewVisionUnsupportedError builds the gate's error naming the model. It
+// wraps ErrModelNoVision with %w, so errors.Is(err, ErrModelNoVision)
+// holds while Error() reads as the one model-specific sentence.
 func NewVisionUnsupportedError(model string) error {
 	return fmt.Errorf("model %q cannot accept image content parts — vision is disabled for it: set models.<role>.vision to true or route the turn to a vision-capable model: %w", model, ErrModelNoVision)
 }
@@ -332,9 +313,10 @@ func HasImageParts(parts []ContentPart) bool {
 // text-only model gets ErrModelNoVision and the caller must surface it.
 //
 // allow is the caller's resolved verdict for the target model: pkg/llm
-// stays agnostic about where that comes from (the OpenRouter catalog's
-// input modalities, a fleet advert, or the per-role
-// `models.<role>.vision` config flag — see cmd/cortex's resolveVision).
+// stays agnostic about where that comes from — the OpenRouter catalog's
+// declared input modalities, a fleet advert, or the per-role
+// `models.<role>.vision` config flag. In cmd/cortex that precedence is
+// resolved once in resolveBinding and carried as AgentRequest.Vision.
 func GateImages(parts []ContentPart, model string, allow bool) error {
 	if !HasImageParts(parts) {
 		return nil

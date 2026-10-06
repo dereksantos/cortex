@@ -86,12 +86,14 @@ type AgentRequest struct {
 
 	// Vision (json:"-") is this request's vision-capability verdict
 	// (issue #216): true only when the target model is known to accept
-	// image content parts (OpenRouter catalog input modalities, else the
-	// per-role `models.<role>.vision` config flag). Stamped from the role
-	// binding at request construction and re-derived on /model switches;
-	// Send refuses any wire message carrying image parts while it is
-	// false — a text-only model gets a clear error naming the model, never
-	// a silent drop.
+	// image content parts, resolved by one precedence everywhere
+	// (resolveBinding / visionForModel): the explicit
+	// `models.<role>.vision` flag, then the OpenRouter catalog's declared
+	// input modalities, then the model id's capability tags. Stamped at
+	// request construction and re-derived on /model switches; Send refuses
+	// any wire message carrying image parts while it is false — a
+	// text-only model gets a clear error naming the model, never a silent
+	// drop.
 	Vision bool `json:"-"`
 
 	// Timeout / MaxAttempts / Backoff (all json:"-") are the P1
@@ -679,7 +681,7 @@ func (m *Message) MarshalJSON() ([]byte, error) {
 		parts = make([]part, 0, len(m.Parts))
 		for _, p := range m.Parts {
 			if p.HasImage() {
-				image := map[string]any{"url": p.WireURL()}
+				image := map[string]any{"url": p.ImageURL}
 				if p.Detail != "" {
 					image["detail"] = p.Detail
 				}

@@ -65,7 +65,7 @@ func TestPreflightCuratedModelsSkipsNonOpenRouter(t *testing.T) {
 	code := ModelSpec{Model: curatedTopPick().ID}
 	study := ModelSpec{Model: "study-model"}
 
-	gotCode, gotStudy := preflightCuratedModels(context.Background(), cfg, code, study, t.TempDir(), listModels)
+	gotCode, gotStudy, _ := preflightCuratedModels(context.Background(), cfg, code, study, t.TempDir(), listModels)
 
 	if calls != 0 {
 		t.Errorf("listModels called %d times, want 0 for a non-openrouter backend", calls)
@@ -92,7 +92,7 @@ func TestPreflightCuratedModelsSkipsNonCuratedModel(t *testing.T) {
 	code := ModelSpec{Model: "anthropic/claude-haiku-4.5"}
 	study := ModelSpec{Model: "some/other-model"}
 
-	gotCode, gotStudy := preflightCuratedModels(context.Background(), cfg, code, study, t.TempDir(), listModels)
+	gotCode, gotStudy, _ := preflightCuratedModels(context.Background(), cfg, code, study, t.TempDir(), listModels)
 
 	if calls != 0 {
 		t.Errorf("listModels called %d times, want 0 when self_heal is off and neither binding is curated", calls)
@@ -115,7 +115,7 @@ func TestPreflightSubstitutesMissingPinnedModel(t *testing.T) {
 
 	var gotCode, gotStudy ModelSpec
 	stderr := captureStderr(t, func() {
-		gotCode, gotStudy = preflightCuratedModels(context.Background(), openrouterCfg(),
+		gotCode, gotStudy, _ = preflightCuratedModels(context.Background(), openrouterCfg(),
 			code, study, dir, fakeListModels(served, nil))
 	})
 
@@ -144,11 +144,22 @@ func TestPreflightPinnedModelStillServedUntouched(t *testing.T) {
 	code := ModelSpec{Model: "vendor/my-pin"}
 	study := ModelSpec{Model: "vendor/my-pin"}
 
-	gotCode, gotStudy := preflightCuratedModels(context.Background(), openrouterCfg(),
+	gotCode, gotStudy, _ := preflightCuratedModels(context.Background(), openrouterCfg(),
 		code, study, t.TempDir(), fakeListModels(served, nil))
 
-	if gotCode != code || gotStudy != study {
-		t.Errorf("served pin changed: got (%+v, %+v), want unchanged", gotCode, gotStudy)
+	// The pin's identity is untouched; the only thing the preflight writes
+	// is the vision verdict, settled (not merely stamped) by the listing —
+	// an id the catalog lists without image input is a definite false.
+	if gotCode.Model != "vendor/my-pin" || gotStudy.Model != "vendor/my-pin" {
+		t.Errorf("served pin changed: got (%q, %q), want %q",
+			gotCode.Model, gotStudy.Model, "vendor/my-pin")
+	}
+	if gotCode.Window != code.Window || gotStudy.Window != study.Window {
+		t.Errorf("served pin's window changed: got (%d, %d), want %d",
+			gotCode.Window, gotStudy.Window, code.Window)
+	}
+	if gotCode.VisionEnabled() || gotStudy.VisionEnabled() {
+		t.Error("catalog lists the pin as text-only: vision must be settled false")
 	}
 }
 
@@ -162,7 +173,7 @@ func TestPreflightCuratedModelsBoundModelStillServedNoOp(t *testing.T) {
 
 	var code, study ModelSpec
 	stderr := captureStderr(t, func() {
-		code, study = preflightCuratedModels(context.Background(), openrouterCfg(),
+		code, study, _ = preflightCuratedModels(context.Background(), openrouterCfg(),
 			ModelSpec{Model: top.ID}, ModelSpec{Model: top.ID}, dir, fakeListModels(served, nil))
 	})
 
@@ -198,7 +209,7 @@ func TestPreflightCuratedModelsMissingSubstitutesNextCurated(t *testing.T) {
 
 	var code, study ModelSpec
 	stderr := captureStderr(t, func() {
-		code, study = preflightCuratedModels(context.Background(), openrouterCfg(),
+		code, study, _ = preflightCuratedModels(context.Background(), openrouterCfg(),
 			ModelSpec{Model: missing.ID}, ModelSpec{Model: "not-curated/model"}, dir, fakeListModels(served, nil))
 	})
 
@@ -249,7 +260,7 @@ func TestPreflightCuratedModelsAllCuratedMissingFallsBackToDiscovery(t *testing.
 
 	var code, study ModelSpec
 	stderr := captureStderr(t, func() {
-		code, study = preflightCuratedModels(context.Background(), openrouterCfg(),
+		code, study, _ = preflightCuratedModels(context.Background(), openrouterCfg(),
 			ModelSpec{Model: top.ID}, ModelSpec{Model: top.ID}, dir, fakeListModels(served, nil))
 	})
 
@@ -289,7 +300,7 @@ func TestPreflightCuratedModelsNetworkErrorLeavesUnchanged(t *testing.T) {
 
 	var code, study ModelSpec
 	stderr := captureStderr(t, func() {
-		code, study = preflightCuratedModels(context.Background(), openrouterCfg(),
+		code, study, _ = preflightCuratedModels(context.Background(), openrouterCfg(),
 			ModelSpec{Model: top.ID}, ModelSpec{Model: top.ID}, dir,
 			fakeListModels(nil, errors.New("dial tcp: connection refused")))
 	})

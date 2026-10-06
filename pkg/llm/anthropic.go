@@ -147,11 +147,17 @@ func (c *AnthropicClient) GenerateWithImages(ctx context.Context, parts []Conten
 		return "", GenerationStats{}, err
 	}
 	blocks := make([]any, 0, len(parts))
-	for _, p := range parts {
+	for i, p := range parts {
 		if p.HasImage() {
-			if blk, ok := AnthropicImageContent(p); ok {
-				blocks = append(blocks, blk)
+			blk, ok := AnthropicImageContent(p)
+			if !ok {
+				// Never drop an image part quietly: GateImages above
+				// validated the parts, so a translation failure here is a
+				// bug, and a bug must surface rather than send the model a
+				// prompt missing its image.
+				return "", GenerationStats{}, fmt.Errorf("anthropic: image content part %d cannot be translated to an image block: %s", i, summarizeURL(p.ImageURL))
 			}
+			blocks = append(blocks, blk)
 			continue
 		}
 		blocks = append(blocks, map[string]any{"type": "text", "text": p.Text})

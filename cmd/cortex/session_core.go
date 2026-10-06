@@ -113,7 +113,13 @@ type CortexSession struct {
 	deadModels map[string]modelErrClass
 	// healList is the healing ladder's catalog fetch, injectable for tests;
 	// nil means liveOpenRouterListModels (the production default).
-	healList  listModelsFn
+	healList listModelsFn
+	// catalog is the OpenRouter listing this session holds, if any: the
+	// startup fetch the preflight made, kept so a /model switch can read a
+	// model's declared input modalities for the vision verdict (#216)
+	// without refetching. nil (a non-OpenRouter backend, or a failed fetch)
+	// means the switch falls back to the config flag / name heuristic.
+	catalog   []llm.OpenRouterModel
 	Config    *Config
 	workspace *Workspace
 	// projectCommands is the resolved project command set (issue #129) —
@@ -384,11 +390,32 @@ func (cs *CortexSession) SetModel(model string) {
 		window = info.MaxInput
 	}
 	applyEffort(cs.Request, dialect, effort)
-	// #216: a /model switch changes the vision verdict too — a fleet-known
-	// model's advert decides; anything else is unknown, which the gate
-	// resolves to "refuse" (never a silent drop).
-	cs.Request.Vision = false
+	// #216: a /model switch re-derives the vision verdict with the SAME
+	// precedence the role binding used (visionForModel): the code role's
+	// explicit config flag when the new model is that role's configured
+	// model, then the catalog's declared input modalities for an
+	// OpenRouter model this session's listing knows, then the id's
+	// capability tags, then false — unknown means the gate refuses images,
+	// never drops them silently.
+	cs.Request.Vision = visionForModel(cs.Config, cs.catalog, model)
 	cs.Window = window
+}
+
+// applyVisionCatalog adopts a freshly fetched OpenRouter listing as this
+// session's vision source (#216) and re-derives the in-flight request's
+// verdict from it. Explicit `models.code.vision` is never overridden —
+// visionForModel consults it first. Called from the healing ladder, whose
+// substitution changes the model under a running session; startup does its
+// equivalent inside preflightCuratedModels, where the study binding is
+// still a local ModelSpec rather than session state.
+func (cs *CortexSession) applyVisionCatalog(catalog []llm.OpenRouterModel) {
+	if len(catalog) == 0 || cs.Config == nil || !cs.Config.isOpenRouter() {
+		return
+	}
+	cs.catalog = catalog
+	if cs.Request != nil {
+		cs.Request.Vision = visionForModel(cs.Config, catalog, cs.Request.Model)
+	}
 }
 
 // windowSize resolves the code model's context window: learned (from an
@@ -465,8 +492,11 @@ func NewCortexSession() *CortexSession {
 	// OpenRouter pick against the live catalog — cheap (one bounded
 	// ListModels call), and only on the openrouter+curated path. A model
 	// that's been retired since the curated table was written is swapped
-	// for this process only; the config file is never touched.
-	code, study = preflightCuratedModels(context.Background(), cfg, code, study,
+	// for this process only; the config file is never touched. The listing
+	// itself is returned and kept on the session (#216): it is the primary
+	// source of the vision verdict, for these bindings and for any later
+	// /model switch.
+	code, study, startupCatalog := preflightCuratedModels(context.Background(), cfg, code, study,
 		modelSubstitutionJournalDir(workspace.ContextDir()), liveOpenRouterListModels)
 
 	if g := sharedSwapGroup(fleet, code, study); g != "" {
@@ -526,6 +556,7 @@ func NewCortexSession() *CortexSession {
 		Window:          code.Window,
 		Study:           study,
 		Fleet:           fleet,
+		catalog:         startupCatalog,
 		deleteRoot:      deleteRoot,
 		allowDelete:     allowDelete,
 		projectCommands: resolveProjectCommands(workspace.Root, cfg),
