@@ -88,19 +88,19 @@ func preflightCuratedModels(ctx context.Context, cfg *Config, code, study ModelS
 
 	// Issue #216: the same fetch that answers "is this model still served"
 	// also carries each entry's declared input modalities, so it settles
-	// the vision verdict for any binding config left unset — the catalog
-	// beats the model-id heuristic, and a model it lists as text-only is
-	// settled to false here so the heuristic can't contradict it. A
-	// substitution below is always to an id this listing contains, so the
-	// swapped pick's verdict comes from the catalog too.
-	applyCatalogVision(served, &code, &study)
-
+	// the vision verdict for any binding config left unset (no explicit
+	// `models.<role>.vision`) — the catalog beats the model-id heuristic,
+	// and a model it lists as text-only is settled to false here so the
+	// heuristic can't contradict it. It runs AFTER the substitutions below,
+	// so a swapped pick's verdict comes from the listing for the new id
+	// rather than being carried over from the missing model it replaced.
 	if checkAll || isCuratedModel(code.Model) {
-		code = substituteIfMissing(code, roleCode, servedSet, servedFree, journalDir)
+		code, _ = substituteIfMissing(cfg, code, roleCode, servedSet, servedFree, journalDir)
 	}
 	if checkAll || isCuratedModel(study.Model) {
-		study = substituteIfMissing(study, roleStudy, servedSet, servedFree, journalDir)
+		study, _ = substituteIfMissing(cfg, study, roleStudy, servedSet, servedFree, journalDir)
 	}
+	applyCatalogVision(cfg, served, &code, &study)
 	return code, study, served
 }
 
@@ -110,10 +110,18 @@ func preflightCuratedModels(ctx context.Context, cfg *Config, code, study ModelS
 // still-served entry (deterministic); failing that, it falls back to
 // discoverFreeModel's heuristic pick over the live :free catalog (adaptive).
 // If literally nothing survives (no curated entry served, no :free models at
-// all), spec is returned unchanged — a stale pick beats no model.
-func substituteIfMissing(spec ModelSpec, role string, servedSet map[string]bool, servedFree []llm.OpenRouterModel, journalDir string) ModelSpec {
+// all), the spec is returned unchanged along with substituted=false — a
+// stale pick beats no model.
+//
+// A real substitution clears any vision verdict the spec carried that config
+// did not explicitly declare for the model being replaced (#216): that
+// verdict judged a model no longer bound, so the caller's
+// applyCatalogVision re-settles it from the listing for the new id. A
+// verdict config declared for that pin stays, since the flag describes the
+// user's choice, not a swapped-in stand-in.
+func substituteIfMissing(cfg *Config, spec ModelSpec, role string, servedSet map[string]bool, servedFree []llm.OpenRouterModel, journalDir string) (ModelSpec, bool) {
 	if servedSet[spec.Model] {
-		return spec
+		return spec, false
 	}
 
 	old := spec.Model
@@ -122,15 +130,22 @@ func substituteIfMissing(spec ModelSpec, role string, servedSet map[string]bool,
 		newID, newWindow, reason, ok = discoverFreeModel(servedFree)
 	}
 	if !ok {
-		return spec
+		return spec, false
 	}
 
 	spec.Model = newID
 	if newWindow > 0 {
 		spec.Window = newWindow
 	}
+	// Only a verdict config declared for the OLD pin survives the swap: the
+	// flag is a property of the model named in config, not of the stand-in
+	// picked here, and anything else (the name heuristic, or a catalog
+	// verdict for the retired id) must not carry over.
+	if !cfgDeclaresVisionFor(cfg, role, old) {
+		spec.Vision = nil
+	}
 	reportSubstitution(role, old, newID, reason, journalDir)
-	return spec
+	return spec, true
 }
 
 // nextCuratedPick walks curatedFreeModels in preference order for the first

@@ -531,6 +531,11 @@ func NewCortexSession() *CortexSession {
 	// /model switch.
 	code, study, startupCatalog := preflightCuratedModels(context.Background(), cfg, code, study,
 		modelSubstitutionJournalDir(workspace.ContextDir()), liveOpenRouterListModels)
+	// #216: the preflight settled verdicts from the live catalog where it
+	// had one; anything it left nil (no fetch, an unlisted id) falls to the
+	// name heuristic here — LAST, so the heuristic can never mask a verdict
+	// the catalog stated for these bindings.
+	applyHeuristicVision(cfg, &code, &study)
 
 	if g := sharedSwapGroup(fleet, code, study); g != "" {
 		printStartupWarning(os.Stderr, fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g))

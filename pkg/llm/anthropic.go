@@ -129,9 +129,12 @@ func (c *AnthropicClient) GenerateWithStats(ctx context.Context, prompt string) 
 }
 
 // Vision reports whether this client's model is permitted to receive image
-// content blocks (issue #216's gate; cmd/cortex stamps it from the role
-// binding's resolved verdict). Default false: images are refused with a
-// clear error naming the model, never dropped.
+// content blocks (issue #216's gate). Default false: images are refused
+// with a clear error naming the model, never dropped. The caller must set
+// the verdict with SetVision — cmd/cortex resolves one per role binding
+// (config flag / OpenRouter catalog / name heuristic) and wires it into its
+// own request type; hooking that verdict into these clients is parts 2/3 of
+// #134, so no cmd/cortex call site sets it yet.
 func (c *AnthropicClient) Vision() bool { return c.vision }
 
 // SetVision declares whether this client's model accepts image content.

@@ -89,63 +89,115 @@ func TestAgentRequestVisionGate(t *testing.T) {
 }
 
 // TestResolveBindingVision covers the config side of the gate: explicit
-// models.<role>.vision wins; an OpenRouter model without it falls back to
-// the capability table's vision tag; everything else defaults to false.
-// The live-catalog tier of the same precedence is covered by
-// TestApplyCatalogVision and TestPreflightStampsVisionFromCatalog.
+// models.<role>.vision wins; an OpenRouter model without it is left UNSET
+// by resolveBinding (#216) for the session to settle — the live catalog in
+// preflight, else applyHeuristicVision — which is what keeps the catalog
+// from being skipped; everything non-OpenRouter stays unset too, which
+// VisionEnabled reads as false. The live-catalog tier of the same
+// precedence is covered by TestApplyCatalogVision and
+// TestPreflightStampsVisionFromCatalog.
 func TestResolveBindingVision(t *testing.T) {
 	yes, no := true, false
 	tests := []struct {
 		name    string
 		backend Backend
 		models  map[string]ModelSpec
-		want    bool
+		want    *bool // nil: verdict left unset for the catalog/heuristic tier
 	}{
-		{"explicit true", Backend{Type: "litellm"}, map[string]ModelSpec{roleCode: {Model: "m", Vision: &yes}}, true},
-		{"explicit false", Backend{Type: "openrouter"}, map[string]ModelSpec{roleCode: {Model: "acme/vl-8b", Vision: &no}}, false},
-		{"openrouter vision-suffixed model", Backend{Type: "openrouter"}, map[string]ModelSpec{roleCode: {Model: "acme/gpt-4o-vision"}}, true},
-		{"openrouter plain model", Backend{Type: "openrouter"}, map[string]ModelSpec{roleCode: {Model: "qwen/qwen3-coder"}}, false},
-		{"non-openrouter unset stays false", Backend{Type: "litellm"}, map[string]ModelSpec{roleCode: {Model: "acme/gpt-4o-vision"}}, false},
+		{"explicit true", Backend{Type: "litellm"}, map[string]ModelSpec{roleCode: {Model: "m", Vision: &yes}}, &yes},
+		{"explicit false", Backend{Type: "openrouter"}, map[string]ModelSpec{roleCode: {Model: "acme/vl-8b", Vision: &no}}, &no},
+		{"openrouter vision-suffixed model left unset", Backend{Type: "openrouter"}, map[string]ModelSpec{roleCode: {Model: "acme/gpt-4o-vision"}}, nil},
+		{"openrouter plain model left unset", Backend{Type: "openrouter"}, map[string]ModelSpec{roleCode: {Model: "qwen/qwen3-coder"}}, nil},
+		{"non-openrouter unset stays unset", Backend{Type: "litellm"}, map[string]ModelSpec{roleCode: {Model: "acme/gpt-4o-vision"}}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{Backend: tt.backend, Models: tt.models}
-			if got := cfg.resolveBinding(roleCode, nil).VisionEnabled(); got != tt.want {
-				t.Errorf("VisionEnabled()=%v want %v", got, tt.want)
+			spec := cfg.resolveBinding(roleCode, nil)
+			if tt.want == nil {
+				if spec.Vision != nil {
+					t.Errorf("resolveBinding must leave the verdict unset for the catalog tier, got %v", *spec.Vision)
+				}
+				if spec.VisionEnabled() {
+					t.Error("an unset verdict must read as false")
+				}
+				return
+			}
+			if spec.Vision == nil || *spec.Vision != *tt.want {
+				t.Errorf("Vision=%v want %v", spec.Vision, *tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyHeuristicVision covers the fallback tier that runs AFTER the
+// startup preflight: an OpenRouter binding the catalog left nil gets the
+// name heuristic; a catalog-stamped or config-declared verdict is left
+// alone; a non-OpenRouter config gets no verdict at all.
+func TestApplyHeuristicVision(t *testing.T) {
+	yes := true
+	tests := []struct {
+		name    string
+		cfg     *Config
+		spec    ModelSpec
+		wantSet bool
+		want    bool
+	}{
+		{"unlisted vision-tagged id gets the tag", openrouterCfg(), ModelSpec{Model: "acme/llava-7b"}, true, true},
+		{"unlisted plain id gets a settled false", openrouterCfg(), ModelSpec{Model: "acme/plain"}, true, false},
+		{"catalog-stamped verdict survives", openrouterCfg(), ModelSpec{Model: "acme/plain", Vision: &yes}, true, true},
+		{"non-openrouter stays unset", &Config{Backend: Backend{Type: "litellm"}}, ModelSpec{Model: "acme/llava-7b"}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := tt.spec
+			applyHeuristicVision(tt.cfg, &spec)
+			if (spec.Vision != nil) != tt.wantSet {
+				t.Fatalf("settled=%v want %v", spec.Vision != nil, tt.wantSet)
+			}
+			if spec.VisionEnabled() != tt.want {
+				t.Errorf("VisionEnabled()=%v want %v", spec.VisionEnabled(), tt.want)
 			}
 		})
 	}
 }
 
 // TestApplyCatalogVision covers the catalog tier of the #216 precedence:
-// the OpenRouter listing's declared input modalities settle a binding whose
+// the OpenRouter listing's declared input modalities settle bindings whose
 // verdict config left unset — including a model whose id carries no vision
-// tag at all, which the name heuristic alone would get wrong — while an
-// explicit config verdict is never touched and an id the catalog doesn't
-// list is left for the heuristic.
+// tag at all, which the name heuristic alone would get wrong, and a model
+// listed with no modalities at all, which settles false so the heuristic
+// can't contradict a listing that includes the id. A verdict config
+// declared (`models.<role>.vision` on a role pinning that id) is never
+// touched — cfgDeclaresVisionFor tests cfg.Models, NOT the spec's own
+// Vision pointer, since resolveBinding leaves the spec's verdict unset for
+// the catalog to reach at all (the second subtest pins exactly that).
 func TestApplyCatalogVision(t *testing.T) {
 	yes := true
 	catalog := []llm.OpenRouterModel{
 		{ID: "openai/gpt-4o", AcceptsImages: true}, // no vision tag in the id
 		{ID: "qwen/qwen3-coder", AcceptsImages: false},
+		{ID: "acme/plain"}, // listed with no modalities at all: text-only
+	}
+	// cfg declares a verdict for openai/gpt-4o and nothing else; every
+	// other id in the listing is settled by the catalog.
+	cfg := &Config{
+		Backend: Backend{Type: "openrouter"},
+		Models:  map[string]ModelSpec{roleCode: {Model: "openai/gpt-4o", Vision: &yes}},
 	}
 	specs := []*ModelSpec{
-		{Model: "openai/gpt-4o"},
 		{Model: "qwen/qwen3-coder"},
-		{Model: "acme/vl-8b"},                  // not listed: untouched
-		{Model: "openai/gpt-4o", Vision: &yes}, // explicit: untouched
-		{Model: ""},                            // empty id: untouched
+		{Model: "acme/plain"}, // listed text-only: settles false
+		{Model: ""},           // empty id: untouched
 	}
-	applyCatalogVision(catalog, specs...)
+	applyCatalogVision(cfg, catalog, specs...)
 
 	want := []struct {
 		settled bool
 		enabled bool
 	}{
-		{true, true},   // catalog says image input, id says nothing
-		{true, false},  // catalog says text-only
-		{false, false}, // unlisted stays nil for the heuristic
-		{true, true},   // explicit true survives a listing that agrees
+		{true, false}, // catalog says text-only
+		{true, false}, // a listing entry with no modalities is text-only too
 		{false, false},
 	}
 	for i, w := range want {
@@ -158,9 +210,37 @@ func TestApplyCatalogVision(t *testing.T) {
 		}
 	}
 
+	t.Run("a config-declared verdict is never overwritten", func(t *testing.T) {
+		no := false
+		flagCfg := &Config{
+			Backend: Backend{Type: "openrouter"},
+			Models:  map[string]ModelSpec{roleCode: {Model: "openai/gpt-4o", Vision: &no}},
+		}
+		spec := ModelSpec{Model: "openai/gpt-4o", Vision: &no}
+		applyCatalogVision(flagCfg, catalog, &spec)
+		if spec.Vision == nil || *spec.Vision {
+			t.Error("models.code.vision=false must survive a listing that claims image input")
+		}
+	})
+
+	// The catalog tier must reach an id config NAMED but left unflagged —
+	// the exact startup shape resolveBinding produces — and settle it from
+	// the listing even though the id carries no vision tag.
+	t.Run("config-named id without a flag is settled by the catalog", func(t *testing.T) {
+		plainCfg := &Config{
+			Backend: Backend{Type: "openrouter"},
+			Models:  map[string]ModelSpec{roleCode: {Model: "openai/gpt-4o"}},
+		}
+		spec := ModelSpec{Model: "openai/gpt-4o"}
+		applyCatalogVision(plainCfg, catalog, &spec)
+		if !spec.VisionEnabled() {
+			t.Error("an unflagged config pin must still be settled true by a listing with image input")
+		}
+	})
+
 	t.Run("no catalog is a no-op", func(t *testing.T) {
 		spec := ModelSpec{Model: "openai/gpt-4o"}
-		applyCatalogVision(nil, &spec)
+		applyCatalogVision(cfg, nil, &spec)
 		if spec.Vision != nil {
 			t.Error("a missing catalog must leave the verdict unset, not assert false")
 		}
@@ -168,19 +248,31 @@ func TestApplyCatalogVision(t *testing.T) {
 }
 
 // TestPreflightStampsVisionFromCatalog is the end-to-end wiring of the
-// catalog tier: the listing the startup preflight fetches settles both
-// role bindings, and is handed back so the session can reuse it for
+// catalog tier through the REAL startup path: resolveBinding leaves the
+// verdict unset, and the listing the startup preflight fetches settles both
+// role bindings from it, and is handed back so the session can reuse it for
 // /model switches. A network failure leaves both verdicts unset (the
-// heuristic in resolveBinding then decides), never a asserted false.
+// session's applyHeuristicVision fallback then decides), never an asserted
+// false.
 func TestPreflightStampsVisionFromCatalog(t *testing.T) {
 	served := []llm.OpenRouterModel{
 		{ID: "openai/gpt-4o", AcceptsImages: true},
 		{ID: "qwen/qwen3-coder", AcceptsImages: false},
 	}
-	code := ModelSpec{Model: "openai/gpt-4o"}
-	study := ModelSpec{Model: "qwen/qwen3-coder"}
+	// The real startup path: an OpenRouter config pinning a model whose id
+	// carries NO vision tag, with the flag unset — resolveBinding must not
+	// pre-stamp a heuristic verdict here, or applyCatalogVision would skip
+	// the binding and the catalog's image input would never reach it.
+	cfg := openrouterCfg()
+	cfg.Models = map[string]ModelSpec{roleCode: {Model: "openai/gpt-4o"}}
+	code := cfg.resolveBinding(roleCode, nil)
+	study := cfg.resolveBinding(roleStudy, nil)
+	study.Model = "qwen/qwen3-coder"
+	if code.Vision != nil || study.Vision != nil {
+		t.Fatal("resolveBinding must hand the preflight an unset verdict")
+	}
 
-	gotCode, gotStudy, catalog := preflightCuratedModels(context.Background(), openrouterCfg(),
+	gotCode, gotStudy, catalog := preflightCuratedModels(context.Background(), cfg,
 		code, study, t.TempDir(), fakeListModels(served, nil))
 
 	if !gotCode.VisionEnabled() {
@@ -205,7 +297,7 @@ func TestPreflightStampsVisionFromCatalog(t *testing.T) {
 	})
 
 	t.Run("catalog fetch failure leaves the verdict unset", func(t *testing.T) {
-		gotCode, gotStudy, catalog := preflightCuratedModels(context.Background(), openrouterCfg(),
+		gotCode, gotStudy, catalog := preflightCuratedModels(context.Background(), cfg,
 			code, study, t.TempDir(), fakeListModels(nil, errors.New("connection refused")))
 		if gotCode.Vision != nil || gotStudy.Vision != nil {
 			t.Error("a failed catalog fetch must leave vision unset for the name heuristic")
@@ -213,7 +305,61 @@ func TestPreflightStampsVisionFromCatalog(t *testing.T) {
 		if catalog != nil {
 			t.Error("no listing must be handed back when the fetch failed")
 		}
+		// And the session's fallback tier then decides from the id alone:
+		// the tagless gpt-4o id reads false — which is exactly why the
+		// catalog tier has to win when it exists.
+		applyHeuristicVision(cfg, &gotCode, &gotStudy)
+		if gotCode.VisionEnabled() {
+			t.Error("heuristic fallback on a tagless id must be false")
+		}
 	})
+}
+
+// TestPreflightSubstitutionVisionFromNewModel pins that a preflight
+// substitution takes the swapped-in model's catalog verdict, not the one
+// carried over from the missing model it replaced (#216): the retired pin
+// is declared vision-capable in config, the substitute is listed
+// text-only — so code ends up refusing images. Study's binding is a
+// different role's pin of the same retired id, which self-heal (on) swaps
+// too, and whose carried heuristic verdict must be cleared just the same
+// (config declared nothing for the study role).
+func TestPreflightSubstitutionVisionFromNewModel(t *testing.T) {
+	yes := true
+	old := "vendor/retired-vision-pin"
+	served := []llm.OpenRouterModel{
+		{ID: "openai/gpt-4o", ContextLength: 128000, AcceptsImages: true},
+		// discoverFreeModel's largest-context :free pick: text-only, so the
+		// substituted binding must refuse images whatever verdict the
+		// missing pin carried.
+		{ID: "acme/plain:free", ContextLength: 262144, AcceptsImages: false},
+	}
+	cfg := openrouterCfg()
+	cfg.Models = map[string]ModelSpec{roleCode: {Model: old, Vision: &yes}}
+	// A vision verdict carried in on both specs (the heuristic's or a
+	// config-declared one, as it arrives after resolveBinding): neither may
+	// survive the swap to a model the listing reports as text-only.
+	code := ModelSpec{Model: old, Vision: &yes}
+	study := ModelSpec{Model: old, Vision: &yes}
+
+	stderr := captureStderr(t, func() {
+		gotCode, gotStudy, _ := preflightCuratedModels(context.Background(), cfg,
+			code, study, t.TempDir(), fakeListModels(served, nil))
+		if gotCode.Model == old {
+			t.Fatalf("no substitution happened: %q", gotCode.Model)
+		}
+		if gotCode.VisionEnabled() {
+			t.Errorf("substituted to a catalog text-only model: vision must be false, got %v", gotCode.VisionEnabled())
+		}
+		// Study was swapped as well (self-heal on) and config declared no
+		// flag for its role, so its carried verdict must not survive either.
+		if gotStudy.Model == old || gotStudy.VisionEnabled() {
+			t.Errorf("study: model=%q vision=%v, want swapped with a cleared verdict",
+				gotStudy.Model, gotStudy.VisionEnabled())
+		}
+	})
+	if !strings.Contains(stderr, "substituting") {
+		t.Errorf("expected the substitution stderr line, got %q", stderr)
+	}
 }
 
 // TestClearKeepsVision pins that /clear carries the vision verdict across

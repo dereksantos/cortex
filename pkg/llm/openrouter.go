@@ -65,17 +65,18 @@ type OpenRouterClient struct {
 	lastProvider string  // upstream provider that served the most recent call
 
 	// vision declares whether the current model accepts image content
-	// parts (#216). Set from the OpenRouter catalog's input modalities
-	// when the caller has them, else from `models.<role>.vision`.
-	// Default false: image parts are refused until something says the
-	// model takes them.
+	// parts (#216). Set by the caller via SetVision — from the OpenRouter
+	// catalog's input modalities when it has them, else from
+	// `models.<role>.vision`. Default false: image parts are refused until
+	// something says the model takes them.
 	vision bool
 }
 
 // SetVision declares whether this client's model accepts image content
 // parts. Callers holding the OpenRouter catalog pass its input modalities;
-// cmd/cortex passes the per-role `models.<role>.vision` flag. Text-only
-// requests are unaffected either way.
+// otherwise the per-role `models.<role>.vision` flag. Text-only requests
+// are unaffected either way. Nothing in cmd/cortex calls this yet — its
+// resolved verdict rides on its own request type until parts 2/3 of #134.
 func (c *OpenRouterClient) SetVision(v bool) { c.vision = v }
 
 // Vision reports whether image parts are currently permitted on this client.
