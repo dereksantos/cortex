@@ -117,8 +117,10 @@ untracked, non-ignored files then present, recorded under
 `refs/cortex/checkpoints/<session>/<turn>` (`internal/checkpoint` +
 `cmd/cortex/checkpoint.go`). The snapshot is COMMITTED to the per-session undo
 stack only at the turn's END, and only if the turn changed the working tree:
-`commitCheckpoint` re-snapshots the tracked state and the untracked set and
-keeps the checkpoint iff either differs from the turn-start baseline — so a
+`commitCheckpoint` re-snapshots the tracked TREE (the stash commit's tree
+object, or HEAD's tree when the tree is clean — never the commit hash, since
+a stash commit embeds timestamps) and the untracked set, and keeps the
+checkpoint iff either differs from the turn-start baseline — so a
 turn that only ran read-only bash (tests, `git status`) records nothing, while
 a turn that edits only through the `agent` subagent still does (the turn-end
 tree diff is the one signal that catches every mutation path). The stack is

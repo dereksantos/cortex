@@ -17,9 +17,14 @@ import (
 // is HEAD's commit, because `git stash create` prints nothing there). It is
 // COMMITTED to the undo stack only at the turn's END, and only if the turn
 // actually changed the working tree — commitCheckpoint re-snapshots the
-// tracked state (again `git stash create`, HEAD on a clean tree) plus the
-// untracked listing and compares with the pending entry: the checkpoint is
-// kept iff the tree hash differs or the untracked set differs. That single
+// tracked tree (again `git stash create`'s tree object, HEAD's tree on a
+// clean tree) plus the untracked listing and compares with the pending
+// entry: the checkpoint is kept iff the TREE hash differs or the untracked
+// set differs. The comparison is on tree objects, never commit hashes:
+// `git stash create` embeds author/committer timestamps in its commit, so
+// two snapshots of identical content taken in different seconds are
+// different commits (different hashes), while their trees are the same
+// content-addressed object. That single
 // signal catches edits made through any tool surface (write_file, edit_file,
 // remove_path, a mutating bash, the `agent` subagent's own dispatcher) and
 // drops a turn that only ran read-only bash. The turn-start cleanliness of
@@ -57,6 +62,16 @@ const maxCheckpointRefs = 50
 type checkpointEntry struct {
 	snap      string
 	untracked []string
+	// tree is the snapshot's TREE hash (`git rev-parse <snap>^{tree}`),
+	// taken when the snapshot is recorded. commitCheckpoint compares the
+	// turn-end tree to THIS — never the commit hash, because `git stash
+	// create` embeds author/committer timestamps in its commit object: two
+	// snapshots of identical content taken in different seconds are
+	// different commits (and thus different hashes), while their trees are
+	// byte-for-byte the same object. A read-only turn on a dirty tree that
+	// crosses a second boundary would otherwise keep a no-op checkpoint and
+	// skew the /undo depth.
+	tree string
 }
 
 // checkpointStack is the session's in-memory undo history: entries in turn
@@ -154,7 +169,15 @@ func (cs *CortexSession) recordCheckpoint() {
 		// Best-effort: a git failure is not a turn failure. Swallow it.
 		return
 	}
-	cs.pending = checkpointEntry{snap: snap, untracked: untracked}
+	// Record the snapshot's TREE hash alongside the commit: it is the
+	// content-stable identity commitCheckpoint's keep-or-drop diff needs
+	// (a stash commit's hash also carries its timestamps — see the field's
+	// comment).
+	tree := ""
+	if out, err := gitCmdIn(dir, "rev-parse", snap+"^{tree}"); err == nil {
+		tree = strings.TrimSpace(out)
+	}
+	cs.pending = checkpointEntry{snap: snap, untracked: untracked, tree: tree}
 }
 
 // commitCheckpoint runs at the END of the turn (turn.go's deferred cleanup):
@@ -183,23 +206,30 @@ func (cs *CortexSession) commitCheckpoint() {
 	cs.pending = checkpointEntry{}
 	dir := cs.root()
 	if dir != "" && checkpoint.Available(dir) {
-		// The turn-end re-snapshot: the tracked state the working tree holds
-		// NOW (after the turn ran), captured the same way recordCheckpoint
-		// captured it at the turn's start. `git stash create` prints nothing
-		// when the tracked tree is clean, so HEAD stands in — identical to
-		// recordCheckpoint's fallback (a turn that ended with a clean tracked
-		// tree is undoable by design: undoing a commit made during the turn
-		// restores the pre-commit tree).
+		// The turn-end re-snapshot: the TRACKED TREE the working tree holds
+		// NOW (after the turn ran). Capture it as `git stash create` on a
+		// dirty tree (the throwaway commit's tree object — the same tree
+		// recordCheckpoint's snapshot named) or HEAD's tree on a clean one,
+		// and compare against the turn-start TREE hash: `git stash create`
+		// commits embed author/committer timestamps, so the commit hashes of
+		// two identical trees taken in different seconds differ, but the
+		// TREE objects are content-addressed and identical.
 		tree := ""
 		if out, err := gitCmdIn(dir, "stash", "create"); err == nil {
-			tree = strings.TrimSpace(out)
-		}
-		if tree == "" {
-			if out, err := gitCmdIn(dir, "rev-parse", "HEAD"); err == nil {
-				tree = strings.TrimSpace(out)
+			if stash := strings.TrimSpace(out); stash != "" {
+				// Dirty tree: the throwaway commit's tree object is the
+				// turn-end tracked state.
+				if t, err := gitCmdIn(dir, "rev-parse", stash+"^{tree}"); err == nil {
+					tree = strings.TrimSpace(t)
+				}
 			}
 		}
 		if tree == "" {
+			if out, err := gitCmdIn(dir, "rev-parse", "HEAD^{tree}"); err == nil {
+				tree = strings.TrimSpace(out)
+			}
+		}
+		if tree == "" || entry.tree == "" {
 			// Git failed: we cannot tell whether the turn changed files. The
 			// turn-start ref already exists; keep it (conservative — an
 			// unexplained drop would lose a real undo).
@@ -207,7 +237,7 @@ func (cs *CortexSession) commitCheckpoint() {
 			return
 		}
 		if untracked, err := checkpoint.Untracked(dir); err == nil &&
-			tree == entry.snap && equalUntracked(untracked, entry.untracked) {
+			tree == entry.tree && equalUntracked(untracked, entry.untracked) {
 			// The turn's end tree matches its start tree: drop the ref the
 			// start of the turn recorded so the on-disk state never
 			// outlives a turn that changed nothing.

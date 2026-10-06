@@ -145,6 +145,44 @@ func TestRecordCheckpointReadonlyTurnRecordsNothing(t *testing.T) {
 	}
 }
 
+func TestReadonlyTurnAcrossSecondBoundaryDoesNotRecordCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	mustWrite(t, dir, "a.txt", "v1\n")
+	gitCmd(t, dir, "add", "a.txt")
+	gitCmd(t, dir, "commit", "-q", "-m", "base")
+	// Dirty the tracked tree WITHOUT committing (the round-1 bug's setup):
+	// a prior turn left work on disk, and this turn only reads.
+	mustWrite(t, dir, "a.txt", "v2\n")
+
+	cs := testCheckpointSession(t, dir)
+	cs.turnNo = 1
+	cs.recordCheckpoint()
+
+	// Move the commit identity forward in time, past a second boundary:
+	// the turn-end `git stash create` commit now carries different
+	// author/committer timestamps than the turn-start one, so its COMMIT
+	// hash differs. Only a comparison on the TREE object (which is
+	// content-addressed and identical) correctly recognises the tree as
+	// unchanged. On the old commit-hash comparison the hashes differ,
+	// the no-op checkpoint is kept, and /undo's depth is skewed.
+	t.Setenv("GIT_AUTHOR_DATE", "2001-01-01T00:00:00")
+	t.Setenv("GIT_COMMITTER_DATE", "2001-01-01T00:00:00")
+	cs.commitCheckpoint()
+
+	if cs.checkpoints != nil && !cs.checkpoints.empty() {
+		t.Errorf("read-only turn on a dirty tree (second boundary crossed) recorded a checkpoint; stack=%d entries", cs.checkpoints.len())
+	}
+	if n := checkpointRefCount(t, dir); n != 0 {
+		t.Errorf("read-only turn (second boundary crossed) left %d checkpoint refs, want 0", n)
+	}
+	// A deleted ref is the expected outcome for a read-only turn.
+	ref := checkpoint.RefFor(cs.SessionID, "0001")
+	if out, err := gitCmdOutput(t, dir, "rev-parse", ref); err == nil && out != "" {
+		t.Errorf("turn 1's ref survived a read-only turn: %q", out)
+	}
+}
+
 func TestRecordCheckpointNonRepoIsNoop(t *testing.T) {
 	dir := t.TempDir() // not a git repo
 	// A workspace rooted at the non-repo dir: root() resolves to it, and
