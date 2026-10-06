@@ -167,9 +167,24 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// message's masked patterns in as they hit the transcript); carried on
 	// TurnResult.Redactions before the turn returns.
 	cs.redactions = 0
-
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
+	// Issue #111: snapshot the working tree BEFORE this turn mutates anything.
+	// The snapshot names the tree the turn starts from (HEAD's commit on a
+	// clean tree) and records the hidden ref for this turn's ordinal; it is
+	// not yet on the undo stack — commitCheckpoint at the turn's END re-
+	// snapshots the tree and commits it to the stack only if the turn
+	// actually changed the working tree, else it drops the recorded ref.
+	// Guarded and non-fatal (a checkpoint failure never breaks the turn). The
+	// turn ordinal is already stamped above (cs.turnNo), so the ref names this
+	// turn.
+	cs.recordCheckpoint()
+	// Issue #111: commit the turn's checkpoint at its end no matter how the
+	// turn ends (error, interrupt, clean finalize) — the deferred cleanup
+	// consumes the pending snapshot, so a turn that died mid-mutation still
+	// commits a checkpoint (its mutations are on disk) and a read-only turn
+	// drops its ref.
+	defer cs.commitCheckpoint()
 	// Issue #109: stamp the in-flight turn's start — the status row's elapsed
 	// clock (statusStats's TurnStart). It stays set for the whole turn, so the
 	// row's "· 34s" counts up from here; a turn never clears it, and the next

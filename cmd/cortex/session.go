@@ -805,5 +805,9 @@ func (cs *CortexSession) Clear() {
 	// A cleared session is a fresh conversation: stamp its transcript from 1.
 	cs.turns = 0
 	cs.LastPromptTokens = 0
+	// Issue #111: a /clear starts a fresh conversation, so the old
+	// conversation's undo history is gone — clear the in-memory stack and drop
+	// the session's hidden checkpoint refs (best-effort, non-fatal).
+	cs.clearCheckpoints()
 	cs.StartTranscript()
 }

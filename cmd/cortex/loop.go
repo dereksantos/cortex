@@ -1214,8 +1214,19 @@ func requestFor(spec ModelSpec, system, seed string, toolset []Tool, maxTokens i
 // blockingSender is the subagent / non-streaming round-trip: one plain blocking
 // Send, no terminal echo (Progress shows the tool calls). The per-request
 // deadline + ctx-cancel ride on req.Send → sendOnce (http.NewRequestWithContext),
-// so a cancelled ctx closes the socket.
+// so a cancelled ctx closes the socket. A TEST-ONLY subagentSenderOverride (see
+// CortexSession) replaces the round-trip for a named subagent role, so a test
+// can script the subagent's model replies with zero network while the REAL
+// runLoop + dispatcher still run — nil in every production session.
 func (cs *CortexSession) blockingSender() Sender {
+	if cs.subagentSenderOverride != nil {
+		// Only the `agent` subagent is file-mutating (study/learn are
+		// read-only), so only its role is ever scripted; the literal is the
+		// same string internal/tools.Agent.Role carries.
+		if send, ok := cs.subagentSenderOverride["agent"]; ok {
+			return send
+		}
+	}
 	return SenderFunc(func(ctx context.Context, req *AgentRequest) (*AgentResponse, bool, error) {
 		res, err := req.Send(ctx)
 		return res, false, err
@@ -1277,7 +1288,8 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		isBash := call.Function.Name == tools.FunctionBash
 		if isBash {
 			cs.armTestwatch()
-		} else if p := testwatchTouchedPath(call); p != "" {
+		}
+		if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
 			// Issue #129 piece 3: record the touched file for the turn-end
 			// lint pass (the per-edit hook is format-only; lint runs once at
