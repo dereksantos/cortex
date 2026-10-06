@@ -283,33 +283,33 @@ func estTurnTokens(msgs []Message) int {
 
 // imageTokensOf sums the documented per-image estimate over every image
 // part across msgs: tools.ImageTokensOf (decoded bytes ÷ 3 — the
-// base64-on-the-wire billing rule) per part, plus one marker-text content
-// where a resumed transcript carries only the `[image:` string. Zero for
-// text-only messages, so every existing estimate stays byte-for-byte.
+// base64-on-the-wire billing rule) per part. Zero for text-only
+// messages, so every existing estimate stays byte-for-byte.
+//
+// A resumed image result — the `[image:` marker text with NO Parts —
+// books nothing extra: after resume no image goes on the wire, only the
+// ~30-token marker, whose bytes are already counted by estTurnTokens'
+// len(Content) term (#217). Booking it at the cap inflated a resumed
+// turn by 500k tokens of fiction — more than a whole 131k window — and
+// steered demotion by a size the prompt doesn't have.
 func imageTokensOf(msgs []Message) int {
 	tokens := 0
 	for _, msg := range msgs {
-		n := 0
 		for _, p := range msg.Parts {
 			if !p.HasImage() {
 				continue
 			}
 			tokens += tools.ImageTokensOf(imageDataURIRawBytes(p.ImageURL))
-			n++
-		}
-		if n == 0 && strings.HasPrefix(msg.Content, tools.ImageObservationMarker()) {
-			// A resumed (wire-Parts-less) image result: book it at the same
-			// per-image figure the live session used for the bytes it no
-			// longer holds in memory — the cap is the honest upper bound.
-			tokens += tools.ImageTokensOf(defaultImageTokenBookingBytes)
 		}
 	}
 	return tokens
 }
 
-// defaultImageTokenBookingBytes is the size a resumed image (marker text
-// only, no in-memory bytes) is booked at: the shipped image cap, so an
-// image never demotes itself out of accounting by being forgotten.
+// defaultImageTokenBookingBytes is the size an http(s) image URL (whose
+// bytes are not local, so its size is unknown) is booked at: the shipped
+// image cap, as an upper-bound estimate. (A resumed marker-only result
+// books NOTHING — see imageTokensOf; it was this constant misapplied
+// there that inflated resumed turns by a phantom 500k tokens.)
 const defaultImageTokenBookingBytes = 1_500_000
 
 // imageDataURIRawBytes reports how many raw bytes a data-URI image part
@@ -334,15 +334,16 @@ func imageDataURIRawBytes(url string) int {
 }
 
 // hasImageContent reports whether a message carries image parts on the
-// wire, or the `[image:` marker text (a resumed transcript keeps only the
-// string Content).
+// wire (#217). A resumed transcript's marker-only result does NOT count:
+// no image is in its prompt, so neither the outline's "image attached"
+// action nor the /context legend's image count should claim one.
 func hasImageContent(msg Message) bool {
 	for _, p := range msg.Parts {
 		if p.HasImage() {
 			return true
 		}
 	}
-	return strings.HasPrefix(msg.Content, tools.ImageObservationMarker())
+	return false
 }
 
 // outlineUserCap is the maximum runes for a demoted user message to stay verbatim.

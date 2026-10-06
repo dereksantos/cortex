@@ -275,9 +275,10 @@ func (cs *CortexSession) gridLegendLines() []string {
 
 // hydratedImageTokens is the image share of the hydrated tail: the
 // documented per-image estimate over every image part in messages at or
-// after the demotion frontier (plus resumed marker-only results, booked at
-// the cap). Demoted images are NOT counted here — their outline entry
-// replaced them — matching how the tail figure itself works (#217).
+// after the demotion frontier. A resumed marker-only result (no Parts)
+// contributes nothing — no image is in the prompt for it (#217). Demoted
+// images are NOT counted here — their outline entry replaced them —
+// matching how the tail figure itself works.
 func (cs *CortexSession) hydratedImageTokens() int {
 	if cs.Request == nil || cs.ws == nil {
 		return 0

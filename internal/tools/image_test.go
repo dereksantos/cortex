@@ -77,13 +77,33 @@ func readImageCall(t *testing.T, path string, start, end int) ToolCall {
 	}}
 }
 
-// textOnlyDeps answers the ImageGate with a fixed verdict.
+// textOnlyDeps answers the ImageGate with a fixed verdict and the
+// ImageSink with a per-instance slot (the real production owner shape: a
+// session, not process-global state).
 type textOnlyDeps struct {
 	headlessDeps
-	accept bool
+	accept   bool
+	part     ImagePart
+	recorded bool
 }
 
-func (d textOnlyDeps) ImageInputEnabled() bool { return d.accept }
+func (d *textOnlyDeps) ImageInputEnabled() bool { return d.accept }
+func (d *textOnlyDeps) RecordImage(p ImagePart) {
+	d.part = p
+	d.recorded = true
+}
+
+// takePart consumes the recorded attachment (what the cmd/cortex splice
+// step does to its session's slot).
+func (d *textOnlyDeps) takePart() (ImagePart, bool) {
+	if !d.recorded {
+		return ImagePart{}, false
+	}
+	p := d.part
+	d.part = ImagePart{}
+	d.recorded = false
+	return p, true
+}
 
 func TestReadFileImageVisionAttachesPart(t *testing.T) {
 	dir := t.TempDir()
@@ -95,7 +115,8 @@ func TestReadFileImageVisionAttachesPart(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	out, err := readFile(readImageCall(t, p, 0, 0), textOnlyDeps{accept: true})
+	deps := &textOnlyDeps{accept: true}
+	out, err := readFile(readImageCall(t, p, 0, 0), deps)
 	if err != nil {
 		t.Fatalf("read_file image: %v", err)
 	}
@@ -105,9 +126,9 @@ func TestReadFileImageVisionAttachesPart(t *testing.T) {
 	if !strings.Contains(out, "shot.png") || !strings.Contains(out, "image/png") {
 		t.Errorf("observation must name the path and type: %q", out)
 	}
-	part, ok := TakeImageObservation(out)
+	part, ok := deps.takePart()
 	if !ok {
-		t.Fatal("TakeImageObservation found no attachment after an image read")
+		t.Fatal("the session's ImageSink slot holds no attachment after an image read")
 	}
 	if part.MediaType != "image/png" || part.Path != p {
 		t.Errorf("part = %+v", part)
@@ -118,8 +139,8 @@ func TestReadFileImageVisionAttachesPart(t *testing.T) {
 	}
 
 	t.Run("attachment is consumed once", func(t *testing.T) {
-		if _, ok := TakeImageObservation(out); ok {
-			t.Error("a second Take must not re-splice the same image")
+		if _, ok := deps.takePart(); ok {
+			t.Error("a second take must not re-splice the same image")
 		}
 	})
 }
@@ -142,7 +163,8 @@ func TestReadFileImageTextOnlyRefusal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := writeImage(t, dir, tt.file, tt.data)
-			out, err := readFile(readImageCall(t, p, 0, 0), textOnlyDeps{accept: false})
+			deps := &textOnlyDeps{accept: false}
+			out, err := readFile(readImageCall(t, p, 0, 0), deps)
 			if err != nil {
 				t.Fatalf("refusal must be an observation, not an error: %v", err)
 			}
@@ -152,23 +174,27 @@ func TestReadFileImageTextOnlyRefusal(t *testing.T) {
 			if !strings.Contains(out, tt.want) {
 				t.Errorf("refusal must name the file type %q: %q", tt.want, out)
 			}
-			if _, ok := TakeImageObservation(out); ok {
+			if _, ok := deps.takePart(); ok {
 				t.Error("a refusal attaches nothing")
 			}
 		})
 	}
 
-	// A deps that doesn't answer the gate (subagents, headless) takes the
-	// image: their requests carry no image parts, and the wire gate
-	// (pkg/llm.GateImages) backstops anything that ever would.
-	t.Run("deps without the gate attaches", func(t *testing.T) {
+	// A deps that answers the gate yes but records nothing (no ImageSink
+	// — the headless stub, a test double): a marker with no attachment
+	// behind it would tell the model about an image nothing can deliver,
+	// so the read is refused instead (#217: no phantom "attached").
+	t.Run("deps without a sink refuses", func(t *testing.T) {
 		p := writeImage(t, dir, "sub.png", pngBytes(32))
 		out, err := readFile(readImageCall(t, p, 0, 0), headlessDeps{})
 		if err != nil {
 			t.Fatalf("read: %v", err)
 		}
-		if !IsImageObservation(out) {
-			t.Errorf("ungated deps should get the image marker, got %q", out)
+		if IsImageObservation(out) {
+			t.Errorf("a no-sink dispatch must not claim an attachment, got %q", out)
+		}
+		if !strings.Contains(out, "image/png") {
+			t.Errorf("the refusal must name the file type: %q", out)
 		}
 	})
 }
@@ -179,7 +205,8 @@ func TestReadFileImageSizeCapRefusal(t *testing.T) {
 	Configure(Limits{ImageMaxBytes: 128})
 	p := writeImage(t, dir, "big.png", pngBytes(4096))
 
-	out, err := readFile(readImageCall(t, p, 0, 0), textOnlyDeps{accept: true})
+	deps := &textOnlyDeps{accept: true}
+	out, err := readFile(readImageCall(t, p, 0, 0), deps)
 	if err != nil {
 		t.Fatalf("cap refusal must be an observation, not an error: %v", err)
 	}
@@ -189,7 +216,7 @@ func TestReadFileImageSizeCapRefusal(t *testing.T) {
 	if !strings.Contains(out, "image/png") || !strings.Contains(out, "128") {
 		t.Errorf("cap refusal must name the type and the cap: %q", out)
 	}
-	if _, ok := TakeImageObservation(out); ok {
+	if _, ok := deps.takePart(); ok {
 		t.Error("over-cap leaves no attachment")
 	}
 }
@@ -201,7 +228,8 @@ func TestReadFileImageRangedRefused(t *testing.T) {
 		Name:      FunctionReadFile,
 		Arguments: `{"path":"` + p + `","start":1,"end":5}`,
 	}}
-	out, err := readFile(tc, textOnlyDeps{accept: true})
+	deps := &textOnlyDeps{accept: true}
+	out, err := readFile(tc, deps)
 	if err != nil {
 		t.Fatalf("ranged refusal must be an observation: %v", err)
 	}
@@ -211,41 +239,72 @@ func TestReadFileImageRangedRefused(t *testing.T) {
 	if !strings.Contains(out, "image/png") || !strings.Contains(out, "range") {
 		t.Errorf("ranged refusal must name the type and why: %q", out)
 	}
+	if _, ok := deps.takePart(); ok {
+		t.Error("a ranged refusal records no attachment")
+	}
 }
 
-func TestTakeImageObservationStaleCleared(t *testing.T) {
+// TestImageSinkIsPerSession: the attachment slot is the DEPS' own, not
+// process-global state — with two sessions recording images, neither
+// picks up the other's (the shape serve/discord hit when two sessions
+// dispatch concurrently, #217).
+func TestImageSinkIsPerSession(t *testing.T) {
+	t.Cleanup(ResetLimits)
+	ResetLimits()
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	depsA := &textOnlyDeps{accept: true}
+	depsB := &textOnlyDeps{accept: true}
+	pA := writeImage(t, dir, "a.png", pngBytes(16))
+	pB := writeImage(t, dir, "b.png", append(append([]byte{}, pngBytes(8)...), 'B', 'B', 'B'))
+
+	if _, err := Execute(ctx, readImageCall(t, pA, 0, 0), depsA); err != nil {
+		t.Fatalf("execute A: %v", err)
+	}
+	if _, err := Execute(ctx, readImageCall(t, pB, 0, 0), depsB); err != nil {
+		t.Fatalf("execute B: %v", err)
+	}
+
+	partA, ok := depsA.takePart()
+	if !ok || partA.Path != pA {
+		t.Errorf("session A's slot = %+v ok=%v, want the A.png attachment", partA, ok)
+	}
+	partB, ok := depsB.takePart()
+	if !ok || partB.Path != pB {
+		t.Errorf("session B's slot = %+v ok=%v, want the B.png attachment", partB, ok)
+	}
+}
+
+// TestReadFileImageSubagentRefused: a read_file inside a subagent (study
+// or agent) must not return an "attached as an image part" observation —
+// the subagent's engine never splices Parts onto its tool messages, so
+// the model would be told about an image it cannot see (#217 review).
+func TestReadFileImageSubagentRefused(t *testing.T) {
 	t.Cleanup(ResetLimits)
 	ResetLimits()
 	dir := t.TempDir()
 	p := writeImage(t, dir, "x.png", pngBytes(16))
-	ctx := context.Background()
 
-	// Produce an attachment via the real dispatch path...
-	out, err := Execute(ctx, readImageCall(t, p, 0, 0), textOnlyDeps{accept: true})
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if _, ok := TakeImageObservation(out); !ok {
-		t.Fatal("attachment expected after image read")
-	}
+	frame := pushNest("study")
+	defer func() {
+		popNest()
+		_ = frame
+	}()
 
-	// ...then leave a second one and consume it only via a NON-image
-	// tool result: the follow-up Execute must clear it, so the stale
-	// image can never be spliced onto the wrong message.
-	if _, err := Execute(ctx, readImageCall(t, p, 0, 0), textOnlyDeps{accept: true}); err != nil {
-		t.Fatalf("execute 2: %v", err)
-	}
-	other, err := Execute(ctx,
-		ToolCall{ID: "c2", Type: "function", Function: FunctionCall{Name: FunctionOutline, Arguments: `{"path":"` + dir + `"}`}},
-		textOnlyDeps{accept: true})
+	deps := &textOnlyDeps{accept: true}
+	out, err := Execute(context.Background(), readImageCall(t, p, 0, 0), deps)
 	if err != nil {
-		t.Fatalf("outline: %v", err)
+		t.Fatalf("subagent image read must be an observation, not an error: %v", err)
 	}
-	if IsImageObservation(other) {
-		t.Fatal("outline output must not be an image observation")
+	if IsImageObservation(out) {
+		t.Errorf("a subagent read must not claim an attached image part: %q", out)
 	}
-	if _, ok := TakeImageObservation(out); ok {
-		t.Error("a later non-image Execute must have cleared the pending attachment")
+	if !strings.Contains(out, "image/png") || !strings.Contains(out, "subagent") {
+		t.Errorf("the refusal must name the file type and why: %q", out)
+	}
+	if _, ok := deps.takePart(); ok {
+		t.Error("a subagent refusal records no attachment")
 	}
 }
 

@@ -4,9 +4,9 @@
 // bytes as an image CONTENT PART instead of binary garbage in a string:
 // readFile returns the short imageObservationPrefix text (the text copy
 // that rides the transcript and every string-shaped consumer) and records
-// the attachment (tools.go's lastImageObservation) for the coder
+// the attachment on the session's ImageSink (deps), for the coder
 // dispatcher to splice onto the tool-result message as wire Parts
-// (cmd/cortex, via TakeImageObservation). Three outcomes:
+// (cmd/cortex, via the session's per-session pending slot). Three outcomes:
 //
 //   - vision model: image part attached, observation names the file type,
 //     size, and the per-image token estimate the context math books.
@@ -15,6 +15,9 @@
 //     escape hatch — no image part is produced.
 //   - over the size cap (tools.image_max_bytes): a refusal with the byte
 //     size, the cap, and a pointer down, never a truncated image.
+//   - inside a subagent (study/agent): a refusal — the subagent's engine
+//     never splices image parts onto its tool messages, so an "attached"
+//     observation would tell the model about an image it cannot see.
 //
 // A ranged read of an image is refused regardless: line ranges are
 // meaningless over binary bytes.
@@ -31,7 +34,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 // imageMediaTypes maps a lowercased extension to its MIME type — the
@@ -79,11 +81,24 @@ type ImagePart struct {
 // text-only refusal: does the resolved CODE-role model accept image input
 // (#216's verdict — models.<role>.vision / catalog / capability tags).
 // Implemented by *CortexSession; a deps that does NOT implement it (the
-// Study/Agent subagents, headlessDeps, test doubles) takes the image
-// anyway — their wire requests are text-only strings that carry no image
-// parts, and the #216 gate backstops anything that ever does.
+// Study/Agent subagents, headlessDeps, test doubles) is ungated, and the
+// #216 gate backstops anything that ever sends image parts from there.
 type ImageGate interface {
 	ImageInputEnabled() bool
+}
+
+// ImageSink is the OWNER side of the image hand-off (#217): read_file
+// records the attachment it produced by calling RecordImage on the deps
+// it was dispatched with, so the bytes land on the session that ran the
+// read — never on process-global state. The engine's splice step reads
+// and clears the same slot (cmd/cortex's CortexSession.pendingImage).
+// Implemented by *CortexSession; a deps that does NOT implement it (the
+// Study/Agent subagents route through the coder session but read_file
+// refuses inside a subagent anyway, headlessDeps, test doubles) gets a
+// marker-less world: readFile refuses rather than emit an "attached"
+// observation nothing can honor.
+type ImageSink interface {
+	RecordImage(ImagePart)
 }
 
 // detectImage reports whether data is an image read_file should hand to a
@@ -132,14 +147,6 @@ func imagePartFor(path, mediaType string, data []byte) (ImagePart, string) {
 	return part, obs
 }
 
-// ImageObservationFor builds the (ImagePart, marker-observation) pair for
-// raw image bytes — the same construction readFile performs, exposed for
-// the cmd/cortex wiring tests so the engine-side splice/recall tests use
-// the real production marker shape instead of a hand-copied one.
-func ImageObservationFor(path, mediaType string, data []byte) (ImagePart, string) {
-	return imagePartFor(path, mediaType, data)
-}
-
 // IsImageObservation reports whether a tool observation is read_file's
 // image result marker (the text copy), the signal the cmd/cortex
 // dispatcher uses to splice the recorded attachment's Parts onto the
@@ -153,54 +160,6 @@ func IsImageObservation(obs string) bool {
 // escape hatch the caller appends.
 func imageRefusal(path, mediaType string) string {
 	return fmt.Sprintf("%s is %s — an image file; ", path, mediaType)
-}
-
-// --- Attachment hand-off -------------------------------------------------
-//
-// tools.Execute's contract is a string, so the image part can't ride it.
-// Instead read_file records the attachment in a goroutine-local slot (the
-// same goroutine runs Execute and the dispatcher that appends the
-// tool-result message), and TakeImageObservation consumes it for exactly
-// the observation it belongs to. Any Execute call whose result is not an
-// image marker clears the slot, so a stale attachment can never re-splice
-// onto a later tool message, and a subagent's nested read_file (whose
-// image belongs to the child's own conversation, never the parent's tool
-// result) clears the parent's slot on its way out — fail-closed.
-
-type imageSlotKey struct{}
-
-// imageLocal carries the pending attachment for the goroutine running
-// tools.Execute. A plain per-goroutine slot (a goroutine ID would need
-// unsafe); its identity is the isolation.
-var imageLocal sync.Map // imageSlotKey -> ImagePart
-
-// recordImageObservation stores the attachment for the current Execute.
-func recordImageObservation(part ImagePart) {
-	imageLocal.Store(imageSlotKey{}, part)
-}
-
-// clearImageObservation drops any pending attachment (a non-image tool
-// result consumed nothing, so nothing may linger for the next taker).
-func clearImageObservation() {
-	imageLocal.Delete(imageSlotKey{})
-}
-
-// TakeImageObservation consumes the pending image attachment (read_file's,
-// recorded the moment it emitted the marker text). ok is false when the
-// observation is not an image marker or nothing is pending. The slot is
-// consumed on the ok path, so a repeated call for the same observation
-// can't re-splice the image onto a second message.
-func TakeImageObservation(obs string) (ImagePart, bool) {
-	if !IsImageObservation(obs) {
-		clearImageObservation()
-		return ImagePart{}, false
-	}
-	v, ok := imageLocal.Load(imageSlotKey{})
-	if !ok {
-		return ImagePart{}, false
-	}
-	clearImageObservation()
-	return v.(ImagePart), true
 }
 
 // ImageTokensOf is the documented per-image context estimate (#217):

@@ -356,7 +356,7 @@ per-call `model` argument pins another. See
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. An image (png/jpeg/gif/webp) read whole attaches as an image part for vision models (refused, naming the file type, for a text-only model or over the size cap). |
+| `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. An image (png/jpeg/gif/webp) read whole attaches as an image part for vision models (refused, naming the file type, for a text-only model, over the size cap, or inside a subagent). |
 | `write_file` | Create or overwrite a file. |
 | `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. Failures carry the match line numbers (ambiguous) or a closest-region snippet (not found); successes include the current changed region. |
 | `study` | Produce a goal-curated digest of a large file or directory. |

@@ -2,20 +2,23 @@
 // part 2 of #134).
 //
 // read_file detects an image and hands back its short `[image: …]` marker
-// observation with the attachment recorded in tools' per-dispatch slot
-// (internal/tools/image.go). This file closes the loop at the three places
-// the engine touches:
+// observation, recording the attachment on the session itself (the
+// ImageSink seam, internal/tools/image.go — a per-session field, so two
+// sessions dispatching concurrently can never see each other's image).
+// This file closes the loop at the three places the engine touches:
 //
-//   - coderDispatcher (loop.go): after Execute, TakeImageObservation moves
-//     the attachment onto the tool-result message as wire Parts (mapped to
-//     llm.ContentPart), and writes the bytes to a per-session side-car
-//     file so a resumed session — whose transcript keeps only the marker
-//     string — can still point recall at the real bytes. The splice only
-//     happens while the request's Vision verdict is true; the text-only
-//     refusal already came from the tool itself (ImageInputEnabled).
-//   - estTurnTokens (demote.go): images are booked at tools.ImageTokensOf,
-//     the documented per-image estimate, so an image counts toward the
-//     window and demotes on schedule — never staying in the prompt forever.
+//   - the coder Toolset (turn.go wires, loop.go calls): SpliceImages moves
+//     the attachment onto the tool-result message as wire Parts
+//     (mapped to llm.ContentPart), and WriteImageSideCar writes the bytes
+//     to a per-session side-car file so a resumed session — whose
+//     transcript keeps only the marker string — can still point recall at
+//     the real bytes. The splice only happens while the request's Vision
+//     verdict is true; the text-only refusal already came from the tool
+//     itself (ImageInputEnabled).
+//   - estTurnTokens (demote.go): images with wire Parts are booked at
+//     tools.ImageTokensOf, the documented per-image estimate, so an image
+//     counts toward the window and demotes on schedule — never staying in
+//     the prompt forever.
 //   - Recall (tool_deps.go): an image's outline citation resolves to the
 //     marker line plus the side-car path, the recoverable-image contract.
 //
@@ -30,7 +33,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -110,84 +112,89 @@ func (cs *CortexSession) ImageInputEnabled() bool {
 	return cs.Request.Vision
 }
 
+// RecordImage implements internal/tools' ImageSink (#217): read_file
+// records the attachment it produced on the session that dispatched it,
+// and every tool result that is NOT an image marker clears the slot
+// (fail-closed — a stale attachment can never splice onto a later
+// message). The field is the slot — per-session by construction, so a
+// serve/discord process running several sessions concurrently never
+// records one session's image where another session's splice step reads
+// it. A second image recorded before the first is spliced overwrites:
+// the most recent read is the one being appended next.
+func (cs *CortexSession) RecordImage(part tools.ImagePart) {
+	cs.pendingImage = part
+	cs.pendingImageSet = true
+}
+
 // spliceImageResult is the coder Toolset's SpliceImages hook (#217): if
-// read_file just attached an image, move it onto the tool-result message
-// as wire Parts. The bytes' side-car copy is written at append time by
-// writeImageSideCarAt (loop.go calls it with the message's final
-// transcript index — the key recall resolves). A message with no pending
-// attachment, a session without vision (the tool refused; nothing to
-// splice), or no transcript all no-op — and the attachment slot is always
-// consumed, so nothing stale can reach the next result.
-
-// imagePendingCarries the part plus the index the engine will append the
-// spliced message at, set by spliceImageResult and consumed by
-// writeImageSideCarAt (the write must happen at append time, when the
-// message's citation-space index is final).
-type imagePending struct {
-	part tools.ImagePart
-	abs  int
-}
-
-var imageSideCarKeys sync.Map // marker text -> imagePending
-
-// pendingSideCar returns the recorded (part, index) for obs, consuming it.
-func pendingSideCar(obs string) (tools.ImagePart, int, bool) {
-	v, ok := imageSideCarKeys.LoadAndDelete(obs)
-	if !ok {
-		return tools.ImagePart{}, 0, false
-	}
-	p := v.(imagePending)
-	return p.part, p.abs, true
-}
-
+// read_file just attached an image on THIS session, move it onto the
+// tool-result message as wire Parts and park the part for the append-
+// time side-car write (loop.go calls writeImageSideCarAt with the index
+// appendMsg gave this message — the key recall resolves). A message with
+// no pending attachment, a session without vision (the tool refused;
+// nothing to splice), or no transcript all no-op — and the pending slot
+// is always consumed here, so nothing stale can reach the next result.
 func (cs *CortexSession) spliceImageResult(msg *Message) {
-	part, ok := tools.TakeImageObservation(msg.Content)
+	part, ok := cs.takePendingImage(msg.Content)
 	if !ok || !cs.ImageInputEnabled() {
 		return
 	}
 	spliceImageParts(msg, part)
-	// Remember the part for the append-time write. The transcript index
-	// is NOT reliably known here (the hook runs before the engine appends
-	// this message, and possibly before this turn's leading messages are
-	// written), so the entry carries abs = -1 ("unknown") and the engine
-	// supplies the final index when it calls writeImageSideCarAt — the
-	// key recall's citations resolve.
-	if cs.transcript != nil {
-		imageSideCarKeys.Store(msg.Content, imagePending{part: part, abs: -1})
+	cs.pendingSideCar = part
+	cs.pendingSideCarSet = cs.transcript != nil
+}
+
+// takePendingImage consumes the session's pending attachment, but only
+// for an observation that is actually read_file's image marker: a non-
+// image tool result clears the slot, so an attachment can never splice
+// onto a message it doesn't belong to.
+func (cs *CortexSession) takePendingImage(obs string) (tools.ImagePart, bool) {
+	if !cs.pendingImageSet || !tools.IsImageObservation(obs) {
+		cs.pendingImage = tools.ImagePart{}
+		cs.pendingImageSet = false
+		return tools.ImagePart{}, false
 	}
+	part := cs.pendingImage
+	cs.pendingImage = tools.ImagePart{}
+	cs.pendingImageSet = false
+	return part, true
 }
 
 // writeImageSideCarAt persists the image side-car for a message the
-// engine just appended at transcript index abs (#217), consuming the
-// pending entry spliceImageResult left for this marker. The engine calls
-// it from inside its own append path — the one place the final index is
-// known. A message with no pending entry writes nothing.
+// engine appended at transcript index abs (#217), consuming the pending
+// part spliceImageResult left for this message. The engine calls it from
+// inside its own append path — the one place the final index is known.
+// A message with no pending part writes nothing.
 //
-// Keying note: runLoop's appendMsg is cs.Append, whose transcript entry
-// position equals the message's index in cs.Request.Messages AFTER the
-// append, so the correct abs is len(cs.Request.Messages) measured after
-// appendMsg ran — which is exactly what loop.go passes.
+// Keying note: runLoop's appendMsg is cs.Append, which grows the
+// transcript and cs.Request.Messages 1:1, so the message's index is
+// len(cs.Request.Messages) measured BEFORE the append (equivalently,
+// len-1 after) — which is exactly what loop.go passes, and what recall's
+// citations resolve to.
 func (cs *CortexSession) writeImageSideCarAt(msg *Message, abs int) {
 	if cs.transcript == nil {
 		return
 	}
-	part, _, ok := pendingSideCar(msg.Content)
+	part, ok := cs.takePendingSideCar(msg.Content)
 	if !ok {
 		return
 	}
 	writeImageSideCar(cs.SessionsDir(), cs.SessionID, abs, part)
 }
 
-// llmImageParts returns the image parts of a Parts slice (the cheap
-// filter recall and the accounting helpers share).
-func llmImageParts(parts []llm.ContentPart) []llm.ContentPart {
-	var out []llm.ContentPart
-	for _, p := range parts {
-		if p.HasImage() {
-			out = append(out, p)
-		}
+// takePendingSideCar consumes the part spliceImageResult parked for the
+// append-time write; a message whose observation is not an image marker
+// clears the slot (the same fail-closed rule as takePendingImage).
+func (cs *CortexSession) takePendingSideCar(obs string) (tools.ImagePart, bool) {
+	if !cs.pendingSideCarSet || !tools.IsImageObservation(obs) {
+		cs.pendingSideCar = tools.ImagePart{}
+		cs.pendingSideCarSet = false
+		return tools.ImagePart{}, false
 	}
-	return out
+	part := cs.pendingSideCar
+	cs.pendingSideCar = tools.ImagePart{}
+	cs.pendingSideCarSet = false
+	return part, true
 }
 
 // spliceImageParts maps a tools.ImagePart onto a message's wire Parts

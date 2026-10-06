@@ -851,28 +851,12 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// own calls take the direct path: their line is already on screen, printed
 	// before the call ran.
 	if !inSubagent() {
-		return dispatchAndTakeImage(ctx, tc, deps)
+		return dispatchTool(ctx, tc, deps)
 	}
 	beginNestedCall()
 	start := time.Now()
-	out, err := dispatchAndTakeImage(ctx, tc, deps)
-	finishNestedCall(time.Since(start), out, err)
-	return out, err
-}
-
-// dispatchAndTakeImage runs one dispatch and settles the image-attachment
-// slot (#217): a read_file that emitted the image marker recorded its
-// attachment for this goroutine's taker (the cmd/cortex dispatcher, via
-// TakeImageObservation — and inside a subagent, the marker travels as a
-// plain string with the attachment left to be cleared here, since a
-// child's image must never splice onto the parent's tool message); any
-// other result clears a lingering attachment so a stale image can't be
-// taken against the wrong observation.
-func dispatchAndTakeImage(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	out, err := dispatchTool(ctx, tc, deps)
-	if err != nil || !IsImageObservation(out) {
-		clearImageObservation()
-	}
+	finishNestedCall(time.Since(start), out, err)
 	return out, err
 }
 
@@ -1271,14 +1255,31 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 }
 
 // imageReadResult decides what an image whole-file read hands back (#217):
+//   - inside a subagent (study/agent) → a refusal: the subagent's engine
+//     never splices image parts onto its tool messages, so an "attached"
+//     marker would tell the model about an image it cannot see.
+//   - a deps that records nothing (no ImageSink owner) → the same refusal:
+//     a marker with no attachment behind it is the same lie.
 //   - over tools.image_max_bytes → a refusal naming type, size, and cap,
 //     pointing at downscaling — no attachment, no partial image.
 //   - a text-only model (deps answers ImageGate false) → a refusal naming
 //     the file type and the base64 escape hatch — no attachment.
 //   - otherwise → the short marker observation with the attachment
-//     recorded for TakeImageObservation, so the dispatcher can splice the
-//     image part onto the tool-result message for the vision model.
+//     recorded on the deps' ImageSink (the dispatching session), so the
+//     dispatcher can splice the image part onto the tool-result message
+//     for the vision model.
 func imageReadResult(deps ToolDeps, path, mediaType string, data []byte) (string, error) {
+	if inSubagent() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (subagent)", path))
+		return imageRefusal(path, mediaType) +
+			"image input isn't available inside a subagent — no image part can reach the subagent's model; read it from the main conversation.", nil
+	}
+	sink, ok := deps.(ImageSink)
+	if !ok {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (no attachment owner)", path))
+		return imageRefusal(path, mediaType) +
+			"this dispatch has nowhere to attach an image part, so the bytes are withheld — read it from a session that can carry one.", nil
+	}
 	if max := active.ImageMaxBytes; len(data) > max {
 		printToolAction(deps, fmt.Sprintf("read_file(%s) → image too large (%d bytes)", path, len(data)))
 		return imageRefusal(path, mediaType) + fmt.Sprintf(
@@ -1291,7 +1292,7 @@ func imageReadResult(deps ToolDeps, path, mediaType string, data []byte) (string
 			"the bound model does not accept image input, so the bytes are withheld — route the turn to a vision-capable model (models.code.vision), or bash `base64 " + path + "` if you only need the raw encoding.", nil
 	}
 	part, obs := imagePartFor(path, mediaType, data)
-	recordImageObservation(part)
+	sink.RecordImage(part)
 	return obs, nil
 }
 

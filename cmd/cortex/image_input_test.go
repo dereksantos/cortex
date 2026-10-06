@@ -7,7 +7,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,11 +51,16 @@ func TestEstTurnTokensImages(t *testing.T) {
 			cache.TokensOf(len("[image:shot.png image/png 900 bytes ≈300 tokens attached as an image part]")+len("c1")) + tools.ImageTokensOf(900),
 		},
 		{
-			"resumed marker-only image booked at the cap estimate",
+			// A resumed image result (marker text, no wire Parts) books NO
+			// image tokens: after resume no image goes on the wire, only the
+			// ~30-token marker — whose bytes the len(Content) term already
+			// counted. (Booking it at the cap added a phantom 500k tokens,
+			// more than a whole 131k window; the expectation below is what
+			// the marker-only shape actually costs.)
+			"resumed marker-only image books only its marker text",
 			[]Message{{Role: "tool", ToolCallID: "c1",
 				Content: "[image:shot.png image/png 900 bytes ≈300 tokens attached as an image part]"}},
-			cache.TokensOf(len("[image:shot.png image/png 900 bytes ≈300 tokens attached as an image part]")+len("c1")) +
-				tools.ImageTokensOf(defaultImageTokenBookingBytes),
+			cache.TokensOf(len("[image:shot.png image/png 900 bytes ≈300 tokens attached as an image part]") + len("c1")),
 		},
 	}
 	for _, tt := range tests {
@@ -140,53 +148,103 @@ func TestContextLegendShowsImages(t *testing.T) {
 	})
 }
 
-// TestImageDemotesToRecallableOutline drives the real turn-end path's
-// pieces: a turn whose tool result carries an image (spliced + side-car
-// written through the real hook), demoted through turnOutlineEntry, must
-// produce an outline line naming the image with a citation whose recall
-// names the side-car bytes on disk.
+// imageCallResp returns an AgentResponse carrying one read_file tool call.
+func imageCallResp(id, path string) *AgentResponse {
+	args, _ := json.Marshal(map[string]any{"path": path})
+	return &AgentResponse{
+		Choices: []Choice{{FinishReason: "tool_calls", Message: Message{
+			Role: "assistant",
+			ToolCalls: []ToolCall{{
+				ID:       id,
+				Type:     "function",
+				Function: FunctionCall{Name: "read_file", Arguments: string(args)},
+			}},
+		}}},
+	}
+}
+
+// TestImageDemotesToRecallableOutline is the end-to-end acceptance for
+// the side-car contract (issue #217): it drives the REAL runLoop with the
+// coder's Toolset (SpliceImages/WriteImageSideCar wired exactly as
+// turn.go wires them, appendMsg = cs.Append, a scripted Sender that
+// issues one read_file on a PNG then finalizes), demotes the turn through
+// the real turnOutlineEntry, and recalls the citation. The side-car must
+// be written under the index the message actually landed at — the one
+// Recall looks up — so recall names the file and its bytes must equal the
+// fixture's. Driving production ordering matters: a test that calls
+// writeImageSideCarAt before the append measures the wrong index and
+// passes while production writes the side-car one index past the message.
 func TestImageDemotesToRecallableOutline(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	cs.Request.Vision = true
-	// The transcript mirrors the request 1:1, so the side-car key equals
-	// the message's request index — but it must be the SAME file recall
-	// reads, so the transcript has to exist before the messages are added.
-	cs.StartTranscript()
-	defer cs.transcript.Close()
-	id := cs.SessionID
-
 	pngRaw := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, []byte("PNGDATA")...)
-	// The real splice hook: record through the production path (tools'
-	// Execute seam records the slot inside dispatch; the test records the
-	// same way readFile does by reading the fixture back through Execute).
 	path := filepath.Join(dir, "shot.png")
 	if err := os.WriteFile(path, pngRaw, 0o644); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
-	obs, err := tools.Execute(t.Context(), tools.ToolCall{ID: "c1", Type: "function",
-		Function: tools.FunctionCall{Name: tools.FunctionReadFile, Arguments: `{"path":"` + path + `"}`}}, cs)
+
+	ws, err := NewWorkspace(dir)
 	if err != nil {
-		t.Fatalf("execute read_file: %v", err)
+		t.Fatalf("NewWorkspace: %v", err)
 	}
-	msg := Message{Role: RoleTool, ToolCallID: "c1", Content: obs}
-	cs.spliceImageResult(&msg)
-	// Production ordering (loop.go): the assistant message, the
-	// SpliceImages hook, then writeImageSideCarAt with the index appendMsg
-	// gives this message, then Append.
-	cs.Append(Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Type: "function", Function: FunctionCall{Name: "read_file", Arguments: `{"path":"shot.png"}`}}}})
-	cs.spliceImageResult(&msg)
-	if len(msg.Parts) == 0 || !msg.Parts[len(msg.Parts)-1].HasImage() {
-		t.Fatalf("splice produced no image parts: %+v", msg)
+	cs := &CortexSession{
+		workspace: ws,
+		Window:    20000,
+		SessionID: "image-input-test",
+		Request:   CortexArgs{}.Request(),
 	}
-	cs.writeImageSideCarAt(&msg, len(cs.Request.Messages))
-	cs.Append(msg)
+	cs.Request.Model = "m"
+	cs.Request.Vision = true
+	cs.ws = cs.newWorkingSet(1)
+	cs.StartTranscript()
+	defer cs.Close()
+	id := cs.SessionID
+
+	// The scripted coder: round 1 asks for read_file on the PNG, round 2
+	// answers. The real coderDispatcher runs the read through the session
+	// (ImageSink records on cs), and the Toolset below is the coder's,
+	// spliced + side-car wired as in turn.go.
+	var i int
+	script := []*AgentResponse{
+		imageCallResp("c1", "shot.png"),
+		answerResp("saw it"),
+	}
+	send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		r := script[i]
+		if i < len(script)-1 {
+			i++
+		}
+		return r, false, nil
+	})
+	ts := Toolset{
+		Dispatch:          cs.coderDispatcher(),
+		SpliceImages:      cs.spliceImageResult,
+		WriteImageSideCar: cs.writeImageSideCarAt,
+	}
+	turnStart := len(cs.Request.Messages)
+	if _, _, err := runLoop(t.Context(), send, cs.Request, ts, Bounds{MaxIter: 5}, nil, cs.Append, nil); err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+
+	// The turn ran and the tool result carries the wire Parts.
+	toolIdx := -1
+	for j := turnStart; j < len(cs.Request.Messages); j++ {
+		m := cs.Request.Messages[j]
+		if m.Role == RoleTool && tools.IsImageObservation(m.Content) {
+			toolIdx = j
+			if len(m.Parts) == 0 || !m.Parts[len(m.Parts)-1].HasImage() {
+				t.Fatalf("the appended tool message carries no image parts: %+v", m)
+			}
+		}
+	}
+	if toolIdx < 0 {
+		t.Fatal("no image tool result was appended")
+	}
 
 	// Demotion: the outline entry names the image, never the bytes.
-	span := cache.TurnSpan{Start: 1, End: 3}
-	entry := turnOutlineEntry(1, span, cs.Request.Messages[1:], cs.SessionID)
+	span := cache.TurnSpan{Start: turnStart, End: len(cs.Request.Messages)}
+	entry := turnOutlineEntry(1, span, cs.Request.Messages[turnStart:], cs.SessionID)
 	if !strings.Contains(strings.Join(entry.Actions, " "), "image attached") {
 		t.Errorf("outline actions must name the image: %v", entry.Actions)
 	}
@@ -200,6 +258,8 @@ func TestImageDemotesToRecallableOutline(t *testing.T) {
 	}
 
 	// Recall resolves the citation and names the side-car with the bytes.
+	// On the current-code index bug the side-car sits one past the
+	// message and recall prints "image bytes no longer on disk" instead.
 	got, err := cs.Recall(entry.Citation)
 	if err != nil {
 		t.Fatalf("recall: %v", err)
@@ -207,13 +267,14 @@ func TestImageDemotesToRecallableOutline(t *testing.T) {
 	if !strings.Contains(got, "image bytes on disk:") {
 		t.Errorf("recall must name the side-car path: %q", got)
 	}
-	matches, _ := filepath.Glob(filepath.Join(cs.SessionsDir(), id+".m*"))
-	if len(matches) != 1 {
-		t.Fatalf("side-car files = %v, want exactly one", matches)
+	wantSideCar := filepath.Join(cs.SessionsDir(), fmt.Sprintf("%s.m%d.png", id, toolIdx))
+	raw, readErr := os.ReadFile(wantSideCar)
+	if readErr != nil {
+		matches, _ := filepath.Glob(filepath.Join(cs.SessionsDir(), id+".m*"))
+		t.Fatalf("side-car at %s: %v (found %v)", wantSideCar, readErr, matches)
 	}
-	raw, readErr := os.ReadFile(matches[0])
-	if readErr != nil || !bytes.Equal(raw, pngRaw) {
-		t.Errorf("side-car bytes = %q, err %v", raw, readErr)
+	if !bytes.Equal(raw, pngRaw) {
+		t.Errorf("side-car bytes = %q, want the fixture's %q", raw, pngRaw)
 	}
 }
 

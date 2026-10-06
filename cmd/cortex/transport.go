@@ -648,7 +648,7 @@ type Message struct {
 	// (json:"-"), so session transcripts and redaction keep seeing the
 	// string Content — for an image tool result that string is read_file's
 	// short `[image: …]` marker observation, and the demotion/token math
-	// books the image itself through messageImageTokens (#217).
+	// books the image itself through imageTokensOf (#217).
 	Parts []llm.ContentPart `json:"-"`
 
 	cache *cacheControl

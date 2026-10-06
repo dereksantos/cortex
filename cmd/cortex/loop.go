@@ -728,12 +728,19 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			// backstops anything else.
 			if ts.SpliceImages != nil {
 				ts.SpliceImages(&toolMsg)
+				// The side-car key is the index appendMsg is about to give
+				// this message — for the coder (cs.Append) the request's
+				// length BEFORE the append, which equals its transcript
+				// position 1:1; measuring after would be one past it and
+				// recall would look up an index no side-car was written
+				// under (#217).
+				sideCarIdx := len(req.Messages)
 				appendMsg(toolMsg)
 				// The append-time half of the side-car write (#217): with
-				// appendMsg done, the message's transcript index is the
-				// request length now — the key recall's citations resolve.
+				// appendMsg done, write under the index the message
+				// actually landed at — the key recall's citations resolve.
 				if ts.WriteImageSideCar != nil {
-					ts.WriteImageSideCar(&toolMsg, len(req.Messages))
+					ts.WriteImageSideCar(&toolMsg, sideCarIdx)
 				}
 			} else {
 				appendMsg(toolMsg)

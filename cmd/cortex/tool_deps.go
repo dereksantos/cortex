@@ -507,17 +507,6 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 				b.WriteString(call.ActivityLabel())
 			}
 		}
-		// A resumed in-memory message can still hold wire Parts (a turn
-		// demoted in this very session): name the actual part count and the
-		// byte size so recall of a not-yet-resumed image says what was
-		// there, not just that a marker line existed (#217).
-		if imgs := llmImageParts(msg.Parts); len(imgs) > 0 {
-			imgBytes := 0
-			for _, p := range imgs {
-				imgBytes += imageDataURIRawBytes(p.ImageURL)
-			}
-			fmt.Fprintf(&b, "\n  ▸ %d image part(s) attached (%d bytes)", len(imgs), imgBytes)
-		}
 		b.WriteString("\n\n")
 	}
 
