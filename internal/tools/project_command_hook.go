@@ -251,17 +251,69 @@ func hookGate(template, root, fsPath string, trusted bool) (argv []string, ok bo
 	return splitProjectCommand(template, root, fsPath), true, ""
 }
 
+// HookOutcome is the structured outcome of one post-edit format hook run
+// (issue #219): what happened to the FILE, separately from what the note
+// says. A consumer of the hook's note (the turn receipt's unformatted fact,
+// cmd/cortex) records a file from THIS, never from the note's presence — a
+// clean run, a run the formatter rewrote, and a run that left the file
+// untouched-but-noted are distinguishable in the note's text only by
+// wording a reword could break.
+type HookOutcome int
+
+const (
+	// HookOutcomeNotRun: the hook ran nothing for this file (an untrusted
+	// workspace, the mode off, no applicable command, or a template the
+	// gate refused). The file is untouched — the note, if any, announces
+	// the state and says nothing about the file's content.
+	HookOutcomeNotRun HookOutcome = iota
+	// HookOutcomeClean: the format command ran to completion and left the
+	// file byte-identical (or reported observations on an already-clean
+	// file). The file is clean.
+	HookOutcomeClean
+	// HookOutcomeChanged: the format command ran and REWROTE the file —
+	// the content as written was not clean; the hook fixed it.
+	HookOutcomeChanged
+	// HookOutcomeFailed: the format command could not run (spawn error),
+	// failed, or timed out — the file is left exactly as written and its
+	// cleanliness is unverified.
+	HookOutcomeFailed
+)
+
+// hookOutcomeOf derives the hook's structured outcome (HookOutcome) from
+// the same decision points runProjectCommandHook reports in its note — a
+// single source, so the outcome and the note can never drift apart.
+// templateRefused is the gate's refusal text ("" = the gate let the
+// command run; the other parameters then describe the run), err is the
+// run error (errHookTimeout on the per-command budget), and changed
+// whether the file's bytes differ after the run.
+func hookOutcomeOf(templateRefused string, err error, changed bool) HookOutcome {
+	switch {
+	case templateRefused != "":
+		return HookOutcomeNotRun
+	case err != nil: // covers errHookTimeout: the file is untouched either way
+		return HookOutcomeFailed
+	case changed:
+		return HookOutcomeChanged
+	default:
+		return HookOutcomeClean
+	}
+}
+
 // runProjectCommandHook runs the post-edit FORMAT hook for the file at
 // fsPath (the workdir-resolved path) and returns the note to append to the
-// tool result. root is the project root the commands are meant to run from
+// tool result alongside the run's structured outcome (HookOutcome: what
+// happened to the file, issue #219). root is the project root the commands
+// are meant to run from
 // (the session's workdir, "" for a CWD-implicit session). mode is the
 // resolved hook mode for this call (effectiveHookMode: the configured
 // ceiling, the session-mode a /hook command lowered, and the per-call
 // `hook: "skip"` already folded in): off runs nothing and is silent; format
 // and all both run the per-file format command only — lint moved to the
 // turn end (RunTurnEndLint) because per-edit lint is slow and noisy
-// (clippy, eslint). It returns "" when there is nothing to report — no
-// command set, no command that applies to the file's extension — so the
+// (clippy, eslint). It returns ("", HookOutcomeNotRun) when there is
+// nothing to report — no
+// command set, no command that applies to the file's extension, or an
+// untrusted/mode-off workspace — so the
 // tool result is byte-identical to the pre-hook behavior in the common
 // case.
 //
@@ -279,16 +331,16 @@ func hookGate(template, root, fsPath string, trusted bool) (argv []string, ok bo
 // into the note string, because the contract is that the hook never blocks
 // the edit — and every note carries the elapsed time ("gofmt 0.2s", "eslint
 // timed out after 10s") so a slow tool is obvious in the result.
-func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) string {
+func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) (string, HookOutcome) {
 	if !trusted {
 		if state != nil && state.inactiveNoteDue() {
 			state.announceInactive()
-			return HookInactiveNote
+			return HookInactiveNote, HookOutcomeNotRun
 		}
-		return ""
+		return "", HookOutcomeNotRun
 	}
 	if mode == HookModeOff {
-		return "" // off: nothing runs, and it's the operator's choice, so silent
+		return "", HookOutcomeNotRun // off: nothing runs, and it's the operator's choice, so silent
 	}
 
 	// Note: in "all" mode lint is NOT run per edit (clippy/eslint are slow
@@ -296,6 +348,7 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 	// turn's touched files. The per-edit hook is format-only.
 
 	var b strings.Builder
+	var outcome HookOutcome
 
 	// --- Format -----------------------------------------------------------
 	// Only a per-file format command (carrying {file}) is safe to run
@@ -309,23 +362,26 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 		switch {
 		case ok:
 			elapsed, changed, out, err := runAndWriteBack(ctx, argv, root, fsPath)
-			switch {
-			case errors.Is(err, errHookTimeout):
-				b.WriteString("note: " + cmdName(cmds.Format.Cmd) + " timed out after " + fmtSeconds(elapsed) + "; it was NOT run to completion")
-			case err != nil:
-				// A run error (spawn failure, gofmt on an unparseable file,
-				// etc.). The tool's output, if any, rides along as an
-				// observation — the file is left as written.
-				if s := strings.TrimSpace(out); s != "" {
-					fmt.Fprintf(&b, "note: %s ran with an error in %s (%v): %s", cmdName(cmds.Format.Cmd), fmtSeconds(elapsed), err, clipNote(s))
+			outcome = hookOutcomeOf("", err, changed)
+			switch outcome {
+			case HookOutcomeFailed:
+				if errors.Is(err, errHookTimeout) {
+					b.WriteString("note: " + cmdName(cmds.Format.Cmd) + " timed out after " + fmtSeconds(elapsed) + "; it was NOT run to completion")
 				} else {
-					fmt.Fprintf(&b, "note: %s could not run: %v", cmdName(cmds.Format.Cmd), err)
+					// A run error (spawn failure, gofmt on an unparseable
+					// file, etc.). The tool's output, if any, rides along as
+					// an observation — the file is left as written.
+					if s := strings.TrimSpace(out); s != "" {
+						fmt.Fprintf(&b, "note: %s ran with an error in %s (%v): %s", cmdName(cmds.Format.Cmd), fmtSeconds(elapsed), err, clipNote(s))
+					} else {
+						fmt.Fprintf(&b, "note: %s could not run: %v", cmdName(cmds.Format.Cmd), err)
+					}
 				}
-			case changed:
+			case HookOutcomeChanged:
 				b.WriteString("note: formatted " + fsPath + " with the project format command (" + cmds.Format.Cmd + ", " + fmtSeconds(elapsed) + ")")
-			default:
-				// Clean run, no change. Surface any tool output as an
-				// observation; otherwise the file was already clean.
+			default: // HookOutcomeClean: a clean run, no change. Surface any
+				// tool output as an observation; otherwise the file was
+				// already clean.
 				if s := strings.TrimSpace(out); s != "" {
 					b.WriteString("note: project format command reported (" + fmtSeconds(elapsed) + "): " + clipNote(s))
 				}
@@ -333,23 +389,25 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 		default:
 			// The template can't run as a plain argv (shell syntax) — or a
 			// trusted check refused it. The file is left exactly as written.
+			outcome = hookOutcomeOf(refusal, nil, false)
 			b.WriteString("note: project format command not run: " + refusal)
 		}
 	}
 
-	return b.String()
+	return b.String(), outcome
 }
 
 // RunProjectCommandHook is the EXPORTED post-edit format hook: the same run
 // as runProjectCommandHook (the identical trust/mode/extension gates, the
-// identical note), for a session that wants to wrap the hook per turn —
-// cmd/cortex's FormatHook (the FormatHookNoter capability, issue #219) runs
-// through it so the turn's measurement-only receipt records the hook's note
-// while the model sees the identical note. The production write_file/
+// identical note, the identical structured outcome) for a session that
+// wants to wrap the hook per turn — cmd/cortex's FormatHook (the
+// FormatHookNoter capability, issue #219) runs through it so the turn's
+// measurement-only receipt records the hook's outcome while the model sees
+// the identical note. The production write_file/
 // edit_file path calls the unexported runProjectCommandHook directly (same
 // package); the exported form exists only for the session's wrapper, which
 // sits in cmd/cortex.
-func RunProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) string {
+func RunProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) (string, HookOutcome) {
 	return runProjectCommandHook(ctx, cmds, root, fsPath, trusted, state, mode)
 }
 

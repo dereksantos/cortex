@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/registry"
 )
 
@@ -56,6 +57,15 @@ func streamTurnTestSessionFactory(t *testing.T) sessionFactory {
 	return func() *CortexSession {
 		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 		cs.Request.BaseURL = srv.URL
+		// Issue #219: the turn receipt's files-changed fact reads the
+		// workspace's git state — give the session the project's OWN
+		// commands (the shape a discovered session carries), so the turn's
+		// measurements resolve the way production resolves them.
+		cs.projectCommands = projectcmd.Commands{
+			Test:   projectcmd.Command{Cmd: "go test ./...", Source: "go.mod"},
+			Build:  projectcmd.Command{Cmd: "go build ./...", Source: "go.mod"},
+			Format: projectcmd.Command{Cmd: "gofmt -w {file}", PerFile: true, Extends: []string{".go"}, Source: "go.mod"},
+		}
 		return cs
 	}
 }

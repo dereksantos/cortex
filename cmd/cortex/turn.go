@@ -130,14 +130,16 @@ type TurnResult struct {
 	// Receipt carries the measurement-only turn receipt (issue #219,
 	// step 1, turn_receipt.go): the workspace's `git diff --stat` block
 	// (when the workspace is a git repository), the exit codes of the
-	// project's own test/build commands (the model's own runs recorded by
-	// the per-turn bash recorder, plus the harness's own final run of the
-	// project's commands through the tools.hookRunner seam), and the files
-	// the post-edit format hook knew about — rendered in a fixed plain-text
-	// form. Empty when the turn ran no tools or measured nothing.
-	// Measurement only: the receipt never blocked the turn, never failed a
-	// tool call, and never reached the model — it rides here for a caller
-	// (REPL, headless `cortex turn`, a self-dev driver) to surface.
+	// project's own test/build commands the MODEL ran through bash (its
+	// own verification runs, recorded by the per-turn bash recorder — the
+	// harness runs no project commands of its own for the receipt, and a
+	// run the gate refused or the user declined records "(not run: …)",
+	// never an exit code), and the files the post-edit format hook could
+	// not verify (it ran, and failed or timed out) — rendered in a fixed
+	// plain-text form. Empty when the turn ran no tools or measured
+	// nothing. Measurement only: the receipt never blocked the turn, never
+	// failed a tool call, and never reached the model — it rides here for a
+	// caller (REPL, headless `cortex turn`, a self-dev driver) to surface.
 	Receipt string
 }
 
@@ -215,9 +217,9 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// exactly the files IT touched).
 	cs.testwatchDrop()
 	// Issue #219: the same turn-boundary drop for the measurement-only
-	// receipt (turn_receipt.go) — a stale bash recorder, final-verification
-	// list, or unformatted-file list from a prior turn that never reached
-	// its end must not leak into this turn's receipt.
+	// receipt (turn_receipt.go) — a stale bash recorder or
+	// unformatted-file list from a prior turn that never reached its end
+	// must not leak into this turn's receipt.
 	cs.receiptDrop()
 	// Arm the turn-end lint pass's budget for this turn (piece 3): 0 means
 	// "not configured by NewCortexSession" — runTurnLint falls back to the

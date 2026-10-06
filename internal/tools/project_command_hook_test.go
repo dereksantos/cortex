@@ -67,7 +67,7 @@ func TestPostEditHookFormatsUnformattedFile(t *testing.T) {
 
 	// Unformatted: space-indented body, mis-spaced assignments.
 	unformatted := "package main\n\nfunc main() {\n  x :=    1\n  _ = x\n}\n"
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "main.go", "content": unformatted}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -101,7 +101,7 @@ func TestPostEditHookSurfacesFailingLint(t *testing.T) {
 	// Well-formatted (format step is a no-op) but vet-FAILING: %d with a
 	// string argument.
 	bad := "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Printf(\"%d\\n\", \"hello\")\n}\n"
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "bad.go", "content": bad}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file must not fail because of a failing lint, got %v", err)
@@ -143,7 +143,7 @@ func TestPostEditHookErrorNeverBlocksTheEdit(t *testing.T) {
 
 	// Broken Go: gofmt exits non-zero and leaves the file untouched.
 	broken := "package main\n\nfunc broken( {\n"
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "x.go", "content": broken}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("a hook error must not fail the write, got %v", err)
@@ -180,7 +180,7 @@ func TestPostEditHookUntrustedRunsNothing(t *testing.T) {
 	// session" (both writes below are the same session).
 	deps := hookDeps{cmds: cmds, state: &PostEditHookState{}} // trusted=false
 
-	out1, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out1, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "a.go", "content": "package main\n"}), deps)
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -192,7 +192,7 @@ func TestPostEditHookUntrustedRunsNothing(t *testing.T) {
 		t.Errorf("untrusted: no command may run, got %q", out1)
 	}
 
-	out2, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out2, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "b.go", "content": "package main\n"}), deps)
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -226,7 +226,7 @@ func TestPostEditHookTrustedRunsArbitraryCommand(t *testing.T) {
 	cmds := projectcmd.Commands{
 		Format: projectcmd.Command{Cmd: "./bin/my-fmt {file}", PerFile: true, Source: "config.json"},
 	}
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "x.go", "content": "package main\n"}), hookDeps{cmds: cmds, trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -253,7 +253,7 @@ func TestPostEditHookSkipsShellControlTemplate(t *testing.T) {
 		Format: projectcmd.Command{Cmd: "gofmt -w {file}; echo hacked", PerFile: true, Source: "config.json"},
 	}
 	before := "package main\n"
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "x.go", "content": before}), hookDeps{cmds: cmds, trusted: true})
 	if err != nil {
 		t.Fatalf("a hook skip must not fail the write, got %v", err)
@@ -298,7 +298,7 @@ func TestPostEditHookFileWithSpacesIsOneArgument(t *testing.T) {
 	if err := os.MkdirAll(dirWithSpace, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "dir with space/my file.go", "content": "package main\n"}), hookDeps{cmds: cmds, trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -338,7 +338,7 @@ func TestPostEditHookUntrustedNoteOnWrite(t *testing.T) {
 	// One session (an explicit shared state) drives the full untrusted
 	// path: note on the first write, nothing run.
 	deps := hookDeps{cmds: cmds, trusted: false, state: &PostEditHookState{}}
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "a.go", "content": "package main\n"}), deps)
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -368,7 +368,7 @@ func TestPostEditHookReportsTimeout(t *testing.T) {
 	}
 	t.Cleanup(func() { hookRunner = orig })
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "y.go", "content": "package main\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("a hook timeout must not fail the write, got %v", err)
@@ -393,7 +393,7 @@ func TestPostEditHookRunsOnEditFile(t *testing.T) {
 	// Start clean; the edit introduces an unformatted line (spaces, not tabs).
 	writeRepoFile(t, filepath.Join(root, "m.go"), "package main\n\nfunc f() {\n\treturn\n}\n")
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
 		"path":       "m.go",
 		"old_string": "func f() {",
 		"new_string": "func f() {\n  return",
@@ -461,7 +461,7 @@ func TestPostEditHookNoteComposesWithEditWarnings(t *testing.T) {
 			root := t.TempDir()
 			t.Chdir(root)
 			writeRepoFile(t, filepath.Join(root, "m.go"), full)
-			out, err := Execute(context.Background(), tc.call, hookDeps{cmds: cmds, trusted: true})
+			out, _, err := Execute(context.Background(), tc.call, hookDeps{cmds: cmds, trusted: true})
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
@@ -490,7 +490,7 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 	content := "package main\n\nfunc main() {\n  x :=    1\n}\n"
 
-	outHeadless, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	outHeadless, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "a.go", "content": content}), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
@@ -499,7 +499,7 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 		t.Errorf("headless write_file must be hook-free, got %q", outHeadless)
 	}
 
-	outEmpty, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	outEmpty, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "b.go", "content": content}), hookDeps{cmds: projectcmd.Commands{}, trusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -667,7 +667,7 @@ func TestPostEditHookDoesNotShellInject(t *testing.T) {
 			t.Chdir(root)
 			writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 
-			out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+			out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 				map[string]any{"path": evilName, "content": "package main\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 			if err != nil {
 				t.Fatalf("write_file must succeed regardless of the file name, got %v", err)
@@ -694,7 +694,7 @@ func TestPostEditHookSkipsNonSourceFiles(t *testing.T) {
 	t.Chdir(root)
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "README.md", "content": "# t\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -724,7 +724,7 @@ func TestPostEditHookWholePackageVetIsSilent(t *testing.T) {
 
 	// a.go is unformatted (so the format note IS expected) and calls
 	// helper from its sibling file.
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "sub/a.go", "content": "package sub\n\nfunc main() {\n  _ = helper()\n}\n"}), hookDeps{cmds: goRepoCmds(), trusted: true})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -761,7 +761,7 @@ func TestPostEditHookInactiveNoteIsOncePerSession(t *testing.T) {
 	// of "once per session" (value copies of deps share the pointer).
 	deps := hookDeps{cmds: goRepoCmds(), state: &PostEditHookState{}} // trusted=false
 
-	out1, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out1, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "a.go", "content": "package main\n"}), deps)
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -770,7 +770,7 @@ func TestPostEditHookInactiveNoteIsOncePerSession(t *testing.T) {
 		t.Errorf("the first untrusted write of a session must carry the inactive note, got %q", out1)
 	}
 
-	out2, err := Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
+	out2, _, err := Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
 		"path":       "a.go",
 		"old_string": "package main",
 		"new_string": "package main // edited",
@@ -785,7 +785,7 @@ func TestPostEditHookInactiveNoteIsOncePerSession(t *testing.T) {
 	// A NEW session (its own state pointer) gets its own flag: the note
 	// fires again.
 	fresh := hookDeps{cmds: goRepoCmds(), state: &PostEditHookState{}}
-	out3, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out3, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "c.go", "content": "package main\n"}), fresh)
 	if err != nil {
 		t.Fatalf("write_file: %v", err)

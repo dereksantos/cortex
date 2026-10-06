@@ -72,14 +72,14 @@ func TestNestedSubagentActivity(t *testing.T) {
 		deps := &subDeps{digest: strings.Repeat("x", 812)}
 		deps.loop = func(d ToolDeps) {
 			for i := 0; i < 2; i++ {
-				if _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
+				if _, _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
 					map[string]any{"path": read}), d); err != nil {
 					t.Errorf("nested read: %v", err)
 				}
 			}
 		}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err != nil {
+			if _, _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err != nil {
 				t.Fatalf("study: %v", err)
 			}
 		})
@@ -116,7 +116,7 @@ func TestNestedSubagentActivity(t *testing.T) {
 	t.Run("a failing subagent reports the error on its done line", func(t *testing.T) {
 		deps := &subDeps{err: fmt.Errorf("backend refused the request")}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err == nil {
+			if _, _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err == nil {
 				t.Fatal("want the error to propagate")
 			}
 		})
@@ -129,13 +129,13 @@ func TestNestedSubagentActivity(t *testing.T) {
 	t.Run("a quiet session prints nothing, nested or not", func(t *testing.T) {
 		deps := &subDeps{silent: true, digest: "d"}
 		deps.loop = func(d ToolDeps) {
-			if _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
 				map[string]any{"path": read}), d); err != nil {
 				t.Errorf("nested read: %v", err)
 			}
 		}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err != nil {
+			if _, _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err != nil {
 				t.Fatalf("study: %v", err)
 			}
 		})
@@ -154,14 +154,14 @@ func TestNestedDisplayCap(t *testing.T) {
 		deps := &subDeps{digest: "d"}
 		deps.loop = func(d ToolDeps) {
 			for i := 0; i < calls; i++ {
-				if _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
+				if _, _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
 					map[string]any{"path": read}), d); err != nil {
 					t.Errorf("nested read: %v", err)
 				}
 			}
 		}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err != nil {
+			if _, _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err != nil {
 				t.Fatalf("study: %v", err)
 			}
 		})
@@ -187,13 +187,13 @@ func TestNestedDiffFollowsItsCall(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "f.txt")
 		deps := &subDeps{digest: "d"}
 		deps.loop = func(d ToolDeps) {
-			if _, err := Execute(context.Background(), editCall(t, FunctionWriteFile,
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionWriteFile,
 				map[string]any{"path": path, "content": "hello\n"}), d); err != nil {
 				t.Errorf("nested write: %v", err)
 			}
 		}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err != nil {
+			if _, _, err := Execute(context.Background(), studyCall(t, "x", ""), deps); err != nil {
 				t.Fatalf("study: %v", err)
 			}
 		})

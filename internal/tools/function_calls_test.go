@@ -229,7 +229,7 @@ func TestStripToolMarkup(t *testing.T) {
 func TestEditFileIdenticalOldNewReturnsReReadMessage(t *testing.T) {
 	path := seedEditFile(t, "f.go", "package main\nfunc f() int { return 1 }\n")
 
-	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+	_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path":       path,
 		"old_string": "return 1",
 		"new_string": "return 1",

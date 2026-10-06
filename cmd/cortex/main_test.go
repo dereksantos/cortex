@@ -104,7 +104,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("reads existing file", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": path})
-		got, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -115,7 +115,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("missing file errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": filepath.Join(dir, "nope.txt")})
-		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil); err == nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil); err == nil {
 			t.Fatal("expected error reading missing file")
 		}
 	})
@@ -126,7 +126,7 @@ func TestWriteFileTool(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	args, _ := json.Marshal(map[string]string{"path": path, "content": "written by cortex"})
 
-	got, err := tools.Execute(context.Background(), tc(FunctionWriteFile, string(args)), nil)
+	got, _, err := tools.Execute(context.Background(), tc(FunctionWriteFile, string(args)), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +146,8 @@ func TestWriteFileTool(t *testing.T) {
 func TestEditFileTool(t *testing.T) {
 	edit := func(path, oldS, newS string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": path, "old_string": oldS, "new_string": newS})
-		return tools.Execute(context.Background(), tc(FunctionEditFile, string(args)), nil)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionEditFile, string(args)), nil)
+		return out, err
 	}
 
 	t.Run("unique match is replaced", func(t *testing.T) {
@@ -212,7 +213,7 @@ func TestEditFileTool(t *testing.T) {
 func TestBashTool(t *testing.T) {
 	t.Run("allowlisted command runs", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "echo hello"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -227,7 +228,7 @@ func TestBashTool(t *testing.T) {
 		// blocked and reported back (as a result, not an error) so the model
 		// can adapt.
 		args, _ := json.Marshal(map[string]string{"command": "curl http://example.com"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("gating should not error: %v", err)
 		}
@@ -239,7 +240,7 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("empty command errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "   "})
-		if _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil); err == nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil); err == nil {
 			t.Fatal("expected error for empty command")
 		}
 	})
@@ -250,7 +251,7 @@ func TestBashTool(t *testing.T) {
 		// session the study path is unavailable; the old truncation
 		// behavior must hold.
 		args, _ := json.Marshal(map[string]string{"command": "head -c 20000 /dev/zero"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -268,7 +269,7 @@ func TestBashTool(t *testing.T) {
 // (unexported) helpers they cover.
 
 func TestExecuteUnknownTool(t *testing.T) {
-	if _, err := tools.Execute(context.Background(), tc("frobnicate", `{}`), nil); err == nil {
+	if _, _, err := tools.Execute(context.Background(), tc("frobnicate", `{}`), nil); err == nil {
 		t.Fatal("expected error for unknown tool name")
 	}
 }
@@ -461,7 +462,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		size := (curationBudgetTokens + 1000) * 4
 		os.WriteFile(big, make([]byte, size), 0644) // over the budget
 		args, _ := json.Marshal(map[string]string{"path": big})
-		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
 		if err != nil {
 			t.Fatalf("oversized non-Go file should get a skeleton, not an error: %v", err)
 		}
@@ -481,7 +482,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 			strings.Repeat("x", (curationBudgetTokens+1000)*4) + "\n"
 		os.WriteFile(bigGo, []byte(src), 0644)
 		args, _ := json.Marshal(map[string]string{"path": bigGo})
-		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
 		if err != nil {
 			t.Fatalf("Go skeleton path should not error: %v", err)
 		}
@@ -500,7 +501,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		small := filepath.Join(dir, "small.go")
 		os.WriteFile(small, make([]byte, 8000), 0644) // ~2k tokens, well under the budget
 		args, _ := json.Marshal(map[string]string{"path": small})
-		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs); err != nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs); err != nil {
 			t.Fatalf("under-budget read should succeed: %v", err)
 		}
 	})
@@ -513,7 +514,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		size := (curationBudgetTokens + 1000) * 4
 		os.WriteFile(big, make([]byte, size), 0644)
 		args, _ := json.Marshal(map[string]string{"path": big})
-		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000})
+		out, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000})
 		if err != nil {
 			t.Fatalf("a huge window must not turn curation into an error path: %v", err)
 		}
@@ -587,7 +588,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 	t.Run("parsed call executes through the normal path", func(t *testing.T) {
 		content := "<function=bash>\n<parameter=command>\necho hi\n</parameter>\n</function>"
 		calls := parseXMLToolCalls(content)
-		out, err := tools.Execute(context.Background(), calls[0], nil)
+		out, _, err := tools.Execute(context.Background(), calls[0], nil)
 		if err != nil {
 			t.Fatal(err)
 		}

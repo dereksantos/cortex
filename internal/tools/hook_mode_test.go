@@ -78,7 +78,7 @@ func writeHookProbe(t *testing.T, deps hookDeps, content string) string {
 	root := t.TempDir()
 	t.Chdir(root)
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "probe.go", "content": content}), deps)
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -293,7 +293,7 @@ func TestPerCallHookSkip(t *testing.T) {
 			writeRepoFile(t, filepath.Join(root, "s.go"), "package main\n\nvar v = 1\n")
 
 			// First call: hook: "skip" → nothing runs, whatever the mode.
-			out1, err := Execute(context.Background(), callArgs(t, FunctionWriteFile, map[string]any{
+			out1, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile, map[string]any{
 				"path": "s.go", "content": "package main\n\nvar v = 2\n", "hook": "skip",
 			}), deps)
 			if err != nil {
@@ -309,7 +309,7 @@ func TestPerCallHookSkip(t *testing.T) {
 			// per-edit hook is format-only, so "all" runs the same one format
 			// step as "format" — the turn-end lint pass is the "all" half that
 			// moved to finalize, pinned by cmd/cortex's turn-lint tests.
-			_, err = Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
+			_, _, err = Execute(context.Background(), callArgs(t, FunctionEditFile, map[string]any{
 				"path":       "s.go",
 				"old_string": "var v = 2",
 				"new_string": "var v = 3",
@@ -364,7 +364,7 @@ func TestPostEditHookRealTimeout(t *testing.T) {
 
 	// End-to-end through the hook: the note names the command and the
 	// budget, and the write still succeeds.
-	out2, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out2, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "z.go", "content": "package main\n"}), hookDeps{cmds: cmds, trusted: true})
 	if err != nil {
 		t.Fatalf("a hook timeout must not fail the write, got %v", err)

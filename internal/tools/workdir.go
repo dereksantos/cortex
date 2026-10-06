@@ -36,6 +36,26 @@ func workdirOf(deps ToolDeps) string {
 	return strings.TrimSpace(w.Workdir())
 }
 
+// BashEnver is an OPTIONAL ToolDeps capability, asserted dynamically like
+// Workdirer: an EXTRA PATH dir the session's bash subprocess inherits,
+// prepended to the process's PATH. The turn-receipt surface test's seam —
+// its discovered test/build commands are real scripts in a temp dir — so a
+// turn running a bare command name executes the REAL script. "" (the
+// default, every production session) leaves the bash tool's environment
+// untouched.
+type BashEnver interface {
+	BashEnv() string
+}
+
+// bashEnvOf extracts the optional extra PATH dir from deps ("" when absent).
+func bashEnvOf(deps ToolDeps) string {
+	e, ok := deps.(BashEnver)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(e.BashEnv())
+}
+
 // workdirRootForErrors reports the workspace root a not-found error states
 // (issue #142): deps' anchored workdir when present, else the process CWD —
 // the workspace every CWD-rooted session (the default REPL, cortex turn)

@@ -4,29 +4,37 @@
 // going to report about its own work:
 //
 //   - files changed: the workspace's own `git diff --stat` block PLUS the
-//     untracked files the turn created (a diff alone misses a file a turn
-//     only wrote — it is not tracked yet), measured in the session's
+//     UNTRACKED files present in the turn's workspace (a diff alone misses a
+//     file the turn only wrote — it is not tracked yet; the harness cannot
+//     attribute which untracked file this exact turn created, so the fact is
+//     scoped to what is on disk at turn end), measured in the session's
 //     workspace (both git commands run with cmd.Dir = cs.Workdir()), so an
 //     explicit-root workspace (serve, --project, tests) measures ITS repo,
 //     not wherever the process started;
 //   - verification: the exit codes of the project's OWN test/build commands
-//     that RAN this turn — the model's own runs, recorded by the per-turn
-//     bash recorder (the bash tool reports a non-zero exit in its result
-//     text, so the exit code is parsed from the result, not from a shadowed
-//     tool error). The harness does NOT run the project's test/build
-//     commands itself: running project-declared commands is a trust-gated
-//     decision (issue #129's documented rule — trust is the only gate), and
-//     a measurement path that ran them on every turn, untrusted workspaces
-//     included, broke that rule and added up to 20s of latency to every
-//     chat turn. A turn that ran no verification has no verification fact;
-//   - unformatted: the files the post-edit format hook knows about — the
-//     production hook call sites run through the per-turn wrapper
+//     that the model ran THIS turn — its own runs, recorded by the per-turn
+//     bash recorder (receiptBash/receiptBashOutcome, paired on the same
+//     call in coderDispatcher). A run that FAILED records the exit code the
+//     bash tool observed in its result text (the "[exit error: …]" marker,
+//     parsed, never inferred from a shadowed tool error); a run the shell
+//     gate REFUSED or the user DECLINED never ran and records (not run: …)
+//     — a blocked check's result is unknown, and it must never render as an
+//     exit code, least of all exit 0. The harness does NOT run the
+//     project's test/build commands itself: running project-declared
+//     commands is a trust-gated decision (issue #129's documented rule —
+//     trust is the only gate), and a measurement path that ran them on
+//     every turn, untrusted workspaces included, broke that rule and added
+//     up to 20s of latency to every chat turn. A turn that ran no
+//     verification has no verification fact;
+//   - unformatted: the files the post-edit format hook could not verify —
+//     the production hook call sites run through the per-turn wrapper
 //     (FormatHook, the tools.FormatHookNoter capability) so the files the
-//     hook reported a problem with are recorded on the receipt while the
-//     model still sees the identical note. A clean run (the hook formatted
-//     the file without a problem note) and the one-time "hook inactive:
-//     workspace not trusted" note do NOT record a file — the label says the
-//     formatter failed or left changes, so a clean file is not one.
+//     hook FAILED to format (could not run, failed, or timed out — the
+//     file is left as written, its cleanliness unverified) are recorded on
+//     the receipt while the model still sees the identical note. A clean
+//     run and a run the formatter rewrote (the file is clean NOW — the
+//     hook fixed it) do NOT record a file: the label says the formatter
+//     failed, and a file it formatted is not one.
 //
 // MEASUREMENT ONLY, by design: the receipt never blocks the turn, never
 // fails a tool call, never adds a finalize round, and never changes what
@@ -72,15 +80,17 @@ const receiptMaxVerificationLines = 6
 
 // receiptVerification is one verification run recorded on the receipt:
 // the role (test|build), the exact command line, the exit code the process
-// returned (0 on success; 1 when it was cut off by a deadline or failed to
-// run), and the elapsed time of the run. Both facts are always rendered —
-// an unmeasured exit code or elapsed time would be a measurement gap, not
-// an absence of the fact.
+// returned (0 only when it actually exited 0), and the elapsed time of the
+// run. When notRun is set the command NEVER RAN — the shell gate refused
+// it or the user declined it — and the line renders (not run: …) instead of
+// an exit code: a blocked check's result is unknown, and it must never
+// render as a pass. The exit code and elapsed time are then unmeasured.
 type receiptVerification struct {
 	role     string
 	command  string
 	exitCode int
 	elapsed  time.Duration
+	notRun   string // "" = it ran; otherwise the refusal the line renders
 }
 
 // turnReceipt is the measurement-only receipt for one turn (issue #219):
@@ -88,25 +98,28 @@ type receiptVerification struct {
 // render(). All fields are empty on a turn that ran no tools or measured
 // nothing — render() then returns "" and TurnResult.Receipt stays empty.
 type turnReceipt struct {
-	filesChanged       []string // git diff --stat lines + the untracked files the turn created
+	filesChanged       []string // git diff --stat lines + the untracked files present in the turn's workspace
 	gitWorkspace       bool     // true when the turn's workspace is a git repository (a clean tree still renders the files-changed section: "nothing changed")
 	verification       []receiptVerification
-	unformatted        []string // files the post-edit format hook reported a problem with
+	unformatted        []string // files the post-edit format hook failed to verify (could not run, failed, timed out)
 	hadReceiptBashRuns bool     // true when the bash recorder saw a verification run this turn
 }
 
 // receiptBash records one test/build command the model is about to run in
 // a bash call, for the receipt's verification fact. Called from
 // coderDispatcher (loop.go) BEFORE the bash call runs, so the recorded
-// command and its outcome (the bash tool's observed result, resolved by
-// receiptBashOutcome) pair on the same call. Only commands that are a
-// recognized run of the PROJECT's own test or build command are recorded
-// (receiptBashRole: an exact match of the discovered command, or a prefix
-// of it in either direction — the model ran the check with fewer flags, or
-// bare). Every other command (rm, ls, git, a foreign toolchain, even `go
-// vet` when the project declared `go test ./...`) is not this project's
-// verification and contributes nothing. A session with no discovered
-// test/build command records nothing.
+// command and its outcome (resolved by receiptBashOutcome from the
+// dispatcher's own knowledge of the call's fate) pair on the same call.
+// Only commands that are a recognized run of the PROJECT's own test or
+// build command are recorded (receiptBashRole: a two-field-or-longer
+// discovered command must be shared field-for-field up to the shorter side
+// — the model ran the check, possibly with extra flags — and neither side
+// may carry a SHELL-CONTROL field past the shared prefix; a discovered
+// command of ONE field, a bare `make` or a single test binary, matches ONLY
+// the exact command). Every other command (rm, ls, git, a foreign
+// toolchain, even `go vet` when the project declared `go test ./...`) is
+// not this project's verification and contributes nothing. A session with
+// no discovered test/build command records nothing.
 func (cs *CortexSession) receiptBash(command string) {
 	if strings.TrimSpace(command) == "" {
 		return
@@ -122,17 +135,29 @@ func (cs *CortexSession) receiptBash(command string) {
 }
 
 // receiptBashRole reports whether command is a run of the project's own
-// test or build command (an exact match or a prefix of it in EITHER DIRECTION),
-// and which role it is. The match is prefix-of in either direction because
-// neither side is a reliable superset: discovery's recorded command may carry
-// flags the model omitted (discovery `go test ./... -v`, model ran `go test
-// ./...` — the model's fields prefix discovery's), or the model may run the
-// check BARE (discovery `go test ./...`, model ran `go test` — discovery's
-// fields prefix the model's); a prefix in the other direction still names the
-// same project check. Only the PROJECT's own commands count — an exact match
-// of the first field is NOT enough, so `go vet` (same toolchain, a DIFFERENT
-// check the project never declared) is not this project's verification.
-// A session with no discovered test/build command records nothing.
+// test or build command, and which role it is. Two shapes of discovery:
+//
+//   - a discovered command of ONE field (a bare `make`, a single test
+//     binary like `failcheck`): it has no prefix to share — only the EXACT
+//     command is a run of it (`failcheck -v` is a different command line,
+//     `make` alone is the build);
+//   - a discovered command of TWO or more fields: the model must have
+//     shared at least the first TWO fields of the DISCOVERED command (a
+//     bare `go` is a toolchain, not a run of `go test ./...`), neither side
+//     may carry a SHELL-CONTROL field past the shared prefix (`|`, `||`,
+//     `&&`, `;`, `&`, `>`, `<`, …): `go test ./... | tail` is a pipeline
+//     whose exit status is tail's, and `go test ./... || true` never fails
+//     — neither is a run of the check, so neither is recorded as one. The
+//     model may run the check with EXTRA fields after the shared prefix
+//     (`go test ./... -v` vs discovery `go test ./...`); running a PREFIX
+//     of the discovered command (fewer fields than discovery) is a
+//     different, broader command and is not accepted — the recorded exit
+//     would be a compound or broader command's, not the check's.
+//
+// Only the PROJECT's own commands count — `go vet` (same toolchain, a
+// DIFFERENT check the project never declared) is not this project's
+// verification. A session with no discovered test/build command records
+// nothing.
 func (cs *CortexSession) receiptBashRole(command string) (projectcmd.Role, bool) {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -147,49 +172,83 @@ func (cs *CortexSession) receiptBashRole(command string) (projectcmd.Role, bool)
 		if len(cmds) == 0 {
 			continue
 		}
-		if sharedPrefix(cmds, fields) || sharedPrefix(fields, cmds) {
-			return role, true
+		if len(cmds) == 1 {
+			// A one-field discovery is a bare command: only the exact
+			// command is a run of it (any extra field makes it a different
+			// command line).
+			if len(fields) == 1 && fields[0] == cmds[0] {
+				return role, true
+			}
+			continue
 		}
+		if len(fields) < 2 {
+			continue
+		}
+		shared := 0
+		for shared < len(cmds) && shared < len(fields) && cmds[shared] == fields[shared] {
+			shared++
+		}
+		if shared < 2 {
+			continue
+		}
+		// The model must have shared at least the first two fields of the
+		// DISCOVERED command. If the model has FEWER fields than discovery,
+		// the model ran a prefix of the check (e.g. "go test" vs "go test
+		// ./...") — that is not a run of the check, it is a different,
+		// broader command. Reject it.
+		if len(fields) < len(cmds) {
+			continue
+		}
+		// The model may have EXTRA fields after the shared prefix (e.g.
+		// "go test ./... -v"). That is fine — the model ran the check with
+		// extra flags. But if the field immediately after the shared prefix
+		// is a shell-control operator, the line is a compound command, not
+		// a bare run of the check.
+		if shared < len(fields) && isShellControl(fields[shared]) {
+			continue
+		}
+		return role, true
 	}
 	return "", false
 }
 
-// sharedPrefix reports whether a is a PREFIX of b (every field of a equals
-// the corresponding field of b; a longer than b is never a prefix of it).
-func sharedPrefix(a, b []string) bool {
-	if len(a) > len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+// isShellControl reports whether a command field carries shell-control
+// syntax (pipes, chains, redirects, substitutions, command separators,
+// comments) — the same character set the shell-approval prefix matcher
+// refuses to widen across (containsShellControl). A field like this after
+// the shared prefix means the line is a compound command, not a bare run
+// of the check.
+func isShellControl(field string) bool {
+	return strings.ContainsAny(field, "|;&<>`$\n")
 }
 
 // receiptModelBashRun is one model-side test/build run recorded before the
 // bash call: the role it matched and the exact command the model ran. The
-// outcome (exit code, elapsed) is filled in by receiptBashOutcome once the
-// call has run.
+// outcome (exit code, not-run reason, elapsed) is filled in by
+// receiptBashOutcome once the call has run.
 type receiptModelBashRun struct {
 	role     string
 	command  string
 	exitCode int
 	elapsed  time.Duration
+	notRun   string // "" = it ran; otherwise the refusal rendered instead of an exit code
 }
 
-// receiptBashOutcome fills in the outcome of the last recorded model
-// bash run for command: the exit code the bash tool observed and the wall
-// time of the call. The bash tool reports a non-zero exit in its RESULT
-// TEXT (the "[exit error: exit status N]" marker), not as the call's error
-// — a failed test run returns cleanly with the marker in the output — so
-// the exit code is parsed from resultText (parseBashExitCode); a tool-level
-// error (callErr, e.g. a rejected command) means the command never ran and
-// is recorded as a non-zero exit. Called from coderDispatcher (loop.go)
-// AFTER the bash call has run. A command receiptBash did not record (a
-// non-verification command) is a no-op.
-func (cs *CortexSession) receiptBashOutcome(command, resultText string, callErr error, elapsed time.Duration) {
+// receiptBashOutcome fills in the outcome of the last recorded model bash
+// run for command: how the bash call fared, from the dispatcher's own
+// knowledge of the call's fate (issue #219). It is NEVER inferred from the
+// message text: the bash tool reports a non-zero exit in its result text
+// (the "[exit error: exit status N]" marker, parsed by
+// parseBashExitCode) and a CLEAN (msg, nil) for a command the shell gate
+// refused or the user declined — the absence of a marker is not an exit
+// code. gateRefused is the structured refusal (the tools.ShellGateOutcome
+// the dispatcher observed): it is set when the gate refused the command
+// (Blocked) or the user declined it (Risky), and such a run records (not
+// run: refused) — never an exit. A tool-level error (callErr, e.g. a
+// rejected tool call) means the command never ran too. Called from
+// coderDispatcher (loop.go) AFTER the bash call has run. A command
+// receiptBash did not record (a non-verification command) is a no-op.
+func (cs *CortexSession) receiptBashOutcome(command, resultText string, callErr error, gateRefused tools.ShellGateOutcome, elapsed time.Duration) {
 	if len(cs.receiptModelBash) == 0 {
 		return
 	}
@@ -198,14 +257,19 @@ func (cs *CortexSession) receiptBashOutcome(command, resultText string, callErr 
 		return
 	}
 	last.elapsed = elapsed
-	if callErr != nil {
-		last.exitCode = 1
-		return
+	switch {
+	case gateRefused == tools.ShellGateRefused:
+		last.notRun = "not run: refused — the shell risk gate blocked this command"
+	case gateRefused == tools.ShellGateBlocked:
+		last.notRun = "not run: risky and not approved"
+	case callErr != nil:
+		last.notRun = "not run: " + callErr.Error()
+	default:
+		if code, ok := parseBashExitCode(resultText); ok {
+			last.exitCode = code
+		}
+		// no marker: the run exited 0
 	}
-	if code, ok := parseBashExitCode(resultText); ok {
-		last.exitCode = code
-	}
-	// no marker: the run exited 0
 }
 
 // parseBashExitCode extracts the exit code the bash tool observed from its
@@ -243,25 +307,27 @@ func parseBashExitCode(resultText string) (code int, ok bool) {
 	return n, true
 }
 
-// receiptFormatHook is the session's per-turn wrapper around the post-edit
-// format hook: it runs the hook exactly as the production write_file/
-// edit_file path does (the same trust/mode/extension gates —
-// runProjectCommandHook carries them; the hookSkip flag is the per-call
-// `hook: "skip"` opt-out, which must lower the effective mode the way the
-// direct path does) and records the hook's OUTCOME on the receipt. A file
-// is recorded only when the hook reported that the formatter FAILED or LEFT
-// CHANGES (hookOutcomeProblem, below) — a clean run (the hook formatted the
-// file; its note, if any, is informational) and the one-time "hook inactive:
-// workspace not trusted" note do not record the file, so the receipt's
-// "unformatted:" line names exactly the files the hook says are not clean.
-// The note is returned UNCHANGED, so the model sees exactly what the
-// pre-receipt hook printed. Measurement only: this wrapper never fails the
-// edit.
+// FormatHook is the session's per-turn wrapper around the post-edit
+// format hook (the tools.FormatHookNoter capability): it runs the hook
+// exactly as the production write_file/edit_file path does (the same
+// trust/mode/extension gates — runProjectCommandHook carries them; the
+// hookSkip flag is the per-call `hook: "skip"` opt-out, which must lower
+// the effective mode the way the direct path does) and records the hook's
+// OUTCOME on the receipt. A file is recorded only on HookOutcomeFailed
+// (the formatter could not run, failed, or timed out — the file is left as
+// written, its cleanliness unverified); a clean run, a run the formatter
+// REWROTE (the file is clean now — the hook fixed it), and a run that
+// never happened (untrusted workspace, mode off, no applicable command)
+// record nothing, so the receipt's "unformatted:" line names exactly the
+// files the formatter could NOT verify. The note is returned UNCHANGED, so
+// the model sees exactly what the pre-receipt hook printed. Measurement
+// only: this wrapper never fails the edit.
 //
-// It is the tools.FormatHookNoter capability: the production hook call sites
-// (internal/tools' write_file/edit_file and the in-place-rewrite hook) run
-// through it when the session implements it, and run the hook directly
-// otherwise (the model-facing note is byte-identical either way).
+// It is the tools.FormatHookNoter capability: the production hook call
+// sites (internal/tools' write_file/edit_file and the in-place-rewrite
+// hook) run through it when the session implements it, and run the hook
+// directly otherwise (the model-facing note is byte-identical either
+// way).
 func (cs *CortexSession) FormatHook(ctx context.Context, fsPath string, hookSkip bool) string {
 	// The mode the hook runs in is the session's effective mode (ceiling +
 	// session /hook mode) FURTHER lowered to off for a per-call `hook:
@@ -276,8 +342,8 @@ func (cs *CortexSession) FormatHook(ctx context.Context, fsPath string, hookSkip
 	if hookSkip && mode != tools.HookModeOff {
 		mode = tools.HookModeOff
 	}
-	note := tools.RunProjectCommandHook(ctx, cs.ProjectCommands(), cs.Workdir(), fsPath, cs.WorkspaceTrusted(), cs.HookState(), mode)
-	if note != "" && fsPath != "" && hookOutcomeProblem(note) {
+	note, outcome := tools.RunProjectCommandHook(ctx, cs.ProjectCommands(), cs.Workdir(), fsPath, cs.WorkspaceTrusted(), cs.HookState(), mode)
+	if outcome == tools.HookOutcomeFailed && fsPath != "" {
 		// The receipt names the file WORKSPACE-RELATIVE, like the model's
 		// own paths: fsPath is the hook's filesystem form (the production
 		// call sites resolve it against the workdir — resolveWorkdir), so
@@ -291,19 +357,6 @@ func (cs *CortexSession) FormatHook(ctx context.Context, fsPath string, hookSkip
 		cs.receiptUnformatted = append(cs.receiptUnformatted, name)
 	}
 	return note
-}
-
-// hookOutcomeProblem reports whether a format hook's note records a file
-// the receipt should name: the formatter FAILED ("note: … ran with an
-// error …", "note: … could not run …", "note: … timed out …") or LEFT
-// CHANGES ("note: formatted … with the project format command …" — the
-// hook rewrote the file, so the content as written was not clean). The
-// only note that does NOT record the file is the one-time "post-edit hook
-// inactive: …" note — the hook did not run at all, so the file is
-// untouched, not unformatted.
-func hookOutcomeProblem(note string) bool {
-	note = strings.TrimSpace(note)
-	return note != tools.HookInactiveNote
 }
 
 // computeReceipt computes this turn's receipt from the turn's
@@ -345,10 +398,10 @@ func (cs *CortexSession) gitWorkspace() bool {
 }
 
 // receiptModelVerifications turns the recorded model-side bash runs into
-// the receipt's verification entries, in run order. The two structs are
-// field-identical (receiptModelBashRun is the recorder's form,
-// receiptVerification the receipt's rendered form), so the conversion is
-// the same as copying field by field.
+// the receipt's verification entries, in run order. The two structs share
+// the same fields in the same order (receiptModelBashRun is the recorder's
+// form, receiptVerification the receipt's rendered form), so a straight
+// conversion is the copy.
 func (cs *CortexSession) receiptModelVerifications() []receiptVerification {
 	out := make([]receiptVerification, 0, len(cs.receiptModelBash))
 	for _, r := range cs.receiptModelBash {
@@ -384,9 +437,12 @@ func (cs *CortexSession) receiptUnformattedPaths() []string {
 // non-repository, a missing git binary, or a failed invocation degrades to
 // an empty fact — the receipt simply has no files-changed line. The per-file
 // stat lines are bounded to receiptMaxStatLines; the block's summary tail
-// is always kept (boundStatLines). The untracked entries are bounded to
-// receiptMaxStatLines too; their names are appended after the stat block,
-// each on its own line, so the block stays readable either way.
+// is always kept (boundStatLines). The untracked entries — already
+// .gitignore-filtered by `git status` itself, so cortex's own ignored
+// runtime (its `.cortex/`, including the session transcripts) can never
+// appear — are bounded to receiptMaxStatLines too; their names are appended
+// after the stat block, each on its own line, so the block stays readable
+// either way.
 func (cs *CortexSession) receiptFilesChanged() []string {
 	wd := cs.Workdir()
 	if wd == "" {
@@ -496,11 +552,17 @@ func (r turnReceipt) render() string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// renderVerificationLine renders one verification run's receipt line:
-// "test: go test ./... (exit 1, 0.4s)" — the role, the exact command, the
-// REAL exit code the process returned (0 only when it actually exited 0),
-// and the elapsed time of the run.
+// renderVerificationLine renders one verification run's receipt line: a
+// run that RAN renders "test: go test ./... (exit 1, 0.4s)" — the role,
+// the exact command, the REAL exit code the process returned (0 only when
+// it actually exited 0), and the elapsed time of the run. A run the shell
+// gate refused or the user declined renders "test: go test ./... (not run:
+// …)" — v.notRun: a command that never ran has no exit code, and its
+// result is unknown, not a pass.
 func renderVerificationLine(v receiptVerification) string {
+	if v.notRun != "" {
+		return v.role + ": " + v.command + " (" + v.notRun + ")"
+	}
 	s := strconv.FormatFloat(v.elapsed.Seconds(), 'f', -1, 64)
 	return v.role + ": " + v.command + " (exit " + strconv.Itoa(v.exitCode) + ", " + s + "s)"
 }

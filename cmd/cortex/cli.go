@@ -36,7 +36,7 @@ func runStudyCLI(project, path, goal string) {
 	}
 	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
-	out, err := tools.Execute(context.Background(), call, session)
+	out, _, err := tools.Execute(context.Background(), call, session)
 	if err != nil {
 		fmt.Println("study error:", err)
 		return

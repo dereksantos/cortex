@@ -107,7 +107,7 @@ func TestExecuteRefusesDisabledAgent(t *testing.T) {
 		Name:      FunctionAgent,
 		Arguments: `{"path":".","goal":"do the thing"}`,
 	}}
-	out, err := Execute(context.Background(), tc, off)
+	out, _, err := Execute(context.Background(), tc, off)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestAgentModelArg(t *testing.T) {
 				Name:      FunctionAgent,
 				Arguments: tt.args,
 			}}
-			if _, err := Execute(context.Background(), tc, deps); err != nil {
+			if _, _, err := Execute(context.Background(), tc, deps); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 			if deps.gotModel != tt.want {

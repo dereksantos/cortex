@@ -14,7 +14,8 @@ import (
 // runEdit invokes the edit_file tool with raw JSON args and returns its result.
 func runEdit(args map[string]any) (string, error) {
 	b, _ := json.Marshal(args)
-	return tools.Execute(context.Background(), tc(FunctionEditFile, string(b)), nil)
+	out, _, err := tools.Execute(context.Background(), tc(FunctionEditFile, string(b)), nil)
+	return out, err
 }
 
 func TestEditFileWhitespaceTolerant(t *testing.T) {

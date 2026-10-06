@@ -81,7 +81,7 @@ func planReceiptTestSession(t *testing.T, script []*AgentResponse) *CortexSessio
 			// hook — the receipt's unformatted fact — the touched-file
 			// record), every other call is stubbed (no real file access).
 			if call.Function.Name == tools.FunctionWriteFile || call.Function.Name == tools.FunctionEditFile {
-				out, err := tools.Execute(ctx, call, cs)
+				out, _, err := tools.Execute(ctx, call, cs)
 				if err != nil {
 					return "Error: " + err.Error()
 				}

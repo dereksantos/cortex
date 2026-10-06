@@ -1339,6 +1339,12 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			if cmd, err := call.StringArg("command"); err == nil {
 				cs.receiptBash(cmd)
 			}
+			// The gate's structured outcome for THIS call (tools.ShellGateOutcome,
+			// published on the session by gateShell, tool_deps.go) is sampled
+			// and cleared here, around the call: a refused or declined command
+			// never ran and must record (not run: …), never an exit code, and a
+			// later call's Clean never leaks into an earlier one's record.
+			cs.gateOutcome = tools.ShellGateClean
 		}
 		if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
@@ -1356,7 +1362,7 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			}
 		}
 		cs.startActivity(call.ActivityLabel())
-		out, err := tools.Execute(ctx, call, cs)
+		out, _, err := tools.Execute(ctx, call, cs)
 		cs.stopActivity()
 		// Issue #154: after a bash command, sweep the workspace for
 		// scratch-named non-test files the command created — the touch hook
@@ -1377,7 +1383,7 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		// non-verification command).
 		if isBash {
 			if cmd, argErr := call.StringArg("command"); argErr == nil {
-				cs.receiptBashOutcome(cmd, out, err, time.Since(bashStart))
+				cs.receiptBashOutcome(cmd, out, err, cs.gateOutcome, time.Since(bashStart))
 			}
 		}
 		if err != nil {

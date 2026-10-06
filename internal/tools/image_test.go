@@ -259,10 +259,10 @@ func TestImageSinkIsPerSession(t *testing.T) {
 	pA := writeImage(t, dir, "a.png", pngBytes(16))
 	pB := writeImage(t, dir, "b.png", append(append([]byte{}, pngBytes(8)...), 'B', 'B', 'B'))
 
-	if _, err := Execute(ctx, readImageCall(t, pA, 0, 0), depsA); err != nil {
+	if _, _, err := Execute(ctx, readImageCall(t, pA, 0, 0), depsA); err != nil {
 		t.Fatalf("execute A: %v", err)
 	}
-	if _, err := Execute(ctx, readImageCall(t, pB, 0, 0), depsB); err != nil {
+	if _, _, err := Execute(ctx, readImageCall(t, pB, 0, 0), depsB); err != nil {
 		t.Fatalf("execute B: %v", err)
 	}
 
@@ -293,7 +293,7 @@ func TestReadFileImageSubagentRefused(t *testing.T) {
 	}()
 
 	deps := &textOnlyDeps{accept: true}
-	out, err := Execute(context.Background(), readImageCall(t, p, 0, 0), deps)
+	out, _, err := Execute(context.Background(), readImageCall(t, p, 0, 0), deps)
 	if err != nil {
 		t.Fatalf("subagent image read must be an observation, not an error: %v", err)
 	}

@@ -299,7 +299,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			t.Fatalf("seed: %v", err)
 		}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), editCall(t, FunctionEditFile, map[string]any{
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionEditFile, map[string]any{
 				"path": path, "old_string": "return 1", "new_string": "return 2",
 			}), nil); err != nil {
 				t.Fatalf("edit_file: %v", err)
@@ -316,7 +316,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 	t.Run("write_file to a new path renders as a create", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "new.txt")
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
 				"path": path, "content": "hello\nworld\n",
 			}), nil); err != nil {
 				t.Fatalf("write_file: %v", err)
@@ -336,7 +336,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			t.Fatalf("seed: %v", err)
 		}
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
 				"path": path, "content": "keep\nadd\n",
 			}), nil); err != nil {
 				t.Fatalf("write_file: %v", err)
@@ -356,7 +356,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 	t.Run("quiet deps print nothing at all", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "f.txt")
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
 				"path": path, "content": "hello\n",
 			}), quietDeps{}); err != nil {
 				t.Fatalf("write_file: %v", err)
@@ -374,7 +374,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 
 		path := filepath.Join(t.TempDir(), "f.txt")
 		out := captureStdout(t, func() {
-			if _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionWriteFile, map[string]any{
 				"path": path, "content": "hello\n",
 			}), nil); err != nil {
 				t.Fatalf("write_file: %v", err)
