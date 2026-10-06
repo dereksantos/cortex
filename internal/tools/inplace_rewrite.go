@@ -72,6 +72,7 @@ const (
 	rewriteFormRedirect rewriteForm = "redirect"
 	rewriteFormInPlace  rewriteForm = "in-place"
 	rewriteFormScript   rewriteForm = "script"
+	rewriteFormRead     rewriteForm = "read"
 )
 
 type rewriteTarget struct {
@@ -102,45 +103,94 @@ var (
 )
 
 // detectInPlaceRewrites scans command (already rewritten by the attribution
-// backstop — the command the gate classified is the command that runs) and
-// returns the rewrite targets it can see, in first-occurrence order,
-// de-duplicated by raw path.
+// backstop — the command that ran is the command that is gated) and returns
+// the REWRITE targets it names in first-occurrence order — targets that a
+// REWRITE reached (in-place form, redirect form, script form). It does not
+// name reads: plain readers (cat / head / tail / tac, sed / grep without a
+// write flag, a head/tail on a pipe) are named by detectShellReads with
+// rewriteFormRead (issue #209), so callers of detectInPlaceRewrites keep
+// seeing rewrites only (the name and the #201 call sites assume that).
+//
+// A command that rewrites multiple files, or that reads and rewrites in one
+// line, names the REWRITE target once: `cat f.go && sed -i 's/x/y/' f.go`
+// names f.go only as a rewrite (a rewrite always wins over an earlier read
+// of the same file — the first form seen is not the only form that command
+// reaches). Targets de-duplicate by raw path.
 func detectInPlaceRewrites(command string) []rewriteTarget {
-	var out []rewriteTarget
+	var rewrites []rewriteTarget
 	seen := map[string]bool{}
 	add := func(raw string, form rewriteForm) {
 		raw = strings.TrimSpace(raw)
 		if raw == "" || redirVarRe.MatchString(raw) {
-			return // $VAR: the value is unknowable — don't guess
+			return // $VAR: value unknowable — do not guess
 		}
 		if seen[raw] {
 			return
 		}
 		seen[raw] = true
-		out = append(out, rewriteTarget{raw: raw, form: form})
+		rewrites = append(rewrites, rewriteTarget{raw: raw, form: form})
 	}
-	// The binary/argument scan is per-simple-command: a `|`, `&`, `;`, or
-	// newline outside quotes delimits commands, and splitSimpleCommand itself
-	// is NOT quote-aware for those operators (it would split on the `;`
-	// inside a quoted script), so we quote-strip the command first and then
-	// split on the operators. The redirect scan is quote-aware and runs on
-	// the ORIGINAL part (it needs the script bodies to know where a `>` is
-	// data, not a redirect), and it runs AFTER the binary/argument scan for
-	// the same command, so targets appear in first-occurrence order within
-	// the command (the sed -i target before the redirect target in
-	// `sed -i 's/x/y/' f.go && cat f.go > copy.go`).
+	// The binary/argument scan is per-simple-command: an unquoted `|`, `&`,
+	// `;`, or newline delimits commands, and splitSimpleCommand itself is
+	// not quote-aware for those operators (it would split on a `;` inside a
+	// quoted script), so we first quote-strip the command and then split on
+	// the operators. The redirect scan is quote-aware and runs on the
+	// original part (it needs the script body to know whether a `>` is data
+	// or a redirect), and it runs after the binary/argument scan for the
+	// same command, so targets appear in first-occurrence order within the
+	// command (in `sed -i 's/x/y/' f.go && cat f.go > copy.go` the sed -i
+	// target comes before the redirect target). Reads are NOT scanned here:
+	// they are named by detectShellReads (issue #209), and the combined
+	// note's "the rewrite wins over a read of the same path" dedup is done
+	// in inPlaceRewriteNote — a path the command both read and rewrote is
+	// named once, as the rewrite.
 	for _, part := range strings.FieldsFunc(stripQuotedRegions(command), func(r rune) bool {
 		return r == '|' || r == '&' || r == ';' || r == '\n' || r == '\r'
 	}) {
-		scanRewritePart(part, add)
+		scanLine := part
+		if i := strings.Index(part, "<<"); i >= 0 {
+			// Heredoc: scan the command line only (before the `<<` marker);
+			// the body lines are data and name no target.
+			scanLine = strings.TrimSpace(part[:i])
+		}
+		if scanLine == "" {
+			continue
+		}
+		scanRewritePart(scanLine, add)
 	}
-	// Redirects are scanned on the original (un-stripped) command, split on
-	// the same operators but quote-aware so a `;` inside a quoted script
-	// does not fool the splitter.
+	// Redirects are scanned against the original (un-stripped) command, split
+	// on the same operators but quote-aware so that a `;` inside a quoted
+	// script does not confuse the splitter.
 	for _, part := range splitQuoteAware(command) {
 		scanRedirects(part, add)
 	}
-	return out
+	return rewrites
+}
+
+// stdoutConsumed reports whether a simple command's stdout is consumed by
+// something other than the model's view — a file redirect (`> f`, `>> f`, not
+// a /dev/null throwaway or an fd dup) or a pipe (the command is the left side
+// of a `|`). A reader whose stdout is consumed is a PRODUCER, not a file read
+// the model is inspecting: `cat f.go > copy.go` and `cat f.go | tee x` make
+// copies/feeds, so f.go's read is not named — the model is not reading f.go to
+// see it. `cat f.go` (stdout to the terminal) IS a read. isPipedLeft is
+// whether the next operator after this part in the command is `|`.
+func stdoutConsumed(part string, isPipedLeft bool) bool {
+	if isPipedLeft {
+		return true
+	}
+	return hasFileRedirect(part)
+}
+
+// hasFileRedirect reports whether part has an unquoted `>`/`>>` redirect to a
+// file (not a /dev/null throwaway, not an fd dup). Reuses scanRedirects' walk,
+// which already filters those out as targets.
+func hasFileRedirect(part string) bool {
+	found := false
+	scanRedirects(part, func(raw string, form rewriteForm) {
+		found = true
+	})
+	return found
 }
 
 // splitQuoteAware splits command on the simple-command operators (`|`, `&`,
@@ -249,9 +299,29 @@ func scanRewritePart(part string, add func(string, rewriteForm)) {
 		scanPerl(args, add)
 	case "awk":
 		scanAwk(args, add)
+	case "tee":
+		// tee writes to its FILE arguments (plus stdout). It is the one
+		// writer the redirect scan cannot name — `tee f <<EOF` and
+		// `... | tee f` have no `>` — so its targets are named here as
+		// redirect-form rewrites and get the existing edit_file/write_file
+		// steer (issue #209's create path is real: tee creates the file).
+		scanTee(args, add)
 	default:
 		if scriptBins[bin] {
 			scanScriptC(args, add)
+		}
+	}
+}
+
+// scanTee: `tee [-a] FILE...` — the file arguments are where tee writes
+// (a `-a` append still writes the same file). tee is the one writer the
+// redirect scan cannot name — `tee f <<EOF` and `... | tee f` have no `>` —
+// so every bare-file argument is a rewrite target in the redirect form
+// (issue #209: tee really does create files).
+func scanTee(args []shellWord, add func(string, rewriteForm)) {
+	for _, a := range args {
+		if isBareFile(a.val) {
+			add(a.val, rewriteFormRedirect)
 		}
 	}
 }
@@ -417,6 +487,136 @@ func scanScriptC(args []shellWord, add func(string, rewriteForm)) {
 	}
 }
 
+// readBins are the binaries whose FILE arguments are READ (not written): a
+// plain cat / head / tail / tac, and sed / grep without their write forms
+// (sed -i / ed / perl -i / gawk -i are REWRITES, handled by the rewrite
+// scan, so they never reach the read scan as readBins). The read scan names
+// their file arguments with rewriteFormRead (issue #209). `grep` is always a
+// read (it has no in-place mode), and `head`/`tail`/`tac` read their file
+// list (tail -f is excluded by scanReadPart's -f check). `tee` is a WRITER
+// (scanTee in the rewrite scan), not a reader, so it is not here.
+var readBins = map[string]bool{
+	"cat": true, "head": true, "tail": true, "tac": true,
+	"sed": true, "grep": true,
+}
+
+// isDevPath reports whether p names a device under /dev (e.g. /dev/zero).
+// Reading one is a stream, not a file the model could read with read_file —
+// naming it a read target would nudge the model to the wrong tool (and
+// `head -c 20000 /dev/zero` is a legitimate size test).
+func isDevPath(p string) bool {
+	return p == "/dev" || strings.HasPrefix(p, "/dev/")
+}
+
+// scanReadPart scans one simple command's binary + arguments (no shell
+// metacharacters remain — the caller split on them) and names its file
+// arguments as READ targets (rewriteFormRead, issue #209) when the binary is
+// a reader. A command that REWRITES (sed -i, ed, perl -i, gawk -i, a script
+// -c, a redirect) never reaches the read scan: its binary is not a readBin,
+// so nothing is added. The file arguments are the same bare-file words the
+// rewrite scan names (isBareFile), so a sed -i's file (its OUTPUT) is never
+// a read target.
+func scanReadPart(part string, add func(string, rewriteForm)) {
+	words, ok := splitSimpleCommand(part)
+	if !ok {
+		return
+	}
+	if len(words) < 2 {
+		return
+	}
+	// A leading VAR=val is an env-mutated invocation (possibly several);
+	// the binary is the first word without an `=`. Words with an `=` are
+	// never the binary. (The rewrite scan does the same offset.)
+	offset := 0
+	for offset < len(words) && strings.Contains(words[offset].val, "=") {
+		offset++
+	}
+	if offset >= len(words) {
+		return
+	}
+	bin := lastPathElem(words[offset].val)
+	args := words[offset+1:]
+	if !readBins[bin] {
+		return // not a reader (a rewrite, an interpreter, or an unknown bin)
+	}
+	// `head`/`tail`/`tac` consume their leading flags (so `-n 40`'s argument
+	// is not a file); `-f` (tail's follow mode) names no file to read.
+	// `sed`/`grep` consume their leading flags + scripts (so `sed -n '2,4p'`'s
+	// script is not a file). `cat` has no flags that consume a file argument,
+	// so its file list is everything after the binary.
+	i := 0
+	switch bin {
+	case "head", "tail", "tac":
+		for i < len(args) {
+			v := args[i].val
+			if !strings.HasPrefix(v, "-") || v == "-" {
+				break
+			}
+			if v == "-f" {
+				return // tail -f: follow mode, no file to read
+			}
+			// Flags that take a value (-n, -c, -k) consume their argument.
+			if v == "-n" || v == "-c" || v == "-k" || v == "--lines" ||
+				v == "--bytes" || v == "--sleep-interval" || v == "--quiet" ||
+				v == "--silent" || v == "--verbose" {
+				i++
+			}
+			i++
+		}
+	case "sed":
+		hasScriptFlag := false
+		for i < len(args) {
+			v := args[i].val
+			if !strings.HasPrefix(v, "-") || v == "-" {
+				break
+			}
+			if v == "-i" || sedInPlaceRe.MatchString(v) || v == "--in-place" || strings.HasPrefix(v, "--in-place=") {
+				return // sed -i: a REWRITE (handled by the rewrite scan)
+			}
+			if (v == "-e" || v == "-f") && i+1 < len(args) {
+				hasScriptFlag = true
+				i++ // the script argument
+			}
+			i++
+		}
+		// If the script came inline (no -e/-f), the first non-flag word is the
+		// SCRIPT, not a file — skip it; the rest are the files. `sed -n '2,4p'
+		// f.go`: -n is a flag, '2,4p' is the script, f.go is the file.
+		if !hasScriptFlag && i < len(args) && isBareFile(args[i].val) {
+			i++
+		}
+	case "grep":
+		hasPatternFlag := false
+		for i < len(args) {
+			v := args[i].val
+			if !strings.HasPrefix(v, "-") || v == "-" {
+				break
+			}
+			// -e/-f take a pattern argument; -A/-B/-C take a line count.
+			if v == "-e" || v == "-f" {
+				hasPatternFlag = true
+				i++ // the pattern argument
+			}
+			if (v == "-A" || v == "-B" || v == "-C") && i+1 < len(args) {
+				i++ // the line-count argument
+			}
+			i++
+		}
+		// The first non-flag word is the PATTERN (unless it came via -e/-f),
+		// so skip it; the rest are the files. `grep -A 5 TODO inspect.go`:
+		// -A eats 5, TODO is the pattern, inspect.go is the file.
+		if !hasPatternFlag && i < len(args) && isBareFile(args[i].val) {
+			i++
+		}
+	}
+	for ; i < len(args); i++ {
+		v := args[i].val
+		if isBareFile(v) && !isDevPath(v) {
+			add(v, rewriteFormRead)
+		}
+	}
+}
+
 // scanRedirects walks one simple command's raw bytes and names the target of
 // every unquoted `> TARGET` / `>> TARGET`. It is separate from
 // splitSimpleCommand, which treats `>` as a shell operator it refuses to
@@ -530,28 +730,164 @@ func rewriteTargetDisplay(raw, workdir string) string {
 	return raw
 }
 
+// hasRewriteTarget reports whether command names at least one target a
+// REWRITE reached (in-place, redirect, or script form) — as opposed to a
+// read-only target (rewriteFormRead). The bash tool's grep no-match
+// special-case ("no matches") is suppressed when a command changed
+// something, but a pure read (cat / head / sed -n / grep -A) changes
+// nothing, so a read-only note must NOT suppress it (issue #209 step 1).
+func hasRewriteTarget(command string) bool {
+	for _, t := range detectInPlaceRewrites(command) {
+		if t.form != rewriteFormRead {
+			return true
+		}
+	}
+	return false
+}
+
+// detectShellReads scans command for file READS (issue #209) and returns
+// their targets in first-occurrence order: the file arguments a plain reader
+// (cat / head / tail / tac, sed / grep without a write flag, a piped
+// head/tail) names. A command that REWRITES a file (sed -i, ed, perl -i,
+// gawk -i, a script -c, a `>`/`>>` redirect, a tee) never names that file as
+// a read: the read scan only fires on a command whose binary is a reader, and
+// the file a writer names is its output, not its input — so a read is by
+// definition something the command did not touch, and the post-edit hook must
+// never run on it (a read of f.go must not gofmt f.go). The rewrite wins over
+// a read of the same path: a path the command reads and rewrites in different
+// parts (e.g. `cat f.go && sed -i ... f.go`) or in one pipe (`cat f.go | tee
+// f.go`) is named once, as the REWRITE — the reads are computed in
+// first-occurrence order, then every path the rewrite scan named is dropped,
+// so the read note never double-names a file the command also wrote.
+func detectShellReads(command string) []rewriteTarget {
+	// Compute the rewrites first: a read of a path the command also rewrites
+	// is not a read target (the rewrite wins the dedup — here and in
+	// inPlaceRewriteNote's combined note).
+	rewritten := map[string]bool{}
+	for _, t := range detectInPlaceRewrites(command) {
+		rewritten[t.raw] = true
+	}
+	var reads []rewriteTarget
+	seen := map[string]bool{}
+	add := func(raw string, form rewriteForm) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || redirVarRe.MatchString(raw) {
+			return // $VAR: the value is unknowable — don't guess
+		}
+		if seen[raw] {
+			return
+		}
+		seen[raw] = true
+		if rewritten[raw] {
+			return // the command rewrote this path: the rewrite wins, no read
+		}
+		reads = append(reads, rewriteTarget{raw: raw, form: rewriteFormRead})
+	}
+	for _, p := range splitProducerParts(command) {
+		// A reader whose stdout is piped or file-redirected is a producer
+		// (it makes a copy/feeds a pipe), not a read the model is inspecting —
+		// its file arguments are not named. `cat f.go > copy.go`, `cat f.go |
+		// tee x`: f.go is the input being copied, not a read target.
+		if stdoutConsumed(p.text, p.pipedLeft) {
+			continue
+		}
+		scanReadPart(p.text, add)
+	}
+	return reads
+}
+
+// producerPart is one simple command with a flag for whether its stdout is
+// piped to the next command (the next operator is `|`).
+type producerPart struct {
+	text      string
+	pipedLeft bool
+}
+
+// splitProducerParts splits command like splitQuoteAware but also records, for
+// each part, whether it is the left side of a `|` (its stdout is piped). The
+// read scan uses this to skip producers: a reader piped into something is
+// making a copy/feeding a pipe, not a file read the model is inspecting.
+func splitProducerParts(s string) []producerPart {
+	var parts []producerPart
+	i := 0
+	start := 0
+	for i < len(s) {
+		c := s[i]
+		switch c {
+		case '\'':
+			i = skipQuoted(s, i, '\'')
+		case '"':
+			i = skipQuoted(s, i, '"')
+		case '\\':
+			i += 2
+			if i > len(s) {
+				i = len(s)
+			}
+		case '|', '&', ';', '\n', '\r':
+			parts = append(parts, producerPart{text: s[start:i], pipedLeft: c == '|'})
+			i++
+			for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+				i++
+			}
+			start = i
+		default:
+			i++
+		}
+	}
+	parts = append(parts, producerPart{text: s[start:]})
+	return parts
+}
+
 // inPlaceRewriteNote renders the model-facing note for one bash command that
-// rewrites files (issue #201): it names the touched targets — workdir-relative
-// when a workdir is anchored, so the model can re-do the change with
-// edit_file/write_file on the same path it uses for every other edit — and
-// steers to the edit tools, whose diff display and post-edit hook a scripted
-// edit skips. "" when the command names no rewrite target; the caller
-// (bash) appends it to the result on both the run and the refused paths.
+// touches files (issue #201 rewrites, issue #209 reads). It names the touched
+// targets — workdir-relative when a workdir is anchored, so the model can act
+// on the same path it uses everywhere — and steers to the right tool for each
+// form: rewrite targets (in-place, redirect, script) steer to
+// edit_file/write_file (diff display + post-edit hook), read targets (plain
+// cat/head/tail/tac/sed/grep) steer to read_file/outline/grep (the dedicated
+// readers a bash shell command skips). One combined note when the command has
+// both kinds. "" when the command names no target at all; the caller (bash)
+// appends it to the result on both the run and the refused paths.
 func inPlaceRewriteNote(deps ToolDeps, command string) string {
-	targets := detectInPlaceRewrites(command)
-	if len(targets) == 0 {
+	rewrites := detectInPlaceRewrites(command)
+	reads := detectShellReads(command)
+	if len(rewrites) == 0 && len(reads) == 0 {
 		return ""
 	}
+	var rewriteTargets, readTargets []rewriteTarget
+	for _, t := range rewrites {
+		if t.form != rewriteFormRead {
+			rewriteTargets = append(rewriteTargets, t)
+		}
+	}
+	// detectShellReads already drops any path the command also rewrote (the
+	// rewrite wins the dedup), so the two sets never share a path.
+	readTargets = reads
 	wd := workdirOf(deps)
 	var b strings.Builder
-	b.WriteString("note: this command rewrites file(s) in place: ")
-	for i, t := range targets {
-		if i > 0 {
-			b.WriteString(", ")
+	if len(rewriteTargets) > 0 {
+		b.WriteString("note: this command rewrites file(s) in place: ")
+		for i, t := range rewriteTargets {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(rewriteTargetDisplay(t.raw, wd))
 		}
-		b.WriteString(rewriteTargetDisplay(t.raw, wd))
+		b.WriteString(" — use edit_file (or write_file for a whole-file rewrite) for file edits: they show the diff and run the post-edit hook, which scripted edits skip.")
 	}
-	b.WriteString(" — use edit_file (or write_file for a whole-file rewrite) for file edits: they show the diff and run the post-edit hook, which scripted edits skip.")
+	if len(readTargets) > 0 {
+		if len(rewriteTargets) > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString("note: this command reads file(s) via the shell: ")
+		for i, t := range readTargets {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(rewriteTargetDisplay(t.raw, wd))
+		}
+		b.WriteString(" — use read_file (or outline/grep) for file reads: they are the dedicated readers, sized and quote-aware, that a bash shell command skips.")
+	}
 	return b.String()
 }
 
