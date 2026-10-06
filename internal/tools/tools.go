@@ -438,6 +438,29 @@ type HookStateProvider interface {
 	HookState() *PostEditHookState
 }
 
+// FormatHookNoter is the OPTIONAL ToolDeps capability that supplies the
+// session's per-turn WRAPPER around the post-edit format hook
+// (cmd/cortex's receiptFormatHook, issue #219): it runs the hook exactly as
+// this package's production path does and records the hook's note for the
+// turn's measurement-only receipt. A session without it (subagent Toolsets,
+// hand-built callers) has the hook run directly — the model-facing note is
+// byte-identical, only the receipt recording is skipped.
+type FormatHookNoter interface {
+	FormatHook(ctx context.Context, fsPath string) string
+}
+
+// formatHookNote runs the post-edit format hook for fsPath through the
+// session's wrapper when the capability is present, directly otherwise. The
+// note returned is the model-facing one, byte-identical to the direct run
+// in either case — the wrapper only records the note on the session's
+// turn-receipt state alongside returning it.
+func formatHookNote(ctx context.Context, deps ToolDeps, fsPath string, hookSkip bool) string {
+	if noter, ok := deps.(FormatHookNoter); ok {
+		return noter.FormatHook(ctx, fsPath)
+	}
+	return runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookStateOf(deps), effectiveHookMode(hookStateOf(deps), hookSkip))
+}
+
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
 	FunctionReadFile     = "read_file"
@@ -1392,8 +1415,8 @@ func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) 
 	// said about the result. Trust is the hard gate (an untrusted workspace
 	// runs nothing and, once per session, says so) and the mode (config /
 	// env / /hook, plus this call's `hook: "skip"`) turns it down or off.
-	hookState := hookStateOf(deps)
-	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookState, effectiveHookMode(hookState, hookSkip)); note != "" {
+	note := formatHookNote(ctx, deps, fsPath, hookSkip)
+	if note != "" {
 		result += "\n" + note
 	}
 	return result, nil
@@ -1563,8 +1586,8 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// result. Trust is the hard gate (an untrusted workspace runs nothing and,
 	// once per session, says so) and the mode (config / env / /hook, plus this
 	// call's `hook: "skip"`) turns it down or off.
-	hookState := hookStateOf(deps)
-	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookState, effectiveHookMode(hookState, hookSkip)); note != "" {
+	note := formatHookNote(ctx, deps, fsPath, hookSkip)
+	if note != "" {
 		result += "\n" + note
 	}
 	return result, nil

@@ -130,6 +130,10 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 		case e.Role == RoleTool && e.ToolCallID != "":
 			sawToolResult = true
 		case e.Role == "assistant" && e.Content == "ok":
+			// Issue #219: the turn's measurement receipt is harness output — it
+			// rides the distinct TurnResult.Receipt field and persists as a
+			// transcript-only kindNote entry, so the stored assistant message
+			// (and its transcript entry) holds the model's verbatim reply.
 			sawFinalReply = true
 		}
 	}

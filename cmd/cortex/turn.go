@@ -127,6 +127,18 @@ type TurnResult struct {
 	// disk. The live in-memory messages are NOT redacted — only what is
 	// persisted is — so this is the only place the count is visible.
 	Redactions int
+	// Receipt carries the measurement-only turn receipt (issue #219,
+	// step 1, turn_receipt.go): the workspace's `git diff --stat` block
+	// (when the workspace is a git repository), the exit codes of the
+	// project's own test/build commands (the model's own runs recorded by
+	// the per-turn bash recorder, plus the harness's own final run of the
+	// project's commands through the tools.hookRunner seam), and the files
+	// the post-edit format hook knew about — rendered in a fixed plain-text
+	// form. Empty when the turn ran no tools or measured nothing.
+	// Measurement only: the receipt never blocked the turn, never failed a
+	// tool call, and never reached the model — it rides here for a caller
+	// (REPL, headless `cortex turn`, a self-dev driver) to surface.
+	Receipt string
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -187,6 +199,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// for the new turn (lintTouchedFiles never carry over — a turn lints
 	// exactly the files IT touched).
 	cs.testwatchDrop()
+	// Issue #219: the same turn-boundary drop for the measurement-only
+	// receipt (turn_receipt.go) — a stale bash recorder, final-verification
+	// list, or unformatted-file list from a prior turn that never reached
+	// its end must not leak into this turn's receipt.
+	cs.receiptDrop()
 	// Arm the turn-end lint pass's budget for this turn (piece 3): 0 means
 	// "not configured by NewCortexSession" — runTurnLint falls back to the
 	// default 60s, so hand-built test sessions stay functional.
@@ -509,9 +526,17 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// file is settled); on the error/interrupt path (no finalize happened)
 	// cs.lintReceipt is empty and the pass is simply skipped. Turn it into
 	// the result the same way as the other receipts.
+	// Issue #219: the measurement-only turn receipt (turn_receipt.go) is
+	// computed at the SAME point: after runLoop has settled every tool call,
+	// the workspace is final, so its final verification run (the project's
+	// own test/build commands through the hookRunner seam) sees the settled
+	// tree — and, like the others, it is computed BEFORE the unrecovered-
+	// error return so an interrupted turn still reports its measurements.
+	// Measurement only: the receipt never changes the turn's outcome.
 	lintReceipt := cs.lintReceipt
 	testReceipt := cs.testwatchTestsReceipt()
 	debugReceipt := cs.testwatchDebugReceipt()
+	turnReceipt := cs.computeReceipt(ctx).render()
 	if err != nil {
 		if pf := pendingFailureOf(err); pf != nil {
 			cs.journalModelFailure(pf, err)
@@ -521,7 +546,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		// total includes what a failed turn redacted (captureTurn never runs
 		// here, so cs.redactions is exact at this point).
 		cs.redactionsTotal += cs.redactions
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Redactions: cs.redactions}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt, Redactions: cs.redactions}, err
 	}
 
 	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
@@ -536,7 +561,20 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// session summary record the same figure, docs/journal.md).
 	cs.redactionsTotal += cs.redactions
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, LastError: stats.LastError, Redactions: cs.redactions}, nil
+	// Issue #219: the measurement-only turn receipt is harness output, not
+	// model content. It is surfaced on the distinct TurnResult.Receipt field
+	// (callers — REPL, headless, serve, discord — choose to print it) and
+	// persisted on the session transcript as a kindNote entry so the receipt
+	// survives on the on-disk record; the kindNote is transcript-only
+	// (loadSession skips it), so the stored assistant message — the model's
+	// own reply — is never rewritten and resume never replays the receipt
+	// into the model's context. Measurement only: a turn that measured
+	// nothing has an empty receipt and the transcript is untouched.
+	if turnReceipt != "" {
+		cs.transcriptNote("turn receipt:\n" + turnReceipt)
+	}
+
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt, LastError: stats.LastError, Redactions: cs.redactions}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from

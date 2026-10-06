@@ -694,6 +694,7 @@ func main() {
 			// a /plan run reports test loss exactly like a single turn.
 			printTestReceipt(plan.TestReceipt)
 			printLintReceipt(plan.LintReceipt)
+			printTurnReceipt(plan.Receipt)
 			afterTurn(session, planErr)
 			continue
 		}
@@ -837,6 +838,11 @@ func main() {
 		// turn-boundary surface — the findings the model saw in the finalize
 		// round reach the human in the terminal too.
 		printLintReceipt(res.LintReceipt)
+		// Issue #219: the measurement-only turn receipt — what the turn
+		// actually left in the workspace (the git diff --stat block, the
+		// project's own test/build exit codes, the format hook's knowledge) —
+		// rides the same turn-boundary surface, measured, not claimed.
+		printTurnReceipt(res.Receipt)
 		// Issue #117: a turn that recovered from a mid-turn provider failure
 		// SUCCEEDED (err is nil), so the backend's status/body was otherwise
 		// lost behind the reply — one dim line, secrets redacted. afterTurn is

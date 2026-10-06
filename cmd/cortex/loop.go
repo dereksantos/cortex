@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/journal"
@@ -1275,8 +1276,18 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		// workspace's test-named files instead (armTestwatch). A no-op
 		// for every other tool and for a missing file.
 		isBash := call.Function.Name == tools.FunctionBash
+		bashStart := time.Time{}
 		if isBash {
 			cs.armTestwatch()
+			bashStart = time.Now()
+			// Issue #219: record a bash command that is the project's OWN
+			// test/build run BEFORE it runs (receiptBash, turn_receipt.go) —
+			// the receipt's verification fact pairs the model's own
+			// verification runs with their outcomes; a non-verification
+			// command (rm, ls, git, …) records nothing.
+			if cmd, err := call.StringArg("command"); err == nil {
+				cs.receiptBash(cmd)
+			}
 		} else if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
 			// Issue #129 piece 3: record the touched file for the turn-end
@@ -1303,6 +1314,15 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		// leftover-debug scan. Best-effort: a no-op when there is no workdir.
 		if isBash {
 			cs.sweepScratchFiles()
+		}
+		// Issue #219: record the outcome of a verification bash run (the
+		// exit code the bash tool observed and the wall time of the call) —
+		// receiptBashOutcome is a no-op for a command receiptBash did not
+		// record (a non-verification command).
+		if isBash {
+			if cmd, err := call.StringArg("command"); err == nil {
+				cs.receiptBashOutcome(cmd, err, time.Since(bashStart))
+			}
 		}
 		if err != nil {
 			return "Error: " + err.Error()

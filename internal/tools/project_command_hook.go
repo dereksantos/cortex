@@ -340,6 +340,19 @@ func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 	return b.String()
 }
 
+// RunProjectCommandHook is the EXPORTED post-edit format hook: the same run
+// as runProjectCommandHook (the identical trust/mode/extension gates, the
+// identical note), for a session that wants to wrap the hook per turn —
+// cmd/cortex's FormatHook (the FormatHookNoter capability, issue #219) runs
+// through it so the turn's measurement-only receipt records the hook's note
+// while the model sees the identical note. The production write_file/
+// edit_file path calls the unexported runProjectCommandHook directly (same
+// package); the exported form exists only for the session's wrapper, which
+// sits in cmd/cortex.
+func RunProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) string {
+	return runProjectCommandHook(ctx, cmds, root, fsPath, trusted, state, mode)
+}
+
 // RunTurnEndLint is the turn-end lint pass (issue #129, piece 3): lint is
 // slow and noisy per edit (clippy, eslint), so it runs ONCE per turn, here,
 // instead of inside runProjectCommandHook. The session calls it at the
