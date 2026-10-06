@@ -110,17 +110,26 @@ Three capabilities distinguish it:
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
 REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/undo [N]`
-(issue #111 — per-turn checkpoints: at the start of every turn, while the repo
-is a git repo, the working tree is snapshotted via `git stash create` and the
-ref is recorded under `refs/cortex/checkpoints/<session>/<turn>`
-(`internal/checkpoint` + `cmd/cortex/checkpoint.go`); the snapshot is a no-op on
-a clean tracked tree, so only turns that actually mutate files record a ref, and
-the stack is pruned to the newest 50 (`maxCheckpointRefs`). `/undo [N]`, default
-1, restores the Nth-most-recent snapshot's tree back to the working tree — it
-writes the snapshot's tracked files back and re-materialises a turn-deleted file
-(as untracked) — while leaving the index, the user's `git stash` list, and
-`.cortex/` untouched; it prints the files changed, records a transcript note so
-the model learns its edits were reverted, and drops the consumed refs. One line
+(issue #111 — per-turn checkpoints: a snapshot is taken at the START of every
+turn, while the repo is a git repo — the tracked tree via `git stash create`,
+falling back to HEAD's commit when the tracked tree is clean — plus the set of
+untracked, non-ignored files then present, recorded under
+`refs/cortex/checkpoints/<session>/<turn>` (`internal/checkpoint` +
+`cmd/cortex/checkpoint.go`). The snapshot is COMMITTED to the per-session undo
+stack only at the turn's END, and only if the turn changed the working tree:
+`commitCheckpoint` re-snapshots the tracked state and the untracked set and
+keeps the checkpoint iff either differs from the turn-start baseline — so a
+turn that only ran read-only bash (tests, `git status`) records nothing, while
+a turn that edits only through the `agent` subagent still does (the turn-end
+tree diff is the one signal that catches every mutation path). The stack is
+pruned to the newest 50 (`maxCheckpointRefs`) per session. `/undo [N]`, default
+1, restores the Nth-most-recent snapshot to the working tree — it writes the
+snapshot's tracked files back (preserving file modes), re-materialises a
+turn-deleted file, and removes the files the turn CREATED (untracked paths
+absent from the snapshot's baseline) — while leaving pre-existing untracked
+files, the index, the user's `git stash` list, and `.cortex/` untouched; it
+prints only the files it actually changed, records a transcript note so the
+model learns its edits were reverted, and drops the consumed refs. One line
 when not in a git repo or when there is nothing to undo), `/sessions`,
 `/model [name]`, `/plan <task>`, `/hook off|format|all` (turns the post-edit
 hook down or off for this session — monotone-down, never raises it; bare

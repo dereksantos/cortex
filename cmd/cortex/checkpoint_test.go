@@ -13,9 +13,10 @@ import (
 // checkpoint_test.go covers the REPL wiring of internal/checkpoint (issue
 // #111): the snapshot taken at the start of a turn, the turn-end commit
 // decision (a checkpoint lands on the undo stack only when the turn actually
-// mutated files), the in-memory stack, and the /clear + Close cleanup. It
-// drives the REAL git binary in a temp repo (the same gitCmd/gitCmdOutput +
-// initGitRepo convention change_test.go establishes) so the assertions are on
+// changed the working tree — commitCheckpoint re-snapshots and diffs), the
+// in-memory stack, and the /clear + Close cleanup. It drives the REAL git
+// binary in a temp repo (the same gitCmd/gitCmdOutput + initGitRepo
+// convention change_test.go establishes) so the assertions are on
 // real refs and real git state, not a stub.
 
 // gitCheckpointRefs returns the set of hidden checkpoint refs currently in dir.
@@ -57,16 +58,15 @@ func testCheckpointSession(t *testing.T, dir string) *CortexSession {
 // runTurn simulates one turn's checkpoint lifecycle the way turn.go drives it:
 // the turn stamps its ordinal, records the start-of-turn snapshot, the test
 // performs the turn's file mutations, and the turn's end commits the snapshot
-// iff the turn mutated files. The mutation flag and the turn-no stamping are
-// turn.go's job — simulated here so the checkpoint code itself is exercised
-// against real git.
-func runTurn(cs *CortexSession, turn int, mutated bool, mutate func()) {
+// iff the turn changed the working tree (commitCheckpoint re-snapshots and
+// diffs — the flag-based decision is gone, so the mutate closure IS the
+// signal). The turn-no stamping is turn.go's job — simulated here so the
+// checkpoint code itself is exercised against real git.
+func runTurn(cs *CortexSession, turn int, mutate func()) {
 	cs.turnNo = turn
-	cs.turnMutated = false
 	cs.recordCheckpoint()
-	if mutated {
+	if mutate != nil {
 		mutate()
-		cs.turnMutated = true
 	}
 	cs.commitCheckpoint()
 }
@@ -84,7 +84,7 @@ func TestRecordCheckpointCommitsOnMutatingTurn(t *testing.T) {
 	// A mutating turn on a CLEAN committed tree — the issue's usual case
 	// (committed work, then one bad turn): the start-of-turn snapshot falls
 	// back to HEAD, and the turn-end commit lands the checkpoint on the stack.
-	runTurn(cs, 1, true, func() { mustWrite(t, dir, "a.txt", "v2\n") })
+	runTurn(cs, 1, func() { mustWrite(t, dir, "a.txt", "v2\n") })
 
 	if cs.checkpoints == nil || cs.checkpoints.empty() {
 		t.Fatal("mutating turn left the stack empty")
@@ -120,9 +120,9 @@ func TestRecordCheckpointReadonlyTurnRecordsNothing(t *testing.T) {
 	cs := testCheckpointSession(t, dir)
 
 	// A read-only turn on a CLEAN tree: the snapshot is recorded at the
-	// turn's start, but the turn-end commit drops it (no mutation) — no ref,
-	// no stack entry.
-	runTurn(cs, 1, false, nil)
+	// turn's start, but the turn-end commit drops it (the end tree matches
+	// the start tree) — no ref, no stack entry.
+	runTurn(cs, 1, nil)
 
 	if cs.checkpoints != nil && !cs.checkpoints.empty() {
 		t.Errorf("read-only turn recorded a checkpoint; stack=%d entries", cs.checkpoints.len())
@@ -135,7 +135,7 @@ func TestRecordCheckpointReadonlyTurnRecordsNothing(t *testing.T) {
 	// mutating turn left work on disk; this turn only reads, and must NOT
 	// push a no-op snapshot that would skew the undo depth.
 	mustWrite(t, dir, "a.txt", "v2\n")
-	runTurn(cs, 2, false, nil)
+	runTurn(cs, 2, nil)
 
 	if cs.checkpoints != nil && !cs.checkpoints.empty() {
 		t.Errorf("read-only turn on a dirty tree recorded a checkpoint; stack=%d entries", cs.checkpoints.len())
@@ -158,7 +158,6 @@ func TestRecordCheckpointNonRepoIsNoop(t *testing.T) {
 	cs.turnNo = 1
 
 	cs.recordCheckpoint() // must not panic, must not record anything
-	cs.turnMutated = true
 	cs.commitCheckpoint() // must not panic, must not record anything
 
 	if cs.checkpoints != nil && !cs.checkpoints.empty() {
@@ -177,7 +176,7 @@ func TestRecordCheckpointPrunes(t *testing.T) {
 	// Record more than maxCheckpointRefs mutating turns, each on a mutated
 	// tree.
 	for turn := 1; turn <= maxCheckpointRefs+10; turn++ {
-		runTurn(cs, turn, true, func() {
+		runTurn(cs, turn, func() {
 			mustWrite(t, dir, "a.txt", fmt.Sprintf("v%d\n", turn))
 		})
 	}
@@ -185,9 +184,48 @@ func TestRecordCheckpointPrunes(t *testing.T) {
 	if n := checkpointRefCount(t, dir); n != maxCheckpointRefs {
 		t.Errorf("after %d turns, %d checkpoint refs, want %d (pruned)", maxCheckpointRefs+10, n, maxCheckpointRefs)
 	}
-	// The in-memory stack is pruned to the same ceiling.
+	// The in-memory stack is pruned to the same ceiling — and pruned from the
+	// OLDEST side: the newest entry is turn maxCheckpointRefs+10's start
+	// snapshot (the state right before the turn that wrote v60), and the
+	// oldest surviving entry is turn maxCheckpointRefs-39=11's start snapshot
+	// (turns 1..10 aged out, their refs deleted).
 	if cs.checkpoints == nil || cs.checkpoints.len() != maxCheckpointRefs {
-		t.Errorf("stack length = %d, want %d", cs.checkpoints.len(), maxCheckpointRefs)
+		t.Fatalf("stack length = %d, want %d", cs.checkpoints.len(), maxCheckpointRefs)
+	}
+	newest, ok := cs.checkpoints.newest()
+	if !ok || newest.snap == "" {
+		t.Fatal("newest entry missing after prune")
+	}
+	if ref, err := gitCmdOutput(t, dir, "rev-parse", checkpoint.RefFor(cs.SessionID, fmt.Sprintf("%04d", maxCheckpointRefs+10))); err != nil || ref != newest.snap {
+		t.Fatalf("newest snap = %q (ref resolves %q, err=%v), want turn %d's start snapshot", newest.snap, ref, err, maxCheckpointRefs+10)
+	}
+	// Restoring the newest entry must bring back the tree the last turn
+	// started from: a.txt still holds v59 (the last turn wrote v60, so its
+	// PRE-mutation state is v59).
+	if _, err := checkpoint.Restore(dir, newest.snap, newest.untracked); err != nil {
+		t.Fatalf("restore newest: %v", err)
+	}
+	if got := read(t, dir, "a.txt"); got != "v59\n" {
+		t.Errorf("restoring the newest (turn %d) snapshot gave a.txt = %q, want %q (the state before the last turn's mutation)", maxCheckpointRefs+10, got, "v59\n")
+	}
+	// The OLDEST surviving stack entry is turn 11's: its ref resolves to the
+	// tree with a.txt at v10 (turn 11 started right after turn 10's write).
+	oldest, ok := cs.checkpoints.nth(cs.checkpoints.len())
+	if !ok {
+		t.Fatal("no oldest entry")
+	}
+	if ref, err := gitCmdOutput(t, dir, "rev-parse", checkpoint.RefFor(cs.SessionID, "0011")); err != nil || ref != oldest.snap {
+		t.Fatalf("oldest snap = %q (ref 0011 resolves %q, err=%v), want turn 11's start snapshot", oldest.snap, ref, err)
+	}
+	if _, err := checkpoint.Restore(dir, oldest.snap, oldest.untracked); err != nil {
+		t.Fatalf("restore oldest: %v", err)
+	}
+	if got := read(t, dir, "a.txt"); got != "v10\n" {
+		t.Errorf("restoring the oldest (turn 11) snapshot gave a.txt = %q, want %q", got, "v10\n")
+	}
+	// And the refs of the aged-out turns 1..10 are gone from the object store.
+	if ref, err := gitCmdOutput(t, dir, "rev-parse", checkpoint.RefFor(cs.SessionID, "0001")); err == nil && ref != "" {
+		t.Errorf("turn 1's ref survived pruning: %q", ref)
 	}
 }
 
@@ -199,7 +237,7 @@ func TestClearCheckpointsClearsStackAndRefs(t *testing.T) {
 	gitCmd(t, dir, "commit", "-q", "-m", "base")
 
 	cs := testCheckpointSession(t, dir)
-	runTurn(cs, 1, true, func() { mustWrite(t, dir, "a.txt", "v2\n") })
+	runTurn(cs, 1, func() { mustWrite(t, dir, "a.txt", "v2\n") })
 	if n := checkpointRefCount(t, dir); n == 0 {
 		t.Fatal("no checkpoint ref recorded before clear")
 	}
@@ -372,10 +410,10 @@ func TestUndoRestoresAndDropsRefs(t *testing.T) {
 	cs := testCheckpointSession(t, dir)
 
 	// Turn 1: v1 → v2 (its snapshot = base, v1).
-	runTurn(cs, 1, true, func() { mustWrite(t, dir, "a.txt", "v2\n") })
+	runTurn(cs, 1, func() { mustWrite(t, dir, "a.txt", "v2\n") })
 	// Turn 2: v2 → v3 (its snapshot = v2 — the state to restore to first on
 	// /undo, the most recent turn's PRE-mutation state).
-	runTurn(cs, 2, true, func() { mustWrite(t, dir, "a.txt", "v3\n") })
+	runTurn(cs, 2, func() { mustWrite(t, dir, "a.txt", "v3\n") })
 	if cs.checkpoints == nil || cs.checkpoints.empty() {
 		t.Fatal("no checkpoints recorded")
 	}
@@ -424,7 +462,7 @@ func TestUndoCommandOutOfRange(t *testing.T) {
 	gitCmd(t, dir, "add", "a.txt")
 	gitCmd(t, dir, "commit", "-q", "-m", "base")
 	cs := testCheckpointSession(t, dir)
-	runTurn(cs, 1, true, func() { mustWrite(t, dir, "a.txt", "v2\n") })
+	runTurn(cs, 1, func() { mustWrite(t, dir, "a.txt", "v2\n") })
 
 	before := read(t, dir, "a.txt")
 	cs.undo(99) // beyond the single recorded snapshot

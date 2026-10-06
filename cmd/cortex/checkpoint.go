@@ -13,16 +13,21 @@ import (
 // keyed by session id, and pruned to the newest maxCheckpointRefs on append.
 //
 // A checkpoint is recorded at the START of EVERY coder turn (turn.go) — the
-// snapshot names the tree the turn starts from (on a clean tree that is HEAD's
-// commit — the committed base — because `git stash create` prints nothing
-// there). It is COMMITTED to the undo stack only at the turn's END, and only
-// if the turn actually ran a file-mutating tool (write_file, edit_file,
-// remove_path, or a mutating bash) — otherwise the ref is dropped and the
-// stack is untouched. The turn-start cleanliness of the tree therefore tells
-// us nothing (a clean tree is the normal case before a bad turn, and a dirty
-// tree is the normal case for a read-only turn); what decides is whether the
-// turn mutated files. The stack's depth N therefore maps to the
-// Nth-most-recent turn that actually mutated files — the issue's spec.
+// snapshot names the tree the turn starts from (on a clean tracked tree that
+// is HEAD's commit, because `git stash create` prints nothing there). It is
+// COMMITTED to the undo stack only at the turn's END, and only if the turn
+// actually changed the working tree — commitCheckpoint re-snapshots the
+// tracked state (again `git stash create`, HEAD on a clean tree) plus the
+// untracked listing and compares with the pending entry: the checkpoint is
+// kept iff the tree hash differs or the untracked set differs. That single
+// signal catches edits made through any tool surface (write_file, edit_file,
+// remove_path, a mutating bash, the `agent` subagent's own dispatcher) and
+// drops a turn that only ran read-only bash. The turn-start cleanliness of
+// the tree therefore tells us nothing (a clean tree is the normal case before
+// a bad turn, and a dirty tree is the normal case for a read-only turn); what
+// decides is whether the turn's end tree differs from its start tree. The
+// stack's depth N therefore maps to the Nth-most-recent turn that changed
+// files — the issue's spec.
 //
 // The stack is an in-memory slice of (snapshot hash, untracked baseline) pairs
 // in TURN order (oldest first). Undo walks it newest-first: the top of the
@@ -64,8 +69,8 @@ type checkpointStack struct {
 }
 
 // push records a turn's checkpoint at the top of the stack. An entry whose
-// snapshot is empty (no git, no repo, or a turn that mutated nothing) is a
-// no-op — that is the "only turns that mutate record checkpoints" clause.
+// snapshot is empty (no git, no repo, or a turn with nothing to snapshot) is
+// a no-op.
 func (s *checkpointStack) push(e checkpointEntry) {
 	if e.snap == "" {
 		return
@@ -110,6 +115,22 @@ func (s *checkpointStack) truncateTo(keep int) {
 func (s *checkpointStack) empty() bool { return len(s.entries) == 0 }
 func (s *checkpointStack) len() int    { return len(s.entries) }
 
+// truncateToNewest keeps only the LAST `keep` entries (the NEWEST), dropping
+// the oldest len(s)-keep. commitCheckpoint uses it after a push, mirroring
+// checkpoint.Prune (which keeps the session's newest refs): after enough
+// mutating turns the OLDEST snapshots age out and the most recent turn stays
+// undoable. This is the inverse of truncateTo — /undo drops from the top
+// (newest consumed first), pruning drops from the bottom (oldest consumed
+// first) — so they are separate methods and neither is reused for the other.
+func (s *checkpointStack) truncateToNewest(keep int) {
+	if keep < 0 {
+		keep = 0
+	}
+	if keep < len(s.entries) {
+		s.entries = s.entries[len(s.entries)-keep:]
+	}
+}
+
 func (s *checkpointStack) clear() { s.entries = nil }
 
 // recordCheckpoint takes the turn's snapshot at the START of the turn
@@ -138,29 +159,71 @@ func (cs *CortexSession) recordCheckpoint() {
 
 // commitCheckpoint runs at the END of the turn (turn.go's deferred cleanup):
 // it commits the turn's pending snapshot to the undo stack — and drops the
-// recorded ref — iff the turn actually mutated files (the turn ran
-// write_file, edit_file, remove_path, or a bash command). A turn that read
-// only leaves the stack untouched, so the stack's depth always maps to the
-// Nth-most-recent turn that mutated files (the issue's spec). Guarded and
+// recorded ref — iff the turn actually changed the working tree. The decision
+// is made here, at the turn's end, by RE-SNAPSHOTTING: the current tracked
+// state (`git stash create`, falling back to HEAD when that prints nothing —
+// the same fallback recordCheckpoint uses) and the current untracked listing
+// are compared with the pending entry, and the checkpoint is kept when the
+// tree hash differs or the untracked set differs. That is the ONE signal
+// every mutation path is caught by — write_file, edit_file, remove_path, a
+// mutating bash, and the `agent` subagent's own dispatcher all of them just
+// change the tree — and a turn that only ran read-only bash (`go test`,
+// `git status`) ends with an identical tree and an identical untracked set,
+// so its ref is dropped and the stack is untouched. A read-only turn leaves
+// the stack untouched, so the stack's depth always maps to the
+// Nth-most-recent turn that changed files (the issue's spec). Guarded and
 // non-fatal: a git failure swallows, the pending entry is always consumed.
 func (cs *CortexSession) commitCheckpoint() {
 	if cs.pending.snap == "" {
 		return // no snapshot was recorded (no repo, no git, no session id)
 	}
-	mutated := cs.turnMutated
 	// Consume the pending entry whether or not we keep it — a turn never
 	// commits a snapshot it did not record.
 	entry := cs.pending
 	cs.pending = checkpointEntry{}
-	if !mutated {
-		// The turn read only: drop the ref the start of the turn recorded so
-		// the on-disk state never outlives a turn that mutated nothing.
-		dir := cs.root()
-		if dir != "" && checkpoint.Available(dir) {
-			_, _ = gitCmdIn(dir, "update-ref", "-d", checkpoint.RefFor(cs.SessionID, cs.underscoredTurn()))
+	dir := cs.root()
+	if dir != "" && checkpoint.Available(dir) {
+		// The turn-end re-snapshot: the tracked state the working tree holds
+		// NOW (after the turn ran), captured the same way recordCheckpoint
+		// captured it at the turn's start. `git stash create` prints nothing
+		// when the tracked tree is clean, so HEAD stands in — identical to
+		// recordCheckpoint's fallback (a turn that ended with a clean tracked
+		// tree is undoable by design: undoing a commit made during the turn
+		// restores the pre-commit tree).
+		tree := ""
+		if out, err := gitCmdIn(dir, "stash", "create"); err == nil {
+			tree = strings.TrimSpace(out)
 		}
+		if tree == "" {
+			if out, err := gitCmdIn(dir, "rev-parse", "HEAD"); err == nil {
+				tree = strings.TrimSpace(out)
+			}
+		}
+		if tree == "" {
+			// Git failed: we cannot tell whether the turn changed files. The
+			// turn-start ref already exists; keep it (conservative — an
+			// unexplained drop would lose a real undo).
+			cs.keepCheckpointEntry(entry)
+			return
+		}
+		if untracked, err := checkpoint.Untracked(dir); err == nil &&
+			tree == entry.snap && equalUntracked(untracked, entry.untracked) {
+			// The turn's end tree matches its start tree: drop the ref the
+			// start of the turn recorded so the on-disk state never
+			// outlives a turn that changed nothing.
+			_, _ = gitCmdIn(dir, "update-ref", "-d", checkpoint.RefFor(cs.SessionID, cs.underscoredTurn()))
+			return
+		}
+		cs.keepCheckpointEntry(entry)
 		return
 	}
+	cs.keepCheckpointEntry(entry)
+}
+
+// keepCheckpointEntry pushes a kept entry onto the stack and prunes both the
+// stack and the session's hidden refs to the newest maxCheckpointRefs — the
+// shared tail of commitCheckpoint's keep paths.
+func (cs *CortexSession) keepCheckpointEntry(entry checkpointEntry) {
 	if cs.checkpoints == nil {
 		cs.checkpoints = &checkpointStack{}
 	}
@@ -171,6 +234,25 @@ func (cs *CortexSession) commitCheckpoint() {
 	}
 }
 
+// equalUntracked reports whether two untracked listings hold the same paths
+// (order-independent; both come from git's sorted ls-files, but the set
+// comparison keeps the check honest against ordering drift).
+func equalUntracked(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, p := range a {
+		set[p] = true
+	}
+	for _, p := range b {
+		if !set[p] {
+			return false
+		}
+	}
+	return true
+}
+
 // pruneStackTo keeps only the newest keep entries of the stack (mirroring the
 // ref Prune, so the stack and the hidden refs agree on what is undoable).
 func (cs *CortexSession) pruneStackTo(keep int) {
@@ -178,7 +260,7 @@ func (cs *CortexSession) pruneStackTo(keep int) {
 		return
 	}
 	if cs.checkpoints.len() > keep {
-		cs.checkpoints.truncateTo(keep)
+		cs.checkpoints.truncateToNewest(keep)
 	}
 }
 

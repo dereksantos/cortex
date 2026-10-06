@@ -16,13 +16,14 @@
 //
 //  2. On a clean tracked tree `git stash create` prints an empty line, so
 //     `git rev-parse HEAD` is used as the snapshot commit instead — the
-//     committed base IS the tree. Only whether the turn MUTATES files
-//     decides whether a checkpoint is recorded, and that is decided at TURN
-//     END (the caller keeps the checkpoint only if the turn actually ran a
-//     file-mutating tool), never by the cleanliness of the tree at turn
-//     start: a clean tree at the start tells you nothing about whether the
-//     turn will mutate, and a dirty tree at the start is common for
-//     read-only turns.
+//     committed base IS the tree. Only whether the turn CHANGED the working
+//     tree decides whether a checkpoint is recorded, and that is decided at
+//     TURN END (the caller re-snapshots and keeps the checkpoint only if the
+//     tree hash or the untracked set differs — see the REPL's
+//     commitCheckpoint, which is the one caller), never by the cleanliness of
+//     the tree at turn start: a clean tree at the start tells you nothing
+//     about whether the turn will mutate, and a dirty tree at the start is
+//     common for read-only turns.
 //
 // A snapshot therefore carries two facts: the tracked tree (the commit hash)
 // and the set of UNTRACKED, non-ignored files present at snapshot time (the
@@ -388,6 +389,15 @@ func indexPaths(dir string) ([]string, error) {
 		}
 	}
 	return paths, nil
+}
+
+// Untracked returns the working tree's untracked, non-ignored paths — the
+// exact `git ls-files --others --exclude-standard` listing, sorted. Exported
+// because the REPL's turn-end commit decision (commitCheckpoint) re-takes it
+// to diff against the turn-start baseline; the same listing Snapshot records
+// is the baseline it diffs against, so one place owns the listing.
+func Untracked(dir string) ([]string, error) {
+	return untrackedPaths(dir)
 }
 
 // untrackedPaths returns the working tree's untracked, non-ignored paths —
