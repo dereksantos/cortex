@@ -1207,6 +1207,7 @@ func requestFor(spec ModelSpec, system, seed string, toolset []Tool, maxTokens i
 		Timeout:     spec.timeout(requestTimeout),
 		MaxAttempts: spec.maxAttempts(maxSendAttempts),
 		Backoff:     spec.backoff(retryBackoff),
+		Vision:      spec.VisionEnabled(),
 	}
 	applyEffort(req, dialect, spec.Thinking)
 	return req
