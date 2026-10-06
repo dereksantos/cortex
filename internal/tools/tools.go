@@ -594,7 +594,7 @@ var OutlineTool = newTool(FunctionOutline,
 // Bash is the bash tool declaration: runs a shell command behind the
 // shellrisk gate (safe runs, risky prompts, blocked refuses).
 var Bash = newTool(FunctionBash,
-	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit. In-place file rewrites (sed -i, ed, perl -pi, awk, python -c, > redirects) are reported on the result — use edit_file or write_file instead: they show the diff and run the post-edit hook, while scripted edits do neither.",
+	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit. In-place file rewrites (sed -i, ed, perl -pi, awk, python -c, > redirects) and file reads (cat, head, tail, tac, sed, grep) are reported on the result — use edit_file or write_file for edits (diff display + post-edit hook) and read_file/outline/grep for reads (sized, quote-aware readers that a bash shell command skips).",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
@@ -2209,9 +2209,13 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// model nothing to act on and it retried the same command in a loop
 		// (2026-06-14). Name the empty-result case explicitly. Exit >=2 is a real
 		// grep error and keeps its stderr (merged into result by CombinedOutput).
+		// A REWRITE target suppresses this (the command changed something, so
+		// the note is meaningful); a pure READ target does not (issue #209):
+		// `grep -n Absent f.txt` is a read, and its no-match result must still
+		// read as "(no matches)", not as a rewritten-file note.
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
-			leadBin == "grep" && strings.TrimSpace(result) == "" && rewriteNote == "" {
+			leadBin == "grep" && strings.TrimSpace(result) == "" && !hasRewriteTarget(command) {
 			return "(no matches)", nil
 		}
 		result += "\n[exit error: " + runErr.Error() + "]"

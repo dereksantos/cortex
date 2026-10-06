@@ -246,7 +246,7 @@ the model-driven memory tools
   verbatim (a drift tripwire, same pattern as the debugging principle under
   Constraints → Testing):
 
-  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash `cat`/`sed`/`head` (or similar) to read files — read_file/outline/grep are your readers.
+  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers.
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton. A
