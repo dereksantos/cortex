@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +85,56 @@ func TestParseTurnArgs(t *testing.T) {
 				t.Errorf("parseTurnArgs(%q) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestTurnCLIReceiptRouting (issue #219): reportTurnText's non-JSON branch
+// must print the turn's measurement receipt to stderr — the same surface as
+// the test-loss / lint receipts (printTestReceipt / printLintReceipt) — and
+// never to stdout (issue #118's answer-only contract: stdout holds exactly
+// the reply). The receipt is a multi-line block (files changed / verification
+// sections), so the routing under test is the receipt block's destination, not
+// just the presence of a line.
+func TestTurnCLIReceiptRouting(t *testing.T) {
+	receipt := "files changed:\n  go.mod | 2 +\nverification:\n  test: go test ./... (exit 0, 1s)"
+	res := TurnResult{Reply: "the answer", Receipt: receipt}
+
+	var outBuf, errBuf bytes.Buffer
+	reportTurnText(&outBuf, &errBuf, nil, res, "sess-1")
+
+	stdout, stderr := outBuf.String(), errBuf.String()
+	// issue #118: stdout is the reply only.
+	if stdout != res.Reply+"\n" {
+		t.Errorf("stdout = %q, want exactly the reply only (%q) — issue #118's answer-only contract", stdout, res.Reply+"\n")
+	}
+	// The receipt block rides on stderr, whole and intact.
+	if !strings.Contains(stderr, receipt) {
+		t.Errorf("stderr = %q, want the turn receipt %q printed (issue #219)", stderr, receipt)
+	}
+	if strings.Contains(stdout, "files changed") || strings.Contains(stdout, "verification:") {
+		t.Errorf("the receipt leaked to stdout — it belongs on stderr (issue #118)\nstdout: %q", stdout)
+	}
+}
+
+// TestTurnCLIReceiptRoutingNoReceipt is the companion case: a turn that
+// measured nothing (empty receipt) prints no receipt block on stderr — the
+// non-JSON branch must not emit a stray "turn receipt: " header. The
+// session line (the only other stderr output reportTurnText can produce
+// for a clean turn) is still present.
+func TestTurnCLIReceiptRoutingNoReceipt(t *testing.T) {
+	res := TurnResult{Reply: "the answer"}
+
+	var outBuf, errBuf bytes.Buffer
+	reportTurnText(&outBuf, &errBuf, nil, res, "sess-1")
+
+	if outBuf.String() != res.Reply+"\n" {
+		t.Errorf("stdout = %q, want exactly the reply only", outBuf.String())
+	}
+	stderr := errBuf.String()
+	if strings.Contains(stderr, "files changed") || strings.Contains(stderr, "verification") {
+		t.Errorf("stderr = %q, want no receipt block (no receipt measured)", stderr)
+	}
+	if stderr != "session: sess-1\n" {
+		t.Errorf("stderr = %q, want exactly the session line (%q)", stderr, "session: sess-1\n")
 	}
 }

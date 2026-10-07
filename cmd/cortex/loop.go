@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/journal"
@@ -1326,8 +1327,18 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		// workspace's test-named files instead (armTestwatch). A no-op
 		// for every other tool and for a missing file.
 		isBash := call.Function.Name == tools.FunctionBash
+		bashStart := time.Time{}
 		if isBash {
 			cs.armTestwatch()
+			bashStart = time.Now()
+			// Issue #219: record a bash command that is the project's OWN
+			// test/build run BEFORE it runs (receiptBash, turn_receipt.go) —
+			// the receipt's verification fact pairs the model's own
+			// verification runs with their outcomes; a non-verification
+			// command (rm, ls, git, …) records nothing.
+			if cmd, err := call.StringArg("command"); err == nil {
+				cs.receiptBash(cmd)
+			}
 		}
 		if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
@@ -1345,7 +1356,7 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			}
 		}
 		cs.startActivity(call.ActivityLabel())
-		out, err := tools.Execute(ctx, call, cs)
+		out, outcome, err := tools.Execute(ctx, call, cs)
 		cs.stopActivity()
 		// Issue #154: after a bash command, sweep the workspace for
 		// scratch-named non-test files the command created — the touch hook
@@ -1355,6 +1366,18 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		// leftover-debug scan. Best-effort: a no-op when there is no workdir.
 		if isBash {
 			cs.sweepScratchFiles()
+		}
+		// Issue #219: record the outcome of a verification bash run plus the
+		// wall time of the call. The outcome is Execute's own return value
+		// for THIS call — Ran=true with the process's exit code only when the
+		// bash tool spawned the process; a disabled tool, a validation
+		// rejection, a gate refusal, or a declined prompt all return
+		// Ran=false, and a callErr ran nothing — so receiptBashOutcome
+		// renders those as not-run, never as an exit code.
+		if isBash {
+			if cmd, argErr := call.StringArg("command"); argErr == nil {
+				cs.receiptBashOutcome(cmd, outcome, err, time.Since(bashStart))
+			}
 		}
 		if err != nil {
 			return "Error: " + err.Error()

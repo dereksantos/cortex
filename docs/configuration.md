@@ -708,7 +708,13 @@ including the `agent` subagent's, minus any the turn deleted since) —
 one run per file for a `{file}` lint, one run per distinct package dir for
 a `{dir}` lint. Findings reach the model in one more tools-withheld
 (finalize) round, and appear in the REPL, in `cortex turn`'s stderr and its
-`lint` JSON field, and in the turn's journal capture.
+`lint` JSON field, and in the turn's journal capture. A turn that ran
+tools emits a measurement-only receipt on stderr and under the `receipt`
+JSON key, listing files changed (`git diff --stat` plus untracked files),
+the exit codes of the model's own runs of the project's test/build
+commands (`not run:` when the run was refused or blocked), and the files
+the format hook failed on; it is saved as a transcript note and never
+shown to the model (issue #219).
 
 **The mode switch.** `tools.post_edit_hook` controls how much the hook
 does: `"off"` (nothing runs), `"format"` (only the per-file format command

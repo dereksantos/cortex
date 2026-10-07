@@ -100,7 +100,7 @@ func TestEditFileEmptyOldStringError(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Execute(context.Background(), editArgs(t, tc.args), headlessDeps{})
+			_, _, err := Execute(context.Background(), editArgs(t, tc.args), headlessDeps{})
 			if err == nil {
 				t.Fatalf("expected an error, got none")
 			}
@@ -122,7 +122,7 @@ func TestEditFileEmptyOldStringError(t *testing.T) {
 func TestEditFileValidStillApplies(t *testing.T) {
 	path := seedEditFile(t, "f.go", "package main\nfunc f() int { return 1 }\n")
 
-	out, err := Execute(context.Background(), editArgs(t, map[string]any{
+	out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path": path, "old_string": "return 1", "new_string": "return 2",
 	}), headlessDeps{})
 	if err != nil {
@@ -186,7 +186,7 @@ func TestEditFileResultIncludesChangedRegion(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := seedEditFile(t, "f.go", tc.before)
-			out, err := Execute(context.Background(), editArgs(t, map[string]any{
+			out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 				"path": path, "old_string": tc.old, "new_string": tc.new,
 			}), headlessDeps{})
 			if err != nil {
@@ -259,7 +259,7 @@ func TestEditFileReportsNetLineChange(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := seedEditFile(t, "f.go", tc.before)
-			out, err := Execute(context.Background(), editArgs(t, map[string]any{
+			out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 				"path": path, "old_string": tc.old, "new_string": tc.new,
 			}), headlessDeps{})
 			if err != nil {
@@ -284,7 +284,7 @@ func TestEditFileMultiEditAggregatesLineDelta(t *testing.T) {
 
 	// Two edits: drop "line one" and "line three" (each a pure deletion), keep
 	// the rest. Net: -2 lines removed, 0 added → should warn.
-	out, err := Execute(context.Background(), editArgs(t, map[string]any{
+	out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path": path,
 		"edits": []map[string]any{
 			{"old_string": "line one\n", "new_string": ""},
@@ -321,7 +321,7 @@ func TestEditFileAmbiguousExactMatchPointsAtFirstOccurrence(t *testing.T) {
 	before := "package main\nx := 1\nkeep this line\nx := 1\n"
 	path := seedEditFile(t, "f.go", before)
 
-	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+	_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path": path, "old_string": "x := 1", "new_string": "x := 2",
 	}), headlessDeps{})
 	if err == nil {
@@ -346,7 +346,7 @@ func TestEditFileAmbiguousTolerantMatchPointsAtFirstOccurrence(t *testing.T) {
 	before := "package main\nx := 1\nkeep this line\n  x := 1\n"
 	path := seedEditFile(t, "f.go", before)
 
-	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+	_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path": path, "old_string": "\tx := 1", "new_string": "x := 2",
 	}), headlessDeps{})
 	if err == nil {
@@ -370,7 +370,7 @@ func TestEditFileNotFoundCarriesClosestLineHint(t *testing.T) {
 	path := seedEditFile(t, "f.go", before)
 
 	// A guessed anchor close to but not equal to the real line.
-	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+	_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path": path, "old_string": "func T.Chdir(root string) {}", "new_string": "func Chdir(root string) {}",
 	}), headlessDeps{})
 	if err == nil {
@@ -410,7 +410,7 @@ func TestEditFileNotFoundHintAnchorsOnBestLine(t *testing.T) {
 	before := "package main\nfunc Chdir(root string) {}\n\nvar x int\n"
 	path := seedEditFile(t, "f.go", before)
 
-	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+	_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path":       path,
 		"old_string": "func Changed(root string) int {\nfunc Chdir(root string) {}\n",
 		"new_string": "x",
@@ -468,7 +468,7 @@ func TestEditFileNotFoundDirectiveTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := seedEditFile(t, "f.go", tc.before)
-			_, err := Execute(context.Background(), editArgs(t, map[string]any{
+			_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 				"path": path, "old_string": tc.old, "new_string": "x",
 			}), headlessDeps{})
 			if err == nil {
@@ -529,7 +529,7 @@ func TestEditFileTolerantMatchPreservesFileLineContent(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := seedEditFile(t, "f.go", tc.before)
-			out, err := Execute(context.Background(), editArgs(t, map[string]any{
+			out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 				"path": path, "old_string": tc.old, "new_string": tc.new,
 			}), headlessDeps{})
 			if err != nil {
@@ -553,7 +553,7 @@ func TestEditFileEditsArrayPropagatesFailureHint(t *testing.T) {
 	before := "package main\nfunc Chdir(root string) {}\n"
 	path := seedEditFile(t, "f.go", before)
 
-	_, err := Execute(context.Background(), editArgs(t, map[string]any{
+	_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 		"path": path,
 		"edits": []map[string]any{
 			{"old_string": "func Chdir(root string) {}", "new_string": "func Chdir(root string) int {}"},

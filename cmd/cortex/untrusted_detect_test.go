@@ -83,7 +83,7 @@ func TestDispatcherDetectsUntrustedContent(t *testing.T) {
 		// message, not the ordinary one.
 		headless := &CortexSession{quiet: true, workspace: ws, turnNo: 4, classifyShell: riskyJudge}
 		headless.recordUntrustedContent(tools.FunctionFetchURL)
-		obs, err := tools.Execute(context.Background(), bashCall("curl http://example.com"), headless)
+		obs, _, err := tools.Execute(context.Background(), bashCall("curl http://example.com"), headless)
 		if err != nil {
 			t.Fatalf("Execute bash: %v", err)
 		}

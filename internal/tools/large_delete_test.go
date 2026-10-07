@@ -73,7 +73,7 @@ func TestLargeDeletionWarningWrite(t *testing.T) {
 			if tc.before != "" {
 				largeDelSeedFile(t, path, tc.before)
 			}
-			out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+			out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 				map[string]any{"path": path, "content": tc.after}), headlessDeps{})
 			if err != nil {
 				t.Fatalf("write_file: %v", err)
@@ -114,7 +114,7 @@ func TestLargeDeletionWarningWriteQuiet(t *testing.T) {
 			out := captureStdout(t, func() {
 				var werr error
 				var res string
-				res, werr = Execute(context.Background(), callArgs(t, FunctionWriteFile,
+				res, _, werr = Execute(context.Background(), callArgs(t, FunctionWriteFile,
 					map[string]any{"path": path, "content": tc.after}), quietDeps{})
 				if werr != nil {
 					t.Fatalf("write_file: %v", werr)
@@ -175,7 +175,7 @@ func TestLargeDeletionWarningEdit(t *testing.T) {
 			if tc.replaceAll {
 				args["replace_all"] = true
 			}
-			out, err := Execute(context.Background(), callArgs(t, FunctionEditFile, args), headlessDeps{})
+			out, _, err := Execute(context.Background(), callArgs(t, FunctionEditFile, args), headlessDeps{})
 			if err != nil {
 				t.Fatalf("edit_file: %v", err)
 			}

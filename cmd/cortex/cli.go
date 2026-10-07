@@ -36,7 +36,7 @@ func runStudyCLI(project, path, goal string) {
 	}
 	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
-	out, err := tools.Execute(context.Background(), call, session)
+	out, _, err := tools.Execute(context.Background(), call, session)
 	if err != nil {
 		fmt.Println("study error:", err)
 		return
@@ -141,7 +141,10 @@ func runTurnCLI(args []string) {
 			plan, planErr := session.TurnWithPlan(ctx, a.input)
 			// TestReceipt (issue #141): the plan's steps' receipts, so the
 			// stderr / --json "tests_changed" surfaces below cover --plan too.
-			res = TurnResult{Reply: plan.Reply, Interrupted: errors.Is(planErr, context.Canceled), TestReceipt: plan.TestReceipt}
+			// LintReceipt (issue #129 piece 3) and Receipt (issue #219) ride
+			// the same mapping, so the non-JSON stderr and --json surfaces
+			// cover --plan exactly like a single turn.
+			res = TurnResult{Reply: plan.Reply, Interrupted: errors.Is(planErr, context.Canceled), TestReceipt: plan.TestReceipt, LintReceipt: plan.LintReceipt, Receipt: plan.Receipt}
 			turnErr = planErr
 		} else {
 			res, turnErr = session.Turn(ctx, a.input)
@@ -158,6 +161,12 @@ func runTurnCLI(args []string) {
 			}
 			if res.LintReceipt != "" {
 				out["lint"] = res.LintReceipt
+			}
+			// Issue #219: the measurement-only turn receipt rides --json under
+			// "receipt" — the driver sees what the turn actually left in the
+			// workspace, measured, not claimed.
+			if res.Receipt != "" {
+				out["receipt"] = res.Receipt
 			}
 			// Issue #117: a turn that recovered from a mid-turn provider
 			// failure succeeded, so err is nil and the failure was otherwise
@@ -218,6 +227,12 @@ func reportTurnText(stdout, stderr io.Writer, turnErr error, res TurnResult, ses
 	}
 	if res.LintReceipt != "" {
 		fmt.Fprintln(stderr, res.LintReceipt)
+	}
+	// Issue #219: the measurement-only turn receipt goes to stderr too —
+	// headless stdout is the answer only (issue #118's contract), and the
+	// receipt is a harness-level fact like the lint receipt above.
+	if res.Receipt != "" {
+		fmt.Fprintln(stderr, res.Receipt)
 	}
 	if res.LastError != nil {
 		fmt.Fprintln(stderr, backendErrorLine(res.LastError))

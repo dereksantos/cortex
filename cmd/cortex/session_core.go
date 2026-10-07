@@ -304,6 +304,24 @@ type CortexSession struct {
 	// with the snapshot).
 	lintReceipt string
 
+	// turnReceipt state (issue #219, step 1 — measurement-only receipt,
+	// turn_receipt.go): the per-turn measurements the receipt assembles
+	// from. receiptModelBash is the bash recorder — the model's own
+	// test/build runs (commands recognized against the project's own
+	// test/build command set) recorded by coderDispatcher's
+	// receiptBash/receiptBashOutcome, in run order; receiptUnformatted
+	// holds the files the post-edit format hook reported a problem with
+	// this turn (the per-turn wrapper FormatHook records the hook's
+	// outcome alongside the model-facing note); receipt is the receipt
+	// computed at turn end (turn.go, for a turn that ran tools —
+	// turnUsedTools). Dropped at the START of every turn (receiptDrop,
+	// turn.go) — an error or interrupt path that returns before turn end
+	// must not leak its measurements into the next turn (testwatchDrop's
+	// lifecycle).
+	receiptModelBash   []receiptModelBashRun
+	receiptUnformatted []string
+	receipt            turnReceipt
+
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to
 	// MaybeCaptureScanRoots (scanroots.go) treats that reply as the

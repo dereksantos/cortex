@@ -282,14 +282,14 @@ func TestNoBannedGlyphsInRenderPaths(t *testing.T) {
 		defer restoreWidth(t, 80)()
 		deps := &subDeps{digest: "a digest of the study"}
 		deps.loop = func(d ToolDeps) {
-			if _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
+			if _, _, err := Execute(context.Background(), editCall(t, FunctionReadFile,
 				map[string]any{"path": read}), d); err != nil {
 				t.Errorf("nested read: %v", err)
 			}
 		}
 		colored, nocolor := framePair(t, func() string {
 			out := captureStdout(t, func() {
-				if _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err != nil {
+				if _, _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err != nil {
 					t.Fatalf("study: %v", err)
 				}
 			})

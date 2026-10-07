@@ -935,7 +935,7 @@ func inPlaceRewriteHookNote(ctx context.Context, deps ToolDeps, command string) 
 			continue
 		}
 		seen[rel] = true
-		note := runProjectCommandHook(ctx, projectCommandsOf(deps), wd, abs, workspaceTrusted(deps), hookStateOf(deps), effectiveHookMode(hookStateOf(deps), false))
+		note := formatHookNote(ctx, deps, abs, false)
 		if note != "" {
 			if b.Len() > 0 {
 				b.WriteString("\n")

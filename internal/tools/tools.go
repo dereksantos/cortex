@@ -103,8 +103,26 @@ type SubAgentRunner interface {
 	RunSubagent(ctx context.Context, sa Subagent, seed string) (digest string, err error)
 }
 
-// ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means the
-// command must not run and message explains why.
+// BashOutcome is the structured outcome of a bash tool call (issue #219):
+// whether the command's process RAN, and, when it did, the exit code the
+// process returned (0 when it exited 0; 1 for a signal-killed run — a
+// signal has no exit status, and exec reports -1 for it, so bash maps it to
+// a plain non-zero failure — the real exit code otherwise). It is a POSITIVE signal — Ran is set
+// only on the path that spawned the process — so a consumer of the call's
+// fate (the turn receipt's bash recorder, cmd/cortex) never infers "it ran
+// and exited 0" from the absence of a marker in the result message: a call
+// the tool disabled, a call a validation rejected, and a command the shell
+// gate refused (or the user declined) all come back Ran=false, and the
+// message is the reason, not a run.
+type BashOutcome struct {
+	Ran      bool
+	ExitCode int
+}
+
+// ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means
+// the command must not run and message explains why. The structured fate of
+// a bash call — ran or not, and its exit code — is the BashOutcome Execute
+// returns, so the seam carries no outcome of its own.
 type ShellGate interface {
 	GateShell(ctx context.Context, command string) (string, bool)
 }
@@ -437,6 +455,35 @@ func hookStateOf(deps ToolDeps) *PostEditHookState {
 // and a stateless caller has no session to announce it for).
 type HookStateProvider interface {
 	HookState() *PostEditHookState
+}
+
+// FormatHookNoter is the OPTIONAL ToolDeps capability that supplies the
+// session's per-turn WRAPPER around the post-edit format hook
+// (cmd/cortex's CortexSession.FormatHook, issue #219): it runs the hook
+// exactly as this package's production path does and records the hook's
+// outcome for the turn's measurement-only receipt. A session without it
+// (subagent Toolsets, hand-built callers) has the hook run directly — the
+// model-facing note is byte-identical, only the receipt recording is
+// skipped.
+type FormatHookNoter interface {
+	FormatHook(ctx context.Context, fsPath string, hookSkip bool) string
+}
+
+// formatHookNote runs the post-edit format hook for fsPath through the
+// session's wrapper when the capability is present, directly otherwise. The
+// note returned is the model-facing one, byte-identical to the direct run
+// in either case — the wrapper only records the note's outcome on the
+// session's turn-receipt state alongside returning it. hookSkip is the
+// per-call `hook: "skip"` opt-out: the wrapper must fold it into the
+// effective mode the same way the direct run does (effectiveHookMode), or
+// a skip on a session that implements the capability would silently run the
+// formatter anyway.
+func formatHookNote(ctx context.Context, deps ToolDeps, fsPath string, hookSkip bool) string {
+	if noter, ok := deps.(FormatHookNoter); ok {
+		return noter.FormatHook(ctx, fsPath, hookSkip)
+	}
+	note, _ := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookStateOf(deps), effectiveHookMode(hookStateOf(deps), hookSkip))
+	return note
 }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
@@ -824,7 +871,7 @@ func init() {
 // tools need — study does; the file tools ignore both. It is a function (not a
 // method) because ToolCall now lives in internal/agent and methods cannot be
 // added to a type from another package.
-func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	// A tool dispatched without a session (tests, non-interactive paths) runs
 	// against the nil-safe headless defaults: the shell gate fails closed, study
 	// is unavailable, delete is disabled. This preserves the old behavior of the
@@ -834,16 +881,18 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		deps = headlessDeps{}
 	}
 
-	// Check if tool is enabled via config
+	// Check if tool is enabled via config. The command never ran: the
+	// BashOutcome is Ran=false, so a consumer of the call's fate (the turn
+	// receipt's bash recorder) never reads a disabled tool's clean result as
+	// a pass.
 	if !deps.IsToolEnabled(tc.Function.Name) {
-		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), nil
+		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), BashOutcome{}, nil
 	}
 
-	// Validate tool call (dynamic checks beyond config)
-	if deps != nil {
-		if ok, msg := deps.ValidateToolCall(tc); !ok {
-			return msg, nil
-		}
+	// Validate tool call (dynamic checks beyond config) — a rejection never
+	// ran either.
+	if ok, msg := deps.ValidateToolCall(tc); !ok {
+		return msg, BashOutcome{}, nil
 	}
 
 	// Inside a subagent, time the call and let its announcement out on the far
@@ -855,58 +904,81 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	beginNestedCall()
 	start := time.Now()
-	out, err := dispatchTool(ctx, tc, deps)
+	out, outcome, err := dispatchTool(ctx, tc, deps)
 	finishNestedCall(time.Since(start), out, err)
-	return out, err
+	return out, outcome, err
 }
 
-// dispatchTool routes one tool call to its implementation.
-func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+// dispatchTool routes one tool call to its implementation. It returns the
+// call's BashOutcome for a BASH call only — the outcome the bash tool
+// itself computed (Ran=false for a gate refusal, a disabled tool, or a
+// validation rejection; Ran=true with the process's exit code for a run) —
+// and the zero outcome (which reports "not a bash call" to the caller) for
+// every other tool.
+func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
-		return readFile(tc, deps)
+		out, err := readFile(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionWriteFile:
-		return writeFile(ctx, tc, deps)
+		out, err := writeFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionEditFile:
-		return editFile(ctx, tc, deps)
+		out, err := editFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionOutline:
-		return outlineTool(tc, deps)
+		out, err := outlineTool(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionGrep:
-		return grep(ctx, tc, deps)
+		out, err := grep(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionBash:
 		return bash(ctx, tc, deps)
 	case FunctionRemove:
-		return removePath(tc, deps)
+		out, err := removePath(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryWrite:
-		return memoryWrite(tc, deps)
+		out, err := memoryWrite(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryRead:
-		return memoryRead(tc, deps)
+		out, err := memoryRead(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemorySearch:
-		return memorySearch(tc, deps)
+		out, err := memorySearch(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryForget:
-		return memoryForget(tc, deps)
+		out, err := memoryForget(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionRecall:
-		return recall(ctx, tc, deps)
+		out, err := recall(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionFetchURL:
-		return fetchURL(ctx, tc, deps)
+		out, err := fetchURL(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionWebSearch:
-		return webSearch(ctx, tc, deps)
+		out, err := webSearch(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextEvict:
-		return contextEvict(tc, deps)
+		out, err := contextEvict(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextMerge:
-		return contextMerge(tc, deps)
+		out, err := contextMerge(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextAdjustWatermarks:
-		return contextAdjustWatermarks(tc, deps)
+		out, err := contextAdjustWatermarks(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionScanLandscape:
-		return scanLandscape(deps)
+		out, err := scanLandscape(deps)
+		return out, BashOutcome{}, err
 	}
 	// Any registered subagent tool (study, and future inheritors reflect/dream)
 	// shares this one dispatch path via the name→profile registry.
 	if sa, ok := Lookup(name); ok {
-		return runSubagent(ctx, tc, deps, sa)
+		out, err := runSubagent(ctx, tc, deps, sa)
+		return out, BashOutcome{}, err
 	}
-	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
+	return "", BashOutcome{}, fmt.Errorf(`no available tools matching name "%s"`, name)
 }
 
 // --- Helpers shared across tools ----------------------------------------
@@ -1478,8 +1550,8 @@ func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) 
 	// said about the result. Trust is the hard gate (an untrusted workspace
 	// runs nothing and, once per session, says so) and the mode (config /
 	// env / /hook, plus this call's `hook: "skip"`) turns it down or off.
-	hookState := hookStateOf(deps)
-	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookState, effectiveHookMode(hookState, hookSkip)); note != "" {
+	note := formatHookNote(ctx, deps, fsPath, hookSkip)
+	if note != "" {
 		result += "\n" + note
 	}
 	return result, nil
@@ -1649,8 +1721,8 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// result. Trust is the hard gate (an untrusted workspace runs nothing and,
 	// once per session, says so) and the mode (config / env / /hook, plus this
 	// call's `hook: "skip"`) turns it down or off.
-	hookState := hookStateOf(deps)
-	if note := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookState, effectiveHookMode(hookState, hookSkip)); note != "" {
+	note := formatHookNote(ctx, deps, fsPath, hookSkip)
+	if note != "" {
 		result += "\n" + note
 	}
 	return result, nil
@@ -2207,13 +2279,13 @@ func confinedPath(root, p string) (string, error) {
 
 // --- bash ---------------------------------------------------------------
 
-func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	command, err := tc.StringArg("command")
 	if err != nil {
-		return "", err
+		return "", BashOutcome{}, err
 	}
 	if strings.TrimSpace(command) == "" {
-		return "", fmt.Errorf("empty command")
+		return "", BashOutcome{}, fmt.Errorf("empty command")
 	}
 	// Attribution backstop BEFORE the risk gate: when attribution is on and
 	// the command is a single git commit without the trailer, add it — the
@@ -2238,12 +2310,16 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	rewriteNote := inPlaceRewriteNote(deps, command)
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
-	// reads the reason plainly and adapts.
+	// reads the reason plainly and adapts. The command NEVER RAN: a consumer
+	// of the call's fate (the turn receipt's bash recorder, via Execute's
+	// returned BashOutcome) sees Ran=false for this call — the gate is the
+	// sole spawn point here, so the refusal means the process was never
+	// started, and the result is a reason, not an exit code.
 	if msg, ok := deps.GateShell(ctx, command); !ok {
 		if rewriteNote != "" {
 			msg += "\n" + rewriteNote
 		}
-		return msg, nil
+		return msg, BashOutcome{}, nil
 	}
 	// leadBin is the first token, used only for the grep-empty heuristic below.
 	leadBin := ""
@@ -2302,7 +2378,17 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
 			leadBin == "grep" && strings.TrimSpace(result) == "" && !hasRewriteTarget(command) {
-			return "(no matches)", nil
+			return "(no matches)", BashOutcome{Ran: true, ExitCode: 1}, nil
+		}
+		// The process ran: the outcome is Ran=true with the process's own
+		// exit code (exitErr.ExitCode(); a signal-killed run has no exit
+		// status — ExitCode() reports -1 — and is mapped to 1: a failure,
+		// never a pass). The outcome is what a consumer of the call's fate
+		// (the turn receipt's bash recorder, via Execute's return value)
+		// reads — never an inference from the marker below.
+		exitCode := 1
+		if exitErr != nil && exitErr.ExitCode() >= 0 {
+			exitCode = exitErr.ExitCode()
 		}
 		result += "\n[exit error: " + runErr.Error() + "]"
 		// A failed command made no commit (or not one to be proud of): the
@@ -2313,7 +2399,7 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		if rewriteNote != "" {
 			result += "\n" + rewriteNote
 		}
-		return result, nil
+		return result, BashOutcome{Ran: true, ExitCode: exitCode}, nil
 	}
 	// The command succeeded: read the repository back and journal the FACT of
 	// the commit it landed — SHA and whether the trailer is really in the
@@ -2337,7 +2423,8 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if hookNote := inPlaceRewriteHookNote(ctx, deps, command); hookNote != "" {
 		result += "\n" + hookNote
 	}
-	return result, nil
+	// The process ran and exited 0.
+	return result, BashOutcome{Ran: true, ExitCode: 0}, nil
 }
 
 // bashStudyWindow is the consuming-model window the shell-output study is

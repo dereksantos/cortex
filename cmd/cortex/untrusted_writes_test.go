@@ -112,7 +112,8 @@ func TestTaintedWriteConfinement(t *testing.T) {
 		// Pin the CWD at the workspace root so relative escapes resolve the
 		// same way they do in a REPL session.
 		t.Chdir(root)
-		return tools.Execute(context.Background(), c.call(t), cs)
+		out, _, err := tools.Execute(context.Background(), c.call(t), cs)
+		return out, err
 	}
 
 	for _, c := range cases {
@@ -164,18 +165,18 @@ func TestTaintedWriteConfinement(t *testing.T) {
 		cs := &CortexSession{quiet: true, workspace: ws, turnNo: 1, allowDelete: true, deleteRoot: outside}
 		t.Chdir(root)
 
-		obs, err := tools.Execute(context.Background(), writeCall(filepath.Join(outside, "new.txt")), cs)
+		obs, _, err := tools.Execute(context.Background(), writeCall(filepath.Join(outside, "new.txt")), cs)
 		if err != nil || !strings.Contains(obs, "wrote") {
 			t.Fatalf("untainted absolute write outside the root must still land, got obs=%q err=%v", obs, err)
 		}
 		if body, rerr := os.ReadFile(filepath.Join(outside, "new.txt")); rerr != nil || string(body) != "payload" {
 			t.Errorf("untainted write did not land: %q, %v", body, rerr)
 		}
-		obs, err = tools.Execute(context.Background(), editCall(existing), cs)
+		obs, _, err = tools.Execute(context.Background(), editCall(existing), cs)
 		if err != nil || !strings.Contains(obs, "edited") {
 			t.Fatalf("untainted edit outside the root must still apply, got obs=%q err=%v", obs, err)
 		}
-		obs, err = tools.Execute(context.Background(), removeCall(existing), cs)
+		obs, _, err = tools.Execute(context.Background(), removeCall(existing), cs)
 		if err != nil || !strings.Contains(obs, "removed") {
 			t.Fatalf("untainted remove outside the root must still delete, got obs=%q err=%v", obs, err)
 		}
@@ -197,7 +198,7 @@ func TestTaintedWriteConfinement(t *testing.T) {
 				t.Fatal(err)
 			}
 			inTree := "intree/f.txt"
-			obs, err := tools.Execute(context.Background(), writeCall(inTree), cs)
+			obs, _, err := tools.Execute(context.Background(), writeCall(inTree), cs)
 			if err != nil || !strings.Contains(obs, "wrote") {
 				t.Errorf("tainted=%v: in-tree write must land, got obs=%q err=%v", tainted, obs, err)
 			}
@@ -214,13 +215,13 @@ func TestTaintedWriteConfinement(t *testing.T) {
 		cs := &CortexSession{quiet: true, workspace: ws, turnNo: 1, allowDelete: true, deleteRoot: outside}
 		cs.recordUntrustedContent("fetch_url")
 		t.Chdir(root)
-		obs, err := tools.Execute(context.Background(), writeCall(sink), cs)
+		obs, _, err := tools.Execute(context.Background(), writeCall(sink), cs)
 		if !strings.Contains(err.Error(), "untrusted web content entered this turn") {
 			t.Fatalf("tainted turn must reject the escape, got obs=%q err=%v", obs, err)
 		}
 		cs.turnNo = 2
 		cs.taint = nil // turn.go's turn-start reset
-		obs, err = tools.Execute(context.Background(), writeCall(sink), cs)
+		obs, _, err = tools.Execute(context.Background(), writeCall(sink), cs)
 		if err != nil || !strings.Contains(obs, "wrote") {
 			t.Errorf("after the turn reset the escape must behave as ordinary work again: obs=%q err=%v", obs, err)
 		}
@@ -238,7 +239,7 @@ func TestTaintedWriteConfinement(t *testing.T) {
 		cs.recordUntrustedContent("fetch_url")
 		t.Chdir(root)
 		childCtx := withSubagentDepth(context.Background(), 1)
-		obs, err := tools.Execute(childCtx, writeCall(sink), cs)
+		obs, _, err := tools.Execute(childCtx, writeCall(sink), cs)
 		if !strings.Contains(err.Error(), "untrusted web content entered this turn") {
 			t.Errorf("a subagent-driven confined write must be refused by the in-tool check, got obs=%q err=%v", obs, err)
 		}

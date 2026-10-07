@@ -15,6 +15,9 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,6 +27,27 @@ import (
 func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *testing.T) {
 	quickRetries(t)
 	root := t.TempDir()
+	// Issue #219: the turn receipt's files-changed fact reads the
+	// workspace's git state — the root must be a git repository so
+	// gitWorkspace() is true and render() emits the files-changed
+	// section (even empty), making the receipt non-empty and the
+	// kindNote written. A non-repo temp dir measures nothing and the
+	// receipt renders "".
+	git := exec.Command("git", "init", "-q")
+	git.Dir = root
+	if out, err := git.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	gitc := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = root
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	gitc("config", "user.email", "t@t")
+	gitc("config", "user.name", "t")
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
@@ -130,6 +154,10 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 		case e.Role == RoleTool && e.ToolCallID != "":
 			sawToolResult = true
 		case e.Role == "assistant" && e.Content == "ok":
+			// Issue #219: the turn's measurement receipt is harness output — it
+			// rides the distinct TurnResult.Receipt field and persists as a
+			// transcript-only kindNote entry, so the stored assistant message
+			// (and its transcript entry) holds the model's verbatim reply.
 			sawFinalReply = true
 		}
 	}
@@ -144,5 +172,37 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	}
 	if !sawFinalReply {
 		t.Error("transcript view-model is missing the final assistant reply \"ok\"")
+	}
+
+	// Issue #219: the turn's measurement receipt is harness output — the
+	// turn ran a tool (the bash call), so the receipt is computed and
+	// persisted on the session's transcript as a kindNote entry, while the
+	// model's reply stays the verbatim "ok" (asserted above: the receipt
+	// rides TurnResult.Receipt and the kindNote, never the assistant
+	// message).
+	sessionPath := filepath.Join(root, ".cortex", "sessions", created.ID+".jsonl")
+	data, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("read transcript file %s: %v", sessionPath, err)
+	}
+	sawReceiptNote := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Kind    string `json:"kind"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("bad transcript line %q: %v", line, err)
+		}
+		if entry.Kind == "note" && strings.Contains(entry.Content, "turn receipt:") {
+			sawReceiptNote = true
+		}
+	}
+	if !sawReceiptNote {
+		t.Errorf("no kindNote transcript entry carries the turn receipt; transcript: %s", data)
 	}
 }
