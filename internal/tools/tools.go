@@ -1574,6 +1574,15 @@ func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) 
 	if note != "" {
 		result += "\n" + note
 	}
+	// Issue #224: the write-sanity pass — for a .go file, report EVERY
+	// package-name problem (duplicate package-level declarations, references
+	// to names that exist nowhere) in one note, so a guessed-helper session
+	// fixes all of them in one round instead of one build per error. Like
+	// every post-edit observation it never fails the write; non-Go and clean
+	// packages get a byte-identical result.
+	if sn := writeSanityNote(fsPath, path); sn != "" {
+		result += "\n" + sn
+	}
 	return result, nil
 }
 
@@ -1744,6 +1753,11 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	note := formatHookNote(ctx, deps, fsPath, hookSkip)
 	if note != "" {
 		result += "\n" + note
+	}
+	// Issue #224: the write-sanity pass, same as writeFile — every package-
+	// name problem in one note, never a veto, byte-identical for non-Go.
+	if sn := writeSanityNote(fsPath, a.Path); sn != "" {
+		result += "\n" + sn
 	}
 	return result, nil
 }

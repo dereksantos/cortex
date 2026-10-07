@@ -485,11 +485,17 @@ func TestPostEditHookNoteComposesWithEditWarnings(t *testing.T) {
 // with an empty Commands gets byte-identical write_file results to the
 // pre-hook behavior — no note, no extra work.
 func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
-	root := t.TempDir()
-	t.Chdir(root)
-	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
-	content := "package main\n\nfunc main() {\n  x :=    1\n}\n"
-
+	// A .go file, in the language the post-edit path actually inspects — so
+	// this pins the Go path specifically: no commands means no HOOK note, and
+	// a package with nothing wrong means no write-sanity note either. Each
+	// file goes in its OWN directory (issue #224): two `package main` files
+	// sharing a dir would both declare `func main`, and the sanity pass would
+	// report the collision — a note from the other post-write observation,
+	// not from the hook, and this test claims only the hook's silence.
+	content := "package main\n\nfunc main() {}\n\n"
+	headlessDir := t.TempDir()
+	t.Chdir(headlessDir)
+	writeRepoFile(t, filepath.Join(headlessDir, "go.mod"), "module t\n\ngo 1.26\n")
 	outHeadless, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "a.go", "content": content}), headlessDeps{})
 	if err != nil {
@@ -499,6 +505,9 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 		t.Errorf("headless write_file must be hook-free, got %q", outHeadless)
 	}
 
+	emptyDir := t.TempDir()
+	t.Chdir(emptyDir)
+	writeRepoFile(t, filepath.Join(emptyDir, "go.mod"), "module t\n\ngo 1.26\n")
 	outEmpty, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "b.go", "content": content}), hookDeps{cmds: projectcmd.Commands{}, trusted: true})
 	if err != nil {
@@ -506,10 +515,10 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 	}
 	// Both results must be the bare "wrote N bytes to PATH" with NO hook note
 	// appended — an empty Commands adds nothing.
-	if outHeadless != "wrote 42 bytes to a.go" {
+	if outHeadless != "wrote 30 bytes to a.go" {
 		t.Errorf("headless write_file result changed, got %q", outHeadless)
 	}
-	if outEmpty != "wrote 42 bytes to b.go" {
+	if outEmpty != "wrote 30 bytes to b.go" {
 		t.Errorf("empty-Commands write_file should add no note, got %q", outEmpty)
 	}
 }

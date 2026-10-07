@@ -256,6 +256,19 @@ the model-driven memory tools
 
   Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers.
 
+  The built-in system prompt also carries the writing half of that principle
+  (issue #224) as `locateBeforeWritingPrinciple`, spliced right after the
+  locate-first line and mirrored here verbatim (the same drift tripwire):
+
+  Locate before writing. Before writing code that names a helper, constant, type or path you have not seen in this session, grep or outline for it and use what actually exists — never invent identifiers, type shapes, or file paths; a name that is not there comes back undefined. Before adding a new package-level name (a test helper, a const, a fixture), grep the package (including its other _test.go files) so the name exists where you call it and does not collide with one already declared; checking first costs one tool call, a guessed name costs a build-and-fix round per guess.
+
+  It answers the self-dev loop's tick 20261006T074738Z: new code (mostly test
+  files) was written against helpers, type shapes and paths that were never
+  located (seven undefined identifiers at once; a compile error carried from
+  one session to the next; a duplicated package-level const). It rides in the
+  base system prompt and is restated in each plan step prompt (where new
+  files actually get written and demotion can fold the locate work away).
+
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton. An
   image file (png/jpeg/gif/webp, by extension or magic bytes) read whole
@@ -305,7 +318,8 @@ the model-driven memory tools
   replacement appends a GUARD DROPPED warning naming them (#210). A successful
   result appends the current changed region (added lines marked `>`, removed
   `-`, context unmarked, capped at 12 lines) so the
-  model's view of the file stays in sync (#173).
+  model's view of the file stays in sync (#173). On a `.go` file a successful
+  result may also carry the write-sanity note described in the next bullet.
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
@@ -327,6 +341,15 @@ the model-driven memory tools
   .github/copilot-instructions.md; docs/configuration.md); `cortex
   project commands` shows each command's source and when it runs
   (per-edit / turn-end / never / inactive).
+  Independently of that hook and of workspace trust, a `.go` file that lands
+  also gets a write-sanity pass (`internal/tools/writesanity.go`, stdlib
+  only): it parses the written file's PACKAGE — same-package `_test.go`
+  siblings included, build-constrained siblings excluded — and appends ONE
+  note listing every duplicate package-level declaration and every bare name
+  undefined anywhere in the package, so a session fixes a whole batch of
+  compile errors in one round instead of one per build (#224). The note never
+  vetoes the write, and it is silent for non-Go files, unparseable files, and
+  packages with nothing wrong.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked. The Risky prompt shows the classifier's reason above the command

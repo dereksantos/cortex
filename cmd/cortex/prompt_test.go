@@ -300,6 +300,14 @@ func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
 	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), reviewFeedbackPrinciple) {
 		t.Error("planStepPrompt must restate the review-feedback principle (same const) for each step turn")
 	}
+	// The step prompt restates the issue #224 locate-before-writing principle
+	// the same way: a step turn is where new code — mostly test files —
+	// actually gets written, and demotion at the turn boundaries can fold the
+	// earlier grep/outline work out of view, so the step prompt carries the
+	// standing principle — not only the base prompt.
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), locateBeforeWritingPrinciple) {
+		t.Error("planStepPrompt must restate the locate-before-writing principle (same const) for each step turn")
+	}
 	// The issue #225 principles ride the same way — in BOTH the planning
 	// instruction (where a lower-level helper can be named in place of the
 	// user-facing path) and each step prompt (where a failing acceptance
@@ -1169,5 +1177,101 @@ func TestFailingTestPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 	if !strings.Contains(string(data), failingTestPrinciple) {
 		t.Error("CLAUDE.md's \"Constraints → Testing\" section no longer mirrors the built-in prompt's failing-test working-style principle verbatim (failingTestPrinciple) — the docs and the prompt have drifted apart")
+	}
+}
+
+// TestDefaultPromptEncodesLocateBeforeWriting pins issue #224's content: the
+// built-in prompt must tell the model to locate before WRITING — grep or
+// outline for a helper, constant, type or path it has not seen this session
+// instead of inventing one, and check a new package-level name against the
+// package (including its other _test.go files) so it neither references what
+// doesn't exist nor collides with what does. The self-dev loop's tick
+// 20261006T074738Z is the case this exists for: sessions wrote test files
+// against guessed identifiers (seven undefined at once), carried a type-shape
+// compile error from one session into the next, and duplicated a
+// package-level const — each guess costing a build-and-fix round.
+//
+// The keyword assertions run against locateBeforeWritingPrinciple ITSELF,
+// and each absence-checked keyword is additionally asserted ABSENT from the
+// full prompt with the principle stripped — so every subtest actually rides
+// on the new principle (the same style as
+// TestDefaultPromptEncodesBlockedCheckGuidance). Keywords that occur
+// elsewhere in the prompt ("grep", "outline", "invent" also sit in
+// locateFirstPrinciple; "package" also sits in debugWorkingStylePrinciple and
+// the Inspect line) are checked in the const only.
+func TestDefaultPromptEncodesLocateBeforeWriting(t *testing.T) {
+	// The full prompt with the principle removed: its splice site is
+	// locateFirstPrinciple + "\n\n" + locateBeforeWritingPrinciple + "\n\n" —
+	// strip exactly the principle and one surrounding blank-line separator,
+	// leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		"\n\n"+locateBeforeWritingPrinciple, "", 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the locate-before-writing principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		{"helper", "the trigger: a helper (or constant/type/path) named by new code", false}, // testTargetPrinciple (#225) also names "a lower-level helper"
+		{"collide", "the collision ban: don't redeclare a package-level name that exists", true},
+		{"package", "the scope to check: the package the new name lands in", false}, // "package" also occurs in debugWorkingStylePrinciple and the Inspect line
+		{"undefined", "the failure class the guess produces (a name that is not there)", true},
+		{"grep", "the locate tool to use before writing", false},                           // locateFirstPrinciple also names grep
+		{"outline", "the other locate tool to use before writing", false},                  // locateFirstPrinciple also names outline
+		{"invent", "the ban: never invent identifiers, type shapes, or file paths", false}, // locateFirstPrinciple also says "never invent or guess file paths"
+		{"_test.go", "the test-file scope: check the package's other test files too", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(locateBeforeWritingPrinciple), tt.keyword) {
+				t.Errorf("locateBeforeWritingPrinciple no longer encodes the locate-before-writing guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
+// TestLocateBeforeWritingPrinciplePosition pins where the issue #224
+// principle sits: right after locateFirstPrinciple (the reading half it
+// extends) inside the "# How you work" block, before "# How you
+// communicate" — a position check, not a content check, mirroring
+// TestDefaultPromptEncodesLocateFirstPosition. The placement matters: the
+// writing half must be met immediately after the reading half, as one
+// locate-before-you-touch-anything pair.
+func TestLocateBeforeWritingPrinciplePosition(t *testing.T) {
+	i := strings.Index(SystemPrompt, locateBeforeWritingPrinciple)
+	if i < 0 {
+		t.Fatal("the locate-before-writing principle is not in the built-in prompt")
+	}
+	if j := strings.Index(SystemPrompt, locateFirstPrinciple); j < 0 || i < j {
+		t.Error("the locate-before-writing principle must sit right after the locate-first principle it extends")
+	}
+	if j := strings.Index(SystemPrompt, "# How you work"); j < 0 || i < j {
+		t.Error("the locate-before-writing principle must sit in the \"# How you work\" block")
+	}
+	if k := strings.Index(SystemPrompt, "# How you communicate"); k < 0 || i >= k {
+		t.Error("the locate-before-writing principle must sit before \"# How you communicate\"")
+	}
+	// Its own paragraph, not spliced mid-line into another principle.
+	if n := strings.Count(SystemPrompt, locateBeforeWritingPrinciple); n != 1 {
+		t.Errorf("the locate-before-writing principle must appear exactly once in the built-in prompt, found %d", n)
+	}
+}
+
+// TestLocateBeforeWritingPrincipleMirroredInClaudeMD is the issue #224
+// consistency tripwire, mirroring TestLocateFirstPrincipleMirroredInClaudeMD:
+// CLAUDE.md must mirror the EXACT same guidance the model receives
+// (locateBeforeWritingPrinciple) so docs and prompt can't drift apart.
+func TestLocateBeforeWritingPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	if !strings.Contains(string(data), locateBeforeWritingPrinciple) {
+		t.Error("CLAUDE.md no longer mirrors the built-in prompt's locate-before-writing working-style principle verbatim (locateBeforeWritingPrinciple) — the docs and the prompt have drifted apart")
 	}
 }
