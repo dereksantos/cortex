@@ -33,7 +33,12 @@ func TestRunLoopDispatchesRecoveredHermesToolCalls(t *testing.T) {
 		if r.Tools == nil { // the forced finalize
 			return fakeResp("forced", nil, 1, 1), false, nil
 		}
-		// No structured tool_calls — the call lives in the text.
+		// No structured tool_calls — the call lives in the text. The
+		// model emits the markup on every tool round; the engine must
+		// recover it (dispatch, not return as prose). The recovered
+		// calls are dispatched as ordinary tool rounds: a repeated
+		// batch goes through the no-progress guard, exactly as a
+		// structured batch would.
 		const content = `Let me look. <function_calls>{"name":"read_file","arguments":{"path":"f"}}</function_calls>`
 		return fakeResp(content, nil, 1, 1), false, nil
 	})
