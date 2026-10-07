@@ -138,3 +138,47 @@ func TestTurnCLIReceiptRoutingNoReceipt(t *testing.T) {
 		t.Errorf("stderr = %q, want exactly the session line (%q)", stderr, "session: sess-1\n")
 	}
 }
+
+// TestReportTurnTextSummaryIssue (issue #230): a turn whose final reply the
+// engine's sanitizer could not repair carries TurnResult.SummaryIssue, and
+// reportTurnText (runTurnCLI's non-JSON branch) must print it as the stderr
+// line "summary issue: <value>" — the headless surface a driver that feeds
+// the reply into a commit message checks. The reply itself still goes to
+// stdout (issue #118's answer-only contract); the flag is a stderr fact.
+//
+// The --json branch's "summary_issue" key is runTurnCLI's out-map builder —
+// the same one-line pattern as the tests_changed / lint / receipt keys,
+// exercised here only via the shared TurnResult field the branch reads.
+func TestReportTurnTextSummaryIssue(t *testing.T) {
+	res := TurnResult{Reply: "the reply", SummaryIssue: "truncated"}
+
+	var outBuf, errBuf bytes.Buffer
+	reportTurnText(&outBuf, &errBuf, nil, res, "sess-1")
+
+	if outBuf.String() != "the reply\n" {
+		t.Errorf("stdout = %q, want exactly the reply only", outBuf.String())
+	}
+	stderr := errBuf.String()
+	if !strings.Contains(stderr, "summary issue: truncated\n") {
+		t.Errorf("stderr = %q, want the line %q", stderr, "summary issue: truncated\n")
+	}
+	if strings.Contains(outBuf.String(), "summary issue") {
+		t.Errorf("the summary-issue flag leaked to stdout — it belongs on stderr (issue #118)")
+	}
+}
+
+// TestReportTurnTextSummaryIssueAbsent is the companion case: a clean turn
+// (no SummaryIssue) prints NO "summary issue:" line on stderr.
+func TestReportTurnTextSummaryIssueAbsent(t *testing.T) {
+	res := TurnResult{Reply: "the reply"}
+
+	var outBuf, errBuf bytes.Buffer
+	reportTurnText(&outBuf, &errBuf, nil, res, "sess-1")
+
+	if outBuf.String() != "the reply\n" {
+		t.Errorf("stdout = %q, want exactly the reply only", outBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "summary issue:") {
+		t.Errorf("stderr = %q, want no summary-issue line for a clean turn", errBuf.String())
+	}
+}
