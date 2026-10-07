@@ -105,10 +105,10 @@ type turnReceipt struct {
 	unformatted        []string // files the post-edit format hook failed to verify (could not run, failed, timed out)
 	hadReceiptBashRuns bool     // true when the bash recorder saw a verification run this turn
 	// checklistMissing is the #220 step-2 fact: the task's checklist items
-	// the reply does NOT account for (checklistMissingItems, case-insensitive
-	// whole-text matching). nil when the task has no checklist or the reply
-	// met every item — a turn with no missing-item fact renders no
-	// "checklist:" section.
+	// the reply does NOT account for (checklistMissingItems — per item, every
+	// significant word, word-prefix match; see checklistItemPresent). nil
+	// when the task has no checklist or the reply met every item — a turn
+	// with no missing-item fact renders no "checklist:" section.
 	checklistMissing []string
 }
 

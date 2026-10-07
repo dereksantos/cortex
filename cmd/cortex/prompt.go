@@ -205,23 +205,27 @@ func taskChecklistItems(task string) []string {
 	return items
 }
 
-// taskPrompt renders the model-facing prompt for a turn's task: the task
-// text, and — only when the task actually carries a checklist (see
+// taskPrompt renders the model-facing prompt for a turn's input: the input
+// text, and — only when checklistTask actually carries a checklist (see
 // taskChecklistItems) — a separator, the extracted items each rendered as
 // `- [ ] item` (the checkbox state the task used is not load-bearing; the
 // account is owed per item either way), and the per-item accounting
-// principle (checklistAccountingPrinciple). A task with no checklist
-// returns its text UNCHANGED — the common case keeps the wire bytes
-// identical to the pre-#220 behavior, and the transcript records the prompt
-// as the model sees it (cs.Append persists what turn.go sends).
+// principle (checklistAccountingPrinciple). checklistTask names WHICH text
+// the checklist is extracted from: input itself for a plain turn, "" for a
+// plan step — a step's input embeds the WHOLE overall task (planStepPrompt)
+// but the run measures its checklist once, at the run's end (TurnWithPlan),
+// so a step's prompt is exactly its input, unchanged. A checklistTask with
+// no checklist returns input UNCHANGED — the common case keeps the wire
+// bytes identical to the pre-#220 behavior, and the transcript records the
+// prompt as the model sees it (cs.Append persists what turn.go sends).
 // Pure: turn.go calls it exactly once per turn, right before Append.
-func taskPrompt(task string) string {
-	items := taskChecklistItems(task)
+func taskPrompt(input, checklistTask string) string {
+	items := taskChecklistItems(checklistTask)
 	if len(items) == 0 {
-		return task
+		return input
 	}
 	var b strings.Builder
-	b.WriteString(task)
+	b.WriteString(input)
 	b.WriteString("\n\nTask checklist (account for each item in your final answer):\n")
 	for _, item := range items {
 		b.WriteString("- [ ] ")

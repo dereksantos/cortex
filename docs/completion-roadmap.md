@@ -151,11 +151,18 @@ topics, fleet slot contention (`docs/archive/refactor-status.md`).
       only), which is what makes the account possible. Plan-then-execute
       measures once per run, not per step (each step's prompt embeds the
       whole task, so per-step measurement would flag the items other steps
-      own): the checklist is injected only in the run's final per-step
-      report turn — whose reply renders every step's done-note, so an item a
-      later step handled is accounted for even when an earlier step's reply
-      didn't name it — and the receipt joins the report turn's block with
-      the per-step blocks. A task with no checklist (or a reply that
+      own): no step prompt carries the checklist (a step turn's input
+      embeds the whole task — the `- [ ]` lines still start lines — so
+      extracting from it would inject the checklist into every step); the
+      run's reply stays the deterministic per-step report (no model report
+      turn — one that would be a full tools-enabled turn after the per-step
+      checks and would replace that deterministic reply with model text),
+      and the run measures the fact deterministically at the run's end,
+      against the rendered per-step report (every step's line — step text +
+      note — and the whole-task echo ride in it, so an item named in its own
+      step's text is accounted for even when no step's reply or note named
+      it), landing on the run's joined receipt whether or not any step ran
+      tools. A task with no checklist (or a reply that
       accounted for every item) contributes no section.
 
 **Gate C:** README/CLAUDE.md updated for `cortex model`; suite green;

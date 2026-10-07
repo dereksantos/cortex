@@ -326,6 +326,59 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 	}
 }
 
+// TestPlanStepPromptsCarryNoChecklist pins issue #220's step-prompt rule
+// on the bytes that actually go to the model: a plan step's input embeds the
+// WHOLE overall task (planStepPrompt — "Overall task: %s"), and that task's
+// `- [ ]` lines still start lines — so a prompt built from the input would
+// leak the checklist into EVERY step. The step instead goes through
+// cs.turn with an empty checklistTask: the user message on the wire is
+// exactly the step's input (planStepPrompt, unchanged) — no "Task checklist"
+// section, no per-item accounting principle. (A plain turn's user message,
+// by contrast, DOES carry the principle — TestTaskPromptCarriesChecklistPrinciple
+// pins the other half of the same rule, and the fallback single turn's
+// prompt carries it through the same taskPrompt path.)
+func TestPlanStepPromptsCarryNoChecklist(t *testing.T) {
+	task := "Add a helper and its tests.\n- [ ] add the helper\n- [ ] add the tests\n"
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. add the helper\n2. add the tests\n", // planning turn (tools withheld)
+		"helper done",                           // step 1
+		"tests done",                            // step 2
+	)
+	cs := planTestSession(t, backend, root)
+
+	if _, err := cs.TurnWithPlan(context.Background(), task); err != nil {
+		t.Fatalf("TurnWithPlan: %v", err)
+	}
+	users := backend.lastUserMessages()
+	if len(users) != 3 {
+		t.Fatalf("recorded prompts = %d, want 3 (one planning + two step)", len(users))
+	}
+	// THE point: each STEP's user message on the wire carries the overall
+	// task (planStepPrompt's whole-task echo) but NOT the checklist section
+	// or the per-item accounting principle.
+	for i, name := range []string{"step 1", "step 2"} {
+		if !strings.Contains(users[i+1], "Overall task:") {
+			t.Errorf("%s prompt must carry the overall task:\n%s", name, users[i+1])
+		}
+		if strings.Contains(users[i+1], checklistAccountingPrinciple) {
+			t.Errorf("%s prompt must NOT carry the checklist accounting principle (the checklist is injected into no step prompt; the run measures it deterministically at the run's end):\n%s", name, users[i+1])
+		}
+		if strings.Contains(users[i+1], "Task checklist") {
+			t.Errorf("%s prompt must NOT carry a Task checklist section:\n%s", name, users[i+1])
+		}
+	}
+	// And the planning turn's prompt (the instruction + the raw task) never
+	// gets a checklist section either — it produces a plan, not an account,
+	// and its input embeds the task's `- [ ]` lines just like a step's does.
+	if strings.Contains(users[0], checklistAccountingPrinciple) {
+		t.Errorf("planning prompt must NOT carry the checklist accounting principle:\n%s", users[0])
+	}
+	if strings.Contains(users[0], "Task checklist") {
+		t.Errorf("planning prompt must NOT carry a Task checklist section:\n%s", users[0])
+	}
+}
+
 func TestParsePlanCapIsSix(t *testing.T) {
 	var reply strings.Builder
 	for i := 1; i <= 9; i++ {
@@ -470,11 +523,10 @@ func (b *planTestBackend) stepCount() int {
 // planTestSession builds a quiet, hand-built *CortexSession pointed at
 // backend — the turnTestSessionFactory shape (serve_turn_test.go) minus the
 // SessionManager, with a workspace rooted at root so runProjectCheck has a
-// deterministic directory (no go.mod → the check is skipped, no execution).
-// Its tool list is a strict SUBSET of toolSet: if TurnWithPlan ever restored
-// the full registry (the #150 review bug) instead of the session's own list,
-// the step requests would advertise all of toolSet and the per-request count
-// checks below would fail.
+// deterministic directory. Its tool list is a strict SUBSET of toolSet: if
+// TurnWithPlan ever restored the full registry (the #150 review bug) instead
+// of the session's own list, the step requests would advertise all of toolSet
+// and the per-request count checks below would fail.
 func planTestSession(t *testing.T, b *planTestBackend, root string) *CortexSession {
 	t.Helper()
 	cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}

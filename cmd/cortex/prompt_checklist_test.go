@@ -118,18 +118,18 @@ func TestTaskChecklistItems(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTaskPromptCarriesChecklistPrinciple(t *testing.T) {
-	t.Run("no checklist: the prompt is the task text unchanged", func(t *testing.T) {
+	t.Run("no checklist: the prompt is the input text unchanged", func(t *testing.T) {
 		task := "Add a status line to the REPL."
-		if got := taskPrompt(task); got != task {
-			t.Errorf("taskPrompt(no checklist) = %q, want the task unchanged", got)
+		if got := taskPrompt(task, task); got != task {
+			t.Errorf("taskPrompt(no checklist) = %q, want the input unchanged", got)
 		}
 	})
 
 	t.Run("checklist: the prompt carries each item and the per-item principle", func(t *testing.T) {
 		task := "Do the work.\n- [ ] add the helper\n- [x] add the tests\n"
-		got := taskPrompt(task)
+		got := taskPrompt(task, task)
 		if !strings.HasPrefix(got, task) {
-			t.Fatalf("taskPrompt did not start with the task text:\n%s", got)
+			t.Fatalf("taskPrompt did not start with the input text:\n%s", got)
 		}
 		for _, want := range []string{
 			"Task checklist",
@@ -142,6 +142,18 @@ func TestTaskPromptCarriesChecklistPrinciple(t *testing.T) {
 			if !strings.Contains(got, want) {
 				t.Errorf("taskPrompt lacks %q:\n%s", want, got)
 			}
+		}
+	})
+
+	t.Run("a step's input with a checklist-bearing task but an empty checklistTask: no injection", func(t *testing.T) {
+		// The plan-step case (issue #220): the step's input embeds the WHOLE
+		// overall task (planStepPrompt — "Overall task: …"), whose `- [ ]`
+		// lines would still start lines — but checklistTask is "", so the
+		// prompt is exactly the step's input, unchanged: no checklist section,
+		// no principle.
+		stepInput := "Overall task: " + "Fix the bug.\n- [ ] add the helper\n- [ ] add the tests\n" + "\n\nPlan step 1 of 2: add the helper"
+		if got := taskPrompt(stepInput, ""); got != stepInput {
+			t.Errorf("taskPrompt(step input, \"\") = %q, want the step input unchanged (no checklist injection into a step prompt):\n%s", got, got)
 		}
 	})
 }

@@ -5,13 +5,14 @@ package main
 // Receipt and the kindNote transcript entry). For a plain turn it is computed
 // at the turn's END (after computeReceipt) from the turn's input (the task)
 // and its reply (the model's final answer). In plan-then-execute it is
-// measured ONCE per run — the run's final per-step report turn carries the
-// checklist in its prompt and measures the fact against its own reply (which
-// renders every step's done-note), so an item a later step handled is
-// accounted for even when an earlier step's own reply didn't name it; the
-// fact then lands on PlanRunResult.Receipt through the same joined-receipt
-// surface. The receipt stays measurement-only: it never changes the turn's
-// outcome or the reply.
+// measured ONCE per run, deterministically at the run's END — no model turn:
+// the rendered per-step report (every step's done-note and the whole-task
+// echo ride in it) is checked off the run's task, and the missing items land
+// on PlanRunResult.Receipt through the same joined-receipt surface as the
+// per-step blocks — whether or not any step ran tools. No step's prompt
+// carries the checklist (a step that accounted for the whole task's
+// checklist would flag the items other steps own). The receipt stays
+// measurement-only: it never changes the turn's outcome or the reply.
 //
 // Driven through the REAL turn path (cs.Turn / cs.TurnWithBudget /
 // cs.TurnWithPlan) with a scripted model (the senderOverride test-only seam),
@@ -198,25 +199,29 @@ func TestTurnReceiptChecklistLandsOnForcedMaxIterTurn(t *testing.T) {
 }
 
 // TestTurnWithPlanChecklistReceiptMeasuresWholeRun is the issue #220 step-3
-// plan-then-execute e2e: a plan run whose task carries a checklist measures
-// the checklist ONCE per run — not per step (each step's prompt embeds the
-// whole task, so a per-step measurement would flag the items other steps
-// own). The run's final per-step report turn carries the checklist in its
-// prompt (the step turns don't) and its turn measures the fact against its
-// own reply, which renders every step's done-note. Step 1's reply names only
-// "add the helper" — "add the tests" is missing from it — but the report
-// turn's reply names "tests" (step 2's done-note: "tests added"), so the
-// joined receipt carries NO checklist section: an item covered by step 2 is
-// NOT reported missing. The receipt rides PlanRunResult.Receipt (the joined
-// per-step blocks plus the report turn's block).
+// plan-then-execute e2e, the POSITIVE case: a plan run whose task carries a
+// checklist measures the checklist ONCE per run, deterministically at the
+// run's END (no model report turn — the run's reply is the deterministic
+// per-step report, exactly the shape renderPlanReport renders). The reply
+// the measurement checks is the rendered report itself: every step's line
+// carries the STEP TEXT ("2. [done] add the tests — …"), so an item named in
+// its own step's text is accounted for even when no step's model reply or
+// note named it — "add the tests" (covered by step 2's text) is NOT reported.
+// The other item — "update the docs" — appears in no step's text (the model
+// planned no docs step at all), so it IS reported missing on
+// PlanRunResult.Receipt. The receipt rides PlanRunResult.Receipt (the joined
+// per-step blocks plus the run's own checklist block).
 func TestTurnWithPlanChecklistReceiptMeasuresWholeRun(t *testing.T) {
-	// Script: planning turn (no tools) → two-step plan; step 1 turn (tools)
-	// → write_file then the step-1 reply (names "add the helper" in its own
-	// words, not "add the tests"); step 2 turn (tools) → write_file then the
-	// step-2 reply; report turn (tools) → the run's final reply, which
-	// renders both steps' done-notes ("helper added" / "tests added").
+	// The task's third item is the one the model never planned a step for —
+	// it appears in no step's text, so no coverage path can reach it.
+	task := "Add a helper and its tests, and update the docs.\n- [ ] add the helper\n- [ ] add the tests\n- [ ] update the docs\n"
+	// Script: planning turn (no tools) → two-step plan (the model plans NO
+	// docs step); each step turn (tools) → one write_file, then the step
+	// reply. Neither reply nor note names "update the docs" — the step NOTE
+	// is the project-check outcome ("check skipped: …"), not the model
+	// reply, so step TEXT is what covers the items.
 	script := []*AgentResponse{
-		// planning turn: a two-step plan.
+		// planning turn: a two-step plan (no docs step).
 		respWithAnswer("1. add the helper\n2. add the tests"),
 		// step 1 turn (tools): one write_file, then the step reply.
 		respWithCalls([]ToolCall{writeFileCall("w1", "helper.go", "package main\n\nfunc helper() {}\n")}),
@@ -224,11 +229,9 @@ func TestTurnWithPlanChecklistReceiptMeasuresWholeRun(t *testing.T) {
 		// step 2 turn (tools): one write_file, then the step reply.
 		respWithCalls([]ToolCall{writeFileCall("w2", "helper_test.go", "package main\n")}),
 		respWithAnswer("tests added (helper_test.go:1)"),
-		// report turn (the run's final per-step report): the account.
-		respWithAnswer("1. [done] add the helper — helper added (helper.go:1)\n2. [done] add the tests — tests added (helper_test.go:1)"),
 	}
 	cs := receiptChecklistSession(t, script)
-	res, err := cs.TurnWithPlan(context.Background(), checklistTask)
+	res, err := cs.TurnWithPlan(context.Background(), task)
 	if err != nil {
 		t.Fatalf("TurnWithPlan: %v", err)
 	}
@@ -238,17 +241,41 @@ func TestTurnWithPlanChecklistReceiptMeasuresWholeRun(t *testing.T) {
 	if len(res.Steps) != 2 {
 		t.Fatalf("Steps = %d, want 2", len(res.Steps))
 	}
-	// The checklist is measured once per run, in the report turn: its reply
-	// names "tests" (step 2's done-note), so "add the tests" — missing from
-	// step 1's own reply — is NOT reported missing. The receipt may carry
-	// the other #219 facts (files changed), but NO checklist section.
-	if strings.Contains(res.Receipt, "checklist (not accounted for in the reply):") {
-		t.Fatalf("PlanRunResult.Receipt =\n%s\nmust NOT carry a checklist section (the report turn's reply accounts for every item)", res.Receipt)
+	for i, s := range res.Steps {
+		if s.Status != stepDone {
+			t.Errorf("step %d status = %v, want done", i+1, s.Status)
+		}
 	}
-	// And the run's reply IS the report turn's reply — the account the
-	// measurement measured.
-	if !strings.Contains(res.Reply, "helper added") || !strings.Contains(res.Reply, "tests added") {
-		t.Fatalf("Reply =\n%s\nwant the run's final report turn's reply (both steps' done-notes)", res.Reply)
+	// The run's reply is the DETERMINISTIC per-step report — no model report
+	// turn ran (that would have replaced renderPlanReport's reply with model
+	// text and added a tools-enabled turn after the per-step checks).
+	if !strings.Contains(res.Reply, "Plan-then-execute") || !strings.Contains(res.Reply, "2/2 steps done") {
+		t.Fatalf("Reply =\n%s\nwant the deterministic per-step report (renderPlanReport)", res.Reply)
+	}
+	if !strings.Contains(res.Reply, "2. [done] add the tests") {
+		t.Fatalf("Reply =\n%s\nwant step 2's line to carry the step text (that text is what covers \"add the tests\")", res.Reply)
+	}
+	// THE positive point: the receipt carries the checklist section — it is
+	// measured whether or not a turn's reply accounts for the items, and the
+	// rendered report is the reply checked. The item no step's text names IS
+	// reported missing...
+	if res.Receipt == "" {
+		t.Fatal("PlanRunResult.Receipt empty — the checklist fact did not land")
+	}
+	if !strings.Contains(res.Receipt, "checklist (not accounted for in the reply):") {
+		t.Fatalf("PlanRunResult.Receipt =\n%s\nwant the checklist section (the run's checklist account is measured at the run's end)", res.Receipt)
+	}
+	if !strings.Contains(res.Receipt, "  - update the docs") {
+		t.Errorf("PlanRunResult.Receipt =\n%s\nwant the item no step names (\"update the docs\") reported missing", res.Receipt)
+	}
+	// ...and an item named in its own step's text is NOT: the report's step
+	// line carries "add the tests", which covers the item even though no
+	// model reply or note ever named it.
+	if strings.Contains(res.Receipt, "  - add the tests") {
+		t.Errorf("PlanRunResult.Receipt =\n%s\nmust NOT name \"add the tests\" as missing (step 2's line covers it)", res.Receipt)
+	}
+	if strings.Contains(res.Receipt, "  - add the helper") {
+		t.Errorf("PlanRunResult.Receipt =\n%s\nmust NOT name \"add the helper\" as missing (step 1's line covers it)", res.Receipt)
 	}
 }
 

@@ -287,22 +287,21 @@ func (cs *CortexSession) turn(ctx context.Context, input, checklistTask string, 
 		}
 	}()
 
-	// Issue #220: render the model-facing task prompt here — the task text,
-	// plus (only when the task carries a `- [ ]` checklist) the extracted
-	// items and the per-item accounting principle (taskPrompt, prompt.go).
-	// The prompt is what the model SEES: the appended message and, on
-	// resume, the replayed transcript carry the checklist with it, so the
+	// Issue #220: render the model-facing task prompt here — the input text,
+	// plus (only when checklistTask carries a `- [ ]` checklist) the
+	// extracted items and the per-item accounting principle (taskPrompt,
+	// prompt.go). The prompt is what the model SEES: the appended message and,
+	// on resume, the replayed transcript carry the checklist with it, so the
 	// prompt and the record stay the same bytes.
 	//
 	// checklistTask names WHICH input the checklist is extracted from — for
-	// a plain turn it is the input itself, but a plan step's input embeds
-	// the WHOLE overall task (planStepPrompt) and would make every step
-	// account for the entire checklist; a plan run instead measures the
-	// checklist once, off the run's task, on the run's final report
-	// (TurnWithPlan, plan_mode.go), and passes "" for its step turns —
-	// "" turns the injection OFF, so a step's prompt is exactly the step
-	// line's principles and its turn measures no checklist fact.
-	cs.Append(Message{Role: RoleUser, Content: taskPrompt(input)})
+	// a plain turn it is the input itself, but a plan step's input embeds the
+	// WHOLE overall task (planStepPrompt) and the run measures its checklist
+	// once, at the run's end (TurnWithPlan, plan_mode.go), so the step passes
+	// "" and its prompt is exactly its input, unchanged — no checklist, no
+	// principle, no checklist fact on its turn (the run's receipt carries the
+	// run's own measurement instead).
+	cs.Append(Message{Role: RoleUser, Content: taskPrompt(input, checklistTask)})
 	cs.turnIntent = input
 
 	// Put the memory index (and, adjacent to it, the skills index) in the
