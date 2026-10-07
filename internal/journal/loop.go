@@ -55,6 +55,12 @@ type LoopRunPayload struct {
 	// off, empty template, or no resolvable model — and omitempty keeps
 	// skipped/no-change firings (no commit at all) byte-identical to before.
 	Attributed bool `json:"attributed,omitempty"`
+	// SummaryIssue (issue #230) names the defect in the turn's final reply
+	// that the engine's sanitizer could not repair: "empty", "markup", or
+	// "truncated". Non-empty when the turn's reply was malformed in a way the
+	// engine's in-loop repair could not fix and the commit was skipped.
+	// omitempty keeps healthy firings byte-identical to before.
+	SummaryIssue string `json:"summary_issue,omitempty"`
 }
 
 // NewLoopRunEntry builds a journal entry for one loop.run event.

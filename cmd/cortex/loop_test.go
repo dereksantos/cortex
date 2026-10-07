@@ -2130,3 +2130,276 @@ func TestRunLoopFinalizeHookRoundAcrossFinishes(t *testing.T) {
 		})
 	}
 }
+
+// TestHasToolCallMarkup covers the issue #230 markup detector: it must fire
+// on Qwen XML and Hermes function_calls markup, and stay silent on plain
+// prose.
+func TestHasToolCallMarkup(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "clean prose", content: "I fixed the bug in loop.go.", want: false},
+		{name: "empty content", content: "", want: false},
+		{
+			name:    "Qwen XML markup",
+			content: "Done. <tool_call><function=bash>\n<parameter=command>\ngo test ./...\n</parameter>\n</function></tool_call>",
+			want:    true,
+		},
+		{
+			name:    "Hermes function_calls markup",
+			content: `<function_calls>{"name": "bash", "arguments": {"command": "ls"}}</function_calls>`,
+			want:    true,
+		},
+		{name: "prose with a word that looks like markup but is not", content: "The <tool_call> tag is not a real tool call.", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasToolCallMarkup(tt.content); got != tt.want {
+				t.Errorf("hasToolCallMarkup(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestLooksTruncated covers the issue #230 truncation detector: it must fire
+// on a clear mid-sentence cutoff (dangling conjunction, article, or short
+// reply ending mid-thought) and stay silent on a complete answer.
+func TestLooksTruncated(t *testing.T) {
+	tests := []struct {
+		name   string
+		answer string
+		want   bool
+	}{
+		{name: "empty answer", answer: "", want: false},
+		{name: "ends with period", answer: "I fixed the bug.", want: false},
+		{name: "ends with question mark", answer: "Is that done?", want: false},
+		{name: "ends with exclamation", answer: "Done!", want: false},
+		{name: "ends with closing paren", answer: "Fixed the bug (in loop.go).", want: false},
+		{name: "ends with closing quote", answer: `Fixed the "bug".`, want: false},
+		{name: "ends with colon", answer: "Fixed the bug:", want: false},
+		{name: "ends with semicolon", answer: "Fixed the bug;", want: false},
+		{name: "ends with comma", answer: "Fixed the bug,", want: false},
+		{name: "ends with hyphen", answer: "Fixed the bug -", want: false},
+		{name: "dangling conjunction: and", answer: "I fixed the bug and", want: true},
+		{name: "dangling preposition: to", answer: "I was going to", want: true},
+		{name: "dangling article: the", answer: "Let me restate my complete final answer for the", want: true},
+		{name: "dangling possessive: my", answer: "Let me restate my", want: true},
+		{name: "complete reply ending with a letter", answer: "final answer", want: false},
+		{name: "complete reply ending with a noun", answer: "I fixed the bug in the loop engine", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := looksTruncated(tt.answer); got != tt.want {
+				t.Errorf("looksTruncated(%q) = %v, want %v", tt.answer, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeFinalAnswerStripsMarkup covers the issue #230 sanitizer's
+// markup strip: a final answer with leaked Qwen XML or Hermes markup has it
+// removed, leaving the prose. A markup-only answer becomes empty (the caller
+// handles the empty-salvage chain).
+// TestSanitizeFinalAnswerStripsMarkup covers the issue #230 sanitizer: a
+// final answer with leaked Qwen XML or Hermes markup has it stripped,
+// leaving the prose. A markup-only answer becomes empty (the caller's
+// empty-salvage chain then repairs it). The function is PURE — no send, no
+// salvage — so the salvage decision (empty or truncated) is the caller's.
+func TestSanitizeFinalAnswerStripsMarkup(t *testing.T) {
+	tests := []struct {
+		name      string
+		answer    string
+		want      string
+		wantTrunc bool // the sanitized result is flagged truncated (caller triggers the clamped salvage)
+	}{
+		{
+			name:   "clean prose passes through",
+			answer: "I fixed the bug in loop.go.",
+			want:   "I fixed the bug in loop.go.",
+		},
+		{
+			name:   "empty answer passes through",
+			answer: "",
+			want:   "",
+		},
+		{
+			name:   "Qwen XML markup stripped, prose kept",
+			answer: "Done.\n<tool_call><function=bash>\n<parameter=command>\ngo test ./...\n</parameter>\n</function></tool_call>",
+			want:   "Done.",
+		},
+		{
+			name: "Hermes markup stripped, prose kept",
+			answer: `All done.
+<function_calls>{"name": "bash", "arguments": {"command": "ls"}}</function_calls>`,
+			want: "All done.",
+		},
+		{
+			name:   "markup-only answer becomes empty",
+			answer: "<tool_call><function=bash>\n<parameter=command>\nls\n</parameter>\n</function></tool_call>",
+			want:   "",
+		},
+		{
+			name:      "truncated answer is flagged (caller rewrites it)",
+			answer:    "I fixed the bug and",
+			want:      "I fixed the bug and",
+			wantTrunc: true,
+		},
+		{
+			name:   "complete answer is not flagged",
+			answer: "I was about to say the thing.",
+			want:   "I was about to say the thing.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeFinalAnswer(tt.answer)
+			if got != tt.want {
+				t.Errorf("sanitizeFinalAnswer(%q) = %q, want %q", tt.answer, got, tt.want)
+			}
+			// The pure sanitizer performs no salvage: the truncated flag is
+			// what tells the caller to run its clamped-salvage repair.
+			if gotTrunc := looksTruncated(got); gotTrunc != tt.wantTrunc {
+				t.Errorf("looksTruncated(sanitizeFinalAnswer(%q)) = %v, want %v", tt.answer, gotTrunc, tt.wantTrunc)
+			}
+		})
+	}
+}
+
+// TestRunLoopCleanFinalizeStripsMarkup covers the issue #230 fix in
+// runLoop's clean-finalize path: a natural finish whose content carries
+// leaked Qwen XML markup has it stripped before the answer is returned.
+func TestRunLoopCleanFinalizeStripsMarkup(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var sends int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		// Send 1: the model asks for a read (a tool round).
+		if sends == 1 {
+			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 1), false, nil
+		}
+		// Send 2: natural finish with leaked Qwen XML markup. The answer is
+		// sanitized to "Done." in place — no salvage re-ask, no forced
+		// finalize.
+		return fakeResp("Done. <tool_call><function=bash>\n<parameter=command>\nls\n</parameter>\n</function></tool_call>", nil, 1, 5), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "Done." {
+		t.Errorf("content = %q, want %q (markup stripped)", content, "Done.")
+	}
+	// The clean-finalize path sanitizes the markup in place — the natural
+	// finish (no tool calls) happens before MaxIter, the sanitized "Done."
+	// is a complete answer (no truncation re-ask), and nothing forced a
+	// finalize.
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize", stats.StopReason)
+	}
+	if hasToolCallMarkup(content) {
+		t.Error("content still carries tool-call markup after sanitization")
+	}
+}
+
+// TestRunLoopCleanFinalizeSalvagesTruncated covers the issue #230 fix in
+// runLoop's clean-finalize path: a natural finish whose content looks cut
+// off mid-sentence (no terminal punctuation, not clamped by token count)
+// triggers a salvage re-ask that rewrites the answer.
+func TestRunLoopCleanFinalizeSalvagesTruncated(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var sends int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		// First send: tool round (the model asks for a read).
+		if sends == 1 {
+			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 1), false, nil
+		}
+		// Second send: natural finish, truncated: dangling conjunction,
+		// no clamp.
+		if sends == 2 {
+			return fakeResp("I fixed the bug and", nil, 1, 5), false, nil
+		}
+		// Third send: the salvage re-ask (tools withheld) rewrites the
+		// answer.
+		return fakeResp("A clean, complete final answer.", nil, 1, 5), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "A clean, complete final answer." {
+		t.Errorf("content = %q, want the salvaged rewrite", content)
+	}
+	if sends != 3 {
+		t.Errorf("sends = %d, want 3 (tool round + truncated finish + salvage)", sends)
+	}
+	if stats.StopReason != "salvaged-finalize" {
+		t.Errorf("stop = %q, want salvaged-finalize", stats.StopReason)
+	}
+}
+
+// TestFinalizeLoopStripsMarkup covers the issue #230 fix in finalizeLoop
+// (forced finalize): a forced-finalize reply with leaked markup has it
+// stripped.
+func TestFinalizeLoopStripsMarkup(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	// The forced finalize reply carries leaked Hermes markup.
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		return fakeResp("Summary here.\n<function_calls>{\"name\": \"bash\", \"arguments\": {\"command\": \"ls\"}}</function_calls>", nil, 1, 5), false, nil
+	})
+	stats := &loopStats{StopReason: "max-iter", FinalizeForced: true}
+	content, _, err := finalizeLoop(context.Background(), send, req, "finalize prompt", stats, appendMsg, "")
+	if err != nil {
+		t.Fatalf("finalizeLoop: %v", err)
+	}
+	if content != "Summary here." {
+		t.Errorf("content = %q, want %q (markup stripped)", content, "Summary here.")
+	}
+	if hasToolCallMarkup(content) {
+		t.Error("content still carries tool-call markup after sanitization")
+	}
+}
+
+// TestFinalizeLoopMarkupOnlySalvagesEmpty covers the issue #230 fix in
+// finalizeLoop: a forced-finalize reply that is markup-only (no prose)
+// becomes empty after stripping, and the empty-salvage chain recovers it.
+func TestFinalizeLoopMarkupOnlySalvagesEmpty(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var sends int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		if sends == 1 {
+			// Forced finalize reply: markup only, no prose.
+			return fakeResp("<function_calls>{\"name\": \"bash\", \"arguments\": {\"command\": \"ls\"}}</function_calls>", nil, 1, 5), false, nil
+		}
+		// Empty-salvage re-ask: recovers the turn.
+		return fakeResp("Recovered summary.", nil, 1, 5), false, nil
+	})
+	stats := &loopStats{StopReason: "max-iter", FinalizeForced: true}
+	content, st, err := finalizeLoop(context.Background(), send, req, "finalize prompt", stats, appendMsg, "")
+	if err != nil {
+		t.Fatalf("finalizeLoop: %v", err)
+	}
+	if content != "Recovered summary." {
+		t.Errorf("content = %q, want %q (empty salvage after markup strip)", content, "Recovered summary.")
+	}
+	if !st.Salvaged {
+		t.Error("stats.Salvaged = false, want true (the empty salvage recovered the turn)")
+	}
+}

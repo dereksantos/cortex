@@ -171,6 +171,20 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 		return finalizeLoopFiring(spec, store, payload, strikes)
 	}
 
+	// Issue #230: a malformed final reply (empty, tool-call markup, or
+	// truncated) must not become a commit message — it would pollute git
+	// history with leaked markup, cut-off prose, or nothing at all. The
+	// engine's sanitizer already repaired what it could; this check catches
+	// the residue that survived. When the summary is malformed, skip the
+	// commit and record the issue on the journal payload so the defect is
+	// visible in the loop's run history.
+	if result.SummaryIssue != "" {
+		payload.Outcome = journal.LoopOutcomeFailed
+		payload.Reason = "malformed summary (" + result.SummaryIssue + ")"
+		payload.SummaryIssue = result.SummaryIssue
+		return finalizeLoopFiring(spec, store, payload, strikes)
+	}
+
 	if startErr == nil {
 		if clean, cleanErr := gitCleanIn(proj.Root); cleanErr == nil && !clean {
 			// The commit carries the attribution trailer only when attribution

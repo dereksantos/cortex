@@ -134,6 +134,18 @@ type TurnResult struct {
 	// out for the REPL (and any adapter) to print; a turn whose images all
 	// attached leaves it empty.
 	ImageNotes []string
+	// SummaryIssue (issue #230) names the defect in the turn's final reply
+	// that the engine's sanitizer could not repair: "empty" (the reply is
+	// blank after salvage), "markup" (the reply still carries tool-call
+	// markup after sanitization), or "truncated" (the reply looks cut off
+	// mid-sentence after sanitization). Non-empty only when the reply is
+	// malformed in a way the engine's in-loop repair could not fix — a
+	// reply the sanitizer successfully stripped or salvaged is clean and
+	// leaves this empty. The caller (RunLoopFiring, the commit step) reads
+	// this to decide whether the reply is safe to commit: a malformed
+	// summary would pollute git history with leaked markup, truncated
+	// prose, or nothing at all.
+	SummaryIssue string
 	// Receipt carries the measurement-only turn receipt (issue #219,
 	// step 1, turn_receipt.go): the workspace's `git diff --stat` block
 	// (when the workspace is a git repository), the exit codes of the
@@ -693,7 +705,21 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		cs.transcriptNote("turn receipt:\n" + rendered)
 	}
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), LastError: stats.LastError, Redactions: cs.redactions, ImageNotes: imageNotes}, nil
+	// Issue #230: detect a final reply the engine's sanitizer could not
+	// repair — empty, still carrying tool-call markup, or truncated. The
+	// engine's in-loop repair (sanitizeFinalAnswer) already stripped
+	// recoverable markup and salvaged recoverable truncation; what's left
+	// here is the residue that the commit step must not write to git
+	// history.
+	summaryIssue := ""
+	if content == "" {
+		summaryIssue = "empty"
+	} else if hasToolCallMarkup(content) {
+		summaryIssue = "markup"
+	} else if looksTruncated(content) {
+		summaryIssue = "truncated"
+	}
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), LastError: stats.LastError, Redactions: cs.redactions, ImageNotes: imageNotes, SummaryIssue: summaryIssue}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from
