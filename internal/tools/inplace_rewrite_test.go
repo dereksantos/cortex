@@ -15,6 +15,11 @@ import (
 // — and only those. Plain reads are NOT rewrite targets (they are named by
 // detectShellReads; see TestDetectReadPathsForm), so a plain `cat`/`sed -n`
 // names nothing here.
+//
+// DETECTOR TABLE ONLY: the command strings below are PARSED by
+// detectInPlaceRewrites, never executed — the bare `sed -i` shapes are
+// exactly what this detector must recognize (issue #228 keeps the EXECUTED
+// forms portable; see shell_portability_test.go).
 func TestDetectInPlaceRewrites(t *testing.T) {
 	cases := []struct {
 		name string
@@ -23,7 +28,7 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 	}{
 		{"sed -i single file", `sed -i 's/foo/bar/g' internal/tools/attribution.go`, []string{"internal/tools/attribution.go"}},
 		{"sed -i with -e script", `sed -i -e 's/a/b/' f.go g.go`, []string{"f.go", "g.go"}},
-		{"sed -i backup suffix form", `sed -i.bak 's/x/y/' f.go`, []string{"f.go"}},
+		{"sed -i backup suffix form (portable across GNU/BSD sed — issue #228)", `sed -i.bak 's/x/y/' f.go`, []string{"f.go"}},
 		{"sed --in-place", `sed --in-place 's/x/y/' f.go`, []string{"f.go"}},
 		{"sed without -i only reads", `sed -n '2,4p' f.go`, nil},
 		{"ed in-place", `ed -s f.go`, []string{"f.go"}},
@@ -84,6 +89,11 @@ func TestDetectInPlaceRewrites(t *testing.T) {
 // raw path) catches a regression that re-labels a read as a rewrite — the
 // note that steers to read_file/outline/grep is keyed on this form, and the
 // post-edit hook must only ever run on the REWRITE set.
+//
+// DETECTOR TABLE ONLY: the command strings below are PARSED by
+// detectShellReads, never executed — the bare `sed -i` shapes are exactly
+// what this detector must recognize (issue #228 keeps the EXECUTED forms
+// portable; see shell_portability_test.go).
 func TestDetectReadPathsForm(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -596,7 +606,7 @@ func TestBashInPlaceRewriteNoteEndToEnd(t *testing.T) {
 		cmd      string
 		wantSubs []string
 	}{
-		{"sed -i note appended on success", `sed -i 's/x/y/' /tmp/does-not-matter.go && true`, []string{
+		{"sed -i note appended on success", `sed -i.bak 's/x/y/' /tmp/does-not-matter.go && true`, []string{
 			"note: this command rewrites file(s) in place:",
 			"/tmp/does-not-matter.go",
 			"edit_file",
@@ -662,7 +672,7 @@ func TestBashReadNoteEndToEnd(t *testing.T) {
 		// A read followed by a REWRITE of the same file: the rewrite wins the
 		// dedup, so the result carries the REWRITE note and no read note for
 		// that file.
-		{"read then rewrite of the same file: rewrite note only", `cat /tmp/f209.go && sed -i 's/x/y/' /tmp/f209.go && true`, []string{
+		{"read then rewrite of the same file: rewrite note only", `cat /tmp/f209.go && sed -i.bak 's/x/y/' /tmp/f209.go && true`, []string{
 			"note: this command rewrites file(s) in place:",
 			"/tmp/f209.go",
 		}},

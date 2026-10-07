@@ -459,6 +459,7 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 - Assertions via `t.Errorf` / `t.Fatalf` / `t.Fatal` — no testify/assert.
 - Table-driven tests with `t.Run` subtests.
 - Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
+- Tests that EXECUTE shell commands must use forms portable across GNU and BSD (macOS) tools — e.g. `sed -i.bak 's/x/y/' f` instead of bare `sed -i 's/x/y/' f` (BSD sed reads the next argument as a backup suffix; #228, `internal/tools/shell_portability_test.go` guards this).
 
 Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
 
