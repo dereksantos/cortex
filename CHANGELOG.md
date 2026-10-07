@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Locate-before-writing accountability (#224): a new built-in principle
+  (`locateBeforeWritingPrinciple` in `cmd/cortex/prompt.go`) tells the model
+  that before writing code naming a helper, constant, type or path it has not
+  seen this session, it must grep or outline for it and use what exists —
+  never invent identifiers, type shapes, or file paths — and that before
+  adding a new package-level name (a test helper, a const, a fixture) it must
+  grep the package, including its other `_test.go` files, so the name exists
+  where it is called and does not collide with one already declared. It is
+  the writing half of the locate-first principle (#142), which until now was
+  applied to reading but not to writing: the self-dev loop's tick
+  20261006T074738Z reviews (PRs #222/#223) found sessions writing test files
+  against guessed identifiers (seven undefined at once), carrying a
+  type-shape compile error from one session into the next, and duplicating a
+  package-level const — each guess costing a build-and-fix round. It rides in
+  the base system prompt right after `locateFirstPrinciple` (so every turn
+  sees it, including the self-dev loop's ordinary step turns) and is restated
+  in each plan step prompt, where new files actually get written and
+  turn-boundary demotion can otherwise fold the locate work out of view.
+  Mirrored verbatim in `CLAUDE.md`'s "The agent's tools" section, and pinned
+  by content, position, plan-step-carry, and mirror tests.
 - Review-feedback accountability (#162): a new built-in principle
   (`reviewFeedbackPrinciple` in `cmd/cortex/prompt.go`) tells the model that
   every finding a review raises is owed an explicit disposition — addressed,

@@ -549,6 +549,17 @@ func noReproNote(reply string) string {
 // pinned, so the standing principle rides with every step (same const the
 // base system prompt carries).
 //
+// And it restates the locate-before-writing principle
+// (locateBeforeWritingPrinciple, issue #224): a step turn is where new code —
+// mostly test files — actually gets written, and turn-boundary demotion can
+// fold the sessions' earlier grep/outline work out of the window, leaving the
+// step to write against helpers, type shapes and paths it assumes exist. The
+// tick 20261006T074738Z reviews are the case: one step wrote seven undefined
+// identifiers at once and another carried a type-shape compile error from the
+// previous session's step. The standing principle (same const the base system
+// prompt carries) rides with every step so the locate-before-writing half of
+// the guidance survives demotion.
+//
 // earlierNotes are the DONE steps' notes in order (skipped when empty): an
 // earlier step's no-repro note (issue #178) must reach a later step, so a
 // "fix it" step knows the bug never reproduced instead of running blind and
@@ -556,8 +567,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, noReproMarker,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, locateBeforeWritingPrinciple, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)

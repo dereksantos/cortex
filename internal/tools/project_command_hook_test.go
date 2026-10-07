@@ -488,10 +488,14 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	writeRepoFile(t, filepath.Join(root, "go.mod"), "module t\n\ngo 1.26\n")
-	content := "package main\n\nfunc main() {\n  x :=    1\n}\n"
+	// A markdown file, not a .go file: the #224 write-sanity note is the one
+	// other post-write observation that can append, and it is Go-only —
+	// using it here would blur this test's claim (no HOOK note) with the
+	// sanity pass's own contract (writesanity_test.go).
+	content := "# heading\n\nsome text\n"
 
 	outHeadless, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "a.go", "content": content}), headlessDeps{})
+		map[string]any{"path": "a.md", "content": content}), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,16 +504,16 @@ func TestPostEditHookNoCommandsIsNoop(t *testing.T) {
 	}
 
 	outEmpty, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
-		map[string]any{"path": "b.go", "content": content}), hookDeps{cmds: projectcmd.Commands{}, trusted: true})
+		map[string]any{"path": "b.md", "content": content}), hookDeps{cmds: projectcmd.Commands{}, trusted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Both results must be the bare "wrote N bytes to PATH" with NO hook note
 	// appended — an empty Commands adds nothing.
-	if outHeadless != "wrote 42 bytes to a.go" {
+	if outHeadless != "wrote 21 bytes to a.md" {
 		t.Errorf("headless write_file result changed, got %q", outHeadless)
 	}
-	if outEmpty != "wrote 42 bytes to b.go" {
+	if outEmpty != "wrote 21 bytes to b.md" {
 		t.Errorf("empty-Commands write_file should add no note, got %q", outEmpty)
 	}
 }

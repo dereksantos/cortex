@@ -248,6 +248,19 @@ the model-driven memory tools
 
   Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers.
 
+  The built-in system prompt also carries the writing half of that principle
+  (issue #224) as `locateBeforeWritingPrinciple`, spliced right after the
+  locate-first line and mirrored here verbatim (the same drift tripwire):
+
+  Locate before writing. Before writing code that names a helper, constant, type or path you have not seen in this session, grep or outline for it and use what actually exists — never invent identifiers, type shapes, or file paths; a name that is not there comes back undefined. Before adding a new package-level name (a test helper, a const, a fixture), grep the package (including its other _test.go files) so the name exists where you call it and does not collide with one already declared; checking first costs one tool call, a guessed name costs a build-and-fix round per guess.
+
+  It answers the self-dev loop's tick 20261006T074738Z: new code (mostly test
+  files) was written against helpers, type shapes and paths that were never
+  located (seven undefined identifiers at once; a compile error carried from
+  one session to the next; a duplicated package-level const). It rides in the
+  base system prompt and is restated in each plan step prompt (where new
+  files actually get written and demotion can fold the locate work away).
+
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton. An
   image file (png/jpeg/gif/webp, by extension or magic bytes) read whole

@@ -37,6 +37,8 @@ Test integrity. Removing or changing an existing test to make a failing build pa
 
 ` + locateFirstPrinciple + `
 
+` + locateBeforeWritingPrinciple + `
+
 Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
 
 # How you communicate
@@ -64,6 +66,31 @@ const debugWorkingStylePrinciple = "Debug carefully. Check every error in test a
 // The bash ban covers both READS (cat/sed/head) and CREATES (cat > f,
 // heredocs, tee, /tmp scratch), steering to the dedicated tools.
 const locateFirstPrinciple = "Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers."
+
+// locateBeforeWritingPrinciple is the issue #224 locate-before-writing
+// working-style principle — a const so CLAUDE.md mirrors the EXACT same text
+// (the docs describe the guidance the model actually receives, so the two
+// can't drift apart — the same mirror pattern as locateFirstPrinciple and
+// reviewFeedbackPrinciple). It is spliced into SystemPrompt right after
+// locateFirstPrinciple (see the ` + locateBeforeWritingPrinciple + ` above),
+// keeping it in the "# How you work" block.
+//
+// It exists because locate-first was applied to READING but not to WRITING:
+// the self-dev loop's reviews of its own sessions (tick 20261006T074738Z,
+// PRs #222/#223) found new code — mostly test files — written against
+// helpers, constants, type shapes and file paths that were never grepped or
+// outlined for (seven undefined identifiers at once in one session; a
+// compile error carried from one session into the next; a package-level const
+// duplicated because the existing name was never checked for). Each guessed
+// name costs a build-and-fix round; checking first costs one tool call.
+//
+// Deliberately a principle, not a recipe: no tool-call sequences, no list of
+// incident identifiers — the tick specifics (itoa, okResponse, FinishReason)
+// were the incidents, not the guidance. The phrasing "a name that is not
+// there comes back undefined" carries the issue's undefined-identifier class
+// in words the rest of the prompt never uses, so the pinning test can
+// absence-check it (TestDefaultPromptEncodesLocateBeforeWriting).
+const locateBeforeWritingPrinciple = "Locate before writing. Before writing code that names a helper, constant, type or path you have not seen in this session, grep or outline for it and use what actually exists — never invent identifiers, type shapes, or file paths; a name that is not there comes back undefined. Before adding a new package-level name (a test helper, a const, a fixture), grep the package (including its other _test.go files) so the name exists where you call it and does not collide with one already declared; checking first costs one tool call, a guessed name costs a build-and-fix round per guess."
 
 // verifyBeforeFixPrinciple is the issue #178 verify-before-fix principle —
 // a const so every surface that restates the same idea (the planning
