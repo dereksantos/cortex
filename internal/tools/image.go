@@ -113,6 +113,13 @@ func detectImage(displayPath string, data []byte) (string, bool) {
 	return mt, ok
 }
 
+// SniffImageBytes reports the MIME type the leading bytes of data magic-
+// sniff to ("" for anything unsupported), using the one sniffer read_file
+// uses (#217). A caller that already holds bytes — an HTTP response body, an
+// uploaded payload — can ask the same question with the same answer instead
+// of writing a second copy of the four signatures.
+func SniffImageBytes(data []byte) string { return sniffImageBytes(data) }
+
 // sniffImageBytes magic-sniffs the four supported formats: PNG's 8-byte
 // signature, JPEG's SOI marker, GIF87a/GIF89a headers, and WEBP's
 // "RIFF"???"WEBP" container (RIFF + 4-byte size + FourCC).
@@ -132,6 +139,18 @@ func sniffImageBytes(data []byte) string {
 	return ""
 }
 
+// imagePartMarker is the observation text that stands in for an image's
+// bytes wherever a string is needed (the transcript, the journal, a
+// resumed session): reference, MIME type, byte size, and the per-image
+// token estimate the context math books. read_file names the path it
+// resolved (#217); a turn attachment names the reference the human typed
+// (#218). Both come through this one function, so the two attachment paths
+// can never disagree about what the line says.
+func imagePartMarker(displayName, mediaType string, data []byte) string {
+	return fmt.Sprintf("%s%s %s %d bytes ≈%d tokens attached as an image part]",
+		imageObservationPrefix, displayName, mediaType, len(data), ImageTokensOf(len(data)))
+}
+
 // imagePartFor turns a detected image's bytes into the ImagePart (a
 // canonical base64 data URI) plus the short observation text that stands
 // in for it in the transcript: path, MIME type, byte size, and the
@@ -140,11 +159,33 @@ func imagePartFor(path, mediaType string, data []byte) (ImagePart, string) {
 	part := ImagePart{
 		MediaType: mediaType,
 		Path:      path,
-		DataURI:   "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data),
+		DataURI:   ImageDataURIFor(mediaType, data),
 	}
-	obs := fmt.Sprintf("%s%s %s %d bytes ≈%d tokens attached as an image part]",
-		imageObservationPrefix, path, mediaType, len(data), ImageTokensOf(len(data)))
-	return part, obs
+	return part, imagePartMarker(path, mediaType, data)
+}
+
+// ImageDataURIFor is the one place the canonical OpenAI data URI is
+// assembled — read_file's part (#217) and a turn attachment (#218) share
+// it, so a part either path produces is byte-shaped the same way. An empty
+// media type yields "" (there is nothing to name the payload with).
+func ImageDataURIFor(mediaType string, data []byte) string {
+	if mediaType == "" {
+		return ""
+	}
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+// ImageMarkerFor is the observation line for an image named by a reference
+// a human typed (#218): the same shape read_file emits (#217), with the
+// reference as written in place of a resolved path. filepath.Base is
+// deliberately not applied — a mention of `shots/ui.png` keeps its
+// directory, which is what makes it findable again. It is what an attach
+// site shows and what its context booking reads, so the two cannot drift.
+func ImageMarkerFor(displayRef, mediaType string, data []byte) string {
+	if displayRef == "" || mediaType == "" {
+		return ""
+	}
+	return imagePartMarker(displayRef, mediaType, data)
 }
 
 // IsImageObservation reports whether a tool observation is read_file's

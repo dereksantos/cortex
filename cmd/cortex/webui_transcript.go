@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // transcriptToolCall is one tool invocation carried by an assistant entry.
@@ -24,12 +26,32 @@ type transcriptToolCall struct {
 }
 
 // transcriptEntry is one rendered turn in the session transcript.
+// transcriptImage is one image a message carries (#218), described rather
+// than embedded: the transcript's JSON never holds image bytes (the wire-only
+// Parts field is skipped by its codec), so the view-model reports what the
+// image IS — a remote address it can show, or a name for a local attachment
+// whose bytes stay in the session — and the web UI decides how to present it.
+type transcriptImage struct {
+	// URL is a loadable address when the image part carries one (http(s) or an
+	// inline data: URI); empty for a local file attachment.
+	URL string `json:"url,omitempty"`
+	// Name is the reference the attachment carries (a workspace path, an
+	// address, an uploaded filename) — display text only.
+	Name string `json:"name,omitempty"`
+	// MediaType is the image's declared type.
+	MediaType string `json:"media_type,omitempty"`
+}
+
 type transcriptEntry struct {
 	Turn       int                  `json:"turn"`
 	Role       string               `json:"role"`
 	Content    string               `json:"content"`
 	ToolCalls  []transcriptToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string               `json:"tool_call_id,omitempty"`
+	// Images lists any images attached to this message (#218) so the session
+	// screen can show that a turn carried a screenshot instead of dropping it
+	// to a marker string the reader cannot see past.
+	Images []transcriptImage `json:"images,omitempty"`
 }
 
 // transcriptViewModel is the full session transcript screen.
@@ -76,9 +98,75 @@ func buildTranscriptViewModel(path string) (transcriptViewModel, error) {
 				Args: tc.Function.Arguments,
 			})
 		}
+		e.Images = transcriptImagesFor(m)
 		vm.Entries = append(vm.Entries, e)
 	}
 	return vm, nil
+}
+
+// transcriptImagesFor describes the images attached to one transcript message
+// (#218).
+//
+// It reads the message's MARKER TEXT, not its wire Parts, because the marker
+// is the part that actually survives into the transcript: Parts is `json:"-"`
+// on the wire type (transport.go), so a reloaded transcript holds only
+// read_file's / an attachment's short `[image:…]` observation. Deriving the
+// list from anything else would make the session screen's image display work
+// in-process and come up empty after a restart — the exact split this
+// view-model exists to avoid.
+//
+// Markers are found by scanning rather than by tools.IsImageObservation,
+// deliberately: that predicate answers "is this WHOLE observation an image
+// result", which the splice and side-car paths in image_input.go depend on,
+// and loosening it to a substring test would change what those attach. Here a
+// marker may sit inside surrounding prose, so the scan is the right question,
+// and a message can carry more than one.
+//
+// A marker names a reference and a media type, never bytes, so a local
+// attachment gets no loadable URL and the web UI shows it as a labelled
+// attachment (session.js) — which is what the record honestly supports.
+func transcriptImagesFor(m Message) []transcriptImage {
+	const open = "[image:"
+	rest := m.Content
+	var out []transcriptImage
+	for {
+		i := strings.Index(rest, open)
+		if i < 0 {
+			return out
+		}
+		body := rest[i+len(open):]
+		end := strings.Index(body, "]")
+		if end < 0 {
+			return out
+		}
+		if img, ok := parseTranscriptImageMarker(body[:end]); ok {
+			out = append(out, img)
+		}
+		rest = body[end+1:]
+	}
+}
+
+// parseTranscriptImageMarker reads one marker's body — "ref mediaType N bytes
+// ≈M tokens attached as an image part" — into a transcriptImage. ok is false
+// when there is no reference at all, so an empty or truncated marker yields no
+// entry rather than an image named "".
+func parseTranscriptImageMarker(body string) (transcriptImage, bool) {
+	fields := strings.Fields(body)
+	if len(fields) == 0 {
+		return transcriptImage{}, false
+	}
+	img := transcriptImage{Name: fields[0]}
+	// The media type is the only field containing "/", so a marker that omits
+	// it (or an older shape) still resolves to its reference.
+	if len(fields) > 1 && strings.Contains(fields[1], "/") {
+		img.MediaType = fields[1]
+	}
+	if addr, ok := tools.ImageURL(img.Name); ok {
+		// A remote address is loadable in the browser directly, so the UI can
+		// show the image itself rather than only its name.
+		img.URL = addr
+	}
+	return img, true
 }
 
 // sessionIDFromPath derives a session id from its transcript file path

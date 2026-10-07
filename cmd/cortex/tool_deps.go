@@ -489,12 +489,31 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 		b.WriteString(msg.Role)
 		b.WriteString("\n")
 		b.WriteString(msg.Content)
-		if strings.HasPrefix(msg.Content, tools.ImageObservationMarker()) {
-			// An image result demoted as its short marker text (#217): the
-			// bytes live on disk beside the transcript (the dispatcher's
-			// side-car, one file per message index) — recall names the file
-			// so the model can read it again (or hand it to a tool) instead
-			// of getting a marker with no image behind it.
+		// An image attached to the conversation gets its bytes named, not just
+		// hinted at (#217: a read_file result demoted to its short marker text;
+		// #218: a turn's own user message). The bytes live on disk beside the
+		// transcript, one file per message index and slot.
+		//
+		// Two lookups, because the two cases leave different traces in the
+		// transcript text. A read_file result's CONTENT is the marker, so the
+		// prefix identifies it. A turn's user message is the human's input
+		// verbatim — deliberately unannotated, so nothing in its text says an
+		// image rode with it — and is found by its manifest instead, which also
+		// names which reference each file came from. The manifest is checked
+		// FIRST and purely by index: the messages here were reloaded from disk
+		// and carry no wire Parts, so a Parts test would never fire.
+		if entries := readTurnImageManifest(cs.SessionsDir(), id, abs); len(entries) > 0 {
+			b.WriteString(" (image bytes on disk: ")
+			for i, e := range entries {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(e.Ref + " -> " + e.Path)
+			}
+			b.WriteString(")")
+		} else if strings.HasPrefix(msg.Content, tools.ImageObservationMarker()) {
+			// Recall names the file so the model can read it again (or hand it
+			// to a tool) instead of getting a marker with no image behind it.
 			if p, ok := imagePathForMsg(cs.SessionsDir(), id, abs); ok {
 				b.WriteString(" (image bytes on disk: " + p + ")")
 			} else {

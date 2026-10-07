@@ -1296,10 +1296,15 @@ func imageReadResult(deps ToolDeps, path, mediaType string, data []byte) (string
 	return obs, nil
 }
 
-// isImagePath reports whether a file looks like an image by extension or
+// IsImagePath reports whether a file looks like an image by extension or
 // by magic bytes in its first block (the ranged-read refusal probe —
 // cheap, and it must not read a whole multi-MB file just to ask).
-func isImagePath(displayPath, fsPath string) bool {
+//
+// Exported for #218: the @mention loader asks the same question before
+// deciding whether to load a mentioned file as an image part or attach it as
+// text, and one probe is the point — a private copy of the extension table
+// in the caller is how the two paths drift apart.
+func IsImagePath(displayPath, fsPath string) bool {
 	if _, ok := imageMediaTypes[strings.ToLower(filepath.Ext(displayPath))]; ok {
 		return true
 	}
@@ -1312,6 +1317,10 @@ func isImagePath(displayPath, fsPath string) bool {
 	n, _ := io.ReadFull(f, buf)
 	return sniffImageBytes(buf[:n]) != ""
 }
+
+// isImagePath is the package-internal spelling, kept so the ranged-read
+// refusal site reads as it always did.
+var isImagePath = IsImagePath
 
 // imageExtType resolves the MIME type a refusal should name for a path
 // already known to be an image; a magic-only file with an unknown
