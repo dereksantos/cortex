@@ -383,9 +383,11 @@ func finalizePromptFor(stop string, style FinalizeStyle) string {
 // 2026-08-07 polyglot confabulation).
 const reFinalizePrompt = "Your previous reply was empty. Without calling tools, give your final answer now in at most five sentences. Describe only what you actually completed — if any of the work is unfinished, say so plainly rather than presenting it as done."
 
-// rewriteClampedPrompt is the salvage ask when a model DID answer, but only by
-// running into the completion ceiling. That answer is usually verbose and fails
-// the eval's runaway tripwire; ask for a compact rewrite, then mark the run
+// rewriteClampedPrompt is the salvage ask when a model DID answer, but only
+// by running into the completion ceiling — or, since issue #230, when the
+// (sanitized) answer merely LOOKS cut off mid-sentence (a truncation that
+// never hit the token count). That answer is usually verbose and fails the
+// eval's runaway tripwire; ask for a compact rewrite, then mark the run
 // salvaged if the rewrite succeeds.
 //
 // The honesty clause is not decoration. This prompt was written for the study
@@ -404,7 +406,7 @@ const reFinalizePrompt = "Your previous reply was empty. Without calling tools, 
 // changes into the tree — a worse failure than the one being fixed. Telling the
 // truth about what happened is safe on every turn; telling the model to edit is
 // not.
-const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewrite it now as a concise final answer in at most five sentences. Describe only what you actually completed — never present work you did not finish as done. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
+const rewriteClampedPrompt = "Your previous reply was cut off before it finished. Rewrite it now as a concise final answer in at most five sentences. Describe only what you actually completed — never present work you did not finish as done. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
 
 // runLoop is THE engine. It iterates send → dispatch → re-send until the model
 // answers with no tool calls (clean finalize) or a bound trips, then finalizes
@@ -500,7 +502,12 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// Recover tool calls the model wrote into its text instead of
 		// emitting as structured tool_calls (Qwen XML or Hermes
 		// <function_calls> tags), so a call isn't silently lost (empty
-		// tool_calls reads as a final answer).
+		// tool_calls reads as a final answer). A repeated batch — the
+		// model re-emitting the same call it already ran — goes through
+		// the no-progress guard below, exactly as a structured batch would:
+		// the guard nudges on the penultimate repeat and finalizes on the
+		// next, so a model that legitimately re-issues a call gets a chance
+		// to change course before the loop ends.
 		recoverTextToolCalls(&msg)
 		// This round's assistant message is appended at the dispatch point
 		// below (before any tool results) — UNLESS it's an empty natural finish
@@ -530,6 +537,10 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// qualifies.
 		retryableEmptyFinish := finishedNaturally && strings.TrimSpace(msg.Content) == "" && req.Effort.Level != llm.EffortOff
 		if finishedNaturally {
+			// Parseable tool-call markup in a round is already recovered into
+			// tool calls by recoverTextToolCalls above, so a natural finish is
+			// just trimmed here; the salvage chain then judges the trimmed
+			// answer (empty, truncated).
 			answer := strings.TrimSpace(msg.Content)
 			if retryableEmptyFinish {
 				// Issue #149: an empty finish from a role whose reasoning is on
@@ -638,7 +649,11 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 					req.Tools = ts.Tools
 					return "", stats, nil
 				}
-				if answer != "" && stats.MaxTokensClamped {
+				// The clamped salvage runs when the (sanitized) answer hit the
+				// token ceiling OR looks cut off mid-sentence (issue #230: a
+				// truncation that arrived unclamped by token count, e.g. the
+				// recorded "Let me restate my complete final" case).
+				if (stats.MaxTokensClamped || looksTruncated(answer)) && !stats.Salvaged {
 					if a2 := salvageClampedFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
 						req.Tools = ts.Tools
 						return a2, stats, nil
@@ -659,6 +674,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// off-retry recovered above (replacing the dropped empty message) — and
 		// the assistant message must be on the wire before any tool results (the
 		// API ordering invariant).
+		// Issue #230: a structured tool round whose content ALSO carries
+		// leaked tool-call markup (the 082119.jsonl:281 shape) has the markup
+		// stripped from the content before the message is appended, so the
+		// transcript never replays the raw markup on resume. The structured
+		// calls are dispatched as normal — only the content is cleaned.
+		if len(msg.ToolCalls) > 0 && hasToolCallMarkup(msg.Content) {
+			msg.Content = strings.TrimSpace(stripToolMarkup(msg.Content))
+		}
 		appendMsg(msg)
 
 		sig := toolCallSignature(msg.ToolCalls)
@@ -885,7 +908,16 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 	accountUsage(stats, res, req.MaxTokens)
 	msg := res.Choices[0].Message
 	appendMsg(msg)
-	answer := strings.TrimSpace(msg.Content)
+	// Issue #230: sanitize the reply at the SOURCE — strip leaked tool-call
+	// markup (a "clean" reply that is really raw <tool_call>
+	// or <function_calls> markup) and use the SANITIZED answer to decide
+	// which repair is needed: a markup-only reply reads as "" and gets the
+	// empty-salvage chain (below), a truncated reply gets the clamped
+	// salvage. The salvage output is sanitized too, so no salvage path ships
+	// raw markup. The receipt at the end of this function still reads the
+	// RAW reply (see there) — it needs the markup to report the withheld
+	// call.
+	answer := sanitizeFinalAnswer(msg.Content)
 	// Not gated on MaxTokensClamped — see runLoop's empty-answer branch above.
 	if answer == "" {
 		wasClamped := stats.MaxTokensClamped
@@ -900,12 +932,50 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 			}
 		}
 	}
-	if answer != "" && stats.MaxTokensClamped && !stats.Salvaged {
-		if a2 := salvageClampedFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
+	// The clamped salvage runs when the (sanitized) answer looks cut off
+	// mid-sentence OR hit the token ceiling. The recorded "Let me restate my
+	// complete final" truncation (issue #230) often arrives unclamped by
+	// token count, so MaxTokensClamped alone misses it. !stats.Salvaged keeps
+	// the existing "salvage once" bound: a recovery by the empty salvage
+	// above already set Salvaged, so this won't re-ask.
+	if answer != "" && (stats.MaxTokensClamped || looksTruncated(answer)) && !stats.Salvaged {
+		if a2 := sanitizeFinalAnswer(salvageClampedFinalize(ctx, send, req, stats, appendMsg)); a2 != "" {
 			answer = a2
 		}
 	}
-	return reportWithheldToolCalls(answer), *stats, nil
+	// The forced-wrap-up receipt (issue #132) must see the reply that CARRIES
+	// the withheld call — the raw first reply, since a salvage re-ask is a
+	// clean re-answer and never re-emits the call. reportWithheldToolCalls
+	// turns any tool-call markup in it into the "Intended action not
+	// executed" receipt, stripping the markup from the prose it returns;
+	// passing it the SANITIZED reply instead would hand it markup-free text
+	// and silently drop the receipt — the model's intended action (a bash it
+	// never ran) would vanish from the answer.
+	if !stats.Salvaged {
+		return reportWithheldToolCalls(msg.Content), *stats, nil
+	}
+	// A successful salvage (empty or clamped) re-answered the turn, so the
+	// fresh answer stands as the reply — but a salvage fired on a reply that
+	// also CARRIED a withheld call (the issue #230 truncation trigger fires
+	// on markup-laden replies too: the sanitized prose ends mid-sentence
+	// while the model "reached for" a tool it could not run). The #132
+	// receipt still leads: the withheld call must not vanish with the
+	// salvage, and the raw reply's own prose is a stale duplicate of the
+	// fresh re-answer, so the composition is the receipt lines (markup-free)
+	// followed by the salvaged answer.
+	if hasToolCallMarkup(msg.Content) {
+		var receipt []string
+		for _, line := range strings.Split(reportWithheldToolCalls(msg.Content), "\n") {
+			if !strings.HasPrefix(line, "Intended action not executed") && strings.TrimSpace(line) != "" {
+				break // the prose section begins; keep only the receipt lines
+			}
+			receipt = append(receipt, line)
+		}
+		if len(receipt) > 0 {
+			answer = strings.Join(append(receipt, answer), "\n")
+		}
+	}
+	return answer, *stats, nil
 }
 
 // reportWithheldToolCalls is the forced-wrap-up half of issue #132's text
@@ -1098,6 +1168,109 @@ func recoverTextToolCalls(msg *Message) {
 		msg.ToolCalls = calls
 		msg.Content = stripToolMarkup(msg.Content)
 	}
+}
+
+// hasToolCallMarkup reports whether the content carries tool-call markup —
+// the Qwen-native <tool_call> shape or Hermes-style <function_calls> tags
+// (issue #230). Used by the finalize sanitizers to detect a reply that
+// leaked raw markup into the final answer, which would end up in a commit
+// message or a turn receipt if left unstripped.
+func hasToolCallMarkup(content string) bool {
+	return len(parseToolCallsFromContent(content)) > 0
+}
+
+// looksTruncated reports whether the answer looks cut off mid-sentence
+// (issue #230). The check is intentionally conservative — it fires only on
+// a clear mid-sentence cutoff pattern, not on every non-sentence-ending
+// character, so a reply that ends with a letter (a common, natural ending
+// for a terse answer) is not flagged. The rules, in order:
+//
+//  1. The answer (trimmed) is empty, or its last byte is a
+//     sentence-ending character ('.', '!', '?', ')', ']', '}', '"',
+//     '\”, '`'), or a mid-sentence punctuation mark (',', ';', ':',
+//     '-') — not truncated.
+//  2. The trailing run of letters (the last word, lowercased) is one of
+//     the dangling words below — truncated. These are conjunctions,
+//     prepositions, relative pronouns, and articles/possessives that
+//     dangle at the end of a sentence: "and", "or", "but", "to", "in",
+//     "on", "at", "by", "for", "with", "from", "that", "which", "who",
+//     "whom", "whose", "the", "my", "a", "an", "of", "if".
+//  3. Otherwise — not truncated.
+//
+// This is a heuristic, not a proof: a reply that ends mid-sentence but
+// doesn't match the dangling-word list (e.g. ends with a noun) is not
+// flagged.
+func looksTruncated(answer string) bool {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return false
+	}
+	last := answer[len(answer)-1]
+	// A reply that ends with a sentence-ending character is not truncated.
+	switch last {
+	case '.', '!', '?', ')', ']', '}', '"', '\'', '`':
+		return false
+	}
+	// A reply that ends with a mid-sentence punctuation mark (comma,
+	// semicolon, colon, hyphen) is suspicious but not conclusive — the
+	// model may have intended a list or a dash-separated aside.
+	switch last {
+	case ',', ';', ':', '-':
+		return false
+	}
+	// Extract the last word (the trailing run of letters).
+	i := len(answer) - 1
+	for i >= 0 && isLetter(answer[i]) {
+		i--
+	}
+	lastWord := strings.ToLower(answer[i+1:])
+	if lastWord == "" {
+		return false
+	}
+	// A dangling conjunction, preposition, relative pronoun, or
+	// article/possessive: the sentence was clearly going to continue.
+	switch lastWord {
+	case "and", "or", "but", "to", "in", "on", "at", "by", "for",
+		"with", "from", "that", "which", "who", "whom", "whose",
+		"the", "my", "a", "an", "of", "if":
+		return true
+	}
+	return false
+}
+
+// isLetter reports whether c is an ASCII letter (lowercase or uppercase).
+func isLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// sanitizeFinalAnswer is the issue #230 fix for the finalize path: it strips
+// leaked tool-call markup (Qwen <tool_call> or
+// Hermes <function_calls> tags) from a final answer — the markup is never a
+// valid part of a reply, it is a leaked internal representation that would
+// otherwise ship into a commit message or turn receipt. The result is the
+// trimmed content with every parseable tool-call block removed; "" when the
+// answer was markup-only (nothing left after the strip).
+//
+// It is PURE — no send, no salvage. The repair for what it leaves behind is
+// the caller's existing bounded salvage chain, consulted ONCE on the
+// sanitized answer:
+//   - "" (a truly empty or markup-only answer) → salvageEmptyFinalize /
+//     salvageObservationFinalize, exactly as a bare empty finish gets.
+//   - a non-empty answer that looksTruncated → the clamped salvage
+//     (salvageClampedFinalize), which rewrites it as a concise final answer.
+//
+// Sanitizing at the SOURCE (the reply just received) — rather than after the
+// salvages — is what keeps the repair bounded: the salvage chains see the
+// sanitized answer and make their single, usual decision, so a markup-only or
+// truncated reply gets exactly one re-ask, never a second one layered on top.
+func sanitizeFinalAnswer(answer string) string {
+	if answer == "" {
+		return ""
+	}
+	if !hasToolCallMarkup(answer) {
+		return strings.TrimSpace(answer)
+	}
+	return strings.TrimSpace(stripToolMarkup(answer))
 }
 
 // retryText reports a retry message's trimmed content ("" when it carries
