@@ -355,8 +355,8 @@ func TestPlanStepPromptsCarryNoChecklist(t *testing.T) {
 		t.Fatalf("recorded prompts = %d, want 3 (one planning + two step)", len(users))
 	}
 	// THE point: each STEP's user message on the wire carries the overall
-	// task (planStepPrompt's whole-task echo) but NOT the checklist section
-	// or the per-item accounting principle.
+	// task (the "Overall task:" line in planStepPrompt's prompt) but NOT the
+	// checklist section or the per-item accounting principle.
 	for i, name := range []string{"step 1", "step 2"} {
 		if !strings.Contains(users[i+1], "Overall task:") {
 			t.Errorf("%s prompt must carry the overall task:\n%s", name, users[i+1])
@@ -764,6 +764,79 @@ func TestTurnWithPlanNoReproNoteSurvivesFailingBaseline(t *testing.T) {
 	step2 := backend.lastUserMessages()[2]
 	if !strings.Contains(step2, "Earlier steps:") || !strings.Contains(step2, "not reproduced") {
 		t.Errorf("step 2's prompt must carry step 1's no-repro note:\n%s", step2)
+	}
+}
+
+// TestTurnWithPlanChecklistReceiptMeasuresOnFailedStep is the issue #220
+// step-3 NEGATIVE path: a plan run whose task carries a checklist and whose
+// FIRST STEP FAILS ITS POST-STEP CHECK still measures the run's checklist
+// account — the run stops at the failed step, yet the item NO step's text or
+// note names (here, a third item the model never planned a step for) is
+// reported missing on PlanRunResult.Receipt. The point the test pins: the
+// measurement rides the run's DEFERRED STAMP, which every return path goes
+// through — a failed run (the run most in need of the fact) cannot skip it,
+// mirroring the plain-turn rule in turn.go, which measures before the error
+// return.
+func TestTurnWithPlanChecklistReceiptMeasuresOnFailedStep(t *testing.T) {
+	root := t.TempDir()
+	backend := newPlanTestBackend(t,
+		"1. add the helper\n2. add the tests\n", // planning turn (two steps — NO docs step)
+		"helper added",                          // step 1 turn (the model replies, then its CHECK fails)
+	)
+	cs := planTestSession(t, backend, root)
+
+	// The baseline (call 1) is CLEAN (the gate arms); the FIRST post-step
+	// check (call 2) FAILS — step 1 stops the run, step 2 is never reached.
+	orig := runProjectCheckStub
+	t.Cleanup(func() { runProjectCheckStub = orig })
+	var calls int
+	runProjectCheckStub = func(cs *CortexSession, ctx context.Context) (cmdLine, out string, ok bool, note string) {
+		calls++
+		if calls == 1 {
+			return "go test ./...", "ok", true, "ok" // baseline: clean
+		}
+		return "go test ./...", "FAIL", false, "check failed: FAIL" // step 1's check: fails
+	}
+
+	// The task carries a third item the model never planned a step for — it
+	// appears in no step's text, so no coverage path can reach it.
+	task := "Add a helper and its tests, and update the docs.\n- [ ] add the helper\n- [ ] add the tests\n- [ ] update the docs\n"
+	res, err := cs.TurnWithPlan(context.Background(), task)
+	if err == nil {
+		t.Fatal("TurnWithPlan returned no error, want the step-1 check failure")
+	}
+	if !res.Planned {
+		t.Fatal("Planned = false, want true")
+	}
+	if len(res.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(res.Steps))
+	}
+	if res.Steps[0].Status != stepFailed {
+		t.Errorf("step 1 status = %v, want failed (its post-step check failed)", res.Steps[0].Status)
+	}
+	if res.Steps[1].Status != stepNotReached {
+		t.Errorf("step 2 status = %v, want not reached", res.Steps[1].Status)
+	}
+	// THE point: the failed run STILL carries the run's checklist fact on its
+	// receipt — the item no step names is reported missing (the measurement
+	// rides the deferred stamp, which the failed-check return path goes
+	// through). An item named in its own step's text is NOT: step 1's line
+	// covers "add the helper", step 2's line covers "add the tests".
+	if res.Receipt == "" {
+		t.Fatal("PlanRunResult.Receipt empty — a failed plan run with a checklist task must still measure the run's checklist fact")
+	}
+	if !strings.Contains(res.Receipt, "checklist (not accounted for in the reply):") {
+		t.Fatalf("PlanRunResult.Receipt =\n%s\nwant the checklist section (the failed run's checklist account is measured at the run's end)", res.Receipt)
+	}
+	if !strings.Contains(res.Receipt, "  - update the docs") {
+		t.Errorf("PlanRunResult.Receipt =\n%s\nwant the item no step names (\"update the docs\") reported missing", res.Receipt)
+	}
+	if strings.Contains(res.Receipt, "  - add the helper") || strings.Contains(res.Receipt, "  - add the tests") {
+		t.Errorf("PlanRunResult.Receipt =\n%s\nmust NOT name the items the steps' own lines cover", res.Receipt)
+	}
+	// Baseline + one post-step check: the run stopped at step 1's check.
+	if calls != 2 {
+		t.Errorf("runProjectCheck calls = %d, want 2 (baseline + step 1's post-step check)", calls)
 	}
 }
 

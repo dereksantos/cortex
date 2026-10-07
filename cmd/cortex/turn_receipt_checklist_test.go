@@ -6,10 +6,13 @@ package main
 // at the turn's END (after computeReceipt) from the turn's input (the task)
 // and its reply (the model's final answer). In plan-then-execute it is
 // measured ONCE per run, deterministically at the run's END — no model turn:
-// the rendered per-step report (every step's done-note and the whole-task
-// echo ride in it) is checked off the run's task, and the missing items land
-// on PlanRunResult.Receipt through the same joined-receipt surface as the
-// per-step blocks — whether or not any step ran tools. No step's prompt
+// the run's own rendered per-step report (every step's line — step text +
+// note — rides in it) is checked off the run's task, and the missing items
+// land on PlanRunResult.Receipt through the same joined-receipt surface as
+// the per-step blocks — whether or not any step ran tools, and on a failed
+// or interrupted run too (the measurement rides the run's deferred stamp,
+// which every return path goes through). An item is accounted for when its
+// words appear in a step's text or note. No step's prompt
 // carries the checklist (a step that accounted for the whole task's
 // checklist would flag the items other steps own). The receipt stays
 // measurement-only: it never changes the turn's outcome or the reply.

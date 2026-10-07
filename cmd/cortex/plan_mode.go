@@ -251,9 +251,9 @@ func (r *PlanRunResult) addTurnReceipt(receipt string) {
 //     Report). When the task carries a `- [ ]` checklist (issue #220), the
 //     run's checklist account is measured ONCE, deterministically, at the
 //     run's END — checklistMissingItems off the run's task and the rendered
-//     per-step report (every step's line — step text + note — and the
-//     whole-task echo ride in it, so an item named in its own step's text
-//     is accounted for even when no step's reply or note named it). No
+//     per-step report (every step's line — step text + note — rides in it, so
+//     an item named in its own step's text or note is accounted for even
+//     when no step's reply named it). No
 //     extra model turn runs for it: the fact lands on
 //     PlanRunResult.Receipt (addTurnReceipt) whether or not the steps ran
 //     tools. The step prompts themselves carry NO checklist (cs.turn is
@@ -291,10 +291,14 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 	// checklist from it would inject the checklist into every step, and
 	// measuring per step would make every step account for the ENTIRE
 	// checklist and flag the items other steps own as missing. Instead the
-	// checklist is measured ONCE per run — deterministically, at the run's
-	// end, off the run's task and the rendered per-step report (section 5,
-	// below), which every step's line (step text + note) and the whole-task
-	// echo reach.
+	// checklist is measured ONCE per run — deterministically, in the deferred
+	// stamp below, off the run's task and the run's own rendered report (the
+	// returned Reply): every step's line — step text + note — rides in it, so
+	// an item named in its own step's text or note is accounted for even
+	// when no step's reply named it. The deferred stamp covers EVERY return
+	// path (a failed or interrupted run measures too — the run most in need
+	// of the fact), exactly like the plain-turn rule in turn.go, which
+	// measures before the error return.
 	stepTurn := func(input string) (TurnResult, error) {
 		res, turnErr := cs.turn(ctx, input, "", nil, 0, 0, FinalizeInteractive)
 		receipts.addReceipt(res.TestReceipt)
@@ -317,6 +321,29 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 		return res, turnErr
 	}
 	defer func() {
+		// Issue #220: a PLANNED run's checklist account is measured ONCE per
+		// run, here, in the deferred stamp — deterministically, whether or
+		// not any turn ran tools, and on EVERY return path (a failed or
+		// interrupted run includes: the run most in need of the fact), just
+		// like the plain-turn rule in turn.go, which measures before the
+		// error return. The reply measured is the run's OWN rendered report
+		// (out.Reply, the deterministic per-step report — renderPlanReport
+		// emits only the header line and the per-step lines, with no task
+		// text): every step's line carries the step text (so an item named in
+		// its own step's text is accounted for even when no step's reply or
+		// note named it) and the step's note (including an explicit not-done
+		// note). An item no step's text or note names is reported missing on
+		// PlanRunResult.Receipt through the same joined-receipt surface
+		// (addTurnReceipt) as the per-step blocks — measurement only, exactly
+		// like the other #219/#220 facts. The fallback (single-turn) run
+		// (Planned false) is NOT measured here: its checklist-carrying turn
+		// (reportTurn) measures the fact off the reply itself, exactly like a
+		// plain turn.
+		if out.Planned && len(out.Steps) > 0 {
+			if missing := checklistMissingItems(task, out.Reply); len(missing) > 0 {
+				receipts.addTurnReceipt(turnReceipt{checklistMissing: missing}.render())
+			}
+		}
 		out.TestReceipt = receipts.TestReceipt
 		out.LintReceipt = receipts.LintReceipt
 		out.Receipt = receipts.Receipt
@@ -432,7 +459,7 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 		// Issue #220: the step runs through stepTurn — the checklist is NOT
 		// injected into the step's prompt (a step that accounts for the whole
 		// task's checklist would flag items other steps own), and the step's
-		// turn measures no checklist fact (the run's own final report turn
+		// turn measures no checklist fact (the run's own deferred stamp
 		// measures it once, below).
 		stepRes, err := stepTurn(planStepPrompt(task, i+1, len(steps), step, earlierNotes))
 		if err != nil {
@@ -527,28 +554,16 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 		}
 	}
 
-	// --- 5. Final report + the run's checklist measurement -----------------
+	// --- 5. Final report ----------------------------------------------------
 	// The run's answer is the DETERMINISTIC per-step report: no model turn
 	// runs for it. (A model report turn would add a full tools-enabled turn
 	// AFTER the per-step project checks — a turn that could edit files
 	// unchecked — and would replace renderPlanReport's deterministic reply
 	// with model text, costing an extra model call on every checklist plan
-	// run.)
-	report := renderPlanReport(stepResults, len(steps))
-	// Issue #220: the run's checklist account is measured ONCE, here, at the
-	// run's end — deterministically, whether or not any turn ran tools. The
-	// reply measured is the rendered per-step report itself: every step's
-	// line carries the step text (so an item named in its own step's text is
-	// accounted for even when no step's reply or note named it), every
-	// step's note (including an explicit not-done note) and the whole-task
-	// echo ride in it, too. An item no step's text or note names is
-	// reported missing on PlanRunResult.Receipt through the same
-	// joined-receipt surface (addTurnReceipt) as the per-step blocks —
-	// measurement only, exactly like the other #219/#220 facts.
-	if missing := checklistMissingItems(task, report); len(missing) > 0 {
-		receipts.addTurnReceipt(turnReceipt{checklistMissing: missing}.render())
-	}
-	return PlanRunResult{Planned: true, Steps: stepResults, Reply: report}, nil
+	// run.) The checklist measurement rides the deferred stamp above, so the
+	// run measures it once, at the run's end, on every return path — this
+	// return included.
+	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))}, nil
 }
 
 // interruptPlan records the interrupted step (failed, with an 'interrupted'

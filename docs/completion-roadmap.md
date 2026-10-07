@@ -159,10 +159,11 @@ topics, fleet slot contention (`docs/archive/refactor-status.md`).
       checks and would replace that deterministic reply with model text),
       and the run measures the fact deterministically at the run's end,
       against the rendered per-step report (every step's line — step text +
-      note — and the whole-task echo ride in it, so an item named in its own
-      step's text is accounted for even when no step's reply or note named
-      it), landing on the run's joined receipt whether or not any step ran
-      tools. A task with no checklist (or a reply that
+      note — rides in it, so an item named in its own step's text or note is
+      accounted for even when no step's reply named it), landing on the run's
+      joined receipt whether or not any step ran tools — and on a failed or
+      interrupted run too, since the measurement rides the run's deferred
+      stamp, which every return path goes through. A task with no checklist (or a reply that
       accounted for every item) contributes no section.
 
 **Gate C:** README/CLAUDE.md updated for `cortex model`; suite green;
