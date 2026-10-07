@@ -321,7 +321,7 @@ the model-driven memory tools
   model's view of the file stays in sync (#173). On a `.go` file a successful
   result may also carry the write-sanity note described in the next bullet.
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
-  own format on the file just touched — it is FORMAT-ONLY. Lint moved to Lint moved to
+  own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
   over the distinct `write_file`/`edit_file` paths (including the `agent`
   subagent's, minus files deleted since) — one run per file for `{file}`,
@@ -341,6 +341,15 @@ the model-driven memory tools
   .github/copilot-instructions.md; docs/configuration.md); `cortex
   project commands` shows each command's source and when it runs
   (per-edit / turn-end / never / inactive).
+  Independently of that hook and of workspace trust, a `.go` file that lands
+  also gets a write-sanity pass (`internal/tools/writesanity.go`, stdlib
+  only): it parses the written file's PACKAGE — same-package `_test.go`
+  siblings included, build-constrained siblings excluded — and appends ONE
+  note listing every duplicate package-level declaration and every bare name
+  undefined anywhere in the package, so a session fixes a whole batch of
+  compile errors in one round instead of one per build (#224). The note never
+  vetoes the write, and it is silent for non-Go files, unparseable files, and
+  packages with nothing wrong.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
   Blocked. The Risky prompt shows the classifier's reason above the command

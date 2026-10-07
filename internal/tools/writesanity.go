@@ -191,10 +191,7 @@ func packageFiles(dir, written, pkgName string) (regular, test []string) {
 // note the model's own build disproves. So everything uncertain keeps the
 // file in.
 func siblingBuildsHere(dir, name string) bool {
-	if !filenameSuffixMatches(name) {
-		return false
-	}
-	return satisfiesBuildConstraints(filepath.Join(dir, name))
+	return satisfiesBuildConstraints(dir, name, filepath.Join(dir, name))
 }
 
 // filenameSuffixMatches implements the filename half of go/build's rule: the
@@ -241,6 +238,9 @@ func filenameSuffixMatches(name string) bool {
 // includes it, and treating it as unconstrained would merge it into every
 // package it shares a directory with. A name Go has not used yet simply looks
 // like an ordinary identifier and stays unconstrained, which is the safe side.
+// They also bound what a build CONSTRAINT may be judged on (see judgeableTag),
+// where the filename list is the wrong scope for one name: `unix` is a real
+// tag that is not a GOOS at all, and is decided separately.
 var (
 	knownOS = map[string]bool{
 		"aix": true, "android": true, "darwin": true, "dragonfly": true,
@@ -267,7 +267,18 @@ var (
 // unreadable file and a constraint naming a tag this toolchain does not
 // recognize keep the file (see constraintHolds); nothing here splits a package
 // on a judgement it cannot make.
-func satisfiesBuildConstraints(path string) bool {
+//
+// The filename's GOOS/GOARCH suffix is the one exclusion decided before the
+// header, because go/build applies it to EVERY file whatever its constraints
+// say — a `_windows.go` sibling is out of a linux build even with no `//go:build`
+// line at all (filenameSuffixMatches). It is decided first and on its own
+// terms, so a constraint this check refuses to judge cannot resurrect a file
+// the toolchain excludes by name, and a header it cannot read cannot resurrect
+// one either.
+func satisfiesBuildConstraints(dir, name, path string) bool {
+	if !filenameSuffixMatches(name) {
+		return false // the toolchain's own filename rule, no judgement needed
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return true
@@ -296,26 +307,106 @@ func satisfiesBuildConstraints(path string) bool {
 	return true
 }
 
-// constraintHolds evaluates a parsed constraint against this build. The tag
-// vocabulary is go/build's own context — GOOS, GOARCH, the compiler, `cgo`
-// when cgo is enabled, and the release/tool tags the toolchain advertises —
-// which covers every platform name, so the constraints that actually cause
-// false collisions (`windows`, `!windows`, `darwin || linux`, `js || wasip1`)
-// are judged correctly. A tag outside that vocabulary (a project's custom
-// `-tags custom`, `unix`, or the android↔linux / illumos↔solaris /
-// ios↔darwin equivalences go/build expands by hand) is reported as SATISFIED:
-// only the toolchain's own names may exclude a file here. The cost of that
-// conservatism is narrow — a sibling gated on such a tag may stay in the
-// package and contribute a duplicate note the build disproves — and it is the
-// right side to err on, because excluding a file that does build invents
-// "undefined" reports out of clean code.
+// constraintHolds evaluates a parsed constraint against this build, and
+// refuses to judge it at all when it names a tag outside the platform
+// vocabulary. The tag vocabulary is go/build's own context — GOOS, GOARCH,
+// the compiler, the GOOS-equivalence expansions the toolchain applies by
+// hand (`unix` on a Unix GOOS, `linux` on android, `solaris` on illumos,
+// `darwin` on ios) — plus `cgo` and the `go1.N` release tags, which are the
+// only non-platform tags this process can POSITIVELY decide. Anything else —
+// a project's custom `-tags integration`, an experiment tag, a name from a
+// future toolchain — is unknown, and the whole expression is then reported as
+// SATISFIED, because the one judgement this check may make about a tag it
+// cannot see is no judgement: a file may be excluded only on a platform name
+// that contradicts this build.
+//
+// That last clause is why the decision is taken over the expression rather
+// than per tag. Evaluating tag-by-tag and answering "satisfied" for the
+// unknown ones breaks the moment such a tag is negated: `//go:build
+// !integration` evaluates to false on a build that does not define
+// `integration`, and the file that carries it — an integration-test stub,
+// say — vanishes from the package, taking its declarations with it and
+// inventing "undefined" reports for whoever calls them. Skipping the whole
+// constraint when any unknown tag appears keeps both sides of that pair in,
+// which can only ever add a duplicate note the model's own build disproves —
+// the right direction to err in, per the package comment.
 func constraintHolds(expr constraint.Expr) bool {
+	if namesUnknownTag(expr) {
+		return true
+	}
 	return expr.Eval(toolchainTagHolds)
 }
 
-// toolchainTagHolds reports whether a build tag is satisfied by this build.
-// A tag this process knows nothing about reports true, which is how
-// constraintHolds keeps an unresolvable constraint from excluding its file.
+// namesUnknownTag reports whether the constraint mentions a build tag this
+// process cannot positively judge — see constraintHolds for why that is worth
+// a walk of its own instead of an answer from Eval's tag callback. The walk
+// visits every node rather than short-circuiting like Eval does: a
+// subexpression the toolchain never evaluates still names a tag, and a file
+// gated on one is a file this check cannot rule out. (go/build/constraint has
+// no walker, so the recursion is spelled out over its four expression types.)
+func namesUnknownTag(expr constraint.Expr) bool {
+	switch v := expr.(type) {
+	case *constraint.TagExpr:
+		return !judgeableTag(v.Tag)
+	case *constraint.NotExpr:
+		return namesUnknownTag(v.X)
+	case *constraint.AndExpr:
+		return namesUnknownTag(v.X) || namesUnknownTag(v.Y)
+	case *constraint.OrExpr:
+		return namesUnknownTag(v.X) || namesUnknownTag(v.Y)
+	}
+	return true // an expression shape we don't know: judge nothing
+}
+
+// judgeableTag reports whether a build tag is one this process can decide:
+// a known platform name (so that a mismatch with this build may exclude its
+// file), a GOOS name this build implies, `cgo`, or a `go1.N` release tag
+// (`cgo` and go1.N may each be decided in both directions — a release tag the
+// toolchain does not advertise is genuinely absent from this build). A tag
+// none of those covers — `integration`, `e2e`, `noopt`, a name this toolchain
+// has never heard of — is unknown, and unknown tags are what constraintHolds
+// keeps out of the exclusion business.
+func judgeableTag(tag string) bool {
+	switch tag {
+	case build.Default.GOOS, build.Default.GOARCH, build.Default.Compiler:
+		return true
+	case "unix":
+		return unixOS[build.Default.GOOS]
+	case "linux":
+		return build.Default.GOOS == "android"
+	case "solaris":
+		return build.Default.GOOS == "illumos"
+	case "darwin":
+		return build.Default.GOOS == "ios"
+	case "cgo":
+		return true // satisfied iff cgo is enabled; toolchainTagHolds decides it
+	}
+	// A tag the real go/build resolves only by expanding the GOOS or by the
+	// lists a build is INVOKED with (GOFLAGS=-tags, the toolchain's experiment
+	// tags) is not one this bare process can settle either way, so its file
+	// stays in. `solaris` on linux is exactly such a tag: a plain known-OS
+	// lookup would exclude the file, and its declarations would go with it.
+	// Negation makes the same point louder — `!solaris` on linux is true for
+	// every real build that defines nothing, and false here.
+	for _, expanded := range []string{"linux", "solaris", "darwin", "unix", "boringcrypto"} {
+		if tag == expanded {
+			return false
+		}
+	}
+	for _, t := range build.Default.ToolTags {
+		if t == tag {
+			return false // a toolchain experiment tag: only that toolchain can say
+		}
+	}
+	if isReleaseTag(tag) {
+		return true // a release tag: present or absent, ReleaseTags answers
+	}
+	return knownOS[tag] || knownArch[tag] // a platform name: mismatch may exclude
+}
+
+// toolchainTagHolds reports whether a platform or toolchain tag is satisfied
+// by this build, mirroring go/build's own matchTag for the names that reach
+// it (see judgeableTag — a constraint naming anything else never gets here).
 func toolchainTagHolds(tag string) bool {
 	if tag == build.Default.GOOS || tag == build.Default.GOARCH || tag == build.Default.Compiler {
 		return true
@@ -330,7 +421,51 @@ func toolchainTagHolds(tag string) bool {
 			}
 		}
 	}
+	// The GOOS names this build implies, exactly as go/build expands them.
+	if build.Default.GOOS == "android" && tag == "linux" {
+		return true
+	}
+	if build.Default.GOOS == "illumos" && tag == "solaris" {
+		return true
+	}
+	if build.Default.GOOS == "ios" && tag == "darwin" {
+		return true
+	}
+	if tag == "unix" && unixOS[build.Default.GOOS] {
+		return true
+	}
 	return false
+}
+
+// isReleaseTag reports whether tag is a Go release tag ("go1.21", "go1.22.1")
+// — the family go/build advertises in ReleaseTags, which therefore decides
+// those tags in both directions. Deliberately shape-only: matching a tag this
+// toolchain does not advertise is a true exclusion, so the shape test is what
+// must not be loose — digits after "go", at least one dot, no letters.
+func isReleaseTag(tag string) bool {
+	if !strings.HasPrefix(tag, "go") {
+		return false
+	}
+	rest := tag[len("go"):]
+	if rest == "" || !strings.Contains(rest, ".") {
+		return false
+	}
+	for _, r := range rest {
+		if !unicode.IsDigit(r) && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// unixOS is the set of GOOS values the `unix` build tag matches — go/build's
+// own list (internal/syslist.UnixOS), which is narrower than knownOS: plan9,
+// aix, js, wasip1, windows and zos are known systems that `unix` does not
+// match. Inlined because it is internal to the toolchain.
+var unixOS = map[string]bool{
+	"aix": true, "android": true, "darwin": true, "dragonfly": true,
+	"freebsd": true, "hurd": true, "illumos": true, "ios": true,
+	"linux": true, "netbsd": true, "openbsd": true, "solaris": true,
 }
 
 // goPackageOf reads a .go file's package clause name. "" when unparseable.

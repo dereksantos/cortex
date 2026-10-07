@@ -443,6 +443,87 @@ func Use() *http.Client {
 			want:   []string{"func helper is declared 2 times"},
 		},
 		{
+			// A tag this process cannot judge — a project's custom -tags name —
+			// must never exclude a SIBLING: dropping it strips its declarations
+			// from the package name set and invents "undefined" reports, the one
+			// failure mode this check must never produce. Both files carry the
+			// same tag, so a build that defines it compiles them together.
+			name: "a custom-tagged sibling supplying a helper is not dropped",
+			files: map[string]string{
+				"stub_integration.go": "//go:build integration\n\npackage p\n\nfunc integrationHelper() string { return \"i\" }\n",
+				"use_integration.go":  "//go:build integration\n\npackage p\n\nfunc Use() string { return integrationHelper() }\n",
+			},
+			target:  "use_integration.go",
+			wantNil: true,
+		},
+		{
+			// `unix` is matched by the toolchain by EXPANSION (any Unix GOOS),
+			// not by anything go/build.Default lists, so judging it here would
+			// drop the file on every platform and report its helper undefined.
+			name: "a unix-tagged sibling supplying a helper is not dropped",
+			files: map[string]string{
+				"helper_unix_tag.go": "//go:build unix\n\npackage p\n\nfunc unixHelper() string { return \"u\" }\n",
+				"p.go":               "package p\n\nfunc Use() string { return unixHelper() }\n",
+			},
+			target:  "p.go",
+			wantNil: true,
+		},
+		{
+			// Negation is why the judgement is over the whole expression: with
+			// unknown tags answered "satisfied" per tag, `!integration` evaluated
+			// false, this stub vanished, and its caller was told its helper is
+			// undefined — noise-on-clean, on the file a real build compiles
+			// whenever the tag is not set.
+			name: "a negated custom-tagged sibling supplying a helper is not dropped",
+			files: map[string]string{
+				"stub.go":  "//go:build !integration\n\npackage p\n\nfunc defaultHelper() string { return \"d\" }\n",
+				"other.go": "package p\n\nfunc Use() string { return defaultHelper() }\n",
+			},
+			target:  "other.go",
+			wantNil: true,
+		},
+		{
+			// The same conservatism on the duplicate side: `windows` and
+			// `!windows` name platforms this build knows and ARE told apart, so
+			// the exclusive twin pair never produces a bogus collision (the
+			// written file uses flock through them and stays silent) …
+			name: "an exclusive platform twin pair keeps the caller silent",
+			files: map[string]string{
+				"flock_windows.go": "//go:build windows\n\npackage p\n\nfunc flock() error { return nil }\n",
+				"flock_other.go":   "//go:build " + notWindowsTag + "\n\npackage p\n\nfunc flock() error { return nil }\n",
+				"p.go":             "package p\n\nfunc Use() error { return flock() }\n",
+			},
+			target:  "p.go",
+			wantNil: true,
+		},
+		{
+			// …and a file gated on a tag this process cannot judge stays IN, so
+			// the real collision it has with the written file is still reported
+			// rather than lost to the unjudged header.
+			name: "an unjudgeable sibling's real duplicate is still reported",
+			files: map[string]string{
+				"extra.go": "//go:build integration\n\npackage p\n\nfunc okResponse() int { return 0 }\n",
+				"p.go":     "package p\n\nfunc Use() int { return okResponse() }\n\nfunc okResponse() int { return 1 }\n",
+			},
+			target: "p.go",
+			want:   []string{"func okResponse is declared 2 times"},
+		},
+		{
+			// …and the unjudged constraint never outranks the filename rule: a
+			// `_windows.go` sibling stays out of a non-windows build even under a
+			// header this check refuses to read, so the file sharing the written
+			// file's name is the un-suffixed one and the collision is 2, not 3
+			// (on Windows the suffix keeps `_windows.go` instead — same count).
+			name: "an unjudgeable constraint does not resurrect a platform-suffixed sibling",
+			files: map[string]string{
+				"flock_windows.go": "//go:build integration\n\npackage p\n\nfunc flock() error { return nil }\n",
+				"flock_other.go":   "//go:build integration\n\npackage p\n\nfunc flock() error { return nil }\n",
+				"p.go":             "package p\n\nfunc Use() error { return flock() }\n\nfunc flock() error { return nil }\n",
+			},
+			target: "p.go",
+			want:   []string{"func flock is declared 2 times"},
+		},
+		{
 			// Methods on a type in a SIBLING file: the method name never
 			// enters the package name set and the selector side is exempt.
 			name: "calling a sibling file's method is not undefined",
