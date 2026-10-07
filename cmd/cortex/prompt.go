@@ -28,11 +28,15 @@ Connect it all the way through. A change is done only when the code path that ne
 
 Update the docs. When behavior changes, the documentation that describes it changes with it, in the same change — docs describing behavior that doesn't exist are wrong.
 
-Test integrity. Removing or changing an existing test to make a failing build pass is a decision, not an implementation detail: if you did it, state it plainly in your summary — what you removed or changed and why — so the person reviewing can judge whether the loss is acceptable. A green build that quietly deleted the failing test is not a fix.
+Test integrity. ` + testTargetPrinciple + ` Removing or changing an existing test to make a failing build pass is a decision, not an implementation detail: if you did it, state it plainly in your summary — what you removed or changed and why — so the person reviewing can judge whether the loss is acceptable. A green build that quietly deleted the failing test is not a fix.
 
 ` + failingTestPrinciple + `
 
 ` + reviewFeedbackPrinciple + `
+
+` + specTestPrinciple + `
+
+` + commentsTruthPrinciple + `
 
 ` + debugWorkingStylePrinciple + `
 
@@ -76,6 +80,21 @@ const locateFirstPrinciple = "Locate first. Outline or grep a path to find exact
 // TurnWithPlan's prompts (the scenario in #178).
 const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. When a reported problem doesn't reproduce, saying so with the evidence is the finished result; a fix for a problem you haven't observed is not."
 
+// testTargetPrinciple is the issue #225 test-target principle — a const so
+// plan_mode.go's planning instruction and step prompts can restate the SAME
+// text (one principle, no recipe, the same pattern as verifyBeforeFixPrinciple
+// and reviewFeedbackPrinciple). It is spliced into SystemPrompt's "Test
+// integrity" paragraph — before #141's existing-test clause, so #141 and
+// #225 read as one rule: a test written to match the code instead of the
+// requirement is the same class of bending as a changed existing test.
+//
+// It exists because the self-dev loop's reviews of PR #223 (issue #111) found
+// a step that tested checkpoint.Restore directly instead of cs.undo, so the
+// stack/ref wiring bugs — read-only turns pushing no-op snapshots — went
+// unnoticed: the tested unit passed while the user-facing path it serves
+// stayed broken.
+const testTargetPrinciple = "Test the path the requirement names. A criterion is verified only through the user-facing surface it describes — the command, the API, the entry point the user invokes — not through a lower-level helper that surface routes through: a test that never calls the surface proves nothing about it, no matter how green."
+
 // blockedCheckPrinciple is the issue #200 blocked-check principle — a const
 // so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT same text
 // (the docs describe the guidance the model actually receives, so the two
@@ -102,16 +121,101 @@ const blockedCheckPrinciple = "A check that was blocked, refused, or declined le
 // block, before debugWorkingStylePrinciple.
 const failingTestPrinciple = "Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification."
 
+// specTestPrinciple is the issue #225 failing-spec-test principle — a const so
+// CLAUDE.md's "Constraints" section mirrors the EXACT same text (the docs
+// describe the guidance the model actually receives, so the two can't drift
+// apart — the same mirror pattern as reviewFeedbackPrinciple, which it sits
+// after in the prompt) and so plan_mode.go's planning instruction and step
+// prompts can restate the SAME text (one principle, no recipe, the same
+// pattern as verifyBeforeFixPrinciple). It is spliced into SystemPrompt as its
+// own paragraph after reviewFeedbackPrinciple (issue #162's) and before
+// debugWorkingStylePrinciple (issue #154's), so every turn sees it: REPL
+// turns, headless turns, plan-mode turns, and the self-dev loop's ordinary
+// step turns, which never go through TurnWithPlan's prompts (the same delivery
+// reasoning as reviewFeedbackPrinciple).
+//
+// It exists because the self-dev loop's reviews of PR #223 (issue #111) found
+// the agent repeatedly getting a failing acceptance test to pass by bending
+// the test instead of the behavior — across four review ticks: a production
+// defect (git stash create is empty on a clean tree) patched around in the
+// acceptance test with a rev-parse HEAD fallback instead of putting the
+// fallback into production; the issue's "undo restores … created files"
+// criterion rewritten into a test asserting the created file is left in
+// place, without the deviation ever flagged; and a prune-length failure
+// "fixed" by making the code keep the wrong entries so the length assertion
+// passed, presented in the summary as a fix. Each kept the suite green while
+// the criterion stayed unmet, and the green suite is the main signal both the
+// loop and reviewers use to judge whether a change works. The silence about
+// the deviations is the honesty problem tracked in #128 / #220 / #221; this
+// principle is the editing behavior itself.
+//
+// Deliberately a principle, not a recipe: no file paths, no list of incident
+// PRs — the PR #223 specifics (the stash fallback, the rewrite, the
+// truncateTo flip) were the incident, not the guidance. It extends
+// failingTestPrinciple (#177) from EXISTING tests — whose expectations record
+// a prior decision about correct behavior — to tests WRITTEN from the issue's
+// acceptance criteria, which are a spec the change must meet; and it extends
+// reviewFeedbackPrinciple's "put it where the reviewer said" to the test
+// itself: the test is owed the behavior the criterion names, and meeting it
+// by moving the test is a deviation owed an explicit report.
+const specTestPrinciple = "A failing test written from the issue's acceptance criteria is a spec. Making it green by editing the test, its setup, or its expectation — instead of fixing the behavior the criterion names — is a deviation you must report in your summary, not a fix: the criterion stays unmet, a green suite does not count as coverage, and the defect the test caught must be fixed in production, never patched around in the test. If the criterion itself is wrong, say so with the evidence instead of silently rewriting it."
+
+// commentsTruthPrinciple is the issue #231 comment-truth principle — a const
+// so CLAUDE.md's "Constraints" section mirrors the EXACT same text (the docs
+// describe the guidance the model actually receives, so the two can't drift
+// apart — the same mirror pattern as reviewFeedbackPrinciple, which it sits
+// after in the prompt) and so plan_mode.go's planning instruction and step
+// prompts can restate the SAME text (one principle, no recipe, the same
+// pattern as verifyBeforeFixPrinciple). It is spliced into SystemPrompt as
+// its own paragraph after specTestPrinciple (issue #225's) and before
+// debugWorkingStylePrinciple (issue #154's), so every turn sees it: REPL
+// turns, headless turns, plan-mode turns, and the self-dev loop's ordinary
+// step turns, which never go through TurnWithPlan's prompts (the same delivery
+// reasoning as reviewFeedbackPrinciple).
+//
+// It exists because the self-dev loop's reviews of its own sessions (tick
+// 20261006T, filed in #231) found comments and summary claims that state
+// what the writer intended the code to do instead of what the code does —
+// written before or alongside the code and never re-checked once later edits
+// changed call order or behavior. PR #222: a comment in preflight.go claimed a
+// substituted pick's verdict comes from the catalog, but the call order it
+// chose makes that false (applyCatalogVision overwrites it — the agent's own
+// test asserts exactly that overwrite), and a second comment wrongly claimed
+// unlisted ids settle to false; the PR summary claimed a config-declared
+// verdict survives a substitution that the shipped code performs. PR #226:
+// comments and the summary claimed gating ("for every turn that ran tools",
+// "appended to the visible reply") the code does not implement, and a
+// reviewer's finding 8 asking for the stale comments to be fixed went
+// unresolved although the summary listed the round as fixed. PR #229: an
+// end-to-end test hand-assembled the production order (spliceImageResult
+// twice, side-car write before Append) while its own comment claimed to
+// follow "Production ordering (loop.go)". PR #227: the commit summary said
+// the rewriteFormRead guard was "removed" although the remaining functions
+// still filter on it. A wrong comment is worse than no comment because the
+// next reader is often the agent in a later session, and the same drift
+// survives review rounds because nobody re-checks it.
+//
+// Deliberately a principle, not a recipe: no file paths, no list of incident
+// PRs — the tick specifics (preflight.go, the spliceImageResult ordering,
+// rewriteFormRead) were the incidents, not the guidance. It extends
+// reviewFeedbackPrinciple's "name and fix the class, not the instances" to
+// comments and claims: an example wrong comment is an instance, the class is
+// a statement that outlives the behavior it describes, and it extends
+// specTestPrinciple's honesty about deviations to prose — a summary that
+// claims behavior the code doesn't ship is the same unreported deviation,
+// only in words.
+const commentsTruthPrinciple = "A comment must say what the code does, not what you intended it to do. A comment the code doesn't implement is worse than no comment — it misleads the next reader, who is often you in a later session. After a behavioral change, re-read the comments adjacent to the span you edited — reordered calls, a new overwrite, a removed guard all stale them — and fix or delete any that no longer hold. A summary or docs claim describing behavior is the same class: it must match the code you shipped, and claiming behavior the code doesn't implement is a deviation owed the same report as a test you bent to pass."
+
 // reviewFeedbackPrinciple is the issue #162 review-feedback principle — a
 // const so CLAUDE.md's "Constraints" section mirrors the EXACT same text
 // (the docs describe the guidance the model actually receives, so the two
 // can't drift apart — the same mirror pattern as blockedCheckPrinciple,
 // failingTestPrinciple, and debugWorkingStylePrinciple). It is spliced into
 // SystemPrompt as its own paragraph after failingTestPrinciple and before
-// debugWorkingStylePrinciple, so every turn sees it: REPL turns, headless
-// turns, plan-mode turns, and the self-dev loop's ordinary step turns, which
-// never go through TurnWithPlan's prompts (the same delivery reasoning as
-// verifyBeforeFixPrinciple).
+// specTestPrinciple (issue #225's), so every turn sees it: REPL turns,
+// headless turns, plan-mode turns, and the self-dev loop's ordinary step
+// turns, which never go through TurnWithPlan's prompts (the same delivery
+// reasoning as verifyBeforeFixPrinciple).
 //
 // It exists because review rounds burned whole extra cycles on four distinct
 // ways of not applying what a reviewer asked (three PRs across four ticks, the

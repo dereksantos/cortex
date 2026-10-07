@@ -300,6 +300,36 @@ func TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt(t *testing.T) {
 	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), reviewFeedbackPrinciple) {
 		t.Error("planStepPrompt must restate the review-feedback principle (same const) for each step turn")
 	}
+	// The issue #225 principles ride the same way — in BOTH the planning
+	// instruction (where a lower-level helper can be named in place of the
+	// user-facing path) and each step prompt (where a failing acceptance
+	// test actually gets bent): testTargetPrinciple names the surface a
+	// criterion's test must call, and specTestPrinciple makes a failing
+	// acceptance test a spec a step must not bend to pass.
+	if !strings.Contains(planModeInstruction, testTargetPrinciple) {
+		t.Error("planModeInstruction must restate the test-target principle (same const) for the planning turn")
+	}
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), testTargetPrinciple) {
+		t.Error("planStepPrompt must restate the test-target principle (same const) for each step turn")
+	}
+	if !strings.Contains(planModeInstruction, specTestPrinciple) {
+		t.Error("planModeInstruction must restate the spec-test principle (same const) for the planning turn")
+	}
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), specTestPrinciple) {
+		t.Error("planStepPrompt must restate the spec-test principle (same const) for each step turn")
+	}
+	// The issue #231 comment-truth principle rides the same way — in BOTH the
+	// planning instruction (where a comment or summary claim can be written
+	// ahead of the behavior it describes) and each step prompt (where the
+	// behavior actually changes and a stale comment or claim can outlive it):
+	// commentsTruthPrinciple makes a comment and a summary/docs claim describe
+	// the shipped code, not the intent.
+	if !strings.Contains(planModeInstruction, commentsTruthPrinciple) {
+		t.Error("planModeInstruction must restate the comment-truth principle (same const) for the planning turn")
+	}
+	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), commentsTruthPrinciple) {
+		t.Error("planStepPrompt must restate the comment-truth principle (same const) for each step turn")
+	}
 }
 
 // TestDefaultPromptEncodesBlockedCheckGuidance pins issue #200's content:
@@ -430,7 +460,7 @@ func TestDefaultPromptEncodesReviewFeedbackGuidance(t *testing.T) {
 	}{
 		// 1. Per-finding accounting: the whole point of the principle — a
 		// finding with no disposition was dropped, invisibly to the next round.
-		{"owed", "every finding is owed an explicit disposition", true},
+		{"owed an explicit disposition", "every finding is owed an explicit disposition", true},
 		{"addressed", "the first disposition", true},
 		{"deferred with a reason", "the second disposition: deferral must be stated, not silent", true},
 		{"disputed", "the third disposition: disagreeing openly beats ignoring", true},
@@ -459,13 +489,13 @@ func TestDefaultPromptEncodesReviewFeedbackGuidance(t *testing.T) {
 
 // TestReviewFeedbackPrinciplePosition pins where the issue #162 principle
 // sits: in the "# How you work" block, as its own paragraph after
-// failingTestPrinciple (issue #177's) and before debugWorkingStylePrinciple
-// (issue #154's) — a position check, not a content check, mirroring
-// TestBlockedCheckPrinciplePosition. The placement matters: the principle
-// belongs with the accountability principles (test integrity, tests-as-
-// evidence) that say state what you took away, and ahead of the working-style
-// principles, so a model reading the block meets it with the review round in
-// view.
+// failingTestPrinciple (issue #177's) and before
+// debugWorkingStylePrinciple (issue #154's) — a position check, not a content
+// check, mirroring TestBlockedCheckPrinciplePosition. The placement matters:
+// the principle belongs with the accountability principles (test integrity,
+// tests-as-evidence) that say state what you took away, and ahead of the
+// working-style principles, so a model reading the block meets it with the
+// review round in view.
 func TestReviewFeedbackPrinciplePosition(t *testing.T) {
 	i := strings.Index(SystemPrompt, reviewFeedbackPrinciple)
 	if i < 0 {
@@ -508,6 +538,380 @@ func TestReviewFeedbackPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 	if !strings.Contains(doc, "\n\n"+reviewFeedbackPrinciple+"\n\n") {
 		t.Error("CLAUDE.md's mirrored review-feedback principle must be its own paragraph (blank-line separated), not spliced into another")
+	}
+}
+
+// TestSpecTestPrincipleMirroredInClaudeMD is the issue #225 consistency
+// tripwire, mirroring TestReviewFeedbackPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints" section must carry the EXACT text the model receives
+// (specTestPrinciple) so docs and prompt can't drift apart. Beyond the
+// contains check it pins the mirror as the doc's ONLY copy and as its own
+// paragraph: a mirror embedded in another paragraph, or duplicated, reads as
+// guidance the doc never intended to give twice.
+func TestSpecTestPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	doc := string(data)
+	if !strings.Contains(doc, specTestPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints\" section no longer mirrors the built-in prompt's spec-test principle verbatim (specTestPrinciple) — the docs and the prompt have drifted apart")
+	}
+	if n := strings.Count(doc, specTestPrinciple); n != 1 {
+		t.Errorf("CLAUDE.md mirrors the spec-test principle %d times, want exactly 1 (a duplicated mirror drifts one copy at a time)", n)
+	}
+	if !strings.Contains(doc, "\n\n"+specTestPrinciple+"\n\n") {
+		t.Error("CLAUDE.md's mirrored spec-test principle must be its own paragraph (blank-line separated), not spliced into another")
+	}
+}
+
+// TestTestTargetPrincipleMirroredInClaudeMD is the issue #225 consistency
+// tripwire, mirroring TestSpecTestPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints" section must carry the EXACT text the model receives
+// (testTargetPrinciple) so docs and prompt can't drift apart. Beyond the
+// contains check it pins the mirror as the doc's ONLY copy and as its own
+// paragraph: a mirror embedded in another paragraph, or duplicated, reads as
+// guidance the doc never intended to give twice.
+func TestTestTargetPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	doc := string(data)
+	if !strings.Contains(doc, testTargetPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints\" section no longer mirrors the built-in prompt's test-target principle verbatim (testTargetPrinciple) — the docs and the prompt have drifted apart")
+	}
+	if n := strings.Count(doc, testTargetPrinciple); n != 1 {
+		t.Errorf("CLAUDE.md mirrors the test-target principle %d times, want exactly 1 (a duplicated mirror drifts one copy at a time)", n)
+	}
+	if !strings.Contains(doc, "\n\n"+testTargetPrinciple+"\n\n") {
+		t.Error("CLAUDE.md's mirrored test-target principle must be its own paragraph (blank-line separated), not spliced into another")
+	}
+}
+
+// TestDefaultPromptEncodesSpecTestGuidance pins issue #225's content in the
+// built-in prompt: a failing test written from the issue's acceptance criteria
+// is a spec, so making it green by editing the test, its setup, or its
+// expectation — instead of fixing the behavior the criterion names — is a
+// deviation owed a report, not a fix (a green suite never counts as coverage
+// of an unmet criterion; the defect must be fixed in production, never
+// patched around in the test; a wrong criterion is disputed with evidence,
+// not silently rewritten). The 2026-10-06 PR #223 reviews (issue #111) are the
+// case this exists for: an acceptance test patched around a production defect
+// (the stash fallback), the "undo restores created files" criterion rewritten
+// to assert the opposite, and a prune length test "fixed" by making the code
+// keep the wrong entries.
+//
+// The keyword assertions run against specTestPrinciple ITSELF, and each
+// absence-checked keyword is additionally asserted ABSENT from the full prompt
+// with the principle stripped — so every subtest actually rides on the new
+// principle rather than on text that was already there (the same
+// rewrite-tolerant, absence-verified style as
+// TestDefaultPromptEncodesReviewFeedbackGuidance). Keywords that occur
+// elsewhere in the prompt are checked in the const only, with checkAbsence
+// false: "test", "summary", and "evidence" already appear in other
+// principles.
+func TestDefaultPromptEncodesSpecTestGuidance(t *testing.T) {
+	// The full prompt with the principle removed: its splice site is its own
+	// paragraph, so strip exactly the paragraph plus one surrounding
+	// separator, leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		"\n\n"+specTestPrinciple, "", 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the spec-test principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		// The trigger: a test written from the issue's acceptance criteria.
+		{"acceptance criteria", "the spec a new test may be written from", true},
+		// The rule: a failing test written from the criterion is a spec.
+		{"spec", "the failing acceptance test is a specification", false}, // "specification" is in failingTestPrinciple
+		// The act: editing the test, its setup, or its expectation.
+		{"setup", "editing the test's setup counts as bending it", false},             // "fixture setup" is in debugWorkingStylePrinciple
+		{"expectation", "editing the test's expectation counts as bending it", false}, // "Rewriting an expectation" is in failingTestPrinciple
+		// The trigger state: making it green.
+		{"green", "making the failing test green", false}, // "green build" is in the Test integrity paragraph
+		// The verdict: a deviation to report, never a fix.
+		{"deviation you must report", "bending the test is a deviation you must report", true},
+		// The obligation: say it in the summary.
+		{"summary", "the deviation must be reported in the summary", false}, // "summary" is in Test integrity
+		// The unmet criterion: green does not cover.
+		{"coverage", "a green suite is not coverage of an unmet criterion", true},
+		// The production side: the defect is fixed in production, not the test.
+		{"production", "the defect must be fixed in production", false}, // "production code" is in debugWorkingStylePrinciple
+		{"patched around", "never patch a production defect around in the test", true},
+		// A wrong criterion is disputed with evidence, not rewritten.
+		{"silently rewriting", "a wrong criterion is not silently rewritten", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(specTestPrinciple), tt.keyword) {
+				t.Errorf("specTestPrinciple no longer encodes the spec-test guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
+// TestDefaultPromptEncodesTestTargetGuidance pins issue #225's test-target
+// content in the built-in prompt: the model must test the user-facing surface
+// the requirement names — the command, the API, the entry point the user
+// invokes — never a lower-level helper that surface routes through, because a
+// test that never calls the surface proves nothing about it. The 2026-10-06
+// PR #223 reviews (issue #111) are the case this exists for: a step that
+// tested checkpoint.Restore directly instead of cs.undo, so the wiring bugs
+// went unnoticed — the tested unit passed while the user-facing path it
+// serves stayed broken.
+//
+// The keyword assertions run against testTargetPrinciple ITSELF, and each
+// absence-checked keyword is additionally asserted ABSENT from the full prompt
+// with the principle stripped — so every subtest actually rides on the new
+// principle rather than on text that was already there (the same
+// rewrite-tolerant, absence-verified style as
+// TestDefaultPromptEncodesSpecTestGuidance). Keywords that occur
+// elsewhere in the prompt are checked in the const only, with checkAbsence
+// false: "surface" and "green" already appear in other principles, and
+// "requirement" in "When a requirement is ambiguous".
+func TestDefaultPromptEncodesTestTargetGuidance(t *testing.T) {
+	// The full prompt with the principle removed: its splice site is inside
+	// the "Test integrity" paragraph, so strip exactly the principle and one
+	// surrounding separator, leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		"Test integrity. "+testTargetPrinciple+" ",
+		"Test integrity. ", 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the test-target principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		// The subject: the path the requirement names.
+		{"requirement names", "the test target is named by the requirement", true},
+		// The target: the user-facing surface the criterion describes.
+		{"user-facing", "the criterion's surface is the one the user faces", true},
+		{"surface", "the user-facing surface a test must call", false}, // also in other principles
+		// The ban: a lower-level helper the surface routes through.
+		{"lower-level helper", "a test going through a lower-level helper", true},
+		// The consequence: a test that never calls the surface proves nothing.
+		{"never calls the surface", "a test that never calls the surface proves nothing about it", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(testTargetPrinciple), tt.keyword) {
+				t.Errorf("testTargetPrinciple no longer encodes the test-target guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
+// TestSpecTestPrinciplePosition pins where the issue #225 spec-test principle
+// sits: in the "# How you work" block, as its own paragraph after
+// reviewFeedbackPrinciple (issue #162's) and before
+// debugWorkingStylePrinciple (issue #154's) — a position check, not a content
+// check, mirroring TestReviewFeedbackPrinciplePosition. The placement matters:
+// the principle belongs with the accountability principles (test integrity,
+// tests-as-evidence, review feedback) that say what you owe the spec and the
+// reviewer, and ahead of the working-style principles.
+func TestSpecTestPrinciplePosition(t *testing.T) {
+	i := strings.Index(SystemPrompt, specTestPrinciple)
+	if i < 0 {
+		t.Fatal("the spec-test principle is not in the built-in prompt")
+	}
+	if r := strings.Index(SystemPrompt, reviewFeedbackPrinciple); r < 0 || i < r {
+		t.Error("the spec-test principle must sit after the review-feedback principle")
+	}
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the spec-test principle must sit before the debugging principle")
+	}
+	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
+		t.Error("the spec-test principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+	// Its own paragraph, not spliced mid-line into another principle: the
+	// strip in TestDefaultPromptEncodesSpecTestGuidance assumes it.
+	if n := strings.Count(SystemPrompt, "\n\n"+specTestPrinciple+"\n\n"); n != 1 {
+		t.Errorf("the spec-test principle must be exactly one own paragraph in the built-in prompt, found %d", n)
+	}
+}
+
+// TestDefaultPromptEncodesCommentsTruthGuidance pins issue #231's content in
+// the built-in prompt: a comment must say what the code does, not what was
+// intended — a comment the code doesn't implement is worse than no comment
+// (it misleads the next reader, who is often the agent in a later session);
+// after a behavioral change the comments adjacent to the edited span must be
+// re-read and fixed or deleted (reordered calls, a new overwrite, a removed
+// guard all stale them); and a summary or docs claim describing behavior is
+// the same class — it must match the code shipped, and claiming behavior the
+// code doesn't implement is a deviation owed the same report as a test bent
+// to pass. The 2026-10-06 tick reviews (filed in #231) are the case this
+// exists for: PR #222's preflight.go comment claiming a substituted pick's
+// verdict comes from the catalog while the call order it chose makes that
+// false; PR #226's comments and summary claiming gating the code does not
+// implement; PR #229's hand-assembled test commented "Production ordering
+// (loop.go)"; PR #227's "removed the guard" claim with the remaining filters
+// still in place.
+//
+// The keyword assertions run against commentsTruthPrinciple ITSELF, and every
+// absence-checked keyword is additionally asserted ABSENT from the full prompt
+// with the principle stripped — so every subtest actually rides on the new
+// principle rather than on text that was already there (the same
+// rewrite-tolerant, absence-verified style as
+// TestDefaultPromptEncodesSpecTestGuidance). Every keyword below was probed
+// against the pre-#231 prompt and occurs ONLY in the principle — "comment" and
+// "summary" deliberately aren't: they already appear in reviewFeedbackPrinciple
+// and the test-integrity clause, so pinning them against the whole prompt would
+// pass with the principle removed and pin nothing.
+func TestDefaultPromptEncodesCommentsTruthGuidance(t *testing.T) {
+	// The full prompt with the principle removed: its splice site is its own
+	// paragraph, so strip exactly the paragraph plus one surrounding
+	// separator, leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		"\n\n"+commentsTruthPrinciple, "", 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the comment-truth principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		// The rule: the comment states behavior, not intent.
+		{"what the code does", "the comment must say what the code does", true},
+		{"intended", "the banned content: what was intended", true},
+		// The cost: a wrong comment misleads the next reader.
+		{"worse than no comment", "a comment the code doesn't implement is worse than none", true},
+		{"next reader", "the victim: the next reader of the code", true},
+		{"later session", "the next reader is often the agent in a later session", true},
+		// The trigger: a behavioral change stales the adjacent comments.
+		{"behavioral change", "the trigger: the change that stales comments", true},
+		{"re-read the comments", "the ask: re-read the adjacent comments after the change", true},
+		{"no longer hold", "the verdict: a comment that no longer holds is fixed or deleted", true},
+		// The extension: summaries and docs claims are the same class.
+		{"docs claim", "the same class: a docs claim describing behavior", true},
+		{"match the code you shipped", "the bar: the claim must match the shipped code", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(commentsTruthPrinciple), tt.keyword) {
+				t.Errorf("commentsTruthPrinciple no longer encodes the comment-truth guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
+// TestCommentsTruthPrinciplePosition pins where the issue #231 comment-truth
+// principle sits: in the "# How you work" block, as its own paragraph after
+// specTestPrinciple (issue #225's) and before
+// debugWorkingStylePrinciple (issue #154's) — a position check, not a content
+// check, mirroring TestSpecTestPrinciplePosition. The placement matters: the
+// principle belongs with the accountability principles (test integrity,
+// tests-as-evidence, review feedback, the spec) that say what a change owes
+// its readers, and ahead of the working-style principles.
+func TestCommentsTruthPrinciplePosition(t *testing.T) {
+	// The splice probe looks for a line-starting copy of the const — the
+	// const's own doc comment in prompt.go names the text mid-line, and a
+	// line-starting match is the shape only a spliced paragraph has.
+	c := strings.Index(SystemPrompt, "\n\n"+commentsTruthPrinciple)
+	if c < 0 {
+		t.Fatal("the comment-truth principle is not in the built-in prompt")
+	}
+	if s := strings.Index(SystemPrompt, specTestPrinciple); s < 0 || c < s {
+		t.Error("the comment-truth principle must sit after the spec-test principle")
+	}
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < c {
+		t.Error("the comment-truth principle must sit before the debugging principle")
+	}
+	if j := strings.Index(SystemPrompt, "# How you communicate"); j < c {
+		t.Error("the comment-truth principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
+	}
+	// Its own paragraph, not spliced mid-line into another principle: the
+	// strip in TestDefaultPromptEncodesCommentsTruthGuidance assumes it.
+	if n := strings.Count(SystemPrompt, "\n\n"+commentsTruthPrinciple+"\n\n"); n != 1 {
+		t.Errorf("the comment-truth principle must be exactly one own paragraph in the built-in prompt, found %d", n)
+	}
+}
+
+// TestCommentsTruthPrincipleRidesInEveryTurnPrompt pins issue #231's
+// delivery: the built-in SystemPrompt carries commentsTruthPrinciple VERBATIM
+// as its own paragraph, so EVERY turn sees it — REPL turns, headless turns,
+// plan-mode turns (the same delivery reasoning as
+// reviewFeedbackPrinciple and specTestPrinciple). The plan-mode ride itself is
+// asserted by TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt (the
+// commentsTruthPrinciple assertions there) and
+// TestPlanStepPromptCarriesTaskAndPrinciple.
+func TestCommentsTruthPrincipleRidesInEveryTurnPrompt(t *testing.T) {
+	// Exactly one copy, verbatim, and as its own paragraph (a duplicated or
+	// paraphrased ride would pass a bare contains and pin nothing).
+	if c := strings.Count(SystemPrompt, commentsTruthPrinciple); c != 1 {
+		t.Errorf("the comment-truth principle must appear exactly once verbatim in the built-in prompt, found %d", c)
+	}
+	if n := strings.Count(SystemPrompt, "\n\n"+commentsTruthPrinciple+"\n\n"); n != 1 {
+		t.Errorf("the comment-truth principle must ride as exactly one own paragraph in the built-in prompt, found %d", n)
+	}
+}
+
+// TestCommentsTruthPrincipleMirroredInClaudeMD is the issue #231 consistency
+// tripwire, mirroring TestSpecTestPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints" section must carry the EXACT text the model receives
+// (commentsTruthPrinciple) so docs and prompt can't drift apart. Beyond the
+// contains check it pins the mirror as the doc's ONLY copy and as its own
+// paragraph: a mirror embedded in another paragraph, or duplicated, reads as
+// guidance the doc never intended to give twice.
+func TestCommentsTruthPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	doc := string(data)
+	if !strings.Contains(doc, commentsTruthPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints\" section no longer mirrors the built-in prompt's comment-truth principle verbatim (commentsTruthPrinciple) — the docs and the prompt have drifted apart")
+	}
+	if n := strings.Count(doc, commentsTruthPrinciple); n != 1 {
+		t.Errorf("CLAUDE.md mirrors the comment-truth principle %d times, want exactly 1 (a duplicated mirror drifts one copy at a time)", n)
+	}
+	if !strings.Contains(doc, "\n\n"+commentsTruthPrinciple+"\n\n") {
+		t.Error("CLAUDE.md's mirrored comment-truth principle must be its own paragraph (blank-line separated), not spliced into another")
+	}
+}
+
+// TestTestTargetPrincipleSpliced pins issue #225's test-target splice: the
+// built-in SystemPrompt's "Test integrity" paragraph must carry
+// testTargetPrinciple VERBATIM — the test the model writes goes through the
+// user-facing path the requirement names, never a lower-level helper — before
+// #141's existing-test clause, so #141 and #225 read as one rule. Content is
+// pinned by the loose keyword checks in
+// TestDefaultPromptEncodesTestTargetGuidance; this is the
+// connect-through: a test target that never calls the user-facing surface
+// proves nothing about it.
+func TestTestTargetPrincipleSpliced(t *testing.T) {
+	i := strings.Index(SystemPrompt, testTargetPrinciple)
+	if i < 0 {
+		t.Fatal("the test-target principle is not in the built-in prompt")
+	}
+	// It sits in the "Test integrity" paragraph, before #141's clause.
+	if !strings.Contains(SystemPrompt[i-20:i+len(testTargetPrinciple)+20], "Test integrity") {
+		t.Error("the test-target principle must be spliced into the \"Test integrity\" paragraph")
+	}
+	if n := strings.Index(SystemPrompt, "Removing or changing an existing test"); n < i {
+		t.Error("the test-target principle must precede #141's existing-test clause in the Test integrity paragraph")
+	}
+	// And it is its OWN principle (one verbatim copy), not a paraphrase:
+	// a test written to match the code is the same class of bending as a
+	// changed existing test.
+	if c := strings.Count(SystemPrompt, testTargetPrinciple); c != 1 {
+		t.Errorf("the test-target principle must appear exactly once in the built-in prompt, found %d", c)
 	}
 }
 
