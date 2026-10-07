@@ -86,10 +86,15 @@ func (e AttachmentError) Error() string {
 //     /etc/passwd must be told it was refused, because the alternative —
 //     ignoring it and answering as if nothing was attached — makes a
 //     permission decision invisible.
-//   - A url is validated with tools.ImageURL (so only http(s) reaching an
-//     image-looking target, never file:// or a bare host) and fetched through
-//     the same seam @mentions use, which is the SSRF-safe public fetch and
-//     swappable in tests.
+//   - A url is validated with tools.ImageURL (so only http(s) reaching a
+//     host-bearing target — it says nothing about the target being an image,
+//     which is why the fetched bytes are still judged by the leaf's sniffer,
+//     never file:// or a bare host) and gated by the tools.enable_web
+//     kill-switch BEFORE any download — a `{url}` attachment is network
+//     egress, and an operator who disabled web tools must not get a fetch
+//     from a request body (a refusal names the switch and answers 400).
+//     It is then fetched through the same seam @mentions use, which is the
+//     SSRF-safe public fetch and swappable in tests.
 //   - `data` is decoded and then judged by its BYTES. A `path`/`url`
 //     attachment's reference is anchored in something the server itself read,
 //     so the leaf's extension-OR-magic rule is safe there; here the filename
@@ -155,6 +160,13 @@ func resolveTurnAttachments(ctx context.Context, cs *CortexSession, atts []TurnA
 			addr, ok := tools.ImageURL(strings.TrimSpace(a.URL))
 			if !ok {
 				return nil, attErr("not an http(s) image url")
+			}
+			// The web kill-switch gates the download BEFORE it happens, exactly
+			// as the REPL mention path does: with tools.enable_web false the
+			// request is refused (a 400 through attachmentHTTPStatus) and the
+			// fetch seam is never touched.
+			if !fetchImageWebEnabled(cs) {
+				return nil, attErr("image urls are disabled (tools.enable_web: false)")
 			}
 			data, fetchErr := fetchMentionImageBytes(ctx, addr)
 			// The fsPath stays empty exactly as the mention path leaves it: the

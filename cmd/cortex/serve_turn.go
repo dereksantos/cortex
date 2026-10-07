@@ -20,10 +20,11 @@ import (
 type turnRequest struct {
 	Input string `json:"input"`
 	// Attachments (#218) are images to carry on this turn, each named by a
-	// workspace-relative `path` or an http(s) `url` — never by posted bytes.
-	// Resolved by resolveTurnAttachments (serve_attachments.go), which is the
-	// same routine the SSE endpoint uses, so the two cannot disagree about
-	// what is attachable.
+	// workspace-relative `path`, an http(s) `url` (gated by tools.enable_web),
+	// or base64 `data` posted by a browser file picker. Resolved by
+	// resolveTurnAttachments (serve_attachments.go), which is the same routine
+	// the SSE endpoint uses, so the two cannot disagree about what is
+	// attachable.
 	Attachments []TurnAttachment `json:"attachments,omitempty"`
 }
 

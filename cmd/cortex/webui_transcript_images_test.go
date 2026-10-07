@@ -20,10 +20,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 func TestTranscriptViewModelReportsAttachedImages(t *testing.T) {
@@ -81,8 +84,12 @@ func TestTranscriptViewModelReportsAttachedImages(t *testing.T) {
 	})
 
 	t.Run("a text entry has no images", func(t *testing.T) {
-		// The human's own turn: its content is kept exactly as typed, with no
-		// marker in it (#218 step 3), so it must show no attachment.
+		// The human's own turn in THIS fixture: its content is kept exactly as
+		// typed, with no marker in it (#218 step 3), and no side-car manifest
+		// sits beside the transcript either, so it shows no attachment. (A real
+		// human-attached turn IS covered — by the manifest, through a real
+		// TurnWithAttachments run — in
+		// TestTranscriptViewModelReportsManifestAttachment below.)
 		if vm.Entries[0].Images != nil {
 			t.Errorf("user entry images = %+v, want none", vm.Entries[0].Images)
 		}
@@ -112,6 +119,62 @@ func TestTranscriptViewModelReportsAttachedImages(t *testing.T) {
 			t.Errorf("the attached image is missing from the JSON: %s", blob)
 		}
 	})
+}
+
+// TestTranscriptViewModelReportsManifestAttachment is the real-turn
+// acceptance the reviewer asked for (#218): a human-attached image writes NO
+// marker into the message text — turn.go keeps the user's input byte-for-byte
+// — so the ONLY durable record is the side-car manifest beside the
+// transcript. This drives a real TurnWithAttachments on a vision-enabled
+// session, then builds the view-model from the transcript that run actually
+// wrote, and asserts the user entry's Images is non-empty. A fixture of
+// hand-written marker strings cannot catch this regression, because
+// production never writes one on a human-attached turn.
+func TestTranscriptViewModelReportsManifestAttachment(t *testing.T) {
+	cs := attachTestSession(t, true) // vision-capable, temp workspace, real transcript
+	raw := attachTestPNG(41, 80)
+	input := "what is in this screenshot @shots/ui.png"
+	if _, err := cs.TurnWithAttachments(context.Background(), input, TurnImage{
+		Ref:  "shots/ui.png",
+		Part: tools.ImagePart{MediaType: "image/png", Path: "shots/ui.png", DataURI: attachTestDataURI(raw)},
+	}); err != nil {
+		t.Fatalf("TurnWithAttachments: %v", err)
+	}
+	transcriptPath := filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl")
+
+	vm, err := buildTranscriptViewModel(transcriptPath)
+	if err != nil {
+		t.Fatalf("buildTranscriptViewModel: %v", err)
+	}
+	var userEntry *transcriptEntry
+	for i := range vm.Entries {
+		if vm.Entries[i].Role == RoleUser {
+			userEntry = &vm.Entries[i]
+			break
+		}
+	}
+	if userEntry == nil {
+		t.Fatal("no user entry in the built view-model")
+	}
+	// The human's text survived exactly as typed (no marker was appended)...
+	if userEntry.Content != input {
+		t.Errorf("user content = %q, want the input as typed", userEntry.Content)
+	}
+	// ...and the attachment is still shown, from the manifest.
+	if len(userEntry.Images) == 0 {
+		t.Fatalf("user entry images = %+v, want the manifest's attachment", userEntry.Images)
+	}
+	img := userEntry.Images[0]
+	if img.Name != "shots/ui.png" {
+		t.Errorf("name = %q, want the reference the human attached", img.Name)
+	}
+	if img.MediaType != "image/png" {
+		t.Errorf("media_type = %q, want image/png", img.MediaType)
+	}
+	// A local attachment has no loadable URL, same rule as the marker path.
+	if img.URL != "" {
+		t.Errorf("url = %q, want empty for a local attachment", img.URL)
+	}
 }
 
 func TestTranscriptImagesForEdgeShapes(t *testing.T) {

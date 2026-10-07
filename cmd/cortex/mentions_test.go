@@ -548,6 +548,63 @@ func TestMentionsContextCancelStopsFetch(t *testing.T) {
 	}
 }
 
+// TestMentionsURLWebDisabledNoFetch is the enable_web acceptance (#218
+// review): an `@https://…` mention is network egress, and an operator who set
+// tools.enable_web false to stay offline must not get a download from typing
+// a link in prose. With web tools off the fetch seam is never called, the
+// mention is refused with a reason that NAMES the switch, and the line is
+// left exactly as typed.
+func TestMentionsURLWebDisabledNoFetch(t *testing.T) {
+	orig := fetchMentionImage
+	t.Cleanup(func() { fetchMentionImage = orig })
+	called := false
+	fetchMentionImage = func(context.Context, string) ([]byte, error) {
+		called = true
+		return pngFixtureBytes(8), nil
+	}
+	root := setupMentionWorkspace(t)
+	no := false
+	// The REAL gate: *CortexSession.IsToolEnabled reads Tools.EnableWeb, the
+	// same field fetch_url's dispatch gate reads — so this exercises the
+	// production check, not a copy of it.
+	webOff := visionDeps{CortexSession: &CortexSession{Config: &Config{Tools: ToolConfig{EnableWeb: &no}}}, accept: true}
+	webOn := visionDeps{CortexSession: &CortexSession{}, accept: true}
+
+	tests := []struct {
+		name      string
+		deps      tools.ToolDeps
+		wantFetch bool
+		wantRef   int
+	}{
+		{"web disabled: no fetch, refusal names enable_web", webOff, false, 1},
+		{"web enabled (absent config = on): fetch happens", webOn, true, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called = false
+			input := "see @https://cdn.example.com/a.png"
+			clean, _, images, refused := mentions(root, input, tt.deps)
+			if called != tt.wantFetch {
+				t.Errorf("fetch seam called = %v, want %v", called, tt.wantFetch)
+			}
+			if len(refused) != tt.wantRef {
+				t.Fatalf("refusals = %v, want %d", refused, tt.wantRef)
+			}
+			if tt.wantRef == 1 {
+				if !strings.Contains(refused[0].Reason, "enable_web") {
+					t.Errorf("refusal %q must name tools.enable_web", refused[0].Reason)
+				}
+				if len(images) != 0 {
+					t.Errorf("images = %v, want none when web is disabled", refsOf(images))
+				}
+				if clean != input {
+					t.Errorf("clean = %q, want the input unchanged", clean)
+				}
+			}
+		})
+	}
+}
+
 // TestMentionCompleterSingleModelSource drives the REAL wired completers
 // (the map mentionCompleter builds, with the id list injected through the
 // modelIDs seam) through the REAL lineedit engine for a /model continuation:

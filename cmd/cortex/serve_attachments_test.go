@@ -547,6 +547,70 @@ func TestServeTurnAcceptsPostedBytes(t *testing.T) {
 	})
 }
 
+// TestServeTurnURLAttachmentWebDisabledIsRefused is the enable_web acceptance
+// on the serve side (#218 review): a `{url}` attachment is network egress, so
+// it must obey the same tools.enable_web kill-switch fetch_url does — refused
+// with a 400 that names the switch, before the fetch seam is ever touched.
+func TestServeTurnURLAttachmentWebDisabledIsRefused(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	backend := newWireBackend(t)
+	off := false
+	mgr := NewSessionManager(reg, func() *CortexSession {
+		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
+		cs.Request.BaseURL = backend.srv.URL
+		cs.Request.Vision = true
+		// The REAL gate: IsToolEnabled reads Tools.EnableWeb, the same field
+		// fetch_url's dispatch gate reads.
+		cs.Config = &Config{Tools: ToolConfig{EnableWeb: &off}}
+		return cs
+	})
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
+	defer ts.Close()
+	created, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	orig := fetchMentionImage
+	t.Cleanup(func() { fetchMentionImage = orig })
+	called := false
+	fetchMentionImage = func(context.Context, string) ([]byte, error) {
+		called = true
+		return attachTestPNG(29, 64), nil
+	}
+
+	body, _ := json.Marshal(turnRequest{
+		Input:       "fetch this",
+		Attachments: []TurnAttachment{{URL: "https://cdn.example.com/a.png"}},
+	})
+	resp, text := postTurnJSON(t, ts.URL+"/api/projects/blog/sessions/"+created.ID()+"/turn", string(body))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%q)", resp.StatusCode, text)
+	}
+	if !strings.Contains(text, "enable_web") {
+		t.Errorf("refusal %q must name tools.enable_web", text)
+	}
+	if called {
+		t.Error("the fetch seam was called despite web tools being disabled")
+	}
+	if n := len(backend.captured()); n != 0 {
+		t.Errorf("the turn ran (%d backend requests) despite the refusal", n)
+	}
+
+	// The resolver unit, same table: web off refuses a url before the seam.
+	cs := &CortexSession{workspace: &Workspace{Root: root}, deleteRoot: root, Request: CortexArgs{}.Request(), Config: &Config{Tools: ToolConfig{EnableWeb: &off}}}
+	cs.Request.Vision = true
+	called = false
+	imgs, attErr := resolveTurnAttachments(context.Background(), cs, []TurnAttachment{{URL: "https://cdn.example.com/a.png"}})
+	if attErr == nil || !strings.Contains(attErr.Reason, "enable_web") {
+		t.Errorf("resolver refusal = %v, want one naming enable_web", attErr)
+	}
+	if imgs != nil || called {
+		t.Errorf("a web-disabled url must resolve nothing and fetch nothing (imgs=%v called=%v)", imgs, called)
+	}
+}
+
 // TestServeTurnNoAttachmentsUnchanged is the regression floor: the ordinary
 // request shape must behave exactly as before — same 200, one request, no
 // image parts on the wire.

@@ -171,7 +171,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 // per image under the index the message actually lands at (so `recall` can
 // name the bytes after the in-memory Parts are gone), and NOTHING on the
 // message for a text-only model — the #216 wire gate would refuse the whole
-// request — with a note in TurnResult.TurnImages telling the human why.
+// request — with a note in TurnResult.ImageNotes telling the human why.
 func (cs *CortexSession) TurnWithAttachments(ctx context.Context, input string, images ...TurnImage) (TurnResult, error) {
 	return cs.turnWithImages(ctx, input, nil, 0, 0, FinalizeInteractive, images)
 }

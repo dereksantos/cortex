@@ -99,6 +99,13 @@ func buildTranscriptViewModel(path string) (transcriptViewModel, error) {
 			})
 		}
 		e.Images = transcriptImagesFor(m)
+		// A HUMAN-attached image (#218) leaves no marker in the message text at
+		// all — turn.go keeps the user's input byte-for-byte as typed, so the
+		// marker scan above can never find it. Its durable record is the
+		// side-car manifest written beside the transcript at the index this
+		// message landed at; read it so a turn that carried a screenshot shows
+		// its images here instead of nothing.
+		e.Images = append(e.Images, transcriptImagesFromManifest(filepath.Dir(path), sessionIDFromPath(path), i)...)
 		vm.Entries = append(vm.Entries, e)
 	}
 	return vm, nil
@@ -144,6 +151,32 @@ func transcriptImagesFor(m Message) []transcriptImage {
 		}
 		rest = body[end+1:]
 	}
+}
+
+// transcriptImagesFromManifest describes the images a HUMAN attached to the
+// transcript message at absolute index abs (#218), read from the side-car
+// manifest written beside the transcript (image_input.go's
+// writeTurnImageManifest). It returns nil when the message carried no
+// human-attached image: a turn with an image is recorded ONLY in the manifest
+// (the user's text is persisted byte-for-byte as typed), so without this the
+// session screen shows nothing for a turn that really carried a screenshot.
+// Each entry gets the same URL rule the marker scan applies: a remote
+// reference is loadable in the browser directly; a local one gets name and
+// type only, its bytes staying in the session directory.
+func transcriptImagesFromManifest(sessionsDir, sessionID string, abs int) []transcriptImage {
+	entries := readTurnImageManifest(sessionsDir, sessionID, abs)
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]transcriptImage, 0, len(entries))
+	for _, e := range entries {
+		img := transcriptImage{Name: e.Ref, MediaType: e.MediaType}
+		if addr, ok := tools.ImageURL(e.Ref); ok {
+			img.URL = addr
+		}
+		out = append(out, img)
+	}
+	return out
 }
 
 // parseTranscriptImageMarker reads one marker's body — "ref mediaType N bytes

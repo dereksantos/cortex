@@ -77,6 +77,9 @@ const mentionPunctURL = ",.;!?"
 // one function a test can stub. A stub lets the URL branch be exercised
 // offline, which is what keeps this file's tests in the default set.
 //
+// The gate above the seam: fetchImageWebEnabled. The seam itself is only
+// reached when that gate says web tools are on.
+//
 // Returning an error is what makes a failed download a reportable refusal
 // rather than a silently missing image.
 type MentionImageFetcher func(ctx context.Context, url string) ([]byte, error)
@@ -91,6 +94,20 @@ var fetchMentionImage MentionImageFetcher = func(ctx context.Context, u string) 
 	// whatever comes back, so the download itself must not fail a file the
 	// cap would still have refused with a clearer message.
 	return tools.FetchPublicImageBytes(ctx, u, tools.ImageMaxBytes())
+}
+
+// fetchImageWebEnabled reports whether the web kill-switch (tools.enable_web,
+// the same gate fetch_url and web_search obey through IsToolEnabled) allows
+// an image ADDRESS to be downloaded (#218 review). Checked BEFORE any fetch:
+// an `@https://…` mention or a serve `{url}` attachment is network egress the
+// coder did not ask a tool for, and an operator who set enable_web false to
+// stay offline must not get a download from typing a link in prose. A nil
+// deps is ungated exactly as IsToolEnabled treats a nil Config (all tools on).
+func fetchImageWebEnabled(deps tools.ToolDeps) bool {
+	if deps == nil {
+		return true
+	}
+	return deps.IsToolEnabled(tools.FunctionFetchURL)
 }
 
 // MentionRefusal is an image mention that resolved to nothing attachable, and
@@ -173,6 +190,14 @@ func processMentions(ctx context.Context, workspaceRoot, input string, deps tool
 
 		// --- image ADDRESS mention (#218): fetch, then the shared loader.
 		if addr, ok := tools.ImageURL(ref); ok {
+			// The web kill-switch gates the download BEFORE it happens: with
+			// tools.enable_web false, a URL mention is refused and left exactly
+			// as typed — the bytes are never fetched, so an offline posture
+			// survives prose that happens to contain a link.
+			if !fetchImageWebEnabled(deps) {
+				refused = append(refused, MentionRefusal{Ref: addr, Reason: addr + " was not fetched — web tools are disabled (tools.enable_web: false), so image addresses cannot be downloaded"})
+				continue
+			}
 			data, fetchErr := fetchMentionImageBytes(ctx, addr)
 			att := tools.AttachImageWithErr(deps, addr, "", data, fetchErr)
 			if att.Refused {

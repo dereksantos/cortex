@@ -241,12 +241,19 @@ type turnSideCarEntry struct {
 	MediaType string
 }
 
+// turnImageManifestPath names the manifest file for message index abs of
+// session id — one key shared by the write and the read, so the two can
+// never disagree about where the record lives.
+func turnImageManifestPath(sessionsDir, id string, abs int) string {
+	return filepath.Join(sessionsDir, fmt.Sprintf("%s.m%d.images", id, abs))
+}
+
 // writeTurnImageManifest records, beside the bytes, which reference each
 // side-car came from (#218). The transcript deliberately keeps the human's
 // input exactly as typed — no marker text appended to it — so without this
 // the reference a byte-file came from would exist nowhere on disk: a resumed
 // session could see it holds an image and not say which one. One JSON line
-// per image, read by recall and by a resume.
+// per image, read by recall, by a resume, and by the web transcript view-model.
 func writeTurnImageManifest(sessionsDir, id string, abs int, entries []turnSideCarEntry) {
 	if sessionsDir == "" || id == "" || len(entries) == 0 {
 		return
@@ -255,16 +262,14 @@ func writeTurnImageManifest(sessionsDir, id string, abs int, entries []turnSideC
 	for _, e := range entries {
 		fmt.Fprintf(&b, "%s\t%s\t%s\n", e.Path, e.MediaType, e.Ref)
 	}
-	p := filepath.Join(sessionsDir, fmt.Sprintf("%s.m%d.images", id, abs))
-	_ = os.WriteFile(p, []byte(b.String()), 0o600)
+	_ = os.WriteFile(turnImageManifestPath(sessionsDir, id, abs), []byte(b.String()), 0o600)
 }
 
 // readTurnImageManifest returns the manifest entries for message index abs,
 // or nil when the message carried no human-attached images (or the manifest
 // could not be read — an absent list is the right answer for a lookup).
 func readTurnImageManifest(sessionsDir, id string, abs int) []turnSideCarEntry {
-	p := filepath.Join(sessionsDir, fmt.Sprintf("%s.m%d.images", id, abs))
-	body, err := os.ReadFile(p)
+	body, err := os.ReadFile(turnImageManifestPath(sessionsDir, id, abs))
 	if err != nil {
 		return nil
 	}

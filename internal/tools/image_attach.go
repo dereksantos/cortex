@@ -196,24 +196,6 @@ func attachImage(deps ToolDeps, displayRef, fsPath string, data []byte, loadErr 
 	return att
 }
 
-// ImageURL reports whether a reference a human typed is a remote image
-// address rather than a workspace path, and returns it normalized: scheme
-// lowercased (providers are strict about `https://`, and a human may type
-// `HTTPS://…`), the path escaped if it isn't already, and the query and
-// fragment preserved — they carry what the CDN needs to serve the file.
-//
-// Only http and https count. `file://` is refused rather than quietly
-// turned into a local read: a reference that LOOKS like an address should
-// not gain filesystem privileges by being typed in a URL shape, and the
-// local file belongs in the mention as a workspace path, where the
-// workspace confinement rules apply to it.
-//
-// The scheme is tested as a prefix before parsing, deliberately: url.Parse
-// reads `C:\shots\a.png` as scheme "c" with no host (and a path that is
-// "//host/x" has no scheme at all but is not a relative path either), so
-// parsing alone would either misread a Windows path as an address or
-// silently drop a protocol-relative one. A workspace path never starts
-// with a scheme prefix, so it is never mistaken for an address here.
 // DecodeInlineDataURI accepts base64 image bytes handed over the wire —
 // either a complete `data:<media>;base64,<payload>` URI (the shape a browser's
 // FileReader produces) or a bare base64 payload — and returns the decoded
@@ -290,7 +272,24 @@ func decodeBase64Lenient(payload string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(p)
 }
 
-// ImageURL reduces a reference to
+// ImageURL reports whether a reference a human typed is a remote image
+// address rather than a workspace path, and returns it normalized: scheme
+// lowercased (providers are strict about `https://`, and a human may type
+// `HTTPS://…`), the path escaped if it isn't already, and the query and
+// fragment preserved — they carry what the CDN needs to serve the file.
+//
+// Only http and https count. `file://` is refused rather than quietly
+// turned into a local read: a reference that LOOKS like an address should
+// not gain filesystem privileges by being typed in a URL shape, and the
+// local file belongs in the mention as a workspace path, where the
+// workspace confinement rules apply to it.
+//
+// The scheme is tested as a prefix before parsing, deliberately: url.Parse
+// reads `C:\shots\a.png` as scheme "c" with no host (and a path that is
+// "//host/x" has no scheme at all but is not a relative path either), so
+// parsing alone would either misread a Windows path as an address or
+// silently drop a protocol-relative one. A workspace path never starts
+// with a scheme prefix, so it is never mistaken for an address here.
 func ImageURL(ref string) (string, bool) {
 	low := strings.ToLower(strings.TrimSpace(ref))
 	if !strings.HasPrefix(low, "http:") && !strings.HasPrefix(low, "https:") {
