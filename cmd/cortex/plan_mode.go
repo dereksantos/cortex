@@ -98,6 +98,16 @@ const noReproMarker = `If this step's outcome is that the reported problem does 
 // on the system prompt alone) keeps the plan shaped around observable bugs
 // while the output-shape rules above stay the only other instruction in the
 // turn.
+//
+// The test-target and spec-test principles (issue #225) restate prompt.go's
+// testTargetPrinciple and specTestPrinciple the same way: the plan's steps are
+// where a lower-level helper can be named in place of the user-facing path a
+// criterion names (testTargetPrinciple — test the surface, not the helper it
+// routes through), and a planned step that bends a failing acceptance test to
+// pass is a deviation owed a report (specTestPrinciple — a test written from
+// the issue's criteria is a spec). Both ride with the plan so every step turn
+// inherits the obligation even after demotion folds the planning turn out of
+// view.
 const planModeInstruction = `You are planning a multi-part task. First produce ONLY a plan, then I will execute each step as its own turn.
 
 Respond with a numbered list of steps, one per line, in this exact shape:
@@ -111,7 +121,9 @@ Rules:
 - One line per step, starting at 1; nothing before the list, nothing after.
 - No prose, no headings, no bullet markers — only "N. step" lines.
 - Do not use any tools; just output the numbered list.
-- ` + verifyBeforeFixPrinciple + ``
+- ` + verifyBeforeFixPrinciple + `
+- ` + testTargetPrinciple + `
+- ` + specTestPrinciple + ``
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -623,6 +635,13 @@ func noReproNote(reply string) string {
 // such a reply with "Not reproduced:" so noReproNote recognizes the verdict
 // and carries it into the report and the later steps' prompts.
 //
+// It also carries the test-target and spec-test principles (issue #225):
+// a step turn is where a failing acceptance test actually gets bent and where
+// a lower-level helper gets tested in place of the user-facing path the
+// criterion names — testTargetPrinciple and specTestPrinciple ride with every
+// step (same consts the base system prompt carries) so demotion at the turn
+// boundaries (#131) cannot fold the only copy out of view.
+//
 // And it restates the review-feedback principle (reviewFeedbackPrinciple,
 // issue #162): a step turn is where a review round's findings actually get
 // applied, and demotion at the turn boundaries (#131) can fold the review
@@ -651,8 +670,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, locateBeforeWritingPrinciple, noReproMarker,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, locateBeforeWritingPrinciple, testTargetPrinciple, specTestPrinciple, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)
