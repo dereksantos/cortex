@@ -123,19 +123,12 @@ func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
 	return p
 }
 
-// GateShell implements tools.ShellGate. It returns the structured outcome
-// (issue #219) that gateShell's message alone cannot carry: a Blocked verdict
-// or the same-action backstop (a repeat of an effect class the user already
-// refused this turn) is a REFUSAL; every other not-ok return is a Risky
-// command that never got an approver's yes — a headless or subagent block, a
-// declined prompt, or an approval timeout — a BLOCK. Both mean the command
-// never ran; the receipt must record it as not run, never as an exit code.
-// The outcome is read from cs.gateOutcome, which gateShell sets on every
-// return path — no re-derivation through the classifier, so the split is
-// exactly what the production gate decided.
-func (cs *CortexSession) GateShell(ctx context.Context, command string) (string, bool, tools.ShellGateOutcome) {
-	msg, ok := cs.gateShell(ctx, command)
-	return msg, ok, cs.gateOutcome
+// GateShell implements tools.ShellGate. The gate's structured fate — whether
+// the command ran, and with what exit code — is the caller's BashOutcome
+// (below): the gate is the only bash spawn point this session answers, so
+// its own answer is the receipt's authoritative "it ran / it didn't" signal.
+func (cs *CortexSession) GateShell(ctx context.Context, command string) (string, bool) {
+	return cs.gateShell(ctx, command)
 }
 
 func (cs *CortexSession) AllowDelete() (string, bool) { return cs.deleteRoot, cs.allowDelete }
@@ -153,11 +146,26 @@ func (cs *CortexSession) Workdir() string {
 	return ""
 }
 
-// BashEnv implements tools.BashEnver: the extra PATH dir the bash tool's
-// subprocess inherits (cs.extraPath, prepended to the process PATH) — the
-// turn-receipt surface test's seam for real command binaries. Empty for
-// every production session, so the bash tool's environment is untouched.
-func (cs *CortexSession) BashEnv() string { return cs.extraPath }
+// BashOutcome implements tools.BashOutcomes: the structured fate of a bash
+// command the session's gate answered (issue #219). It is a POSITIVE signal
+// — Ran is true only on the path the command actually spawned — so the
+// receipt never infers "ran and exited 0" from the absence of a marker in
+// the result message: a gate refusal (a Blocked verdict or the same-action
+// backstop) and a Risky command that never got an approver's yes (headless,
+// subagent, a declined prompt, an approval timeout, or a tainted turn's
+// raised bar) all never ran. The answer is recorded per command the first
+// time the gate is asked for it (cs.bashGateAnswers), so the receipt reads
+// the gate's own verdict for THIS call, not a re-derivation through the
+// classifier. A command the gate never answered (a call that died before
+// the gate — a canceled ctx) is not found and reports false: the consumer
+// must not read "unknown" as "it ran".
+func (cs *CortexSession) BashOutcome(command string) (tools.BashOutcome, bool) {
+	if cs.bashGateAnswers == nil {
+		return tools.BashOutcome{}, false
+	}
+	a, ok := cs.bashGateAnswers[command]
+	return a.outcome, ok
+}
 
 // ProjectCommands implements tools.ProjectCommands: the resolved command set
 // (discovered from the workspace's manifests, overridden by config and
@@ -709,7 +717,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	// reaching the risk gate, and the refusal names the class so it
 	// knows what is barred.
 	if cls := shellrisk.EffectClass(command); cls != "" && cs.sameActionBlockedInTurn(cls) {
-		cs.gateOutcome = tools.ShellGateRefused
+		cs.recordBashGate(command, tools.BashOutcome{})
 		return shellrisk.SameActionBlockedMessage(cls), false
 	}
 	var fn shellrisk.ClassifyFn
@@ -764,10 +772,10 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	}
 	switch v.Level {
 	case shellrisk.Safe:
-		cs.gateOutcome = tools.ShellGateClean
+		cs.recordBashGate(command, tools.BashOutcome{Ran: true})
 		return "", true
 	case shellrisk.Blocked:
-		cs.gateOutcome = tools.ShellGateRefused
+		cs.recordBashGate(command, tools.BashOutcome{})
 		cs.recordSameActionBlock(command)
 		return shellrisk.RefusedMessage(v.Reason), false
 	default:
@@ -796,7 +804,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		// and this check stands BEFORE the session-approval match below, so a
 		// subagent never auto-runs on a stored approval either.
 		if subagentDepth(ctx) != 0 || cs == nil {
-			cs.gateOutcome = tools.ShellGateBlocked
+			cs.recordBashGate(command, tools.BashOutcome{})
 			cs.recordSameActionBlock(command)
 			return blocked, false
 		}
@@ -813,7 +821,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		// of it — a stored session approval would let injected text ride an
 		// earlier "always" (e.g. a `git push` prefix) past the raised bar.
 		if !tainted && shellApprovalMatches(cs.shellApprovalPatterns(), command) {
-			cs.gateOutcome = tools.ShellGateClean
+			cs.recordBashGate(command, tools.BashOutcome{Ran: true})
 			return "", true
 		}
 		if !cs.quiet && cs.confirmRisky != nil {
@@ -833,17 +841,17 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			switch choice {
 			case lineedit.ConfirmAlwaysExact:
 				cs.ApproveShell("exact", command, command, v.Reason)
-				cs.gateOutcome = tools.ShellGateClean
+				cs.recordBashGate(command, tools.BashOutcome{Ran: true})
 				return "", true
 			case lineedit.ConfirmAlwaysPrefix:
 				cs.ApproveShell("prefix", prefix, command, v.Reason)
-				cs.gateOutcome = tools.ShellGateClean
+				cs.recordBashGate(command, tools.BashOutcome{Ran: true})
 				return "", true
 			case lineedit.ConfirmYes:
-				cs.gateOutcome = tools.ShellGateClean
+				cs.recordBashGate(command, tools.BashOutcome{Ran: true})
 				return "", true
 			default:
-				cs.gateOutcome = tools.ShellGateBlocked
+				cs.recordBashGate(command, tools.BashOutcome{})
 				cs.recordSameActionBlock(command)
 				return shellrisk.DeclinedMessage(), false
 			}
@@ -855,10 +863,10 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		if cs.approveRisky != nil {
 			approved, timedOut := cs.approveRisky(ctx, reason, command)
 			if approved {
-				cs.gateOutcome = tools.ShellGateClean
+				cs.recordBashGate(command, tools.BashOutcome{Ran: true})
 				return "", true
 			}
-			cs.gateOutcome = tools.ShellGateBlocked
+			cs.recordBashGate(command, tools.BashOutcome{})
 			if timedOut {
 				cs.recordSameActionBlock(command)
 				return blocked, false
@@ -866,7 +874,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			cs.recordSameActionBlock(command)
 			return shellrisk.DeclinedMessage(), false
 		}
-		cs.gateOutcome = tools.ShellGateBlocked
+		cs.recordBashGate(command, tools.BashOutcome{})
 		cs.recordSameActionBlock(command)
 		return blocked, false
 	}

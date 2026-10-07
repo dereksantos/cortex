@@ -141,24 +141,7 @@ type CortexSession struct {
 	quiet         bool
 	confirmRisky  func(question string) lineedit.ConfirmChoice
 	classifyShell shellrisk.ClassifyFn
-	// extraPath is an EXTRA PATH dir the bash tool's subprocess inherits,
-	// prepended to the process's PATH: a test seam for the turn-receipt
-	// surface test, whose discovered test/build commands are real scripts in
-	// a temp dir (failcheck, passcheck). Empty (the default, every
-	// production session) leaves the bash tool's environment untouched.
-	extraPath  string
-	turnIntent string
-	// gateOutcome is the structured outcome (tools.ShellGateOutcome) of the
-	// most recent bash call this session's gate answered for (issue #219):
-	// the gate's own refusal — a Blocked verdict (Refused) or a Risky
-	// command that never got an approver's yes (Blocked) — published on the
-	// session because the gate seam (tools.ShellGate) must stay
-	// (string, bool) for every other implementor. The dispatcher's bash
-	// arm (coderDispatcher, loop.go) samples it around each bash call, so
-	// the structured refusal is the GATE's own, not a re-derivation through
-	// the session's test stubs. ShellGateClean for a call that ran (or for
-	// a non-bash call — the arm clears it first).
-	gateOutcome tools.ShellGateOutcome
+	turnIntent    string
 	// onThinking, when set, is invoked with active=true on the first
 	// reasoning delta of a model call and active=false once its answer
 	// content starts (or the call ends without one) — the served-session SSE
@@ -338,6 +321,15 @@ type CortexSession struct {
 	receiptModelBash   []receiptModelBashRun
 	receiptUnformatted []string
 	receipt            turnReceipt
+	// bashGateAnswers is the session's per-turn record of the gate's own
+	// answer for each bash command it was asked to answer (issue #219):
+	// the structured fate (tools.BashOutcome — ran, and the exit code) the
+	// receipt reads back via BashOutcome. Cleared at the START of every
+	// turn (receiptDrop), mirroring receiptModelBash's lifecycle: an answer
+	// from an earlier turn is not this turn's measurement. A command the
+	// gate never answered for a call (a call that died before the gate —
+	// a canceled ctx) is simply absent.
+	bashGateAnswers map[string]bashGateAnswer
 
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to

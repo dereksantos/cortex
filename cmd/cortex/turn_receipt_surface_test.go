@@ -106,7 +106,13 @@ func receiptSession(t *testing.T, dir string, initGit, trusted bool) *CortexSess
 	}
 	writeCmdScript(t, bin, "failcheck", "exit 1")
 	writeCmdScript(t, bin, "passcheck", "exit 0")
-	cs.extraPath = bin
+	// The real bash tool spawns its process with the test's PATH: the
+	// discovered checks are real binaries in a real PATH dir, so a turn
+	// running `failcheck` executes a REAL shell script — the receipt's exit
+	// code is the shell's observed exit, never a stubbed marker. Prepending
+	// bin through t.Setenv scopes it to this test; the production bash
+	// path has no test-only env seam.
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	// The real gate must let the checks through: a bare custom binary is
 	// not on the safe path, so the tier-3 classifier decides. The seam
 	// classifies both checks Safe (a test command the gate should run);
@@ -436,26 +442,33 @@ func TestReceiptBashRole(t *testing.T) {
 	}
 }
 
-// TestParseBashExitCode pins the exit-code parse: the "[exit error: exit
-// status N]" marker carries the process's real exit code; a result without
-// the marker is the absence of an observed failure (a clean exit), resolved
-// only when the gate says the command actually ran.
-func TestParseBashExitCode(t *testing.T) {
+// TestReceiptExitCodeOf pins the exit-code parse: the bash tool reports a
+// non-zero exit as a trailing "[exit error: <error>]" line, where <error> is
+// the run error's Error() text. exec.ExitError renders as "exit status N"
+// (the number is the process's real exit code), but a run KILLED BY A SIGNAL
+// renders as "signal: killed" and carries no number. A marker that names no
+// exit status — a signal-killed run, or a bare marker — is a real failure
+// reported as exit 1: the receipt's job is to never report a failed run as
+// exit 0. The dispatcher passes only the marker's TAIL (the text after
+// "[exit error: "), so a marker-less input resolves to the absence of an
+// observed failure.
+func TestReceiptExitCodeOf(t *testing.T) {
 	cases := []struct {
 		in   string
 		code int
 		ok   bool
 	}{
-		{"ok  pkg  0.01s", 0, false},
-		{"FAIL\n[exit error: exit status 1]", 1, true},
-		{"boom\n[exit error: exit status 3]", 3, true},
-		{"[exit error: exit status ]", 1, true},
-		{"[exit error: exit status]", 1, true},
+		{"", 0, false},              // marker-less arm: no exit status observed
+		{"exit status 1]", 1, true}, // the real process exit code
+		{"exit status 3]", 3, true},
+		{"exit status ]", 1, true}, // no number: a failure, not a clean exit
+		{"exit status]", 1, true},
+		{"signal: killed]", 1, true}, // signal-killed: no number, a failure
 	}
 	for _, tc := range cases {
-		code, ok := parseBashExitCode(tc.in)
+		code, ok := receiptExitCodeOf(tc.in)
 		if ok != tc.ok || code != tc.code {
-			t.Errorf("parseBashExitCode(%q) = (%d, %v), want (%d, %v)", tc.in, code, ok, tc.code, tc.ok)
+			t.Errorf("receiptExitCodeOf(%q) = (%d, %v), want (%d, %v)", tc.in, code, ok, tc.code, tc.ok)
 		}
 	}
 }

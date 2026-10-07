@@ -105,6 +105,49 @@ type turnReceipt struct {
 	hadReceiptBashRuns bool     // true when the bash recorder saw a verification run this turn
 }
 
+// bashGateAnswer is one command's gate answer in the session's per-turn
+// record (cs.bashGateAnswers, session_core.go): the gate's own structured
+// fate for that command (tools.BashOutcome — whether it ran, and its exit
+// code when it did). Recorded on every gateShell return path (tool_deps.go)
+// — the gate is the only bash spawn point the session answers, so its answer
+// is the receipt's authoritative "it ran / it didn't" signal.
+type bashGateAnswer struct {
+	outcome tools.BashOutcome
+}
+
+// recordBashGate records the gate's answer for command in the session's
+// per-turn record (BashOutcome reads it back): the first answer for a
+// command stands — a command answered again in the same turn (a retry) is
+// the same command, and the first answer is the gate's verdict for it.
+// Measurement only: it never changes the gate's decision.
+func (cs *CortexSession) recordBashGate(command string, outcome tools.BashOutcome) {
+	if cs.bashGateAnswers == nil {
+		cs.bashGateAnswers = map[string]bashGateAnswer{}
+	}
+	if _, ok := cs.bashGateAnswers[command]; !ok {
+		cs.bashGateAnswers[command] = bashGateAnswer{outcome: outcome}
+	}
+}
+
+// setBashGateOutcome OVERWRITES the gate record for command with the
+// post-run outcome the bash tool observed: the gate records its PRE-run
+// answer (recordBashGate — Ran=true once it lets the command through, but
+// it cannot know the exit code before the process runs), and the dispatcher
+// fills in the REAL exit code once the call's own exec result is known
+// (tools.BashOutcome from tools.Execute). The process's fate supersedes the
+// gate's prediction: this is the only arm that may replace an existing
+// record, and only with the outcome of a run that actually happened
+// (Ran=true). Measurement only: it never changes the gate's decision.
+func (cs *CortexSession) setBashGateOutcome(command string, outcome tools.BashOutcome) {
+	if !outcome.Ran {
+		return
+	}
+	if cs.bashGateAnswers == nil {
+		cs.bashGateAnswers = map[string]bashGateAnswer{}
+	}
+	cs.bashGateAnswers[command] = bashGateAnswer{outcome: outcome}
+}
+
 // receiptBash records one test/build command the model is about to run in
 // a bash call, for the receipt's verification fact. Called from
 // coderDispatcher (loop.go) BEFORE the bash call runs, so the recorded
@@ -112,11 +155,11 @@ type turnReceipt struct {
 // dispatcher's own knowledge of the call's fate) pair on the same call.
 // Only commands that are a recognized run of the PROJECT's own test or
 // build command are recorded (receiptBashRole: a two-field-or-longer
-// discovered command must be shared field-for-field up to the shorter side
-// — the model ran the check, possibly with extra flags — and neither side
-// may carry a SHELL-CONTROL field past the shared prefix; a discovered
-// command of ONE field, a bare `make` or a single test binary, matches ONLY
-// the exact command). Every other command (rm, ls, git, a foreign
+// discovered command must be shared field-for-field up to the shorter
+// side — the model ran the check, possibly with extra flags — and no
+// field past the first may carry shell-control syntax; a discovered
+// command of ONE field, a bare `make` or a single test binary, matches
+// ONLY the exact command). Every other command (rm, ls, git, a foreign
 // toolchain, even `go vet` when the project declared `go test ./...`) is
 // not this project's verification and contributes nothing. A session with
 // no discovered test/build command records nothing.
@@ -143,16 +186,18 @@ func (cs *CortexSession) receiptBash(command string) {
 //     `make` alone is the build);
 //   - a discovered command of TWO or more fields: the model must have
 //     shared at least the first TWO fields of the DISCOVERED command (a
-//     bare `go` is a toolchain, not a run of `go test ./...`), neither side
-//     may carry a SHELL-CONTROL field past the shared prefix (`|`, `||`,
-//     `&&`, `;`, `&`, `>`, `<`, …): `go test ./... | tail` is a pipeline
-//     whose exit status is tail's, and `go test ./... || true` never fails
-//     — neither is a run of the check, so neither is recorded as one. The
-//     model may run the check with EXTRA fields after the shared prefix
-//     (`go test ./... -v` vs discovery `go test ./...`); running a PREFIX
-//     of the discovered command (fewer fields than discovery) is a
-//     different, broader command and is not accepted — the recorded exit
-//     would be a compound or broader command's, not the check's.
+//     bare `go` is a toolchain, not a run of `go test ./...`) and the line
+//     must carry NO SHELL-CONTROL field ANYWHERE past its first field
+//     (`|`, `||`, `&&`, `;`, `&`, `>`, `<`, …): `go test ./... | tail` is a
+//     pipeline whose exit status is tail's, `go test ./... -v || true`
+//     never fails, and `go test -v ./... | tail -5` is a pipeline with an
+//     extra flag BEFORE the operator — none of them is a run of the check,
+//     so none is recorded as one. The model may run the check with EXTRA
+//     FIELDS after the shared prefix (`go test ./... -v` vs discovery
+//     `go test ./...`); running a PREFIX of the discovered command (fewer
+//     fields than discovery) is a different, broader command and is not
+//     accepted — the recorded exit would be a compound or broader
+//     command's, not the check's.
 //
 // Only the PROJECT's own commands count — `go vet` (same toolchain, a
 // DIFFERENT check the project never declared) is not this project's
@@ -199,12 +244,21 @@ func (cs *CortexSession) receiptBashRole(command string) (projectcmd.Role, bool)
 		if len(fields) < len(cmds) {
 			continue
 		}
-		// The model may have EXTRA fields after the shared prefix (e.g.
-		// "go test ./... -v"). That is fine — the model ran the check with
-		// extra flags. But if the field immediately after the shared prefix
-		// is a shell-control operator, the line is a compound command, not
-		// a bare run of the check.
-		if shared < len(fields) && isShellControl(fields[shared]) {
+		// The model may have EXTRA FIELDS after the shared prefix (e.g.
+		// "go test ./... -v") — that is a run of the check with extra
+		// flags. But if ANY field past the first carries shell-control
+		// syntax, the line is a compound command, not a bare run of the
+		// check — a flag before the operator ("go test -v ./... | tail")
+		// does not hide it: the exit status would be the pipeline's or
+		// chain's, not the check's.
+		compound := false
+		for _, f := range fields[1:] {
+			if isShellControl(f) {
+				compound = true
+				break
+			}
+		}
+		if compound {
 			continue
 		}
 		return role, true
@@ -215,9 +269,10 @@ func (cs *CortexSession) receiptBashRole(command string) (projectcmd.Role, bool)
 // isShellControl reports whether a command field carries shell-control
 // syntax (pipes, chains, redirects, substitutions, command separators,
 // comments) — the same character set the shell-approval prefix matcher
-// refuses to widen across (containsShellControl). A field like this after
-// the shared prefix means the line is a compound command, not a bare run
-// of the check.
+// refuses to widen across (containsShellControl). Any field like this past
+// the command's first field means the line is a compound command, not a
+// bare run of the check: the recorded exit would be the pipeline's or
+// chain's, not the check's.
 func isShellControl(field string) bool {
 	return strings.ContainsAny(field, "|;&<>`$\n")
 }
@@ -235,20 +290,21 @@ type receiptModelBashRun struct {
 }
 
 // receiptBashOutcome fills in the outcome of the last recorded model bash
-// run for command: how the bash call fared, from the dispatcher's own
-// knowledge of the call's fate (issue #219). It is NEVER inferred from the
+// run for command: how the bash call fared, from the session's own gate
+// answer for the command (issue #219). It is NEVER inferred from the
 // message text: the bash tool reports a non-zero exit in its result text
-// (the "[exit error: exit status N]" marker, parsed by
-// parseBashExitCode) and a CLEAN (msg, nil) for a command the shell gate
+// (the "[exit error: exit status N]" marker), and a CLEAN (msg, nil) for a
+// command the tool disabled, a validation rejected, or the shell gate
 // refused or the user declined — the absence of a marker is not an exit
-// code. gateRefused is the structured refusal (the tools.ShellGateOutcome
-// the dispatcher observed): it is set when the gate refused the command
-// (Blocked) or the user declined it (Risky), and such a run records (not
-// run: refused) — never an exit. A tool-level error (callErr, e.g. a
+// code. The structured signal is the gate's own (BashOutcome, tool_deps.go):
+// Ran=true carries the exit code the gate recorded when it spawned the
+// process (the dispatcher sets it from the call's own exec result), and
+// Ran=false — a refusal, a decline, or a call that never reached the gate —
+// records (not run: …), never an exit. A tool-level error (callErr, e.g. a
 // rejected tool call) means the command never ran too. Called from
 // coderDispatcher (loop.go) AFTER the bash call has run. A command
 // receiptBash did not record (a non-verification command) is a no-op.
-func (cs *CortexSession) receiptBashOutcome(command, resultText string, callErr error, gateRefused tools.ShellGateOutcome, elapsed time.Duration) {
+func (cs *CortexSession) receiptBashOutcome(command string, callErr error, elapsed time.Duration) {
 	if len(cs.receiptModelBash) == 0 {
 		return
 	}
@@ -257,47 +313,46 @@ func (cs *CortexSession) receiptBashOutcome(command, resultText string, callErr 
 		return
 	}
 	last.elapsed = elapsed
-	switch {
-	case gateRefused == tools.ShellGateRefused:
-		last.notRun = "not run: refused — the shell risk gate blocked this command"
-	case gateRefused == tools.ShellGateBlocked:
-		last.notRun = "not run: risky and not approved"
-	case callErr != nil:
+	if callErr != nil {
+		// A tool-level error: the command never ran.
 		last.notRun = "not run: " + callErr.Error()
+		return
+	}
+	outcome, ok := cs.BashOutcome(command)
+	switch {
+	case ok && outcome.Ran:
+		last.exitCode = outcome.ExitCode
+	case ok:
+		last.notRun = "not run: refused or declined by the shell risk gate"
 	default:
-		if code, ok := parseBashExitCode(resultText); ok {
-			last.exitCode = code
-		}
-		// no marker: the run exited 0
+		// The gate never answered for this command — the call died before
+		// reaching the gate (a canceled ctx). The command never ran: do not
+		// record an exit code.
+		last.notRun = "not run: never reached the shell risk gate"
 	}
 }
 
-// parseBashExitCode extracts the exit code the bash tool observed from its
-// result text. The tool reports a non-zero exit as a trailing
-// "[exit error: <error>]" line, where <error> is the run error's Error()
-// text: exec.ExitError renders as "exit status N" (the number is the
-// process's real exit code), but a run KILLED BY A SIGNAL renders as
-// "signal: killed" (or "signal: SIGKILL") and carries no number. A result
-// without the marker ran successfully (exit 0). ok is false when no marker
-// is present. A marker that names no exit status — a signal-killed run, or
-// a bare marker — is a real failure reported as exit 1: the receipt's job
-// is to never report a failed run as exit 0, and a signal-killed check did
-// not exit 0.
-func parseBashExitCode(resultText string) (code int, ok bool) {
-	const marker = "[exit error: "
-	i := strings.LastIndex(resultText, marker)
-	if i < 0 {
-		return 0, false
-	}
-	rest := resultText[i+len(marker):]
-	// A trailing "]" (the marker's close, possibly carrying a trailing
-	// newline) is not part of the exit status.
+// receiptExitCodeOf extracts the exit code the bash tool observed from the
+// text AFTER its "[exit error: " marker: the tool reports a non-zero exit as
+// a trailing "[exit error: <error>]" line, where <error> is the run error's
+// Error() text: exec.ExitError renders as "exit status N" (the number is
+// the process's real exit code), but a run KILLED BY A SIGNAL renders as
+// "signal: killed" (or "signal: SIGKILL") and carries no number. A marker
+// that names no exit status — a signal-killed run, or a bare marker — is a
+// real failure reported as exit 1: the receipt's job is to never report a
+// failed run as exit 0, and a signal-killed check did not exit 0. ok is
+// false when the text names no exit status at all (the dispatcher passes
+// only the marker's tail, so this is the marker-less arm).
+func receiptExitCodeOf(markerTail string) (code int, ok bool) {
+	rest := strings.TrimSpace(markerTail)
 	if j := strings.IndexByte(rest, ']'); j >= 0 {
-		rest = rest[:j]
+		rest = strings.TrimSpace(rest[:j])
 	}
-	rest = strings.TrimSpace(rest)
 	const status = "exit status "
 	if !strings.HasPrefix(rest, status) {
+		if rest == "" {
+			return 0, false
+		}
 		return 1, true // no number: a signal-killed run or a bare marker — a failure
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(rest[len(status):]))
@@ -576,5 +631,6 @@ func renderVerificationLine(v receiptVerification) string {
 func (cs *CortexSession) receiptDrop() {
 	cs.receiptModelBash = nil
 	cs.receiptUnformatted = nil
+	cs.bashGateAnswers = nil
 	cs.receipt = turnReceipt{}
 }

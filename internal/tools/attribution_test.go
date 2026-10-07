@@ -403,12 +403,12 @@ func (m *mockDeps) Summarize(ctx context.Context, text string, role string, max 
 func (m *mockDeps) SummarizeText(ctx context.Context, text string, role string, max int) (string, bool, error) {
 	return "", false, nil
 }
-func (m *mockDeps) GateShell(ctx context.Context, command string) (string, bool, ShellGateOutcome) {
+func (m *mockDeps) GateShell(ctx context.Context, command string) (string, bool) {
 	m.gated = append(m.gated, command)
 	if m.gateRefuse {
-		return "refused", false, ShellGateRefused
+		return "refused", false
 	}
-	return "", true, ShellGateClean
+	return "", true
 }
 func (m *mockDeps) AllowDelete() (string, bool)                 { return "", false }
 func (m *mockDeps) Quiet() bool                                 { return true }

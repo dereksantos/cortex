@@ -1339,12 +1339,6 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			if cmd, err := call.StringArg("command"); err == nil {
 				cs.receiptBash(cmd)
 			}
-			// The gate's structured outcome for THIS call (tools.ShellGateOutcome,
-			// published on the session by gateShell, tool_deps.go) is sampled
-			// and cleared here, around the call: a refused or declined command
-			// never ran and must record (not run: …), never an exit code, and a
-			// later call's Clean never leaks into an earlier one's record.
-			cs.gateOutcome = tools.ShellGateClean
 		}
 		if p := testwatchTouchedPath(call); p != "" {
 			cs.touchFile(p)
@@ -1362,7 +1356,7 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			}
 		}
 		cs.startActivity(call.ActivityLabel())
-		out, _, err := tools.Execute(ctx, call, cs)
+		out, outcome, err := tools.Execute(ctx, call, cs)
 		cs.stopActivity()
 		// Issue #154: after a bash command, sweep the workspace for
 		// scratch-named non-test files the command created — the touch hook
@@ -1374,16 +1368,28 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			cs.sweepScratchFiles()
 		}
 		// Issue #219: record the outcome of a verification bash run (the
-		// exit code the bash tool observed — the tool reports a non-zero
-		// exit in its result text, not as the call's error — and the wall
-		// time of the call). resultText is captured BEFORE the err check
-		// below (the err path returns a different string to the model, but
-		// out is the tool's own result text either way). receiptBashOutcome
-		// is a no-op for a command receiptBash did not record (a
-		// non-verification command).
+		// exit code the PROCESS returned — the dispatcher knows it ran when
+		// the call's message carries the "[exit error: …]" marker, which the
+		// bash tool appends ONLY after it spawned the process: a clean
+		// (msg, nil) is a successful run, a gate refusal, a decline, or a
+		// tool-level rejection — none of which ran — and a callErr is a
+		// tool error, which ran nothing) plus the wall time of the call. The
+		// structured answer is recorded on the session's gate record
+		// (recordBashGate, turn_receipt.go) when the process ran; a call that
+		// never reached the gate (a canceled ctx) records nothing, and
+		// receiptBashOutcome renders it as not-run, never as an exit code.
 		if isBash {
 			if cmd, argErr := call.StringArg("command"); argErr == nil {
-				cs.receiptBashOutcome(cmd, out, err, cs.gateOutcome, time.Since(bashStart))
+				// The gate's PRE-run record (recordBashGate) carries
+				// Ran=true but no exit code — the gate cannot know it before
+				// the process runs. The bash tool's OWN BashOutcome (the call's
+				// exec result) carries the real code; record it so the
+				// receipt reads the process's fate, not the gate's prediction
+				// (setBashGateOutcome overwrites only for a run that
+				// happened — a refusal/decline/tool-error returns Ran=false
+				// and the gate's record stands).
+				cs.setBashGateOutcome(cmd, outcome)
+				cs.receiptBashOutcome(cmd, err, time.Since(bashStart))
 			}
 		}
 		if err != nil {

@@ -583,8 +583,8 @@ type wdNoteDeps struct {
 	wdDeps
 }
 
-func (d wdNoteDeps) GateShell(ctx context.Context, command string) (string, bool, ShellGateOutcome) {
-	return "", true, ShellGateClean
+func (d wdNoteDeps) GateShell(ctx context.Context, command string) (string, bool) {
+	return "", true
 }
 
 // TestBashInPlaceRewriteNoteEndToEnd pins that the bash tool actually APPENDS

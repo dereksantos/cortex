@@ -103,35 +103,40 @@ type SubAgentRunner interface {
 	RunSubagent(ctx context.Context, sa Subagent, seed string) (digest string, err error)
 }
 
-// ShellGateOutcome is the structured outcome the shell-risk gate reports for a
-// bash command (issue #219): did the command RUN. A consumer of a call's fate
-// (the turn receipt's bash recorder, cmd/cortex) reads this instead of
-// inferring one from the result message — a command the gate refused (or the
-// user declined) returns a clean (msg, nil) with no exit marker, and the
-// absence of a marker is NOT "it ran and exited 0".
-type ShellGateOutcome int
+// BashOutcome is the structured outcome of a bash tool call (issue #219):
+// whether the command's process RAN, and, when it did, the exit code the
+// process returned (0 when it exited 0; 1 for a signal-killed run — a
+// signal has no exit status, so the failure is reported as a non-zero exit
+// — the real exit code otherwise). It is a POSITIVE signal — Ran is set
+// only on the path that spawned the process — so a consumer of the call's
+// fate (the turn receipt's bash recorder, cmd/cortex) never infers "it ran
+// and exited 0" from the absence of a marker in the result message: a call
+// the tool disabled, a call a validation rejected, and a command the shell
+// gate refused (or the user declined) all come back Ran=false, and the
+// message is the reason, not a run.
+type BashOutcome struct {
+	Ran      bool
+	ExitCode int
+}
 
-const (
-	// ShellGateClean: the command ran (or no gate stood between it and the
-	// shell — a non-bash call, or a gate note folded into the message while
-	// the command ran). Its exit status, if any, is the bash tool's own exit
-	// marker.
-	ShellGateClean ShellGateOutcome = iota
-	// ShellGateRefused: the risk gate refused the command (a Blocked verdict,
-	// or the same-action backstop) — it never ran.
-	ShellGateRefused
-	// ShellGateBlocked: the command was Risky and never got an approver's yes
-	// — headless, subagent, a declined prompt, an approval timeout, or a
-	// tainted turn's raised bar. It never ran.
-	ShellGateBlocked
-)
+// BashOutcomes reports the structured outcome of a bash tool call, if any
+// (issue #219): a non-bash call reports false and is ignored by a consumer
+// of the call's fate. Every path of the bash tool that does not spawn the
+// process reports Ran=false (the message is the reason), and the path that
+// did spawn reports Ran=true with the process's exit code — so the outcome
+// is accurate for EVERY implementor, not an approximation through the
+// message text.
+type BashOutcomes interface {
+	BashOutcome() (BashOutcome, bool)
+}
 
-// ShellGate runs the shell-risk gate. Returns (message, ok, outcome);
-// ok=false means the command must not run and message explains why, and
-// outcome says which refusal stood (ShellGateRefused / ShellGateBlocked) —
-// ok=true always pairs with ShellGateClean.
+// ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means
+// the command must not run and message explains why. The structured fate of
+// a bash call — ran or not, and its exit code — is the caller's own
+// BashOutcomes (the bash tool's outcome is what it reads), so the seam
+// carries no outcome of its own.
 type ShellGate interface {
-	GateShell(ctx context.Context, command string) (string, bool, ShellGateOutcome)
+	GateShell(ctx context.Context, command string) (string, bool)
 }
 
 // DeleteGate reports whether remove_path is enabled, and the workspace root it's
@@ -242,18 +247,18 @@ func (headlessDeps) Summarize(context.Context, string, string, int) (string, boo
 func (headlessDeps) SummarizeText(context.Context, string, string, int) (string, bool, error) {
 	return "", false, errors.New("summarize unavailable: no session")
 }
-func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool, ShellGateOutcome) {
+func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool) {
 	// The headless stub has no session, so no taint state: the classifier
 	// note is "" (issue #102 threads the session's taint through the real
 	// gate only, and there is no judge call here either — fn is nil).
 	v := shellrisk.Classify(ctx, command, "", nil)
 	switch v.Level {
 	case shellrisk.Safe:
-		return "", true, ShellGateClean
+		return "", true
 	case shellrisk.Blocked:
-		return shellrisk.RefusedMessage(v.Reason), false, ShellGateRefused
+		return shellrisk.RefusedMessage(v.Reason), false
 	default: // Risky — no interactive approver in a headless context.
-		return shellrisk.BlockedMessage(v.Reason), false, ShellGateBlocked
+		return shellrisk.BlockedMessage(v.Reason), false
 	}
 }
 func (headlessDeps) AllowDelete() (string, bool) { return "", false }
@@ -878,28 +883,11 @@ func init() {
 // tools need — study does; the file tools ignore both. It is a function (not a
 // method) because ToolCall now lives in internal/agent and methods cannot be
 // added to a type from another package.
-//
-// The third return value is the structured outcome of the call (issue #219).
-// For a BASH call it is ShellGateClean when the command ran (the exit marker
-// in the message, if any, is the run's real fate), or ShellGateRefused /
-// ShellGateBlocked when the gate refused or the approver declined — in
-// which case the message is the refusal text, not a run. A non-bash call
-// always returns ShellGateClean. The bash tool derives the outcome from ITS
-// OWN gate call (the bash arm of GateShell), so the outcome is accurate for
-// EVERY implementor — a session whose gate is a test stub with no structured
-// outcome still gets the gate's own verdict, not an approximation through
-// the message text or the absence of an exit marker.
-func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOutcome, error) {
+func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	return execute(ctx, tc, deps)
 }
 
-// ExecuteWithOutcome is a legacy wrapper that discards the structured outcome.
-// Use Execute directly for the full (message, outcome, error) triple.
-func ExecuteWithOutcome(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOutcome, error) {
-	return execute(ctx, tc, deps)
-}
-
-func execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOutcome, error) {
+func execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	// A tool dispatched without a session (tests, non-interactive paths) runs
 	// against the nil-safe headless defaults: the shell gate fails closed, study
 	// is unavailable, delete is disabled. This preserves the old behavior of the
@@ -909,16 +897,18 @@ func execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGate
 		deps = headlessDeps{}
 	}
 
-	// Check if tool is enabled via config
+	// Check if tool is enabled via config. The command never ran: the
+	// BashOutcome is Ran=false, so a consumer of the call's fate (the turn
+	// receipt's bash recorder) never reads a disabled tool's clean result as
+	// a pass.
 	if !deps.IsToolEnabled(tc.Function.Name) {
-		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), ShellGateClean, nil
+		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), BashOutcome{}, nil
 	}
 
-	// Validate tool call (dynamic checks beyond config)
-	if deps != nil {
-		if ok, msg := deps.ValidateToolCall(tc); !ok {
-			return msg, ShellGateClean, nil
-		}
+	// Validate tool call (dynamic checks beyond config) — a rejection never
+	// ran either.
+	if ok, msg := deps.ValidateToolCall(tc); !ok {
+		return msg, BashOutcome{}, nil
 	}
 
 	// Inside a subagent, time the call and let its announcement out on the far
@@ -935,60 +925,76 @@ func execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGate
 	return out, outcome, err
 }
 
-// dispatchTool routes one tool call to its implementation.
-func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOutcome, error) {
+// dispatchTool routes one tool call to its implementation. It returns the
+// call's BashOutcome for a BASH call only — the outcome the bash tool
+// itself computed (Ran=false for a gate refusal, a disabled tool, or a
+// validation rejection; Ran=true with the process's exit code for a run) —
+// and the zero outcome (which reports "not a bash call" to the caller) for
+// every other tool.
+func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
-		return withOutcome(readFile(tc, deps))
+		out, err := readFile(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionWriteFile:
-		return withOutcome(writeFile(ctx, tc, deps))
+		out, err := writeFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionEditFile:
-		return withOutcome(editFile(ctx, tc, deps))
+		out, err := editFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionOutline:
-		return withOutcome(outlineTool(tc, deps))
+		out, err := outlineTool(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionGrep:
-		return withOutcome(grep(ctx, tc, deps))
+		out, err := grep(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionBash:
 		return bash(ctx, tc, deps)
 	case FunctionRemove:
-		return withOutcome(removePath(tc, deps))
+		out, err := removePath(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryWrite:
-		return withOutcome(memoryWrite(tc, deps))
+		out, err := memoryWrite(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryRead:
-		return withOutcome(memoryRead(tc, deps))
+		out, err := memoryRead(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemorySearch:
-		return withOutcome(memorySearch(tc, deps))
+		out, err := memorySearch(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryForget:
-		return withOutcome(memoryForget(tc, deps))
+		out, err := memoryForget(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionRecall:
-		return withOutcome(recall(ctx, tc, deps))
+		out, err := recall(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionFetchURL:
-		return withOutcome(fetchURL(ctx, tc, deps))
+		out, err := fetchURL(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionWebSearch:
-		return withOutcome(webSearch(ctx, tc, deps))
+		out, err := webSearch(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextEvict:
-		return withOutcome(contextEvict(tc, deps))
+		out, err := contextEvict(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextMerge:
-		return withOutcome(contextMerge(tc, deps))
+		out, err := contextMerge(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextAdjustWatermarks:
-		return withOutcome(contextAdjustWatermarks(tc, deps))
+		out, err := contextAdjustWatermarks(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionScanLandscape:
-		return withOutcome(scanLandscape(deps))
+		out, err := scanLandscape(deps)
+		return out, BashOutcome{}, err
 	}
 	// Any registered subagent tool (study, and future inheritors reflect/dream)
 	// shares this one dispatch path via the name→profile registry.
 	if sa, ok := Lookup(name); ok {
-		return withOutcome(runSubagent(ctx, tc, deps, sa))
+		out, err := runSubagent(ctx, tc, deps, sa)
+		return out, BashOutcome{}, err
 	}
-	return "", ShellGateClean, fmt.Errorf(`no available tools matching name "%s"`, name)
-}
-
-// withOutcome lifts the legacy (message, error) tool result into the
-// dispatcher's (message, outcome, error) shape: the outcome is Clean — the
-// only tool with a distinct structured outcome is bash (the shell gate's).
-func withOutcome(out string, err error) (string, ShellGateOutcome, error) {
-	return out, ShellGateClean, err
+	return "", BashOutcome{}, fmt.Errorf(`no available tools matching name "%s"`, name)
 }
 
 // --- Helpers shared across tools ----------------------------------------
@@ -2289,13 +2295,13 @@ func confinedPath(root, p string) (string, error) {
 
 // --- bash ---------------------------------------------------------------
 
-func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOutcome, error) {
+func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	command, err := tc.StringArg("command")
 	if err != nil {
-		return "", ShellGateClean, err
+		return "", BashOutcome{}, err
 	}
 	if strings.TrimSpace(command) == "" {
-		return "", ShellGateClean, fmt.Errorf("empty command")
+		return "", BashOutcome{}, fmt.Errorf("empty command")
 	}
 	// Attribution backstop BEFORE the risk gate: when attribution is on and
 	// the command is a single git commit without the trailer, add it — the
@@ -2320,29 +2326,16 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOut
 	rewriteNote := inPlaceRewriteNote(deps, command)
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
-	// reads the reason plainly and adapts. The structured outcome that rides
-	// back (ExecuteWithOutcome, issue #219) is what a consumer of the call's
-	// fate (the turn receipt's bash recorder) reports for this message: a
-	// refused or declined command never ran, so it records (not run: …),
-	// never an exit code. The outcome comes from THIS gate call when the
-	// gate reports one (its ShellGateOutcome), else is derived from the
-	// verdict: Blocked (the reason the risk gate's BlockedMessage carries)
-	// reads as a REFUSAL; every other refusal is a Risky command that never
-	// got an approver's yes — headless, subagent, a declined prompt, an
-	// approval timeout, a tainted turn's raised bar — and reads as BLOCKED.
-	if msg, ok, reported := deps.GateShell(ctx, command); !ok {
-		outcome := reported
-		if outcome == ShellGateClean {
-			if strings.HasPrefix(msg, "blocked") {
-				outcome = ShellGateRefused
-			} else {
-				outcome = ShellGateBlocked
-			}
-		}
+	// reads the reason plainly and adapts. The command NEVER RAN: a consumer
+	// of the call's fate (the turn receipt's bash recorder, via the session's
+	// BashOutcomes capability) sees Ran=false for this call — the gate is the
+	// sole spawn point here, so the refusal means the process was never
+	// started, and the result is a reason, not an exit code.
+	if msg, ok := deps.GateShell(ctx, command); !ok {
 		if rewriteNote != "" {
 			msg += "\n" + rewriteNote
 		}
-		return msg, outcome, nil
+		return msg, BashOutcome{}, nil
 	}
 	// leadBin is the first token, used only for the grep-empty heuristic below.
 	leadBin := ""
@@ -2374,13 +2367,6 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOut
 	if runDir != "" {
 		shellCmd.Dir = runDir
 	}
-	// A session's EXTRA PATH dir (the BashEnver capability, workdir.go) is
-	// prepended to the inherited environment: the turn-receipt surface test's
-	// seam for real command binaries. Empty (every production session) leaves
-	// the command's environment untouched.
-	if extra := bashEnvOf(deps); extra != "" {
-		shellCmd.Env = append(os.Environ(), "PATH="+extra+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
 	out, runErr := shellCmd.CombinedOutput()
 	result := string(out)
 	// Oversized output is studied, not lost: the full output spills to
@@ -2408,7 +2394,17 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOut
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
 			leadBin == "grep" && strings.TrimSpace(result) == "" && !hasRewriteTarget(command) {
-			return "(no matches)", ShellGateClean, nil
+			return "(no matches)", BashOutcome{Ran: true, ExitCode: 1}, nil
+		}
+		// The process ran: the outcome is Ran=true with the process's own
+		// exit code (exitErr.ExitCode(); a signal-killed run has no exit
+		// status and reports 1 — a failure, never a pass). The outcome is
+		// what a consumer of the call's fate (the turn receipt's bash
+		// recorder, via the BashOutcomes capability) reads — never an
+		// inference from the marker below.
+		exitCode := 1
+		if exitErr != nil {
+			exitCode = exitErr.ExitCode()
 		}
 		result += "\n[exit error: " + runErr.Error() + "]"
 		// A failed command made no commit (or not one to be proud of): the
@@ -2419,7 +2415,7 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOut
 		if rewriteNote != "" {
 			result += "\n" + rewriteNote
 		}
-		return result, ShellGateClean, nil
+		return result, BashOutcome{Ran: true, ExitCode: exitCode}, nil
 	}
 	// The command succeeded: read the repository back and journal the FACT of
 	// the commit it landed — SHA and whether the trailer is really in the
@@ -2443,7 +2439,8 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, ShellGateOut
 	if hookNote := inPlaceRewriteHookNote(ctx, deps, command); hookNote != "" {
 		result += "\n" + hookNote
 	}
-	return result, ShellGateClean, nil
+	// The process ran and exited 0.
+	return result, BashOutcome{Ran: true, ExitCode: 0}, nil
 }
 
 // bashStudyWindow is the consuming-model window the shell-output study is

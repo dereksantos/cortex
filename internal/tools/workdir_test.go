@@ -21,8 +21,8 @@ func (d wdDeps) Workdir() string { return d.wd }
 
 // GateShell permits everything: these tests exercise path resolution, not
 // the risk gate (which headlessDeps fails closed).
-func (d wdDeps) GateShell(ctx context.Context, command string) (string, bool, ShellGateOutcome) {
-	return "", true, ShellGateClean
+func (d wdDeps) GateShell(ctx context.Context, command string) (string, bool) {
+	return "", true
 }
 
 func callArgs(t *testing.T, fn string, m map[string]any) ToolCall {
