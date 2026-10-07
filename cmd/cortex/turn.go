@@ -287,7 +287,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		}
 	}()
 
-	cs.Append(Message{Role: RoleUser, Content: input})
+	// Issue #220: render the model-facing task prompt here — the task text,
+	// plus (only when the task carries a `- [ ]` checklist) the extracted
+	// items and the per-item accounting principle (taskPrompt, prompt.go).
+	// The prompt is what the model SEES: the appended message and, on
+	// resume, the replayed transcript carry the checklist with it, so the
+	// prompt and the record stay the same bytes.
+	cs.Append(Message{Role: RoleUser, Content: taskPrompt(input)})
 	cs.turnIntent = input
 
 	// Put the memory index (and, adjacent to it, the skills index) in the
@@ -563,9 +569,29 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	lintReceipt := cs.lintReceipt
 	testReceipt := cs.testwatchTestsReceipt()
 	debugReceipt := cs.testwatchDebugReceipt()
-	var turnReceipt string
+	var turnReceipt turnReceipt
 	if turnUsedTools(cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages))) {
-		turnReceipt = cs.computeReceipt(ctx).render()
+		turnReceipt = cs.computeReceipt(ctx)
+		// Issue #220 step 3: the checklist fact is set at the turn's END,
+		// after computeReceipt, from the turn's input (the task) and its
+		// reply — then re-rendered. It is measured off the reply the turn
+		// actually produced (content, the model's final answer), NOT the
+		// turn's original input: a reply the finalize hook or the
+		// forced-finalize note appended to (issue #141 / #161 — the answer
+		// the model ACCOUNTS for the checklist in) is the one owed the
+		// check, so the fact reflects what the model said. The other
+		// #219 facts are measured by the same "settled at the turn's end"
+		// rule; the checklist is the fourth, and like them it is computed
+		// BEFORE the unrecovered-error return so an interrupted (max-iter,
+		// ...) turn still reports it (the forced-finalize answer is the
+		// reply a cut-off turn leaves behind — exactly the reply whose
+		// checklist account the receipt must measure). Measurement only:
+		// an empty fact (no checklist, or the reply met every item) leaves
+		// the rendered receipt unchanged, and it rides the SAME
+		// TurnResult.Receipt + kindNote surface as the #219 facts (the
+		// render below is the single render for the whole receipt).
+		turnReceipt.checklistMissing = checklistMissingItems(input, content)
+		cs.receipt = turnReceipt
 	}
 	if err != nil {
 		if pf := pendingFailureOf(err); pf != nil {
@@ -576,7 +602,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		// total includes what a failed turn redacted (captureTurn never runs
 		// here, so cs.redactions is exact at this point).
 		cs.redactionsTotal += cs.redactions
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt, Redactions: cs.redactions}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), Redactions: cs.redactions}, err
 	}
 
 	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
@@ -600,11 +626,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// own reply — is never rewritten and resume never replays the receipt
 	// into the model's context. Measurement only: a turn that measured
 	// nothing has an empty receipt and the transcript is untouched.
-	if turnReceipt != "" {
-		cs.transcriptNote("turn receipt:\n" + turnReceipt)
+	if rendered := turnReceipt.render(); rendered != "" {
+		cs.transcriptNote("turn receipt:\n" + rendered)
 	}
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt, LastError: stats.LastError, Redactions: cs.redactions}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), LastError: stats.LastError, Redactions: cs.redactions}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from

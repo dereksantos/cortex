@@ -131,6 +131,21 @@ topics, fleet slot contention (`docs/archive/refactor-status.md`).
       rows sharing the `EvalCellResultPayload` vocabulary alongside the
       current stdout JSONL (the deferred wiring in
       `docs/study-subagent.md` §5).
+- [x] C4. Checklist accounting on the turn receipt (issue #220, built on
+      #219's measurement-only receipt): when a task carries `- [ ]`
+      checklist items, the model's prompt restates them with a per-item
+      "account for this in your reply" principle (principle-over-recipe:
+      the model is told to account for each item in its own words, never to
+      recite the list); at the turn's END the harness measures which items
+      the reply leaves out (case-insensitive, whole-text matching — an item
+      is accounted for when the reply names it) and renders the missing
+      ones, one per line, in a `checklist:` section of the receipt. Like
+      #219's other facts it is measurement-only: it never blocks, never
+      fails a tool call, never changes what the model sees, and rides the
+      same `TurnResult.Receipt` + kindNote surface; a task with no checklist
+      (or a reply that accounted for every item) contributes no section.
+      Plan-then-execute joins the per-step blocks (first step owning an item
+      wins).
 
 **Gate C:** README/CLAUDE.md updated for `cortex model`; suite green;
 study-eval rows visible via jq over the journal.

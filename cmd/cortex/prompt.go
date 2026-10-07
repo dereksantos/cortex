@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -132,6 +133,146 @@ const failingTestPrinciple = "Tests are evidence. An existing test's expected va
 // requirements to review findings, and stays silent on how to record the
 // dispositions, because the shape belongs to whoever drives the round.
 const reviewFeedbackPrinciple = "Every finding a review raises is owed an explicit disposition: addressed, deferred with a reason, or disputed. A finding left with none of these is a finding you dropped, and a dropped finding is invisible to the next round, so it comes back. When a reviewer offers several options as alternatives, pick one and say which — applying all of them is not thoroughness, it stacks behaviour the reviewer meant as a choice. When a reviewer gives example instances, name and fix the underlying class rather than only the instances listed: a fix that covers the examples and not the class needs another round for the next example. Where the reviewer asked for something to live, put it there — a note the reviewer asked to keep belongs in the place they named, not in a nearby file that happens to be open."
+
+// checklistAccountingPrinciple is the issue #220 per-item checklist
+// accounting principle (part 2 of #128, "completion based on facts") — a
+// const so every surface that states the same idea carries the SAME text,
+// the one-principle-no-recipe pattern verifyBeforeFixPrinciple and
+// reviewFeedbackPrinciple set. It is spliced into the model-facing task
+// prompt (taskPrompt, below) ONLY when taskChecklistItems finds at least
+// one `- [ ]` item in the task — a task with no checklist gets nothing,
+// and a standing principle in the base system prompt would tax every
+// checklist-free turn for the one shape this issue is about. It tells the
+// model WHAT to conclude (each item accounted for: done, with the evidence
+// — a file and line, or a command and its result — or not done) but says
+// nothing about WHERE to record the accounting: the output shape belongs to
+// whoever drives the turn (plan mode's step prompts, the #219 receipt, …),
+// so the principle stays reusable. It is deliberately silent on the word
+// "all": the accounting it demands is per item, and an aggregate "all met"
+// that skips an item is the failure mode the issue exists to close.
+const checklistAccountingPrinciple = "A task that lists checklist items is accounted for item by item in your final answer: every `- [ ]` item is reported as done — with the evidence (a file and line, or a command and its result) — or as not done. A summary that covers the items in the aggregate, without each one named and evidenced, is not an account of them."
+
+// taskChecklistLineRe matches one task checklist item: a line whose leading
+// markdown checkbox ("- [ ] " or "- [x] ", either case, `*`/`+` bullets
+// tolerated) is followed by item text, captured in group 1 — the text may
+// itself contain brackets or dashes ("[x] handle - [ ] markers"), so it is
+// taken verbatim to end of line. Fenced code blocks are NOT handled by the
+// regex: taskChecklistItems skips lines inside ``` or ~~~ fences, so a task
+// that merely shows checkbox syntax in an example block lists no items.
+var taskChecklistLineRe = regexp.MustCompile(`^ {0,3}[-*+]\s*\[[ xX]\]\s+(\S.*)$`)
+
+// taskFenceLineRe reports which fence character (backtick or tilde) a line
+// uses, if any. CommonMark allows up to three spaces of indentation on a
+// fence line. taskChecklistItems tracks the opener's character so that a
+// fence only closes on the same character — tildes and backticks cannot be
+// mixed (a ~~~ line does not close a ``` block).
+var taskFenceLineRe = regexp.MustCompile(`^ {0,3}(` + "```" + `|~~~)\S*`)
+
+// taskChecklistItems extracts the task's checklist items — the lines that
+// start a markdown checkbox (either state, `- [ ]` or `- [x]`, `*`/`+`
+// bullets tolerated) — in order, with the item text trimmed. Fenced code
+// blocks (``` or ~~~) are skipped: a task that shows checkbox syntax inside
+// a code example ("add a status line like `- [ ] foo`") is not a task WITH
+// a checklist, and its example lines must not become items the turn is
+// owed an account for. Returns nil when the task has no checklist items —
+// callers treat that as "the principle does not apply to this task" and
+// splice nothing into the prompt. Pure: no session, no config, safe under
+// concurrent turns.
+func taskChecklistItems(task string) []string {
+	var items []string
+	fenceChar := rune(0)
+	for _, line := range strings.Split(task, "\n") {
+		if m := taskFenceLineRe.FindStringSubmatch(line); m != nil {
+			c := rune(m[1][0])
+			if fenceChar == 0 {
+				fenceChar = c
+			} else if c == fenceChar {
+				fenceChar = 0
+			}
+			continue
+		}
+		if fenceChar != 0 {
+			continue
+		}
+		m := taskChecklistLineRe.FindStringSubmatch(strings.TrimRight(line, " \t\r"))
+		if m == nil {
+			continue
+		}
+		if item := strings.TrimSpace(m[1]); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// taskPrompt renders the model-facing prompt for a turn's task: the task
+// text, and — only when the task actually carries a checklist (see
+// taskChecklistItems) — a separator, the extracted items each rendered as
+// `- [ ] item` (the checkbox state the task used is not load-bearing; the
+// account is owed per item either way), and the per-item accounting
+// principle (checklistAccountingPrinciple). A task with no checklist
+// returns its text UNCHANGED — the common case keeps the wire bytes
+// identical to the pre-#220 behavior, and the transcript records the prompt
+// as the model sees it (cs.Append persists what turn.go sends).
+// Pure: turn.go calls it exactly once per turn, right before Append.
+func taskPrompt(task string) string {
+	items := taskChecklistItems(task)
+	if len(items) == 0 {
+		return task
+	}
+	var b strings.Builder
+	b.WriteString(task)
+	b.WriteString("\n\nTask checklist (account for each item in your final answer):\n")
+	for _, item := range items {
+		b.WriteString("- [ ] ")
+		b.WriteString(item)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(checklistAccountingPrinciple)
+	return b.String()
+}
+
+// checklistItemPresent reports whether item's words all appear in reply —
+// the reply's account of that item. It is a case-INSENSITIVE, WHOLE-TEXT
+// match (strings.Contains over the folded-to-lowercase strings), not a
+// substring of the reply's lines and not a word-boundary search: the model
+// is free to account for an item in any phrasing that names it, and a
+// shorter item ("wire") that the longer one ("wire the handler") already
+// names is accounted for by it. An empty item (taskChecklistItems never
+// yields one) is treated as present so it can never dangle on a receipt.
+// Pure and O(len(reply)·len(item)): a reply and a checklist are both small,
+// and the receipt's one pass over the items is the only caller.
+func checklistItemPresent(reply, item string) bool {
+	if item == "" {
+		return true
+	}
+	r := strings.ToLower(reply)
+	return strings.Contains(r, strings.ToLower(item))
+}
+
+// checklistMissingItems returns the task's checklist items (taskChecklistItems,
+// in order) that the reply does NOT account for — the receipt's
+// "checklist:" fact (issue #220 step 2). Matching is per item through
+// checklistItemPresent: case-insensitive, whole-text. Returns nil in two
+// cases a caller reads as "nothing to measure": the task has no checklist
+// at all (taskChecklistItems nil), and the reply accounts for every item (the
+// empty-slice case is the same nil — a turn that met its checklist has no
+// missing-item fact). Pure: no session, no config, safe under concurrent
+// turns.
+func checklistMissingItems(task, reply string) []string {
+	items := taskChecklistItems(task)
+	if len(items) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, item := range items {
+		if !checklistItemPresent(reply, item) {
+			missing = append(missing, item)
+		}
+	}
+	return missing
+}
 
 // memoryPromptSection is the full memory guidance — the four bullets plus the
 // outline/recall paragraph — appended to the system prompt only when there's
