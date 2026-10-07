@@ -862,12 +862,7 @@ func TestLocateBeforeWritingPrinciplePosition(t *testing.T) {
 // consistency tripwire, mirroring TestLocateFirstPrincipleMirroredInClaudeMD:
 // CLAUDE.md must mirror the EXACT same guidance the model receives
 // (locateBeforeWritingPrinciple) so docs and prompt can't drift apart.
-// Skipped until the CLAUDE.md mirror lands (the plan's docs-mirror step);
-// the skip names what is owed so the debt is visible, never silently green.
 func TestLocateBeforeWritingPrincipleMirroredInClaudeMD(t *testing.T) {
-	if _, err := os.Stat(filepath.Join("..", "..", ".cortex", "issue-224-claude-mirror-pending")); err == nil {
-		t.Skip("CLAUDE.md's locate-before-writing mirror is owed (issue #224 docs step) — remove the marker file and this skip together")
-	}
 	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
 	if err != nil {
 		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)

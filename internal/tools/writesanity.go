@@ -54,8 +54,11 @@
 package tools
 
 import (
+	"bufio"
 	"fmt"
 	"go/ast"
+	"go/build"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -109,6 +112,22 @@ func writeSanityNote(fsPath, displayName string) string {
 // external test package — a different unit whose names must not merge with
 // or collide against this one, so it is left out). The written file itself
 // is always included (it belongs to its own package by construction).
+//
+// A SIBLING that does not build in the current context is left out too: the
+// package under check is what compiles, not what shares a directory. A
+// `//go:build`-tagged pair (this repo's `internal/fslock/flock_unix.go` and
+// `flock_windows.go` both declare `func flock`; `internal/lineedit`'s
+// termios pair declares three names twice) and the `_linux.go` /
+// `_windows.go` filename-suffix convention are legal Go that reports a
+// collision only when constraints are ignored — telling the model to
+// "reuse one declaration" would have it break working platform code, which
+// is noise-on-clean in its worst form. Both rules that decide it — the
+// filename suffix and the `//go:build` line — are applied against the
+// toolchain's own context (see siblingBuildsHere), and a constraint naming a
+// tag this process cannot judge excludes nothing: dropping a file the real
+// build includes would strip its names from the declared set and invent
+// "undefined" reports. The written file is exempt from the filter — the model
+// just wrote it, so it is in the package whatever its header says.
 func packageFiles(dir, written, pkgName string) (regular, test []string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -131,6 +150,9 @@ func packageFiles(dir, written, pkgName string) (regular, test []string) {
 		if p == written {
 			continue // appended below, once, in the right bucket
 		}
+		if !siblingBuildsHere(dir, name) {
+			continue // excluded by build constraints: never compiled alongside this file
+		}
 		if goPackageOf(p) != pkgName {
 			continue // different package clause (including pkgName_test): not this package
 		}
@@ -146,6 +168,169 @@ func packageFiles(dir, written, pkgName string) (regular, test []string) {
 		regular = append(regular, written)
 	}
 	return regular, test
+}
+
+// siblingBuildsHere reports whether the .go file dir/name can build
+// alongside the current package, applying the two rules that decide it and
+// nothing else:
+//
+//   - the filename OS/arch suffix (`flock_windows.go`, `termios_linux_test.go`)
+//     must not contradict this build (see filenameSuffixMatches);
+//   - a `//go:build` line, or the legacy `// +build` lines, must not
+//     positively exclude it, and only a tag this process can judge may do
+//     that (see satisfiesBuildConstraints).
+//
+// Both read their context off go/build rather than re-typing it here.
+// Suffixes and constraint tags are judged separately on purpose: go/build's
+// MatchFile answers both together, and its one answer is not ours to
+// interpret — what matters here is that a sibling may be dropped only on a
+// judgement this process can actually make. Dropping a file the real build
+// DOES include strips its names from the declared set and invents
+// "undefined" reports, the one failure mode this check must never produce;
+// keeping a file that in fact does not compile can only ever add a duplicate
+// note the model's own build disproves. So everything uncertain keeps the
+// file in.
+func siblingBuildsHere(dir, name string) bool {
+	if !filenameSuffixMatches(name) {
+		return false
+	}
+	return satisfiesBuildConstraints(filepath.Join(dir, name))
+}
+
+// filenameSuffixMatches implements the filename half of go/build's rule: the
+// elements after the first underscore, with a trailing `_test` stripped, may
+// end in a known GOARCH, a known GOOS, or a known GOOS_GOARCH pair — and then
+// only that platform's file builds (`flock_windows.go` builds on Windows
+// only; `hooks.go`, `linux.go` and `parser_windows_friendly.go` are
+// unconstrained). The name is only a suffix when it is a whole underscore
+// element and the file has no further underscore after it, so a name that is
+// merely ABOUT a platform is never mistaken for one gated by it.
+func filenameSuffixMatches(name string) bool {
+	stem := name
+	if i := strings.IndexByte(stem, '.'); i >= 0 {
+		stem = stem[:i] // drop ".go" / "_test.go"
+	}
+	if !strings.Contains(stem, "_") {
+		return true // no underscore at all: never platform-suffixed (foo.go, linux.go)
+	}
+	elems := strings.Split(stem, "_")[1:]
+	if n := len(elems); n > 0 && elems[n-1] == "test" {
+		elems = elems[:n-1]
+	}
+	n := len(elems)
+	if n == 0 {
+		return true
+	}
+	matches := func(platform string) bool {
+		return platform == build.Default.GOOS || platform == build.Default.GOARCH
+	}
+	if n >= 2 && knownOS[elems[n-2]] && knownArch[elems[n-1]] {
+		return matches(elems[n-2]) && matches(elems[n-1])
+	}
+	if knownOS[elems[n-1]] || knownArch[elems[n-1]] {
+		return matches(elems[n-1])
+	}
+	return true
+}
+
+// knownOS and knownArch mirror go/build's own tables of acceptable target
+// names (internal/syslist): they decide which filename elements are platform
+// suffixes at all. They are deliberately the FULL list of past, present and
+// future names rather than the platforms this toolchain can build for — a
+// `termios_hurd.go` is somebody's real file even though no build here
+// includes it, and treating it as unconstrained would merge it into every
+// package it shares a directory with. A name Go has not used yet simply looks
+// like an ordinary identifier and stays unconstrained, which is the safe side.
+var (
+	knownOS = map[string]bool{
+		"aix": true, "android": true, "darwin": true, "dragonfly": true,
+		"freebsd": true, "hurd": true, "illumos": true, "ios": true,
+		"js": true, "linux": true, "nacl": true, "netbsd": true,
+		"openbsd": true, "plan9": true, "solaris": true, "wasip1": true,
+		"windows": true, "zos": true,
+	}
+	knownArch = map[string]bool{
+		"386": true, "amd64": true, "amd64p32": true, "arm": true,
+		"armbe": true, "arm64": true, "arm64be": true, "loong64": true,
+		"mips": true, "mipsle": true, "mips64": true, "mips64le": true,
+		"mips64p32": true, "mips64p32le": true, "ppc": true, "ppc64": true,
+		"ppc64le": true, "riscv": true, "riscv64": true, "s390": true,
+		"s390x": true, "sparc": true, "sparc64": true, "wasm": true,
+	}
+)
+
+// satisfiesBuildConstraints reads the `//go:build` line (and legacy
+// `// +build` lines) that open path and reports whether they leave the file
+// in the build. The header is the run of blank lines and // comments that
+// opens the file — peeking its head sees every constraint, and the first line
+// that is neither ends the header, exactly as the toolchain reads it. An
+// unreadable file and a constraint naming a tag this toolchain does not
+// recognize keep the file (see constraintHolds); nothing here splits a package
+// on a judgement it cannot make.
+func satisfiesBuildConstraints(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	head, _ := bufio.NewReader(f).Peek(4096)
+	if len(head) == 0 {
+		return true // unreadable or empty: nothing excludes it that we can see
+	}
+	for _, line := range strings.Split(string(head), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !constraint.IsGoBuild(line) && !constraint.IsPlusBuild(line) {
+			return true // the constraint header is over
+		}
+		expr, err := constraint.Parse(line)
+		if err != nil {
+			continue // unparseable directive: keep the file, the build names it
+		}
+		if !constraintHolds(expr) {
+			return false
+		}
+	}
+	return true
+}
+
+// constraintHolds evaluates a parsed constraint against this build. The tag
+// vocabulary is go/build's own context — GOOS, GOARCH, the compiler, `cgo`
+// when cgo is enabled, and the release/tool tags the toolchain advertises —
+// which covers every platform name, so the constraints that actually cause
+// false collisions (`windows`, `!windows`, `darwin || linux`, `js || wasip1`)
+// are judged correctly. A tag outside that vocabulary (a project's custom
+// `-tags custom`, `unix`, or the android↔linux / illumos↔solaris /
+// ios↔darwin equivalences go/build expands by hand) is reported as SATISFIED:
+// only the toolchain's own names may exclude a file here. The cost of that
+// conservatism is narrow — a sibling gated on such a tag may stay in the
+// package and contribute a duplicate note the build disproves — and it is the
+// right side to err on, because excluding a file that does build invents
+// "undefined" reports out of clean code.
+func constraintHolds(expr constraint.Expr) bool {
+	return expr.Eval(toolchainTagHolds)
+}
+
+// toolchainTagHolds reports whether a build tag is satisfied by this build.
+// A tag this process knows nothing about reports true, which is how
+// constraintHolds keeps an unresolvable constraint from excluding its file.
+func toolchainTagHolds(tag string) bool {
+	if tag == build.Default.GOOS || tag == build.Default.GOARCH || tag == build.Default.Compiler {
+		return true
+	}
+	if build.Default.CgoEnabled && tag == "cgo" {
+		return true
+	}
+	for _, list := range [][]string{build.Default.ToolTags, build.Default.ReleaseTags} {
+		for _, t := range list {
+			if t == tag {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // goPackageOf reads a .go file's package clause name. "" when unparseable.
@@ -261,7 +446,11 @@ func duplicatePackageDecls(fset *token.FileSet, regular, tests map[string]*ast.F
 // type-checking the imports (see the package comment), and with pass 1 any
 // local an expression binds is already exempt. Struct field names and
 // interface method names are declarations in their own scopes and are
-// skipped.
+// skipped. So too is the KEY of a keyed composite literal (`Timeout:` in
+// `&http.Client{Timeout: d}`): it resolves in the literal type's field set,
+// which nobody here can see — exempting it keeps field names off the report
+// whether the type is imported or declared in a sibling file, while the
+// literal's type and values stay judged.
 //
 // A file with a dot import gets NO undefined report at all: every bare name
 // could be a dot-imported symbol, and guessing which would manufacture the
@@ -304,37 +493,70 @@ func unresolvedReferences(fset *token.FileSet, regular, tests map[string]*ast.Fi
 		}
 	}
 
-	uses := map[string]int{} // name → first referenced line
+	// uses records the first referenced line of every bare name that nothing
+	// accounts for; order keeps deterministic reporting order.
+	uses := map[string]int{}
 	var order []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if _, isSel := n.(*ast.SelectorExpr); isSel {
-			// Neither side of X.Sel is judged: Sel resolves in X's namespace
-			// and X through its inferred type (see the function comment).
-			// Stop at the selector node so its idents are never visited as
-			// bare uses.
-			return false
-		}
-		id, ok := n.(*ast.Ident)
-		if !ok {
-			return true
-		}
+	// noteUse judges one IDENTIFIER: records it as an unaccounted bare
+	// reference, or waves it through.
+	noteUse := func(id *ast.Ident) {
 		name := id.Name
 		// ""/"_" carry no reference; the package-clause ident declares the
 		// package rather than referencing it; the file's own package-level
 		// names are already in pkgNames (collected from every parsed file
 		// including this one).
 		if name == "" || name == "_" || name == pkgName {
-			return true
+			return
 		}
 		if pkgNames[name] || nameIsUniverse(name) || declared[name] {
-			return true
+			return
 		}
 		if _, seen := uses[name]; !seen {
 			uses[name] = fset.Position(id.Pos()).Line
 			order = append(order, name)
 		}
+	}
+	// visit is the walk's whole judgement of one node: exempt a subtree whose
+	// names resolve in a namespace this check cannot see, or judge the node if
+	// it is a bare identifier. It is a named funcValue rather than a closure
+	// literal because the one exception below — a keyed composite-literal
+	// element, whose KEY is exempt while the rest of it still holds references
+	// — runs the same rules over nested spans through ast.Inspect.
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.SelectorExpr:
+			// Neither side of X.Sel is judged: Sel resolves in X's namespace
+			// and X through its inferred type (see the function comment), so
+			// nothing beneath a selector is a bare use. This is also what keeps
+			// the `Client` of a `http.Client{…}` literal type and the `Second`
+			// of a `time.Second` value off the report.
+			return false
+		case *ast.KeyValueExpr:
+			// A keyed element's KEY (`Addr` in `http.Server{Addr: ":0"}`, `A` in
+			// `P{A: 1}` where P is declared in a sibling file, `ID` in
+			// `Base{ID: x}` through an embedded field) is a name in the literal
+			// type's field set, which nobody here can see — a field or map key,
+			// never a bare reference. Only a BARE identifier key is exempt: an
+			// expression key (`x.field`, `pkg.K`, an index) is an ordinary
+			// expression whose references are real, so its subtree is walked
+			// under these same rules. The value is always judged. A key this
+			// check cannot resolve is left silent — the accepted trade, never
+			// noise-on-clean.
+			if _, bareKey := v.Key.(*ast.Ident); bareKey {
+				ast.Inspect(v.Value, visit)
+				return false
+			}
+			ast.Inspect(v.Key, visit)
+			ast.Inspect(v.Value, visit)
+			return false
+		case *ast.Ident:
+			noteUse(v)
+			return true
+		}
 		return true
-	})
+	}
+	ast.Inspect(file, visit)
 	if len(order) == 0 {
 		return nil
 	}

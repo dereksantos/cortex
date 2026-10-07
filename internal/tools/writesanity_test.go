@@ -8,11 +8,24 @@ package tools
 
 import (
 	"context"
+	"go/build"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// notWindowsTag is the //go:build expression naming the OTHER platform from
+// the one the tests run on, so the constraint fixtures are a genuinely
+// exclusive pair on every GOOS (windows when building for windows, anything
+// else otherwise). A test that hard-coded "!windows" would assert a
+// DUPLICATE declaration on Windows, where both of its twins build.
+var notWindowsTag = func() string {
+	if build.Default.GOOS == "windows" {
+		return "linux"
+	}
+	return "!windows"
+}()
 
 // writeGoFiles creates dir/files (map name→content) and returns dir.
 func writeGoFiles(t *testing.T, files map[string]string) string {
@@ -310,6 +323,124 @@ func Use() {
 			},
 			target:  "a.go",
 			wantNil: true,
+		},
+		{
+			// THE CLASS, not just the one instance: a keyed composite literal's
+			// key resolves in the literal TYPE's field set, which this check
+			// cannot see — so a key on an imported type, on a type from a
+			// sibling file, or on an embedded/promoted field is never a bare
+			// reference. Reporting `"Timeout" is undefined` for
+			// `&http.Client{Timeout: d}` is noise-on-clean in code that appears
+			// in every repo.
+			name: "keyed composite literal keys on an imported type are not undefined",
+			files: map[string]string{
+				"a.go": `package p
+
+import (
+	"net/http"
+	"os/exec"
+	"time"
+)
+
+func Use() *http.Client {
+	srv := &http.Server{Addr: ":0", ReadHeaderTimeout: time.Second}
+	_ = srv
+	cmd := exec.Cmd{Path: "/bin/true", Args: []string{"true"}}
+	_ = cmd
+	return &http.Client{Timeout: 5 * time.Second}
+}
+`,
+			},
+			target:  "a.go",
+			wantNil: true,
+		},
+		{
+			// …and on a type declared in a SIBLING file of the same package,
+			// which the written file's own declarations cannot account for.
+			name: "composite literal keys of a sibling file's struct are not undefined",
+			files: map[string]string{
+				"types.go": "package p\n\ntype P struct {\n\tA int\n\tB string\n}\n",
+				"a.go":     "package p\n\nfunc Use() int {\n\tx := P{A: 1, B: \"two\"}\n\treturn x.A\n}\n",
+			},
+			target:  "a.go",
+			wantNil: true,
+		},
+		{
+			// An embedded field is keyed by its TYPE name and reachable through
+			// its promoted field; neither name is declared in the written file.
+			name: "keys for embedded and promoted fields are not undefined",
+			files: map[string]string{
+				"types.go": "package p\n\ntype Base struct{ ID string }\n\ntype Doc struct {\n\tBase\n\tTitle string\n}\n",
+				"a.go":     "package p\n\nfunc Use() string {\n\td := Doc{Base: Base{ID: \"x\"}, Title: \"t\"}\n\treturn d.ID\n}\n",
+			},
+			target:  "a.go",
+			wantNil: true,
+		},
+		{
+			// The exemption is for KEYS only: a guessed TYPE is precisely the
+			// name class this check exists to catch, and a keyed literal must
+			// not hide it.
+			name: "a guessed struct literal type is still reported undefined",
+			files: map[string]string{
+				"a.go": "package p\n\nfunc Use() { _ = MadeUpType{Field: 1} }\n",
+			},
+			target: "a.go",
+			want:   []string{`"MadeUpType" is undefined`},
+		},
+		{
+			// A build-constrained sibling pair declaring the SAME package-level
+			// name is legal Go, and this repo is full of them (fslock's
+			// flock_unix.go / flock_windows.go, lineedit's termios_real.go /
+			// termios_stub.go). Merging them into one package tells the model to
+			// "reuse one declaration or rename the new one" — break working
+			// platform code.
+			name: "mutually exclusive //go:build twins are not a duplicate declaration",
+			files: map[string]string{
+				"flock_unix.go":    "//go:build !windows\n\npackage p\n\nfunc flock() error { return nil }\n",
+				"flock_windows.go": "//go:build windows\n\npackage p\n\nfunc flock() error { return nil }\n",
+				"p.go":             "package p\n\nfunc Use() error { return flock() }\n",
+			},
+			target:  "p.go",
+			wantNil: true,
+		},
+		{
+			// The same pair named by the GOOS filename-suffix convention instead
+			// of a constraint line.
+			name: "GOOS-suffixed twins are not a duplicate declaration",
+			files: map[string]string{
+				"get_unix.go":    "package p\n\nfunc getTermios() {}\n",
+				"get_windows.go": "package p\n\nfunc getTermios() {}\n",
+				"p.go":           "package p\n\nfunc Use() { getTermios() }\n",
+			},
+			target:  "p.go",
+			wantNil: true,
+		},
+		{
+			// The mirror of the two above, and the one that matters more: the
+			// sibling that DOES build here still contributes its names, so a
+			// helper it declares is not "undefined" — the filter removes only
+			// what never compiles alongside this file.
+			name: "the build-constrained sibling that builds here still counts",
+			files: map[string]string{
+				"helper_unix.go":    "//go:build " + notWindowsTag + "\n\npackage p\n\nfunc helper() string { return \"u\" }\n",
+				"helper_windows.go": "//go:build windows\n\npackage p\n\nfunc helper() string { return \"w\" }\n",
+				"p.go":              "package p\n\nfunc Use() string { return helper() }\n",
+			},
+			target:  "p.go",
+			wantNil: true,
+		},
+		{
+			// …and a genuine collision with the sibling that DOES build is still
+			// reported: constraint filtering must not turn into blanket silence
+			// for every package that uses build tags.
+			name: "a duplicate against the sibling that builds here is still reported",
+			files: map[string]string{
+				"helper_unix.go":    "//go:build " + notWindowsTag + "\n\npackage p\n\nfunc helper() string { return \"u\" }\n",
+				"helper_windows.go": "//go:build windows\n\npackage p\n\nfunc helper() string { return \"w\" }\n",
+				"p.go":              "package p\n\nfunc helper() string { return \"p\" }\n",
+			},
+			target: "p.go",
+			want:   []string{"func helper is declared 2 times"},
 		},
 		{
 			// Methods on a type in a SIBLING file: the method name never

@@ -318,9 +318,10 @@ the model-driven memory tools
   replacement appends a GUARD DROPPED warning naming them (#210). A successful
   result appends the current changed region (added lines marked `>`, removed
   `-`, context unmarked, capped at 12 lines) so the
-  model's view of the file stays in sync (#173).
+  model's view of the file stays in sync (#173). On a `.go` file a successful
+  result may also carry the write-sanity note described in the next bullet.
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
-  own format on the file just touched — it is FORMAT-ONLY. Lint moved to
+  own format on the file just touched — it is FORMAT-ONLY. Lint moved to Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
   over the distinct `write_file`/`edit_file` paths (including the `agent`
   subagent's, minus files deleted since) — one run per file for `{file}`,
