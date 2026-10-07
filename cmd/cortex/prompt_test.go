@@ -460,7 +460,7 @@ func TestDefaultPromptEncodesReviewFeedbackGuidance(t *testing.T) {
 	}{
 		// 1. Per-finding accounting: the whole point of the principle — a
 		// finding with no disposition was dropped, invisibly to the next round.
-		{"owed", "every finding is owed an explicit disposition", false}, // also in commentsTruthPrinciple's "owes the same report"… "a deviation owed the same report"
+		{"owed an explicit disposition", "every finding is owed an explicit disposition", true},
 		{"addressed", "the first disposition", true},
 		{"deferred with a reason", "the second disposition: deferral must be stated, not silent", true},
 		{"disputed", "the third disposition: disagreeing openly beats ignoring", true},
@@ -489,14 +489,13 @@ func TestDefaultPromptEncodesReviewFeedbackGuidance(t *testing.T) {
 
 // TestReviewFeedbackPrinciplePosition pins where the issue #162 principle
 // sits: in the "# How you work" block, as its own paragraph after
-// failingTestPrinciple (issue #177's), followed by the comment-truth
-// principle (issue #231's), and before debugWorkingStylePrinciple (issue
-// #154's) — a position check, not a content check, mirroring
-// TestBlockedCheckPrinciplePosition. The placement matters: the principle
-// belongs with the accountability principles (test integrity, tests-as-
-// evidence) that say state what you took away, and ahead of the working-style
-// principles, so a model reading the block meets it with the review round in
-// view.
+// failingTestPrinciple (issue #177's) and before
+// debugWorkingStylePrinciple (issue #154's) — a position check, not a content
+// check, mirroring TestBlockedCheckPrinciplePosition. The placement matters:
+// the principle belongs with the accountability principles (test integrity,
+// tests-as-evidence) that say state what you took away, and ahead of the
+// working-style principles, so a model reading the block meets it with the
+// review round in view.
 func TestReviewFeedbackPrinciplePosition(t *testing.T) {
 	i := strings.Index(SystemPrompt, reviewFeedbackPrinciple)
 	if i < 0 {
@@ -505,18 +504,8 @@ func TestReviewFeedbackPrinciplePosition(t *testing.T) {
 	if f := strings.Index(SystemPrompt, failingTestPrinciple); f < 0 || i < f {
 		t.Error("the review-feedback principle must sit after the failing-test principle")
 	}
-	// The comment-truth principle (issue #231) sits IMMEDIATELY after it, as
-	// its own paragraph, and before the debugging principle (issue #154's) —
-	// so any principle inserted between them, or moved ahead of the
-	// comment-truth one, fails here rather than silently reordering the block.
-	// The splice probe looks for a line-starting copy of the const — the
-	// const's own doc comment in prompt.go names the text mid-line, and a
-	// line-starting match is the shape only a spliced paragraph has.
-	c := strings.Index(SystemPrompt, "\n\n"+commentsTruthPrinciple)
-	if c < 0 || i > c {
-		t.Error("the review-feedback principle must be followed immediately (own paragraph) by the comment-truth principle")
-	} else if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < c {
-		t.Error("the comment-truth principle must sit before the debugging principle")
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the review-feedback principle must sit before the debugging principle")
 	}
 	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
 		t.Error("the review-feedback principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
@@ -646,7 +635,7 @@ func TestDefaultPromptEncodesSpecTestGuidance(t *testing.T) {
 		// The trigger state: making it green.
 		{"green", "making the failing test green", false}, // "green build" is in the Test integrity paragraph
 		// The verdict: a deviation to report, never a fix.
-		{"deviation", "bending the test is a deviation", false}, // also in commentsTruthPrinciple
+		{"deviation you must report", "bending the test is a deviation you must report", true},
 		// The obligation: say it in the summary.
 		{"summary", "the deviation must be reported in the summary", false}, // "summary" is in Test integrity
 		// The unmet criterion: green does not cover.
@@ -727,8 +716,7 @@ func TestDefaultPromptEncodesTestTargetGuidance(t *testing.T) {
 
 // TestSpecTestPrinciplePosition pins where the issue #225 spec-test principle
 // sits: in the "# How you work" block, as its own paragraph after
-// reviewFeedbackPrinciple (issue #162's), followed by the comment-truth
-// principle (issue #231's), and before
+// reviewFeedbackPrinciple (issue #162's) and before
 // debugWorkingStylePrinciple (issue #154's) — a position check, not a content
 // check, mirroring TestReviewFeedbackPrinciplePosition. The placement matters:
 // the principle belongs with the accountability principles (test integrity,
@@ -742,18 +730,8 @@ func TestSpecTestPrinciplePosition(t *testing.T) {
 	if r := strings.Index(SystemPrompt, reviewFeedbackPrinciple); r < 0 || i < r {
 		t.Error("the spec-test principle must sit after the review-feedback principle")
 	}
-	// The comment-truth principle (issue #231) sits IMMEDIATELY after it, as
-	// its own paragraph, and before the debugging principle (issue #154's) —
-	// so any principle inserted between them, or moved ahead of the
-	// comment-truth one, fails here rather than silently reordering the block.
-	// The splice probe looks for a line-starting copy of the const — the
-	// const's own doc comment in prompt.go names the text mid-line, and a
-	// line-starting match is the shape only a spliced paragraph has.
-	c := strings.Index(SystemPrompt, "\n\n"+commentsTruthPrinciple)
-	if c < 0 || i > c {
-		t.Error("the spec-test principle must be followed immediately (own paragraph) by the comment-truth principle")
-	} else if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < c {
-		t.Error("the comment-truth principle must sit before the debugging principle")
+	if d := strings.Index(SystemPrompt, debugWorkingStylePrinciple); d < i {
+		t.Error("the spec-test principle must sit before the debugging principle")
 	}
 	if j := strings.Index(SystemPrompt, "# How you communicate"); j < i {
 		t.Error("the spec-test principle must sit in the \"# How you work\" block, before \"# How you communicate\"")
@@ -868,12 +846,11 @@ func TestCommentsTruthPrinciplePosition(t *testing.T) {
 // TestCommentsTruthPrincipleRidesInEveryTurnPrompt pins issue #231's
 // delivery: the built-in SystemPrompt carries commentsTruthPrinciple VERBATIM
 // as its own paragraph, so EVERY turn sees it — REPL turns, headless turns,
-// plan-mode turns, and the self-dev loop's ordinary step turns, which never
-// go through TurnWithPlan's prompts (the same delivery reasoning as
-// reviewFeedbackPrinciple and specTestPrinciple). The step-prompt restatement
-// lands with issue #231's plan-mode step (see the plan), so this test asserts
-// only the base-prompt ride for now — the planStepPrompt assertion joins here
-// when the restatement lands.
+// plan-mode turns (the same delivery reasoning as
+// reviewFeedbackPrinciple and specTestPrinciple). The plan-mode ride itself is
+// asserted by TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt (the
+// commentsTruthPrinciple assertions there) and
+// TestPlanStepPromptCarriesTaskAndPrinciple.
 func TestCommentsTruthPrincipleRidesInEveryTurnPrompt(t *testing.T) {
 	// Exactly one copy, verbatim, and as its own paragraph (a duplicated or
 	// paraphrased ride would pass a bare contains and pin nothing).
@@ -891,9 +868,7 @@ func TestCommentsTruthPrincipleRidesInEveryTurnPrompt(t *testing.T) {
 // (commentsTruthPrinciple) so docs and prompt can't drift apart. Beyond the
 // contains check it pins the mirror as the doc's ONLY copy and as its own
 // paragraph: a mirror embedded in another paragraph, or duplicated, reads as
-// guidance the doc never intended to give twice. (Until CLAUDE.md gains the
-// mirror — issue #231's CLAUDE.md step — this test fails deliberately: the
-// tripwire is what forces the mirror to land.)
+// guidance the doc never intended to give twice.
 func TestCommentsTruthPrincipleMirroredInClaudeMD(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
 	if err != nil {
