@@ -383,9 +383,11 @@ func finalizePromptFor(stop string, style FinalizeStyle) string {
 // 2026-08-07 polyglot confabulation).
 const reFinalizePrompt = "Your previous reply was empty. Without calling tools, give your final answer now in at most five sentences. Describe only what you actually completed — if any of the work is unfinished, say so plainly rather than presenting it as done."
 
-// rewriteClampedPrompt is the salvage ask when a model DID answer, but only by
-// running into the completion ceiling. That answer is usually verbose and fails
-// the eval's runaway tripwire; ask for a compact rewrite, then mark the run
+// rewriteClampedPrompt is the salvage ask when a model DID answer, but only
+// by running into the completion ceiling — or, since issue #230, when the
+// (sanitized) answer merely LOOKS cut off mid-sentence (a truncation that
+// never hit the token count). That answer is usually verbose and fails the
+// eval's runaway tripwire; ask for a compact rewrite, then mark the run
 // salvaged if the rewrite succeeds.
 //
 // The honesty clause is not decoration. This prompt was written for the study
@@ -404,7 +406,7 @@ const reFinalizePrompt = "Your previous reply was empty. Without calling tools, 
 // changes into the tree — a worse failure than the one being fixed. Telling the
 // truth about what happened is safe on every turn; telling the model to edit is
 // not.
-const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewrite it now as a concise final answer in at most five sentences. Describe only what you actually completed — never present work you did not finish as done. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
+const rewriteClampedPrompt = "Your previous reply was cut off before it finished. Rewrite it now as a concise final answer in at most five sentences. Describe only what you actually completed — never present work you did not finish as done. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
 
 // runLoop is THE engine. It iterates send → dispatch → re-send until the model
 // answers with no tool calls (clean finalize) or a bound trips, then finalizes
@@ -506,7 +508,6 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// the guard nudges on the penultimate repeat and finalizes on the
 		// next, so a model that legitimately re-issues a call gets a chance
 		// to change course before the loop ends.
-		//
 		recoverTextToolCalls(&msg)
 		// This round's assistant message is appended at the dispatch point
 		// below (before any tool results) — UNLESS it's an empty natural finish
@@ -536,14 +537,10 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// qualifies.
 		retryableEmptyFinish := finishedNaturally && strings.TrimSpace(msg.Content) == "" && req.Effort.Level != llm.EffortOff
 		if finishedNaturally {
-			// Issue #230: trim the natural finish before the salvage chains
-			// judge it. Any PARSEABLE tool-call markup in a round is already
-			// consumed by recoverTextToolCalls above — it was recovered into
-			// tool calls and this branch (no tool calls) is not reached — so
-			// what a natural finish can still carry here is unparseable
-			// residue, not markup: sanitizeFinalAnswer on this path is a
-			// plain trim, not a strip. The salvage chain sees the trimmed
-			// answer and decides (empty, truncated) exactly as before.
+			// Parseable tool-call markup in a round is already recovered into
+			// tool calls by recoverTextToolCalls above, so a natural finish is
+			// just trimmed here; the salvage chain then judges the trimmed
+			// answer (empty, truncated).
 			answer := strings.TrimSpace(msg.Content)
 			if retryableEmptyFinish {
 				// Issue #149: an empty finish from a role whose reasoning is on
@@ -953,13 +950,32 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 	// executed" receipt, stripping the markup from the prose it returns;
 	// passing it the SANITIZED reply instead would hand it markup-free text
 	// and silently drop the receipt — the model's intended action (a bash it
-	// never ran) would vanish from the answer. After a successful salvage
-	// (empty or clamped) the answer is a fresh, already-sanitized re-answer,
-	// so it is returned as-is.
-	if stats.Salvaged {
-		return answer, *stats, nil
+	// never ran) would vanish from the answer.
+	if !stats.Salvaged {
+		return reportWithheldToolCalls(msg.Content), *stats, nil
 	}
-	return reportWithheldToolCalls(msg.Content), *stats, nil
+	// A successful salvage (empty or clamped) re-answered the turn, so the
+	// fresh answer stands as the reply — but a salvage fired on a reply that
+	// also CARRIED a withheld call (the issue #230 truncation trigger fires
+	// on markup-laden replies too: the sanitized prose ends mid-sentence
+	// while the model "reached for" a tool it could not run). The #132
+	// receipt still leads: the withheld call must not vanish with the
+	// salvage, and the raw reply's own prose is a stale duplicate of the
+	// fresh re-answer, so the composition is the receipt lines (markup-free)
+	// followed by the salvaged answer.
+	if hasToolCallMarkup(msg.Content) {
+		var receipt []string
+		for _, line := range strings.Split(reportWithheldToolCalls(msg.Content), "\n") {
+			if !strings.HasPrefix(line, "Intended action not executed") && strings.TrimSpace(line) != "" {
+				break // the prose section begins; keep only the receipt lines
+			}
+			receipt = append(receipt, line)
+		}
+		if len(receipt) > 0 {
+			answer = strings.Join(append(receipt, answer), "\n")
+		}
+	}
+	return answer, *stats, nil
 }
 
 // reportWithheldToolCalls is the forced-wrap-up half of issue #132's text
@@ -1171,7 +1187,7 @@ func hasToolCallMarkup(content string) bool {
 //
 //  1. The answer (trimmed) is empty, or its last byte is a
 //     sentence-ending character ('.', '!', '?', ')', ']', '}', '"',
-//     ”', '`'), or a mid-sentence punctuation mark (',', ';', ':',
+//     '\”, '`'), or a mid-sentence punctuation mark (',', ';', ':',
 //     '-') — not truncated.
 //  2. The trailing run of letters (the last word, lowercased) is one of
 //     the dangling words below — truncated. These are conjunctions,

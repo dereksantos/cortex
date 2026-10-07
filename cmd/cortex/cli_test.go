@@ -146,9 +146,8 @@ func TestTurnCLIReceiptRoutingNoReceipt(t *testing.T) {
 // the reply into a commit message checks. The reply itself still goes to
 // stdout (issue #118's answer-only contract); the flag is a stderr fact.
 //
-// The --json branch's "summary_issue" key is runTurnCLI's out-map builder —
-// the same one-line pattern as the tests_changed / lint / receipt keys,
-// exercised here only via the shared TurnResult field the branch reads.
+// The --json surface — runTurnCLI's out-map builder, turnJSON — is covered
+// by TestTurnJSONSummaryIssue below.
 func TestReportTurnTextSummaryIssue(t *testing.T) {
 	res := TurnResult{Reply: "the reply", SummaryIssue: "truncated"}
 
@@ -164,6 +163,39 @@ func TestReportTurnTextSummaryIssue(t *testing.T) {
 	}
 	if strings.Contains(outBuf.String(), "summary issue") {
 		t.Errorf("the summary-issue flag leaked to stdout — it belongs on stderr (issue #118)")
+	}
+}
+
+// TestTurnJSONSummaryIssue (issue #230): turnJSON — the out-map builder of
+// runTurnCLI's --json branch — carries a final reply the engine's sanitizer
+// could not repair under the "summary_issue" key, and omits the key for a
+// clean turn. The key is what the issue names: a commit-step driver reads
+// `cortex turn --json` and checks it before writing the reply to git
+// history.
+func TestTurnJSONSummaryIssue(t *testing.T) {
+	tests := []struct {
+		name    string
+		res     TurnResult
+		want    string
+		wantKey bool
+	}{
+		{name: "flagged truncated reply", res: TurnResult{Reply: "the reply", SummaryIssue: "truncated"}, want: "truncated", wantKey: true},
+		{name: "clean reply omits the key", res: TurnResult{Reply: "the reply"}, want: "", wantKey: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := turnJSON(tt.res, "sess-1", nil)
+			got, ok := out["summary_issue"].(string)
+			if ok != tt.wantKey {
+				if tt.wantKey {
+					t.Fatalf("turnJSON out map has no summary_issue key, want %q", tt.want)
+				}
+				t.Fatalf("turnJSON out map has a summary_issue key = %v, want the key absent", got)
+			}
+			if tt.wantKey && got != tt.want {
+				t.Errorf("summary_issue = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

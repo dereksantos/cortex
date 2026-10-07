@@ -155,45 +155,7 @@ func runTurnCLI(args []string) {
 		}
 
 		if a.asJSON {
-			out := map[string]any{"session": session.SessionID, "reply": res.Reply}
-			if res.TestReceipt != "" {
-				out["tests_changed"] = res.TestReceipt
-			}
-			if res.LintReceipt != "" {
-				out["lint"] = res.LintReceipt
-			}
-			// Issue #219: the measurement-only turn receipt rides --json under
-			// "receipt" — the driver sees what the turn actually left in the
-			// workspace, measured, not claimed.
-			if res.Receipt != "" {
-				out["receipt"] = res.Receipt
-			}
-			// Issue #117: a turn that recovered from a mid-turn provider
-			// failure succeeded, so err is nil and the failure was otherwise
-			// lost behind the finalize answer — carry it under "backend_error"
-			// so a driver parsing --json sees what the backend said (sibling
-			// of tests_changed above).
-			if res.LastError != nil {
-				out["backend_error"] = backendErrorLine(res.LastError)
-			}
-			// Issue #103: the per-turn secret-redaction count rides --json
-			// ("redactions") so a driver parsing the output sees how much was
-			// masked before the turn's text hit disk, like tests_changed above.
-			if res.Redactions > 0 {
-				out["redactions"] = res.Redactions
-			}
-			// Issue #230: a final reply the engine's sanitizer could not
-			// repair (empty, tool-call markup, or truncated) is flagged so a
-			// driver that feeds the reply into a commit message can check for
-			// it before doing so.
-			if res.SummaryIssue != "" {
-				out["summary_issue"] = res.SummaryIssue
-			}
-			if turnErr != nil {
-				out["error"] = turnErr.Error()
-				out["interrupted"] = res.Interrupted
-			}
-			b, _ := json.Marshal(out)
+			b, _ := json.Marshal(turnJSON(res, session.SessionID, turnErr))
 			fmt.Println(string(b))
 		} else {
 			reportTurnText(os.Stdout, os.Stderr, turnErr, res, session.SessionID)
@@ -206,6 +168,52 @@ func runTurnCLI(args []string) {
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
+}
+
+// turnJSON builds the --json out map (runTurnCLI's JSON branch) so the
+// mapping is testable in isolation — the keys a driver feeding the reply
+// into a commit message reads (issue #230's "summary_issue" first among
+// them) live here, not behind a live session.
+func turnJSON(res TurnResult, sessionID string, turnErr error) map[string]any {
+	out := map[string]any{"session": sessionID, "reply": res.Reply}
+	if res.TestReceipt != "" {
+		out["tests_changed"] = res.TestReceipt
+	}
+	if res.LintReceipt != "" {
+		out["lint"] = res.LintReceipt
+	}
+	// Issue #219: the measurement-only turn receipt rides --json under
+	// "receipt" — the driver sees what the turn actually left in the
+	// workspace, measured, not claimed.
+	if res.Receipt != "" {
+		out["receipt"] = res.Receipt
+	}
+	// Issue #117: a turn that recovered from a mid-turn provider
+	// failure succeeded, so err is nil and the failure was otherwise
+	// lost behind the finalize answer — carry it under "backend_error"
+	// so a driver parsing --json sees what the backend said (sibling
+	// of tests_changed above).
+	if res.LastError != nil {
+		out["backend_error"] = backendErrorLine(res.LastError)
+	}
+	// Issue #103: the per-turn secret-redaction count rides --json
+	// ("redactions") so a driver parsing the output sees how much was
+	// masked before the turn's text hit disk, like tests_changed above.
+	if res.Redactions > 0 {
+		out["redactions"] = res.Redactions
+	}
+	// Issue #230: a final reply the engine's sanitizer could not
+	// repair (empty, tool-call markup, or truncated) is flagged so a
+	// driver that feeds the reply into a commit message can check for
+	// it before doing so.
+	if res.SummaryIssue != "" {
+		out["summary_issue"] = res.SummaryIssue
+	}
+	if turnErr != nil {
+		out["error"] = turnErr.Error()
+		out["interrupted"] = res.Interrupted
+	}
+	return out
 }
 
 // reportTurnText is runTurnCLI's non-JSON reporting: it splits the turn's
