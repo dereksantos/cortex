@@ -93,16 +93,23 @@ type receiptVerification struct {
 	notRun   string // "" = it ran; otherwise the refusal the line renders
 }
 
-// turnReceipt is the measurement-only receipt for one turn (issue #219):
-// the three facts above, assembled by computeReceipt and rendered by
-// render(). All fields are empty on a turn that ran no tools or measured
-// nothing — render() then returns "" and TurnResult.Receipt stays empty.
+// turnReceipt is the measurement-only receipt for one turn (issue #219 and
+// the #220 step-2 checklist fact): the three #219 facts above plus the
+// checklist fact, assembled by computeReceipt and rendered by render(). All
+// fields are empty on a turn that ran no tools or measured nothing —
+// render() then returns "" and TurnResult.Receipt stays empty.
 type turnReceipt struct {
 	filesChanged       []string // git diff --stat lines + the untracked files present in the turn's workspace
 	gitWorkspace       bool     // true when the turn's workspace is a git repository (a clean tree still renders the files-changed section: "nothing changed")
 	verification       []receiptVerification
 	unformatted        []string // files the post-edit format hook failed to verify (could not run, failed, timed out)
 	hadReceiptBashRuns bool     // true when the bash recorder saw a verification run this turn
+	// checklistMissing is the #220 step-2 fact: the task's checklist items
+	// the reply does NOT account for (checklistMissingItems — per item, every
+	// significant word, word-prefix match; see checklistItemPresent). nil
+	// when the task has no checklist or the reply met every item — a turn
+	// with no missing-item fact renders no "checklist:" section.
+	checklistMissing []string
 }
 
 // receiptBash records one test/build command the model is about to run in
@@ -341,7 +348,12 @@ func (cs *CortexSession) FormatHook(ctx context.Context, fsPath string, hookSkip
 // runs), and the unformatted fact (deduped, sorted). The harness runs no
 // project commands of its own for the receipt — the verification fact is
 // precisely "the verification commands that RAN this turn" (the model's
-// bash runs, recorded by the bash recorder), and nothing else.
+// bash runs, recorded by the bash recorder), and nothing else. The
+// checklistMissing fact (#220 step 2) is NOT set here: it is measured off
+// the turn's reply (the model's final answer, content) and the task
+// (input), which cs.turn holds in its own scope — it is set by the caller
+// (turn.go) right after computeReceipt returns, before the receipt is
+// rendered and surfaced on TurnResult.Receipt / the kindNote.
 func (cs *CortexSession) computeReceipt(ctx context.Context) turnReceipt {
 	fc := cs.receiptFilesChanged()
 	r := turnReceipt{
@@ -490,9 +502,12 @@ func boundStatLines(lines []string) []string {
 // reader sees "nothing changed" rather than no section — the git diff
 // --stat block plus the turn's created files, two-space indented), one
 // "verification:" section (one line per verification run that RAN this turn:
-// "<role>: <command> (exit N, Ss)"), and one "unformatted:" line (the files
-// the format hook reported a problem with, "; "-joined). The order is fixed;
-// a fact that measured nothing is omitted, and a receipt with no facts
+// "<role>: <command> (exit N, Ss)"), one "checklist:" section (the #220
+// step-2 fact — the task's checklist items the reply did not account for,
+// one per line; rendered after verification and omitted when the task has no
+// checklist or the reply met every item), and one "unformatted:" line (the
+// files the format hook reported a problem with, "; "-joined). The order is
+// fixed; a fact that measured nothing is omitted, and a receipt with no facts
 // renders "" (a turn with nothing to measure has no receipt).
 func (r turnReceipt) render() string {
 	var b strings.Builder
@@ -516,6 +531,15 @@ func (r turnReceipt) render() string {
 		}
 		if len(r.verification) > receiptMaxVerificationLines {
 			b.WriteString("  … " + strconv.Itoa(len(r.verification)-receiptMaxVerificationLines) + " more\n")
+		}
+	}
+	if len(r.checklistMissing) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("checklist (not accounted for in the reply):\n")
+		for _, item := range r.checklistMissing {
+			b.WriteString("  - " + item + "\n")
 		}
 	}
 	if len(r.unformatted) > 0 {
