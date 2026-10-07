@@ -578,10 +578,21 @@ var EditFile = newTool(FunctionEditFile,
 		"in order and atomically (all succeed or the file is left untouched). The "+
 		"result reports lines removed/added, warns when an edit removes more "+
 		"lines than it adds, and includes the current changed region (line- "+
-		"numbered) so your view of the file stays in sync; on a failure, the "+
-		"error lists the line numbers of every match (ambiguity) or the current "+
-		"content of the closest region in the file (not found) so you can "+
-		"correct the edit without a separate read.",
+		"numbered) so your view of the file stays in sync. A landed edit that "+
+		"removes a line with a conditional, return, or panic/lock-adjacent shape "+
+		"(if/else/for/switch/case/return/panic/lock — the shapes of a safety "+
+		"guard) that does not reappear in the replacement appends a \"GUARD DROPPED\" "+
+		"WARNING naming the dropped line, so a large block edit that silently removes a "+
+		"guard is surfaced in the observation. On a failure, the error lists the "+
+		"line numbers of every match (ambiguity) or the current content of the "+
+		"closest region in the file (not found) so you can correct the edit "+
+		"without a separate read; a not-found is framed as your view of the span "+
+		"being stale (an earlier edit or a reformatting such as gofmt changed it "+
+		"after you read it) and the closest-region snippet is the file's CURRENT "+
+		"content to copy from. If the only difference is whitespace (e.g. gofmt "+
+		"re-aligned the span's interior spacing), the error says \"only whitespace differs\", "+
+		"points at that region's current lines, and refuses to land the edit — copy "+
+		"the region exactly and retry.",
 	objectSchema(map[string]any{
 		"path":        stringProp("Path to the file to edit."),
 		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
@@ -1755,7 +1766,107 @@ func editResultMessage(path, editsNoun, replNoun, before, after string) string {
 	if removed > added && removed >= 2 {
 		msg += fmt.Sprintf("; WARNING: removed %d lines and added %d — re-read the edited region below (or with read_file) to confirm nothing was meant to stay", removed, added)
 	}
+	msg += guardDropWarning(before, after)
 	return msg
+}
+
+// guardDropWarning is the #210 receipt for landed edits: when a replacement
+// removes lines containing conditionals, returns, or panic/lock-adjacent
+// shapes (if/else/for/switch/case/return/panic/lock — the shapes a safety
+// guard takes) that do not reappear in the new content, it appends a WARNING
+// naming the dropped lines. This is the incident from PR #208, where a large
+// block edit silently deleted the
+// `subagentDepth(ctx) != 0 || cs == nil` guard from gateShell — the generic
+// "removed N lines" warning fires on the same shape, but it does not tell the
+// model that the dropped lines looked like a guard, which is the detail that
+// prompts a check. It is silent when the dropped guard line reappears in the
+// new content (a move, not a loss) and for plain removals.
+func guardDropWarning(before, after string) string {
+	var dropped []string
+	for _, r := range diffRows(splitLines(before), splitLines(after)) {
+		if r.op == '-' && guardLineKeyword(r.text) != "" && !strings.Contains(after, r.text) {
+			dropped = append(dropped, r.text)
+		}
+	}
+	if len(dropped) == 0 {
+		return ""
+	}
+	if len(dropped) > 3 {
+		dropped = dropped[:3]
+	}
+	var b strings.Builder
+	b.WriteString("\nGUARD DROPPED: the replacement removed these lines that contain a conditional or return and do not reappear in the new content:")
+	for _, d := range dropped {
+		line := strings.TrimSuffix(d, "\n")
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		b.WriteString("\n  - " + line)
+	}
+	b.WriteString(" — if this was a safety guard (a check, an early return, an unlock), re-add it.")
+	return b.String()
+}
+
+// guardLineKeyword reports the conditional/return keyword on a removed line,
+// or "" when the line is not a guard candidate. The check is word-ish:
+// `if`/`else`/`for`/`switch`/`case`/`return` (control flow), `panic`, and
+// lock-adjacent shapes (sync.Locker — `Lock`/`Unlock`) are the forms a safety
+// guard takes. Matching is case-insensitive (Go method receivers like
+// `mu.Unlock()` are uppercase) and the keyword must stand as a word, not
+// inside an identifier (e.g. `iffy`, `returned`, `lockstep`). A line like
+// `// if this fails` is a comment and is not flagged — comments carry no
+// behavior to lose.
+func guardLineKeyword(line string) string {
+	trimmed := strings.TrimLeft(strings.TrimSuffix(line, "\n"), " \t")
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+		return ""
+	}
+	runes := []rune(trimmed)
+	for _, kw := range []string{"if", "else", "for", "switch", "case", "return", "panic", "lock", "unlock"} {
+		kr := []rune(kw)
+		// Match the keyword as a standalone word (or as the line's start),
+		// not inside an identifier (e.g. "iffy", "returned"). Case-insensitive
+		// so Go method receivers (mu.Lock, mu.Unlock) are caught too.
+		for i := 0; i+len(kr) <= len(runes); i++ {
+			if !eqFold(runes[i:i+len(kr)], kr) {
+				continue
+			}
+			beforeOK := i == 0 || !isLetterOrDigit(runes[i-1])
+			after := i + len(kr)
+			afterOK := after >= len(runes) || !isLetterOrDigit(runes[after])
+			if beforeOK && afterOK {
+				return kw
+			}
+		}
+	}
+	return ""
+}
+
+// eqFold reports whether a and b are equal ignoring ASCII case.
+func eqFold(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if toLowerRune(a[i]) != toLowerRune(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// toLowerRune lowercases a rune (ASCII-only; sufficient for Go identifiers).
+func toLowerRune(r rune) rune {
+	if r >= 'A' && r <= 'Z' {
+		return r + ('a' - 'A')
+	}
+	return r
+}
+
+// isLetterOrDigit reports whether r is an identifier character that can
+// separate a keyword from the surrounding text.
+func isLetterOrDigit(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
 }
 
 // changedRegionSnippet renders the current content of the changed region of a
@@ -1942,6 +2053,16 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 // ignores only trailing whitespace; tier 2 also ignores leading indentation —
 // the safer tolerance is tried first. A match must still be unique unless
 // replace_all is set.
+//
+// A tier-2 match whose matched span differs from old ONLY in whitespace is
+// refused with an "only whitespace differs" error (#210): that is the shape
+// of a stale view (gofmt re-aligned the span after the model read it), and
+// silently landing it would apply the model's replacement to a region it has
+// not seen in its current form. The refusal carries the region's current
+// content so the model's next call works from fresh text. A tier-2 match
+// whose span differs in non-whitespace content (the model mis-indented its
+// anchor) still lands, re-indented — tolerance there is a convenience, not a
+// stale-view hazard.
 func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error) {
 	fileLines := dropTrailingEmpty(strings.SplitAfter(content, "\n"))
 	oldLines := dropTrailingEmpty(strings.SplitAfter(old, "\n"))
@@ -1968,7 +2089,102 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 		}
 		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
 	}
-	return "", 0, fmt.Errorf("old_string not found%s%s", nearMissHint(fileLines, oldLines), notFoundDirective)
+	// The span is not in the file even ignoring leading/trailing whitespace.
+	// Before the generic stale-view not-found error, check the gofmt
+	// realignment case (#210): the span's lines equal the file's lines with
+	// ALL whitespace ignored (interior spaces too — aligned assignments,
+	// aligned comments) but differ byte-for-byte. Tier-1/2 cannot bridge
+	// interior whitespace, so the edit genuinely failed, and the error can
+	// name that only whitespace differs so the model copies the region
+	// exactly instead of guessing.
+	if wsStart, found := allWhitespaceOnlyWindow(fileLines, oldLines); found {
+		return "", 0, whitespaceOnlyDiffError(fileLines, wsStart, k)
+	}
+	return "", 0, fmt.Errorf("old_string not found: your view of the span is stale — the file changed after you read it%s%s", nearMissHint(fileLines, oldLines), notFoundDirective)
+}
+
+// allWhitespaceOnlyWindow scans for a run of fileLines whose lines equal
+// oldLines when every run of whitespace is collapsed to a single space, but
+// which do NOT match exactly (exact matches are handled upstream). Unlike the
+// tier-1/2 tolerant match (which trims only leading/trailing whitespace),
+// this catches interior whitespace differences — the gofmt realignment
+// signature (#210), e.g. aligned assignments or aligned struct fields that
+// the model's stale span does not have. Returns (start, true) for the first
+// such window, (0, false) when none exists.
+func allWhitespaceOnlyWindow(fileLines, oldLines []string) (int, bool) {
+	k := len(oldLines)
+	if k == 0 || k > len(fileLines) {
+		return 0, false
+	}
+	for i := 0; i+k <= len(fileLines); i++ {
+		exact := true
+		onlyWS := true
+		for j := 0; j < k; j++ {
+			if fileLines[i+j] == oldLines[j] {
+				continue
+			}
+			exact = false
+			if collapseWS(fileLines[i+j]) != collapseWS(oldLines[j]) {
+				onlyWS = false
+				break
+			}
+		}
+		if !exact && onlyWS {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// collapseWS collapses every run of whitespace (space, tab, newline) in s to a
+// single space. Two lines that collapse to the same string differ only in
+// whitespace.
+func collapseWS(s string) string {
+	var b strings.Builder
+	prev := false
+	for _, r := range s {
+		ws := r == ' ' || r == '\t' || r == '\n'
+		if ws && prev {
+			continue
+		}
+		if ws {
+			b.WriteByte(' ')
+		} else {
+			b.WriteRune(r)
+		}
+		prev = ws
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// whitespaceOnlyDiffError renders the "only whitespace differs" not-found
+// error: it names the region, explains the whitespace is stale (e.g. gofmt
+// re-aligned it), and shows the region's CURRENT content so the model's next
+// call works from fresh text.
+func whitespaceOnlyDiffError(fileLines []string, start, k int) error {
+	line1 := start + 1
+	lo := start - 1
+	if lo < 0 {
+		lo = 0
+	}
+	hi := start + k - 1
+	if hi >= len(fileLines) {
+		hi = len(fileLines) - 1
+	}
+	var b strings.Builder
+	b.WriteString("\n  closest region, the file's CURRENT content (only whitespace differs — copy it exactly):")
+	for i := lo; i <= hi; i++ {
+		line := strings.TrimSuffix(fileLines[i], "\n")
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		marker := " "
+		if i == start {
+			marker = ">"
+		}
+		fmt.Fprintf(&b, "\n  %s%d: %s", marker, i+1, line)
+	}
+	return fmt.Errorf("old_string not found: only whitespace differs from the file (near line %d) — the content is the same but its whitespace is stale (e.g. gofmt re-aligned it after you read it)%s%s", line1, b.String(), notFoundDirective)
 }
 
 // notFoundDirective is appended to every "old_string not found" failure so a
@@ -2128,7 +2344,7 @@ func nearMissHint(fileLines, oldLines []string) string {
 		end = len(fileLines)
 	}
 	var b strings.Builder
-	b.WriteString(" — closest region (re-read the file if it changed):")
+	b.WriteString(" — closest region, the file's CURRENT content (re-read the file if it changed):")
 	for i := start; i < end; i++ {
 		line := strings.TrimSpace(strings.TrimSuffix(fileLines[i], "\n"))
 		if len(line) > 80 {

@@ -22,6 +22,10 @@ func TestEditFileDeclarationDocumentsResultAndFailureNotes(t *testing.T) {
 		"current changed region",
 		"line numbers of every match",
 		"closest region in the file",
+		"GUARD DROPPED",
+		"only whitespace differs",
+		"stale",
+		"CURRENT content",
 	} {
 		if !strings.Contains(desc, sub) {
 			t.Errorf("edit_file description should mention %q; got:\n%s", sub, desc)
@@ -569,5 +573,197 @@ func TestEditFileEditsArrayPropagatesFailureHint(t *testing.T) {
 	}
 	if !strings.Contains(got, "not found") {
 		t.Errorf("error should propagate the not-found reason; got: %q", got)
+	}
+}
+
+// TestEditFileGuardDropWarning proves a landed edit whose removal drops lines
+// containing conditionals or returns (if/for/switch/return) that do not
+// reappear in new_string appends a GUARD-DROP WARNING naming the dropped
+// line — the shape of the #208 incident where a large block edit silently
+// deleted the subagentDepth guard from gateShell. Plain removals, and
+// replacements where the dropped conditional line reappears in new_string,
+// stay silent. The existing net-line-count WARNING ("removed N lines")
+// fires on the same shape too; this test pins the guard-specific text so a
+// regression to the generic warning cannot pass. See #210.
+func TestEditFileGuardDropWarning(t *testing.T) {
+	cases := []struct {
+		name     string
+		before   string
+		old      string
+		new      string
+		wantWarn bool
+	}{
+		{
+			name:     "removal drops an if-guard and return not in new_string — warns",
+			before:   "package main\nfunc f() int {\n\tif x != 0 {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+			old:      "if x != 0 {\n\t\treturn 1\n\t}\n\treturn 2",
+			new:      "return 2",
+			wantWarn: true,
+		},
+		{
+			name:     "removal drops a for-loop guard not in new_string — warns",
+			before:   "package main\nfunc f() int {\n\tfor _, v := range vs {\n\t\tif v == 0 {\n\t\t\tcontinue\n\t\t}\n\t\ts += v\n\t}\n\treturn s\n}\n",
+			old:      "for _, v := range vs {\n\t\tif v == 0 {\n\t\t\tcontinue\n\t\t}\n\t\ts += v\n\t}",
+			new:      "",
+			wantWarn: true,
+		},
+		{
+			name:     "removal of a plain assignment — no warning",
+			before:   "package main\nvar x = 1\n",
+			old:      "var x = 1\n",
+			new:      "",
+			wantWarn: false,
+		},
+		{
+			name:     "removal where the dropped guard line reappears in new_string — no warning",
+			before:   "package main\nfunc f() int {\n\tif x {\n\t\treturn 1\n\t}\n\treturn 2\n}\n",
+			old:      "if x {\n\t\treturn 1\n\t}",
+			new:      "if x {\n\t\treturn 1\n\t}\n// kept",
+			wantWarn: false,
+		},
+		{
+			name:     "removal drops an else-guard not in new_string — warns",
+			before:   "package main\nfunc f() {\n\tif x {\n\t\ta()\n\t} else {\n\t\tb()\n\t}\n}\n",
+			old:      "} else {\n\t\tb()\n\t}",
+			new:      "}",
+			wantWarn: true,
+		},
+		{
+			name:     "removal drops a case clause not in new_string — warns",
+			before:   "package main\nfunc f() {\n\tswitch x {\n\tcase 0:\n\t\tg()\n\tcase 1:\n\t\th()\n\t}\n}\n",
+			old:      "case 1:\n\t\th()",
+			new:      "",
+			wantWarn: true,
+		},
+		{
+			name:     "removal drops a panic not in new_string — warns",
+			before:   "package main\nfunc f() {\n\tif err != nil {\n\t\tpanic(err)\n\t}\n}\n",
+			old:      "\t\tpanic(err)",
+			new:      "\t\tlog.Printf(\"err: %v\", err)",
+			wantWarn: true,
+		},
+		{
+			name:     "removal drops an unlock not in new_string — warns",
+			before:   "package main\nfunc f() {\n\tdefer mu.Unlock()\n}\n",
+			old:      "\tdefer mu.Unlock()\n",
+			new:      "",
+			wantWarn: true,
+		},
+		{
+			name:     "removal of a line containing a keyword inside an identifier — no warning",
+			before:   "package main\nvar returned = true\n",
+			old:      "var returned = true\n",
+			new:      "",
+			wantWarn: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := seedEditFile(t, "f.go", tc.before)
+			out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
+				"path": path, "old_string": tc.old, "new_string": tc.new,
+			}), headlessDeps{})
+			if err != nil {
+				t.Fatalf("edit_file: %v", err)
+			}
+			hasGuardWarn := strings.Contains(out, "GUARD DROPPED")
+			if hasGuardWarn != tc.wantWarn {
+				t.Errorf("GUARD-DROPPED warning presence = %v, want %v; got: %q", hasGuardWarn, tc.wantWarn, out)
+			}
+		})
+	}
+}
+
+// TestEditFileNotFoundStaleViewFraming proves the not-found error frames the
+// mismatch as a stale view of the file (your copy of the span is out of date,
+// e.g. an earlier edit or reformatting changed it) and states that the
+// closest-region snippet shows the file's CURRENT content — so the model's
+// next call can work from fresh text without a separate read_file. See #210.
+func TestEditFileNotFoundStaleViewFraming(t *testing.T) {
+	cases := []struct {
+		name   string
+		before string
+		old    string
+	}{
+		{
+			name:   "stale view: old_string is a line the file no longer has",
+			before: "package main\nfunc Chdir(root string) {}\n",
+			old:    "func T.Chdir(root string) {}",
+		},
+		{
+			name:   "stale view: multi-line span whose first line is absent",
+			before: "package main\nfunc Chdir(root string) {}\n\nvar x int\n",
+			old:    "func Changed(root string) int {\nfunc Chdir(root string) {}\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := seedEditFile(t, "f.go", tc.before)
+			_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
+				"path": path, "old_string": tc.old, "new_string": "x",
+			}), headlessDeps{})
+			if err == nil {
+				t.Fatalf("edit should error, got none")
+			}
+			got := err.Error()
+			for _, sub := range []string{"not found", "stale"} {
+				if !strings.Contains(got, sub) {
+					t.Errorf("error should contain %q; got: %q", sub, got)
+				}
+			}
+			// The closest-region snippet must be presented as the file's
+			// CURRENT content — the text the model copies its next
+			// old_string from — not an undated guess.
+			if strings.Contains(got, "closest region") && !strings.Contains(got, "CURRENT content") {
+				t.Errorf("closest-region hint should be labeled the file's CURRENT content; got: %q", got)
+			}
+		})
+	}
+}
+
+// TestEditFileNotFoundWhitespaceOnlyDifference proves that when the only
+// difference between old_string and the file is whitespace — specifically
+// INTERIOR whitespace, as in a gofmt realignment of aligned assignments or
+// comments that the tier-1/2 tolerant match cannot bridge (it trims only
+// leading/trailing) — the not-found error explicitly says "only whitespace
+// differs" rather than a generic "not found". See #210.
+//
+// (Leading/trailing re-indentation is NOT covered here: that shape is
+// bridged by the tier-2 tolerant match and lands, re-indented, by design —
+// see TestEditFileTolerantMatchPreservesFileLineContent.)
+func TestEditFileNotFoundWhitespaceOnlyDifference(t *testing.T) {
+	cases := []struct {
+		name   string
+		before string
+		old    string
+	}{
+		{
+			name:   "gofmt aligned assignments, old_string has single spaces",
+			before: "package main\nvar (\n\ta  = 1\n\tbb = 2\n)\n",
+			old:    "a = 1\nbb = 2\n",
+		},
+		{
+			name:   "aligned struct fields, old_string lacks the padding",
+			before: "type T struct {\n\tX int    `json:\"x\"`\n\tY string `json:\"y\"`\n}\n",
+			old:    "X int `json:\"x\"`\nY string `json:\"y\"`\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := seedEditFile(t, "f.go", tc.before)
+			_, _, err := Execute(context.Background(), editArgs(t, map[string]any{
+				"path": path, "old_string": tc.old, "new_string": "x",
+			}), headlessDeps{})
+			if err == nil {
+				t.Fatalf("edit should error, got none")
+			}
+			got := err.Error()
+			if !strings.Contains(got, "not found") {
+				t.Errorf("error should say not found; got: %q", got)
+			}
+			if !strings.Contains(got, "only whitespace differs") {
+				t.Errorf("error should say 'only whitespace differs'; got: %q", got)
+			}
+		})
 	}
 }
