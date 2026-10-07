@@ -259,7 +259,18 @@ func (r *PlanRunResult) addTurnReceipt(receipt string) {
 //     project's checks (runProjectCheck) run in between. A failed step
 //     (turn error or check failure) stops the run; later steps are reported
 //     as not reached.
-//  4. The returned Reply lists every step as done / failed / not reached.
+//  4. The returned Reply is the deterministic per-step report (renderPlan
+//     Report). When the task carries a `- [ ]` checklist (issue #220), the
+//     run's checklist account is measured ONCE, deterministically, at the
+//     run's END — checklistMissingItems off the run's task and the rendered
+//     per-step report (every step's line — step text + note — rides in it, so
+//     an item named in its own step's text or note is accounted for even
+//     when no step's reply named it). No
+//     extra model turn runs for it: the fact lands on
+//     PlanRunResult.Receipt (addTurnReceipt) whether or not the steps ran
+//     tools. The step prompts themselves carry NO checklist (cs.turn is
+//     called with "" for checklistTask — a step that accounted for the
+//     whole task's checklist would flag the items other steps own).
 //
 // attachment (issue #108), when non-empty, is the @path mention attachment
 // for the task (see processMentions): it is prepended to the planning turn
@@ -286,14 +297,65 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 	// receipt; the deferred stamp puts them on whichever result the run
 	// returns, so no return path can drop one.
 	var receipts PlanRunResult
-	turn := func(input string) (TurnResult, error) {
-		res, turnErr := cs.Turn(ctx, input)
+	// Issue #220: plan steps run WITHOUT the checklist injection. Each
+	// step's input embeds the WHOLE overall task (planStepPrompt — the
+	// requirement the step text doesn't restate, #94/#178), so extracting the
+	// checklist from it would inject the checklist into every step, and
+	// measuring per step would make every step account for the ENTIRE
+	// checklist and flag the items other steps own as missing. Instead the
+	// checklist is measured ONCE per run — deterministically, in the deferred
+	// stamp below, off the run's task and the run's own rendered report (the
+	// returned Reply): every step's line — step text + note — rides in it, so
+	// an item named in its own step's text or note is accounted for even
+	// when no step's reply named it. The deferred stamp covers EVERY return
+	// path (a failed or interrupted run measures too — the run most in need
+	// of the fact), exactly like the plain-turn rule in turn.go, which
+	// measures before the error return.
+	stepTurn := func(input string) (TurnResult, error) {
+		res, turnErr := cs.turn(ctx, input, "", nil, 0, 0, FinalizeInteractive)
+		receipts.addReceipt(res.TestReceipt)
+		receipts.addLintReceipt(res.LintReceipt)
+		receipts.addTurnReceipt(res.Receipt)
+		return res, turnErr
+	}
+	// reportTurn is the checklist-carrying turn this run uses for the
+	// FALLBACK single turn only: the whole task is one turn and its reply is
+	// the run's final answer, so its turn injects the checklist into the
+	// prompt (checklistTask = task) and measures the checklist fact against
+	// the reply exactly like a plain turn. A planned run's checklist is
+	// measured deterministically at the run's end instead (see below) — no
+	// extra model turn.
+	reportTurn := func(input string) (TurnResult, error) {
+		res, turnErr := cs.turn(ctx, input, task, nil, 0, 0, FinalizeInteractive)
 		receipts.addReceipt(res.TestReceipt)
 		receipts.addLintReceipt(res.LintReceipt)
 		receipts.addTurnReceipt(res.Receipt)
 		return res, turnErr
 	}
 	defer func() {
+		// Issue #220: a PLANNED run's checklist account is measured ONCE per
+		// run, here, in the deferred stamp — deterministically, whether or
+		// not any turn ran tools, and on EVERY return path (a failed or
+		// interrupted run includes: the run most in need of the fact), just
+		// like the plain-turn rule in turn.go, which measures before the
+		// error return. The reply measured is the run's OWN rendered report
+		// (out.Reply, the deterministic per-step report — renderPlanReport
+		// emits only the header line and the per-step lines, with no task
+		// text): every step's line carries the step text (so an item named in
+		// its own step's text is accounted for even when no step's reply or
+		// note named it) and the step's note (including an explicit not-done
+		// note). An item no step's text or note names is reported missing on
+		// PlanRunResult.Receipt through the same joined-receipt surface
+		// (addTurnReceipt) as the per-step blocks — measurement only, exactly
+		// like the other #219/#220 facts. The fallback (single-turn) run
+		// (Planned false) is NOT measured here: its checklist-carrying turn
+		// (reportTurn) measures the fact off the reply itself, exactly like a
+		// plain turn.
+		if out.Planned && len(out.Steps) > 0 {
+			if missing := checklistMissingItems(task, out.Reply); len(missing) > 0 {
+				receipts.addTurnReceipt(turnReceipt{checklistMissing: missing}.render())
+			}
+		}
 		out.TestReceipt = receipts.TestReceipt
 		out.LintReceipt = receipts.LintReceipt
 		out.Receipt = receipts.Receipt
@@ -316,7 +378,13 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 	// because the saved list is the FILTERED one, not the full registry.)
 	savedTools := cs.Request.Tools
 	cs.Request.Tools = nil
-	planRes, planErr := turn(prepend(planModeInstruction + "\n\nTask: " + task))
+	// The planning turn's prompt embeds the task too ("Task: " + task) — it
+	// gets the same no-checklist treatment as the step turns (cs.turn with an
+	// empty checklistTask): it produces a plan, not an account.
+	planRes, planErr := cs.turn(ctx, prepend(planModeInstruction+"\n\nTask: "+task), "", nil, 0, 0, FinalizeInteractive)
+	receipts.addReceipt(planRes.TestReceipt)
+	receipts.addLintReceipt(planRes.LintReceipt)
+	receipts.addTurnReceipt(planRes.Receipt)
 	// Restore the session's own filtered tool list NOW — before any step or
 	// fallback turn runs — because runLoop left cs.Request.Tools nil (it
 	// stamps req.Tools = ts.Tools = nil on the tool-less planning turn).
@@ -336,8 +404,10 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 	if len(steps) == 0 {
 		// The model's reply was not a parseable ordered list (prose, a
 		// single "step", or tool-call markup). Fall back to doing the whole
-		// task in one plain turn — the pre-step-mode behavior (#150).
-		res, err := turn(prepend(task))
+		// task in one plain turn — the pre-step-mode behavior (#150). This
+		// is the checklist-carrying turn of the run (reportTurn): the whole
+		// task is one turn and its reply is the run's final answer.
+		res, err := reportTurn(prepend(task))
 		if err != nil {
 			return PlanRunResult{Planned: false}, fmt.Errorf("planning reply was not a step list; the fallback single turn failed: %w", err)
 		}
@@ -389,15 +459,21 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 	var earlierNotes []string
 	stepResults := make([]StepResult, 0, len(steps))
 	for i, step := range steps {
-		// Every step prompt carries the ORIGINAL task (not just the step
-		// line) AND the verify-before-fix principle (issue #178): demotion at
+		// Issue #178: every step prompt carries the ORIGINAL task (not just
+		// the step line) AND the verify-before-fix principle: demotion at
 		// the turn boundaries (#131) can fold the planning turn — the only
 		// place the full task text lived — into the outline, and a later step
 		// must not run blind to the overall goal or the requirements the step
 		// text didn't restate (#94's failure mode). planStepPrompt restates
 		// both so each step turn (tools present) carries them, together with
 		// the earlier done steps' notes (earlierNotes).
-		stepRes, err := turn(planStepPrompt(task, i+1, len(steps), step, earlierNotes))
+		//
+		// Issue #220: the step runs through stepTurn — the checklist is NOT
+		// injected into the step's prompt (a step that accounts for the whole
+		// task's checklist would flag items other steps own), and the step's
+		// turn measures no checklist fact (the run's own deferred stamp
+		// measures it once, below).
+		stepRes, err := stepTurn(planStepPrompt(task, i+1, len(steps), step, earlierNotes))
 		if err != nil {
 			// A cancelled context (Ctrl-C / ESC mid-step) is an INTERRUPT, not
 			// a step failure: record the step and every later step, return the
@@ -490,7 +566,15 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 		}
 	}
 
-	// --- 5. Final per-step report ----------------------------------------
+	// --- 5. Final report ----------------------------------------------------
+	// The run's answer is the DETERMINISTIC per-step report: no model turn
+	// runs for it. (A model report turn would add a full tools-enabled turn
+	// AFTER the per-step project checks — a turn that could edit files
+	// unchecked — and would replace renderPlanReport's deterministic reply
+	// with model text, costing an extra model call on every checklist plan
+	// run.) The checklist measurement rides the deferred stamp above, so the
+	// run measures it once, at the run's end, on every return path — this
+	// return included.
 	return PlanRunResult{Planned: true, Steps: stepResults, Reply: renderPlanReport(stepResults, len(steps))}, nil
 }
 
