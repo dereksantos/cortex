@@ -298,8 +298,13 @@ the model-driven memory tools
   span and retry `edit_file` — or use `write_file` for a whole-file rewrite —
   rather than scripting the change through `bash` (sed/awk/python) (#201:
   scripted multi-line edits corrupt files and skip the diff display + post-
-  edit hook). A successful result appends the current changed region (added
-  lines marked `>`, removed `-`, context unmarked, capped at 12 lines) so the
+  edit hook). An interior-whitespace-only mismatch (e.g. gofmt re-aligned the
+  span's spacing) returns an "only whitespace differs" error with the region's
+  current lines, and a landed edit that removes guard-shaped lines
+  (if/else/for/switch/case/return/panic/Lock/Unlock) not present in the
+  replacement appends a GUARD DROPPED warning naming them (#210). A successful
+  result appends the current changed region (added lines marked `>`, removed
+  `-`, context unmarked, capped at 12 lines) so the
   model's view of the file stays in sync (#173).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
