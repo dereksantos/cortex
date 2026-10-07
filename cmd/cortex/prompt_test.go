@@ -535,9 +535,7 @@ func TestReviewFeedbackPrincipleMirroredInClaudeMD(t *testing.T) {
 // (specTestPrinciple) so docs and prompt can't drift apart. Beyond the
 // contains check it pins the mirror as the doc's ONLY copy and as its own
 // paragraph: a mirror embedded in another paragraph, or duplicated, reads as
-// guidance the doc never intended to give twice. (testTargetPrinciple is not
-// mirrored: it lives inside CLAUDE.md's "Test integrity" paragraph, which
-// describes the prompt rather than carrying one principle verbatim.)
+// guidance the doc never intended to give twice.
 func TestSpecTestPrincipleMirroredInClaudeMD(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
 	if err != nil {
@@ -552,6 +550,30 @@ func TestSpecTestPrincipleMirroredInClaudeMD(t *testing.T) {
 	}
 	if !strings.Contains(doc, "\n\n"+specTestPrinciple+"\n\n") {
 		t.Error("CLAUDE.md's mirrored spec-test principle must be its own paragraph (blank-line separated), not spliced into another")
+	}
+}
+
+// TestTestTargetPrincipleMirroredInClaudeMD is the issue #225 consistency
+// tripwire, mirroring TestSpecTestPrincipleMirroredInClaudeMD: CLAUDE.md's
+// "Constraints" section must carry the EXACT text the model receives
+// (testTargetPrinciple) so docs and prompt can't drift apart. Beyond the
+// contains check it pins the mirror as the doc's ONLY copy and as its own
+// paragraph: a mirror embedded in another paragraph, or duplicated, reads as
+// guidance the doc never intended to give twice.
+func TestTestTargetPrincipleMirroredInClaudeMD(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("cannot read CLAUDE.md (the mirrored guidance can't be verified): %v", err)
+	}
+	doc := string(data)
+	if !strings.Contains(doc, testTargetPrinciple) {
+		t.Error("CLAUDE.md's \"Constraints\" section no longer mirrors the built-in prompt's test-target principle verbatim (testTargetPrinciple) — the docs and the prompt have drifted apart")
+	}
+	if n := strings.Count(doc, testTargetPrinciple); n != 1 {
+		t.Errorf("CLAUDE.md mirrors the test-target principle %d times, want exactly 1 (a duplicated mirror drifts one copy at a time)", n)
+	}
+	if !strings.Contains(doc, "\n\n"+testTargetPrinciple+"\n\n") {
+		t.Error("CLAUDE.md's mirrored test-target principle must be its own paragraph (blank-line separated), not spliced into another")
 	}
 }
 
@@ -624,6 +646,62 @@ func TestDefaultPromptEncodesSpecTestGuidance(t *testing.T) {
 	}
 }
 
+// TestDefaultPromptEncodesTestTargetGuidance pins issue #225's test-target
+// content in the built-in prompt: the model must test the user-facing surface
+// the requirement names — the command, the API, the entry point the user
+// invokes — never a lower-level helper that surface routes through, because a
+// test that never calls the surface proves nothing about it. The 2026-10-06
+// PR #223 reviews (issue #111) are the case this exists for: a step that
+// tested checkpoint.Restore directly instead of cs.undo, so the wiring bugs
+// went unnoticed — the tested unit passed while the user-facing path it
+// serves stayed broken.
+//
+// The keyword assertions run against testTargetPrinciple ITSELF, and each
+// absence-checked keyword is additionally asserted ABSENT from the full prompt
+// with the principle stripped — so every subtest actually rides on the new
+// principle rather than on text that was already there (the same
+// rewrite-tolerant, absence-verified style as
+// TestDefaultPromptEncodesSpecTestGuidance). Keywords that occur
+// elsewhere in the prompt are checked in the const only, with checkAbsence
+// false: "surface" and "green" already appear in other principles, and
+// "requirement" in "When a requirement is ambiguous".
+func TestDefaultPromptEncodesTestTargetGuidance(t *testing.T) {
+	// The full prompt with the principle removed: its splice site is inside
+	// the "Test integrity" paragraph, so strip exactly the principle and one
+	// surrounding separator, leaving the rest of the prompt intact.
+	withoutPrinciple := strings.Replace(SystemPrompt,
+		"Test integrity. "+testTargetPrinciple+" ",
+		"Test integrity. ", 1)
+	if withoutPrinciple == SystemPrompt {
+		t.Fatal("could not locate the test-target principle's splice site in SystemPrompt — the removal below would be a no-op")
+	}
+	tests := []struct {
+		keyword      string
+		intent       string
+		checkAbsence bool // false when the keyword also occurs elsewhere in the prompt
+	}{
+		// The subject: the path the requirement names.
+		{"requirement names", "the test target is named by the requirement", true},
+		// The target: the user-facing surface the criterion describes.
+		{"user-facing", "the criterion's surface is the one the user faces", true},
+		{"surface", "the user-facing surface a test must call", false}, // also in other principles
+		// The ban: a lower-level helper the surface routes through.
+		{"lower-level helper", "a test going through a lower-level helper", true},
+		// The consequence: a test that never calls the surface proves nothing.
+		{"never calls the surface", "a test that never calls the surface proves nothing about it", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.keyword, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(testTargetPrinciple), tt.keyword) {
+				t.Errorf("testTargetPrinciple no longer encodes the test-target guidance (%s): missing %q", tt.intent, tt.keyword)
+			}
+			if tt.checkAbsence && strings.Contains(strings.ToLower(withoutPrinciple), tt.keyword) {
+				t.Errorf("keyword %q survives with the principle removed — it does not ride on the new principle: %s", tt.keyword, tt.intent)
+			}
+		})
+	}
+}
+
 // TestSpecTestPrinciplePosition pins where the issue #225 spec-test principle
 // sits: in the "# How you work" block, as its own paragraph after
 // reviewFeedbackPrinciple (issue #162's) and before
@@ -659,7 +737,7 @@ func TestSpecTestPrinciplePosition(t *testing.T) {
 // user-facing path the requirement names, never a lower-level helper — before
 // #141's existing-test clause, so #141 and #225 read as one rule. Content is
 // pinned by the loose keyword checks in
-// TestDefaultPromptEncodesSpecTestGuidance's companions; this is the
+// TestDefaultPromptEncodesTestTargetGuidance; this is the
 // connect-through: a test target that never calls the user-facing surface
 // proves nothing about it.
 func TestTestTargetPrincipleSpliced(t *testing.T) {
@@ -679,32 +757,6 @@ func TestTestTargetPrincipleSpliced(t *testing.T) {
 	// changed existing test.
 	if c := strings.Count(SystemPrompt, testTargetPrinciple); c != 1 {
 		t.Errorf("the test-target principle must appear exactly once in the built-in prompt, found %d", c)
-	}
-}
-
-// TestSpecTestAndTestTargetCarriedInPlanPrompts pins issue #225's delivery to
-// the plan-then-execute path (plan_mode.go): the same const the base system
-// prompt carries must be restated in BOTH the planning instruction and each
-// step prompt, so a loop-driven ordinary turn, a planning turn, and a step
-// turn all see the identical principle text — the same connect-through as
-// TestVerifyBeforeFixPrincipleCarriedInEveryTurnPrompt for #178/#200/#162.
-// The planning turn is one model call with no tools, but its output (the
-// plan's steps) is where a lower-level helper can be named in place of the
-// user-facing path; the step turn is where a failing acceptance test actually
-// gets bent. Both carry the const, so demotion at the turn boundaries (#131)
-// cannot fold the only copy out of view.
-func TestSpecTestAndTestTargetCarriedInPlanPrompts(t *testing.T) {
-	if !strings.Contains(planModeInstruction, specTestPrinciple) {
-		t.Error("planModeInstruction must restate the spec-test principle (same const) for the planning turn")
-	}
-	if !strings.Contains(planModeInstruction, testTargetPrinciple) {
-		t.Error("planModeInstruction must restate the test-target principle (same const) for the planning turn")
-	}
-	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), specTestPrinciple) {
-		t.Error("planStepPrompt must restate the spec-test principle (same const) for each step turn")
-	}
-	if !strings.Contains(planStepPrompt("t", 1, 2, "s", nil), testTargetPrinciple) {
-		t.Error("planStepPrompt must restate the test-target principle (same const) for each step turn")
 	}
 }
 
