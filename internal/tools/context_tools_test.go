@@ -145,7 +145,7 @@ func TestContextToolsExecute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := Execute(context.Background(), tt.call, tt.deps)
+			out, _, err := Execute(context.Background(), tt.call, tt.deps)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("Execute error = %v, want containing %q", err, tt.wantErr)
@@ -174,12 +174,12 @@ func TestContextToolsHeadless(t *testing.T) {
 		FunctionContextMerge:            `{"range_start":"@session/x#m1-2","range_end":"@session/x#m3-4"}`,
 		FunctionContextAdjustWatermarks: `{"high_delta":10,"low_delta":10}`,
 	} {
-		if _, err := Execute(context.Background(), contextCall(name, args), nil); err == nil {
+		if _, _, err := Execute(context.Background(), contextCall(name, args), nil); err == nil {
 			t.Errorf("%s with no session should error", name)
 		}
 	}
 	// Evict degrades gracefully: nothing to remove, honest "not found".
-	out, err := Execute(context.Background(), contextCall(FunctionContextEvict, `{"citation":"@session/x#m1-2"}`), nil)
+	out, _, err := Execute(context.Background(), contextCall(FunctionContextEvict, `{"citation":"@session/x#m1-2"}`), nil)
 	if err != nil || !strings.Contains(out, "not found") {
 		t.Errorf("headless evict = (%q, %v), want a not-found observation", out, err)
 	}

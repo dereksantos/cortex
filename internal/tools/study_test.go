@@ -121,7 +121,7 @@ func TestExecuteDispatchesRegisteredSubagentGenerically(t *testing.T) {
 		Arguments: `{"path":".","goal":"find it"}`,
 	}}
 
-	out, err := Execute(context.Background(), tc, deps)
+	out, _, err := Execute(context.Background(), tc, deps)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestExecuteStudyDispatchUnchanged(t *testing.T) {
 		Name:      FunctionStudy,
 		Arguments: `{"path":".","goal":"x"}`,
 	}}
-	_, err := Execute(context.Background(), tc, headlessDeps{})
+	_, _, err := Execute(context.Background(), tc, headlessDeps{})
 	if err == nil {
 		t.Fatal("expected an error with no session (outline unavailable)")
 	}
@@ -153,7 +153,7 @@ func TestExecuteStudyDispatchUnchanged(t *testing.T) {
 
 func TestExecuteUnknownToolStillErrors(t *testing.T) {
 	tc := agent.ToolCall{Function: agent.FunctionCall{Name: "not-a-real-tool"}}
-	_, err := Execute(context.Background(), tc, headlessDeps{})
+	_, _, err := Execute(context.Background(), tc, headlessDeps{})
 	if err == nil {
 		t.Fatal("expected error for unregistered, unknown tool name")
 	}
@@ -190,7 +190,7 @@ func TestProfileSeedSeam(t *testing.T) {
 			Arguments: fmt.Sprintf(`{"path":%q,"goal":%q}`, path, goal),
 		}}
 
-		if _, err := Execute(context.Background(), tc, deps); err != nil {
+		if _, _, err := Execute(context.Background(), tc, deps); err != nil {
 			t.Fatalf("Execute: %v", err)
 		}
 		if deps.gotSeed != customSeed {

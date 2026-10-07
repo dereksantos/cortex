@@ -41,7 +41,7 @@ func TestMemoryRecallAcrossSessions(t *testing.T) {
 	// --- session 1: the agent saves a durable, non-re-derivable fact ----------
 	s1 := newMemSession(t)
 	const fact = "We deploy only on Tuesdays — never Fridays (change-freeze policy)."
-	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "deploy-policy", "content": fact,
 	}), s1); err != nil {
 		t.Fatalf("session 1 memory_write: %v", err)
@@ -58,7 +58,7 @@ func TestMemoryRecallAcrossSessions(t *testing.T) {
 	}
 
 	// And reading it back returns the full fact — the recall path end to end.
-	body, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "deploy-policy"}), s2)
+	body, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "deploy-policy"}), s2)
 	if err != nil {
 		t.Fatalf("session 2 memory_read: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestMemoryStaleNoteUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	s1 := newMemSession(t)
-	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "staging-reset", "content": "Staging DB resets nightly at 2am UTC.",
 	}), s1); err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ func TestMemoryStaleNoteUpdate(t *testing.T) {
 
 	// reality changes; the agent updates the existing note rather than adding one
 	s2 := newMemSession(t)
-	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "staging-reset", "content": "Staging DB resets nightly at 4am UTC (moved from 2am).",
 	}), s2); err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestMemoryStaleNoteUpdate(t *testing.T) {
 
 	// a fresh session recalls only the corrected value
 	s3 := newMemSession(t)
-	body, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "staging-reset"}), s3)
+	body, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "staging-reset"}), s3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,12 +113,12 @@ func TestMemoryForgetRemovesFromRecall(t *testing.T) {
 	ctx := context.Background()
 
 	s1 := newMemSession(t)
-	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "obsolete", "content": "An assumption that later proved wrong.",
 	}), s1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{"name": "obsolete"}), s1); err != nil {
+	if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{"name": "obsolete"}), s1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,7 +180,7 @@ func TestMemoryNoteIsRedactedOnDisk(t *testing.T) {
 	// A fresh session over the same .cortex sees the SAME redacted note via the
 	// real tool dispatch (the model-facing read path), not the verbatim secret.
 	s2 := newMemSession(t)
-	body2, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "leaked-key"}), s2)
+	body2, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "leaked-key"}), s2)
 	if err != nil {
 		t.Fatalf("fresh session memory_read: %v", err)
 	}

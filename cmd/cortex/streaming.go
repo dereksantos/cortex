@@ -624,6 +624,19 @@ func printLintReceipt(receipt string) {
 	}
 }
 
+// printTurnReceipt prints a turn's measurement-only receipt (issue #219)
+// to the REPL at the turn boundary — after the anchor is stopped and stdout
+// restored — so what the turn actually left in the workspace (the git diff
+// --stat block, the project's own test/build exit codes, the format hook's
+// knowledge) is reported where the person reviewing the turn looks. A no-op
+// for the empty receipt (a turn that ran no tools or measured nothing has
+// nothing to measure).
+func printTurnReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(withColor(receipt, gray))
+	}
+}
+
 // printBackendError prints a turn's recovered provider-error notice (issue
 // #117) to the REPL at the turn boundary — after the anchor is stopped and
 // stdout restored — so a mid-turn 500 the loop recovered from is reported where

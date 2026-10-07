@@ -255,7 +255,7 @@ func (cs *CortexSession) dispatcherFor(sa tools.Subagent) AgentDispatcher {
 				cs.lintTouchedPath(p)
 			}
 		}
-		out, err := tools.Execute(ctx, call, cs)
+		out, _, err := tools.Execute(ctx, call, cs)
 		if err != nil {
 			return "Error: " + err.Error()
 		}

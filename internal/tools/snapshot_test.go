@@ -159,12 +159,12 @@ func readStudyNest(t *testing.T, read string, nested int, digest string) string 
 		for i := 0; i < nested; i++ {
 			// The read fails by design (non-existent seedPath); the error is the
 			// stable content the child line summarizes, so no t.Errorf here.
-			_, _ = Execute(context.Background(), editCall(t, FunctionReadFile,
+			_, _, _ = Execute(context.Background(), editCall(t, FunctionReadFile,
 				map[string]any{"path": read}), d)
 		}
 	}
 	out := captureStdout(t, func() {
-		if _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err != nil {
+		if _, _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err != nil {
 			t.Fatalf("study: %v", err)
 		}
 	})
@@ -217,7 +217,7 @@ func runStudyError(t *testing.T) string {
 	t.Helper()
 	deps := &subDeps{err: fmt.Errorf("backend refused the request")}
 	out := captureStdout(t, func() {
-		if _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err == nil {
+		if _, _, err := Execute(context.Background(), studyCall(t, "internal/tools", "where is the gutter"), deps); err == nil {
 			t.Fatal("want the error to propagate")
 		}
 	})

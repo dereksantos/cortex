@@ -31,7 +31,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("pipe runs when the gate allows", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubSafe}
 		args, _ := json.Marshal(map[string]string{"command": "echo hello | tr a-z A-Z"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -43,7 +43,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("chaining runs when the gate allows", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubSafe}
 		args, _ := json.Marshal(map[string]string{"command": "echo a && echo b"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -56,7 +56,7 @@ func TestBashShellSyntax(t *testing.T) {
 		t.Chdir(t.TempDir())
 		cs := &CortexSession{classifyShell: stubSafe}
 		args, _ := json.Marshal(map[string]string{"command": "echo x > /etc/cortex-should-never-write"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -68,7 +68,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("risky command runs after interactive yes", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }}
 		args, _ := json.Marshal(map[string]string{"command": "echo confirmed | cat"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -80,7 +80,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("risky command refused after interactive no", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmNo }}
 		args, _ := json.Marshal(map[string]string{"command": "echo nope | cat"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -96,7 +96,7 @@ func TestBashShellSyntax(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
 			confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }} // present but ignored when quiet
 		args, _ := json.Marshal(map[string]string{"command": "echo headless | cat"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -118,7 +118,7 @@ func TestBashShellSyntax(t *testing.T) {
 		}}
 		ctx := withSubagentDepth(context.Background(), 1)
 		args, _ := json.Marshal(map[string]string{"command": "echo nested | cat"})
-		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -141,7 +141,7 @@ func TestBashShellSyntax(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) lineedit.ConfirmChoice { return lineedit.ConfirmYes }}
 		ctx := withSubagentDepth(context.Background(), 0)
 		args, _ := json.Marshal(map[string]string{"command": "echo depth-zero | cat"})
-		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestBashShellSyntax(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
 			approveRisky: func(context.Context, string, string) (bool, bool) { return true, false }}
 		args, _ := json.Marshal(map[string]string{"command": "echo discord-approved | cat"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -170,7 +170,7 @@ func TestBashShellSyntax(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
 			approveRisky: func(context.Context, string, string) (bool, bool) { return false, false }}
 		args, _ := json.Marshal(map[string]string{"command": "echo discord-denied | cat"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -189,7 +189,7 @@ func TestBashShellSyntax(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
 			approveRisky: func(context.Context, string, string) (bool, bool) { return false, true }}
 		args, _ := json.Marshal(map[string]string{"command": "echo discord-timeout | cat"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -214,7 +214,7 @@ func TestBashShellSyntax(t *testing.T) {
 			}}
 		ctx := withSubagentDepth(context.Background(), 1)
 		args, _ := json.Marshal(map[string]string{"command": "echo nested-approver | cat"})
-		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
+		got, _, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -235,7 +235,7 @@ func TestBashHonorsQuotedArgs(t *testing.T) {
 	}
 	for _, cmd := range []string{`grep -n Scroller f.txt`, `grep -n "Scroller" f.txt`} {
 		args, _ := json.Marshal(map[string]string{"command": cmd})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("%q: unexpected error: %v", cmd, err)
 		}
@@ -255,7 +255,7 @@ func TestBashGrepNoMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]string{"command": `grep -n Absent f.txt`})
-	got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+	got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

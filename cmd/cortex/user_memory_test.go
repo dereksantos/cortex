@@ -50,7 +50,7 @@ func TestMemoryScopeRoutingPerTool(t *testing.T) {
 		for _, scope := range []string{"project", "user"} {
 			t.Run(scope, func(t *testing.T) {
 				cs := newUserTierSession(t)
-				out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+				out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 					"name": "note", "content": "body", "scope": scope,
 				}), cs)
 				if err != nil {
@@ -82,7 +82,7 @@ func TestMemoryScopeRoutingPerTool(t *testing.T) {
 
 	t.Run("write default is project", func(t *testing.T) {
 		cs := newUserTierSession(t)
-		if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+		if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 			"name": "note", "content": "body",
 		}), cs); err != nil {
 			t.Fatal(err)
@@ -102,7 +102,7 @@ func TestMemoryScopeRoutingPerTool(t *testing.T) {
 		}
 		// Explicit scope=project must NOT fall back to the user tier even
 		// though the note exists there.
-		out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{
+		out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{
 			"name": "only-user", "scope": "project",
 		}), cs)
 		if err != nil {
@@ -115,7 +115,7 @@ func TestMemoryScopeRoutingPerTool(t *testing.T) {
 			t.Errorf("scope=project miss should be a friendly observation, got %q", out)
 		}
 
-		out, err = tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{
+		out, _, err = tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{
 			"name": "only-user", "scope": "user",
 		}), cs)
 		if err != nil {
@@ -134,7 +134,7 @@ func TestMemoryScopeRoutingPerTool(t *testing.T) {
 		if _, err := cs.userMemory.Write("user-fact", "keyword-zzz here too", time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		out, err := tools.Execute(ctx, memCall(tools.FunctionMemorySearch, map[string]any{
+		out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemorySearch, map[string]any{
 			"query": "keyword-zzz", "scope": "project",
 		}), cs)
 		if err != nil {
@@ -153,7 +153,7 @@ func TestMemoryScopeRoutingPerTool(t *testing.T) {
 		if _, err := cs.userMemory.Write("dup", "user version", time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{
+		if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{
 			"name": "dup", "scope": "user",
 		}), cs); err != nil {
 			t.Fatal(err)
@@ -183,7 +183,7 @@ func TestMemoryReadShadowsProjectOverUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "shared-name"}), cs)
+	out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "shared-name"}), cs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestMemoryReadFallsBackToUserOnProjectMiss(t *testing.T) {
 	if _, err := cs.userMemory.Write("user-only", "cross-project fact", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "user-only"}), cs)
+	out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "user-only"}), cs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestMemorySearchBothTierTagging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := tools.Execute(ctx, memCall(tools.FunctionMemorySearch, map[string]any{"query": "widget-factory"}), cs)
+	out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemorySearch, map[string]any{"query": "widget-factory"}), cs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestMemoryForgetNeverCrossesTiers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{"name": "dup"}), cs)
+	out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{"name": "dup"}), cs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestMemoryUnavailableReportsWhichTier(t *testing.T) {
 	}
 	cs.memory = memStore
 
-	out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+	out, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "x", "content": "y", "scope": "user",
 	}), cs)
 	if err != nil {
@@ -379,7 +379,7 @@ func TestMemoryUnavailableReportsWhichTier(t *testing.T) {
 	}
 
 	// The project tier is unaffected.
-	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "x", "content": "y",
 	}), cs); err != nil {
 		t.Fatal(err)

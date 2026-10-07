@@ -232,7 +232,7 @@ func TestBashAttributionRewriteBeforeGate(t *testing.T) {
 		gateRefuse:  true,
 	}
 	tc := bashCall(t, `git commit -m "fix"`)
-	if _, err := bash(context.Background(), tc, deps); err != nil {
+	if _, _, err := bash(context.Background(), tc, deps); err != nil {
 		t.Fatalf("bash: %v", err)
 	}
 	want := `git commit --trailer='Co-Authored-By: Cortex' -m "fix"`
@@ -304,7 +304,7 @@ func TestBashAttributionCommitsForReal(t *testing.T) {
 
 			deps := &mockDeps{attribution: &mockAttributionProvider{trailer: tt.trailer}, workdir: dir}
 			tc := bashCall(t, tt.command)
-			out, err := bash(context.Background(), tc, deps)
+			out, _, err := bash(context.Background(), tc, deps)
 			if err != nil {
 				t.Fatalf("bash: %v", err)
 			}
@@ -690,7 +690,7 @@ func TestBashAttributionJournalesOneEventPerOutcome(t *testing.T) {
 				// would satisfy the spy before attribution ever looked.
 				journalAttributionVerified(dir, "", tt.trailer, tt.command, outcomeNotACommit, deps)
 			} else {
-				_, err = bash(context.Background(), bashCall(t, tt.command), deps)
+				_, _, err = bash(context.Background(), bashCall(t, tt.command), deps)
 			}
 			if err != nil {
 				t.Fatalf("bash: %v", err)
@@ -798,7 +798,7 @@ func TestBashAttributionVerifiedRecordsUnattributedCommit(t *testing.T) {
 
 	// A chain the backstop refuses to rewrite; git still commits.
 	cmd := `git commit -q -m "by hand" ; git log -1 --format=%H >/dev/null`
-	if _, err := bash(context.Background(), bashCall(t, cmd), deps); err != nil {
+	if _, _, err := bash(context.Background(), bashCall(t, cmd), deps); err != nil {
 		t.Fatalf("bash: %v", err)
 	}
 
@@ -833,7 +833,7 @@ func TestBashAttributionRefusedCommandJournalsNothing(t *testing.T) {
 	deps, mock := journalingDeps(t, dir, "Co-Authored-By: Cortex (m1)")
 	mock.gateRefuse = true
 
-	if _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
+	if _, _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
 		t.Fatalf("bash: %v", err)
 	}
 	before := headSHA(t, dir)
@@ -867,7 +867,7 @@ func TestBashAttributionNoJournalerIsNoop(t *testing.T) {
 			mockDeps: &mockDeps{workdir: dir},
 			trailer:  "Co-Authored-By: Cortex (m1)",
 		})
-		if _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
+		if _, _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
 			t.Fatalf("bash: %v", err)
 		}
 		if headSHA(t, dir) == "" {
@@ -882,7 +882,7 @@ func TestBashAttributionNoJournalerIsNoop(t *testing.T) {
 		withIsolatedUserHome(t)
 		mock := &mockDeps{attribution: &mockAttributionProvider{trailer: "Co-Authored-By: Cortex (m1)"}, workdir: dir}
 		deps := ToolDeps(journalingMockDeps{mockDeps: mock, j: &recordingJournaler{}})
-		if _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
+		if _, _, err := bash(context.Background(), bashCall(t, `git commit -q -m "fix"`), deps); err != nil {
 			t.Fatalf("bash: %v", err)
 		}
 		events := readAttributionEvents(t)
