@@ -108,6 +108,14 @@ const noReproMarker = `If this step's outcome is that the reported problem does 
 // the issue's criteria is a spec). Both ride with the plan so every step turn
 // inherits the obligation even after demotion folds the planning turn out of
 // view.
+//
+// It also carries the comment-truth principle (issue #231): a planned step is
+// where a comment or summary claim can be written ahead of the behavior it
+// describes — the step's text (or the summary written for it) states the
+// intent before the code exists, and demotion at the turn boundaries (#131)
+// folds the planning turn out of view, so the standing principle rides with
+// the plan (same const the base system prompt carries) to keep the obligation
+// alive across every step.
 const planModeInstruction = `You are planning a multi-part task. First produce ONLY a plan, then I will execute each step as its own turn.
 
 Respond with a numbered list of steps, one per line, in this exact shape:
@@ -123,7 +131,8 @@ Rules:
 - Do not use any tools; just output the numbered list.
 - ` + verifyBeforeFixPrinciple + `
 - ` + testTargetPrinciple + `
-- ` + specTestPrinciple + ``
+- ` + specTestPrinciple + `
+- ` + commentsTruthPrinciple + ``
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -662,6 +671,14 @@ func noReproNote(reply string) string {
 // previous session's step. The standing principle (same const the base system
 // prompt carries) rides with every step so the locate-before-writing half of
 // the guidance survives demotion.
+// And it restates the comment-truth principle (commentsTruthPrinciple, issue
+// #231): the step turn is where the behavior actually changes — a reordered
+// call, a new overwrite, a removed guard — so the comments adjacent to the
+// edited span (and the summary written for the step) can go stale against it,
+// and demotion at the turn boundaries (#131) folds the plan out of view. The
+// same const the base system prompt carries rides with every step so the
+// obligation to keep comments and claims truthful to the shipped code survives
+// the fold.
 //
 // earlierNotes are the DONE steps' notes in order (skipped when empty): an
 // earlier step's no-repro note (issue #178) must reach a later step, so a
@@ -670,8 +687,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, locateBeforeWritingPrinciple, testTargetPrinciple, specTestPrinciple, noReproMarker,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s",
+		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, locateBeforeWritingPrinciple, testTargetPrinciple, specTestPrinciple, commentsTruthPrinciple, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)

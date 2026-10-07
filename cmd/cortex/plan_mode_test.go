@@ -190,6 +190,16 @@ func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
 	if !strings.Contains(got, specTestPrinciple) {
 		t.Errorf("planStepPrompt does not restate the spec-test principle (specTestPrinciple):\n%s", got)
 	}
+	// And the issue #231 comment-truth principle: the step turn is where the
+	// behavior actually changes — a reordered call, a new overwrite, a removed
+	// guard — so the comments adjacent to the edited span (and the summary
+	// written for the step) can go stale against it, and demotion at the turn
+	// boundaries folds the planning turn out of view. The step prompt carries
+	// the standing principle verbatim (same const as the base system prompt)
+	// so the obligation survives the fold.
+	if !strings.Contains(got, commentsTruthPrinciple) {
+		t.Errorf("planStepPrompt does not restate the comment-truth principle (commentsTruthPrinciple):\n%s", got)
+	}
 	// And the convention and the probe agree on the same phrase: the marker
 	// the model is told to use is the prefix noReproNote anchors on, so a
 	// reply that follows the convention is recognized (round-2 review: the
