@@ -24,7 +24,7 @@ func TestEditFileDeclarationDocumentsResultAndFailureNotes(t *testing.T) {
 		"closest region in the file",
 		"GUARD DROPPED",
 		"only whitespace differs",
-		"stale",
+		"does not match the file as it is now",
 		"CURRENT content",
 	} {
 		if !strings.Contains(desc, sub) {
@@ -588,6 +588,7 @@ func TestEditFileEditsArrayPropagatesFailureHint(t *testing.T) {
 func TestEditFileGuardDropWarning(t *testing.T) {
 	cases := []struct {
 		name     string
+		file     string // seeded file name (defaults to f.go when empty)
 		before   string
 		old      string
 		new      string
@@ -656,10 +657,54 @@ func TestEditFileGuardDropWarning(t *testing.T) {
 			new:      "",
 			wantWarn: false,
 		},
+		{
+			// The dropped guard line `\tif err != nil {` also appears EARLIER in
+			// the file (a sibling check). It does not reappear in the
+			// replacement's added lines, so the warning must still fire — a
+			// comparison against the whole file would miss it (#210).
+			name:     "dropped guard also appears elsewhere in the file — still warns",
+			before:   "package main\nfunc run() error {\n\tclient := dial()\n\tif client == nil {\n\t\treturn errNoClient\n\t}\n\tctx := context.Background()\n\tif ctx == nil {\n\t\treturn errNoCtx\n\t}\n\treturn do(client, ctx)\n}\nfunc do(client, ctx any) error {\n\tif err := client.(*c).Call(ctx); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n",
+			old:      "\tif err := client.(*c).Call(ctx); err != nil {\n\t\treturn err\n\t}\n",
+			new:      "",
+			wantWarn: true,
+		},
+		{
+			// Same as above but the dropped `return err` is re-added by the
+			// replacement (a move, not a loss): the warning stays silent.
+			name:     "dropped guard re-added in new_string — no warning",
+			before:   "package main\nfunc a() error {\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n",
+			old:      "\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil",
+			new:      "\treturn nil\n\tif err != nil {\n\t\treturn err\n\t}",
+			wantWarn: false,
+		},
+		{
+			// Prose in a Markdown file carries `for`/`if` as plain English
+			// words (or mid-line, as in a string literal): a README edit must
+			// never raise the GUARD DROPPED warning (#210).
+			name:     "removal of .md prose mentioning 'for'/'if' — no warning",
+			before:   "# Usage\nThis is for users who want to know.\nIf the build fails, retry.\n",
+			old:      "If the build fails, retry.\n",
+			new:      "",
+			wantWarn: false,
+		},
+		{
+			// A code line whose keyword lives INSIDE a string literal ("wait for
+			// the lock") has no guard shape: `for` is not the line's first
+			// token and there is no .Lock( call (#210).
+			name:     "code line with 'for' inside a string literal — no warning",
+			before:   "package main\nvar msg = \"wait for the lock\"\n",
+			old:      "var msg = \"wait for the lock\"\n",
+			new:      "",
+			wantWarn: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path := seedEditFile(t, "f.go", tc.before)
+			fname := tc.file
+			if fname == "" {
+				fname = "f.go"
+			}
+			path := seedEditFile(t, fname, tc.before)
 			out, _, err := Execute(context.Background(), editArgs(t, map[string]any{
 				"path": path, "old_string": tc.old, "new_string": tc.new,
 			}), headlessDeps{})
@@ -674,26 +719,36 @@ func TestEditFileGuardDropWarning(t *testing.T) {
 	}
 }
 
-// TestEditFileNotFoundStaleViewFraming proves the not-found error frames the
-// mismatch as a stale view of the file (your copy of the span is out of date,
-// e.g. an earlier edit or reformatting changed it) and states that the
-// closest-region snippet shows the file's CURRENT content — so the model's
-// next call can work from fresh text without a separate read_file. See #210.
+// TestEditFileNotFoundStaleViewFraming proves the generic not-found error
+// states the observable fact — old_string does not match the file as it is
+// now — WITHOUT asserting a cause (it may be stale, but equally it may be
+// mistyped, invented, or copied from another file), and labels the
+// closest-region snippet (when one is attached) as the file's CURRENT content
+// so the model's next call copies from fresh text. See #210.
 func TestEditFileNotFoundStaleViewFraming(t *testing.T) {
 	cases := []struct {
-		name   string
-		before string
-		old    string
+		name     string
+		before   string
+		old      string
+		wantHint bool // true → the closest-region hint (labeled CURRENT content) is attached
 	}{
 		{
-			name:   "stale view: old_string is a line the file no longer has",
-			before: "package main\nfunc Chdir(root string) {}\n",
-			old:    "func T.Chdir(root string) {}",
+			name:     "invented span: old_string is a line the file has never had",
+			before:   "package main\nfunc Chdir(root string) {}\n",
+			old:      "func T.Chdir(root string) {}",
+			wantHint: true,
 		},
 		{
-			name:   "stale view: multi-line span whose first line is absent",
-			before: "package main\nfunc Chdir(root string) {}\n\nvar x int\n",
-			old:    "func Changed(root string) int {\nfunc Chdir(root string) {}\n",
+			name:     "copied span: multi-line block whose first line is absent",
+			before:   "package main\nfunc Chdir(root string) {}\n\nvar x int\n",
+			old:      "func Changed(root string) int {\nfunc Chdir(root string) {}\n",
+			wantHint: true,
+		},
+		{
+			name:     "mistyped span with nothing similar in the file",
+			before:   "package main\nfunc Chdir(root string) {}\n",
+			old:      "const zzq zzq2 zzq3\nzzq4 zzq5\n",
+			wantHint: false,
 		},
 	}
 	for _, tc := range cases {
@@ -706,15 +761,24 @@ func TestEditFileNotFoundStaleViewFraming(t *testing.T) {
 				t.Fatalf("edit should error, got none")
 			}
 			got := err.Error()
-			for _, sub := range []string{"not found", "stale"} {
+			// The error states the observable fact without claiming a cause.
+			for _, sub := range []string{"not found", "does not match the file as it is now"} {
 				if !strings.Contains(got, sub) {
 					t.Errorf("error should contain %q; got: %q", sub, got)
 				}
 			}
-			// The closest-region snippet must be presented as the file's
-			// CURRENT content — the text the model copies its next
+			// It must not assert the view is stale as a fact.
+			if strings.Contains(got, "your view of the span is stale") {
+				t.Errorf("error must not assert the view is stale; got: %q", got)
+			}
+			// The closest-region snippet, when attached, is labeled the
+			// file's CURRENT content — the text the model copies its next
 			// old_string from — not an undated guess.
-			if strings.Contains(got, "closest region") && !strings.Contains(got, "CURRENT content") {
+			hasHint := strings.Contains(got, "closest region")
+			if hasHint != tc.wantHint {
+				t.Errorf("hint presence = %v, want %v; got: %q", hasHint, tc.wantHint, got)
+			}
+			if hasHint && !strings.Contains(got, "CURRENT content") {
 				t.Errorf("closest-region hint should be labeled the file's CURRENT content; got: %q", got)
 			}
 		})
