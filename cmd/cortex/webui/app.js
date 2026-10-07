@@ -106,11 +106,29 @@ function renderTurnInput(container, project, session) {
   const status = el("span", { className: "status-text", id: "turn-status" });
   form.appendChild(status);
 
+  // Image attachments (#218): a file picker and an image-URL field, rendered
+  // and validated by attach.js so this file stays inside the per-file JS cap.
+  // collect() answers with the attachments to send, or the reason the pick is
+  // unusable — reported in `status` and the send stops, rather than shipping a
+  // broken image or silently sending a turn missing one.
+  const attach = renderComposerAttachments(form, status);
+
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const text = input.value.trim();
     if (!text) {
       return;
+    }
+    const collected = attach.collect();
+    if (collected.error) {
+      status.textContent = collected.error;
+      return;
+    }
+    // Text stays required: an image-only send is not possible here by design,
+    // so the coder always says what to do with the image.
+    const body = { input: text };
+    if (collected.attachments.length > 0) {
+      body.attachments = collected.attachments;
     }
     status.textContent = "Sending…";
     button.disabled = true;
@@ -119,7 +137,7 @@ function renderTurnInput(container, project, session) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: text }),
+        body: JSON.stringify(body),
       },
     )
       .then((resp) => {
@@ -135,6 +153,9 @@ function renderTurnInput(container, project, session) {
           },
           result: () => {
             input.value = "";
+            // Drop the pending attachment too, so a screenshot sent once does
+            // not ride onto the next turn because the field still held it.
+            attach.clear();
             loadSession();
           },
           error: (payload) => {

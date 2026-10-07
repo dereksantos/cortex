@@ -667,9 +667,22 @@ func main() {
 		// markers. This runs only on the two paths that hand the line to the
 		// model (a normal turn, and /plan's task) — slash commands and prose
 		// the user never sends to the model are left untouched.
+		//
+		// Issue #218: an @mention naming an IMAGE (a workspace path or an
+		// http(s) address) is not inlined text — it comes back in
+		// mentionImages as a content part for the turn itself. Parsing happens
+		// here, at the one place that knows whether this line goes to the
+		// model at all; the bytes reach the model in step with the turn that
+		// carries them.
 		var mentionAttachment string
+		var mentionImages []TurnImage
+		var mentionImageRefusals []MentionRefusal
 		process := func() {
-			input, mentionAttachment = processMentions(session.root(), input)
+			// context.Background(): mention resolution runs while the REPL is
+			// between turns, where the turn's own context does not exist yet —
+			// and a URL mention's download is bounded by the fetch client's
+			// own timeout, so there is nothing here left unbounded.
+			input, mentionAttachment, mentionImages, mentionImageRefusals = processMentions(context.Background(), session.root(), input, session)
 		}
 
 		// /plan <task> runs the plan-then-execute path (#150): one planning
@@ -690,6 +703,17 @@ func main() {
 				continue
 			}
 			process()
+			// Issue #218: /plan has no image seam — TurnWithPlan builds each
+			// step's turn itself — so an @mentioned image cannot ride a plan
+			// run. Saying so beats the alternative: process() already replaced
+			// the mention with "[@x.png attached]", and leaving that unpaired
+			// would tell the human a screenshot went to the model when it did
+			// not. A plan over an image is a normal turn with the mention, then.
+			if len(mentionImages) > 0 || len(mentionImageRefusals) > 0 {
+				printMentionImages(nil, nil, []string{
+					"/plan does not carry image attachments — run the task as a normal turn (or ask about the image there) so the model can see it",
+				})
+			}
 			var plan PlanRunResult
 			var planErr error
 			switch {
@@ -836,20 +860,30 @@ func main() {
 			err error
 			res TurnResult
 		)
+		// Issue #218: the @mentioned images resolved above ride THIS turn, as
+		// content parts on its user message (attachTurnImages owns what that
+		// means per vision verdict). Passing them at the call rather than
+		// prepending anything to turnInput is the point: an image is never text.
 		switch {
 		case editor != nil && anchoredInput():
 			// runAnchoredTurn runs its own Turn and returns its result, so the
 			// turn-boundary receipt below surfaces in this mode too.
-			typeAhead, res, err = runAnchoredTurn(session, editor, turnInput, typeAhead)
+			typeAhead, res, err = runAnchoredTurn(session, editor, turnInput, typeAhead, mentionImages...)
 		case editor != nil:
 			ctx, stop := editor.Interruptible(context.Background())
-			res, err = session.Turn(ctx, turnInput)
+			res, err = session.TurnWithAttachments(ctx, turnInput, mentionImages...)
 			typeAhead = stop()
 		default:
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-			res, err = session.Turn(ctx, turnInput)
+			res, err = session.TurnWithAttachments(ctx, turnInput, mentionImages...)
 			cancel()
 		}
+		// Issue #218: one line per image the human attached, printed after
+		// submitting — the attachments that reached the model, and the ones
+		// that did not with the reason. An image that silently vanished would
+		// be indistinguishable from a typo'd mention, so silence is not an
+		// option for either case.
+		printMentionImages(mentionImages, mentionImageRefusals, res.ImageNotes)
 		// Issue #141: surface the "tests changed" receipt to the user before
 		// the shared post-turn safety net (afterTurn). The model has already
 		// been told (via the finalize hook) and the journal carries it; the

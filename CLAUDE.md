@@ -100,7 +100,7 @@ Three capabilities distinguish it:
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
-| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19) |
+| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19). The turn endpoints (`POST .../turn`, `POST .../turn/stream`) accept an `attachments` body field — a list of `{path}` (workspace-relative, confined by `read_file`'s rule), `{url}` (http(s), fetched only when `tools.enable_web` is on), or `{data}` (base64 image bytes, `data:` URI or bare, from a browser file picker) — resolved by `resolveTurnAttachments` (`cmd/cortex/serve_attachments.go`) into the same `TurnImage` an `@`image mention produces; any refusal is a 400 before the turn runs (issue #218) |
 | `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
 | `cortex project <add\|list\|remove>` | Manage the project registry |
 | `cortex project trust <add\|remove\|list>` | Manage the per-workspace trust list (the post-edit hook's only gate; user config only) |
@@ -186,7 +186,15 @@ the word at the cursor, so surrounding text survives. A submitted `@path`
 mention attaches the file to the turn with the same size rules as `read_file`
 (small files inline, large files as a structural outline + pointer to
 study); the mention is replaced by a `[@path attached]` marker in what the
-model sees. Only an `@` starting a whitespace-delimited word is a mention
+model sees. An `@`mention naming an IMAGE — a workspace file or an
+`@https://…` address — is attached differently (issue #218): its bytes ride
+the turn's user message as a content part (`TurnWithAttachments`), never as
+inlined text, and the REPL prints an attachment line per image plus a reason
+per image that could not attach (the #217 detection/cap/vision verdicts apply;
+a text-only model gets nothing on the wire and a printed note). A URL mention
+is a download gated by `tools.enable_web` — with web tools off it is refused
+with the switch named and never fetched. Only an `@` starting a
+whitespace-delimited word is a mention
 (emails and `@types/node`-style names are prose), and a mention that does not
 resolve to a readable file leaves the input unchanged. History records the
 line exactly as typed.
@@ -269,6 +277,12 @@ the model-driven memory tools
   to an outline line naming the image with a recallable citation — never
   kept in the prompt forever. A resumed marker-only result books no
   image tokens (nothing is on the wire for it). A
+  human-attached image (issue #218, `TurnWithAttachments`) leaves no marker
+  in the message text at all — the user's input is persisted byte-for-byte
+  — and is recorded instead by a per-message side-car manifest
+  (`<id>.m<idx>.images`, `cmd/cortex/image_input.go`) that `recall` and the
+  web-UI transcript view-model (`cmd/cortex/webui_transcript.go`) read to
+  show the attachment. A
   directory returns a bounded listing (directories marked `/`) plus a pointer
   to `outline`, and a missing path returns an oriented error: it points at
   `outline`/`grep` instead of guessing, states the workspace root for

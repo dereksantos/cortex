@@ -286,12 +286,33 @@ func estTurnTokens(msgs []Message) int {
 // base64-on-the-wire billing rule) per part. Zero for text-only
 // messages, so every existing estimate stays byte-for-byte.
 //
+// Two part shapes, booked differently and ONCE each (#218):
+//
+//   - a data: URI carries its own bytes, so the part is priced from them
+//     (imageDataURIRawBytes, without decoding);
+//   - an http(s) URL names remote bytes whose size is not knowable here, so
+//     it is booked at the documented upper bound — the shipped image cap.
+//     The bound is a property of the PART, not of its text: a 4000-character
+//     URL is still one image of unknown size, so the URL string's length must
+//     never enter the arithmetic (pricing it as text would under-estimate one
+//     image and, worse, make the booking depend on how the reference was
+//     spelled).
+//
 // A resumed image result — the `[image:` marker text with NO Parts —
 // books nothing extra: after resume no image goes on the wire, only the
 // ~30-token marker, whose bytes are already counted by estTurnTokens'
 // len(Content) term (#217). Booking it at the cap inflated a resumed
 // turn by 500k tokens of fiction — more than a whole 131k window — and
 // steered demotion by a size the prompt doesn't have.
+//
+// No double-booking term is needed, and none is added: each image reaches
+// the window as exactly one part on one message (read_file's result splices
+// its one attachment; a turn splices its attachment list, whose marker text
+// is not present in the transcript at all — the human's input is kept as
+// typed), so "one part = one image = one booking" already holds. The
+// per-message loop is what makes that true for a turn carrying several
+// images: N parts bill N times, and the same reference appearing twice would
+// be a duplicated attachment rather than two images.
 func imageTokensOf(msgs []Message) int {
 	tokens := 0
 	for _, msg := range msgs {
@@ -299,10 +320,22 @@ func imageTokensOf(msgs []Message) int {
 			if !p.HasImage() {
 				continue
 			}
-			tokens += tools.ImageTokensOf(imageDataURIRawBytes(p.ImageURL))
+			tokens += tools.ImageTokensOf(imagePartBytes(p.ImageURL))
 		}
 	}
 	return tokens
+}
+
+// imagePartBytes is the byte size an image part stands for, branching
+// explicitly on the two shapes so a caller can see which is which:
+// a data: URI's own decoded size, or the unknown-size upper bound for a
+// remote URL. Delegates to imageDataURIRawBytes, which implements exactly
+// that split; named separately so the token math reads as the policy it is.
+func imagePartBytes(imageURL string) int {
+	if strings.HasPrefix(imageURL, "data:") {
+		return imageDataURIRawBytes(imageURL)
+	}
+	return defaultImageTokenBookingBytes
 }
 
 // defaultImageTokenBookingBytes is the size an http(s) image URL (whose
@@ -310,6 +343,17 @@ func imageTokensOf(msgs []Message) int {
 // image cap, as an upper-bound estimate. (A resumed marker-only result
 // books NOTHING — see imageTokensOf; it was this constant misapplied
 // there that inflated resumed turns by a phantom 500k tokens.)
+//
+// Where a URL image part comes from today: nowhere in Cortex's own paths.
+// An @mentioned image URL is DOWNLOADED and sent as a data URI (step 2's
+// mention loader hands the bytes to the #217/#218 leaf), and read_file
+// attaches bytes it read — so the parts Cortex builds always carry a data:
+// URI and are priced from their real bytes. The URL branch is the backstop
+// for a part that arrives some other way: a resumed transcript replaying a
+// part a provider once accepted, or a future adapter that forwards a URL
+// rather than fetching it. That is why it stays an upper bound — an
+// unknown-size image must be assumed to fill the cap, or a session carrying
+// one would never demote.
 const defaultImageTokenBookingBytes = 1_500_000
 
 // imageDataURIRawBytes reports how many raw bytes a data-URI image part

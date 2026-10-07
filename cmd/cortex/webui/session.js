@@ -33,6 +33,44 @@ function renderToolResult(container, e) {
   );
 }
 
+// renderAttachedImages appends the images a turn carries (#218), so a
+// screenshot the coder attached is visible in the transcript rather than
+// present only as a marker string they cannot see past.
+//
+// It renders from `e.images`, a list of {url, media_type, name} the transcript
+// view-model supplies for a message whose image parts have a reachable source
+// — a remote URL image, or an inline image the server re-served. A read_file
+// or uploaded attachment's bytes are NOT embedded in the transcript JSON (the
+// wire-only Parts field is skipped by its codec), so those render as a static
+// labelled note rather than a broken <img>: a viewer that claims an image is
+// there when nothing can load it is worse than one that says where the bytes
+// live.
+function renderAttachedImages(container, e) {
+  const imgs = e.images || [];
+  if (imgs.length === 0) {
+    return;
+  }
+  const kids = [];
+  for (const im of imgs) {
+    const label = im.name || im.url || "image";
+    const loadable =
+      im.url &&
+      (im.url.indexOf("http:") === 0 || im.url.indexOf("https:") === 0 || im.url.indexOf("data:") === 0);
+    if (loadable) {
+      kids.push(el("img", { className: "attach-img", src: im.url, alt: label, loading: "lazy" }));
+      kids.push(el("div", { className: "attach-cap" }, ["attached image: " + label]));
+    } else {
+      // No loadable source: label it plainly and say the bytes live in the
+      // session, so the transcript is honest that an image was attached
+      // without pretending to display it.
+      kids.push(
+        el("div", { className: "attach-cap" }, ["attached image: " + label + " (bytes held in the session)"]),
+      );
+    }
+  }
+  container.appendChild(el("div", { className: "attach-feed" }, kids));
+}
+
 // renderEntry appends one transcript entry: a tool-result entry renders via
 // renderToolResult (collapsible, mono); user/assistant text stays a .msg
 // bubble as before. Any tool calls the entry carries still render as a
@@ -55,6 +93,10 @@ function renderEntry(container, e) {
     );
     container.appendChild(el("div", { className: "toolfeed" }, lines));
   }
+  // Any image the entry carries renders underneath its text (#218), so an
+  // attached screenshot is visible in the thread rather than only as the
+  // "[image: …]" marker string.
+  renderAttachedImages(container, e);
 }
 
 // renderSession writes a transcript view-model (transcriptViewModel's JSON

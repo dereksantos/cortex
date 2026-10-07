@@ -127,6 +127,13 @@ type TurnResult struct {
 	// disk. The live in-memory messages are NOT redacted — only what is
 	// persisted is — so this is the only place the count is visible.
 	Redactions int
+	// ImageNotes (#218) are the plain-text lines explaining images the human
+	// attached to the input that did NOT reach the model — today, one per
+	// image when the bound model has no vision verdict. An attachment that
+	// silently vanished would look identical to a typo, so the reason travels
+	// out for the REPL (and any adapter) to print; a turn whose images all
+	// attached leaves it empty.
+	ImageNotes []string
 	// Receipt carries the measurement-only turn receipt (issue #219,
 	// step 1, turn_receipt.go): the workspace's `git diff --stat` block
 	// (when the workspace is a git repository), the exit codes of the
@@ -152,11 +159,40 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	return cs.turn(ctx, input, input, nil, 0, 0, FinalizeInteractive)
 }
 
+// TurnWithAttachments is Turn with images the HUMAN attached to the input
+// (#218) — the @mentions the REPL resolved, or the attachments a serve
+// request carried. It is VARIADIC so every existing call site and sibling
+// (Turn, TurnWithProgress, TurnWithBudget, and the adapters that build a
+// closure over one of them) stays byte-for-byte what it was: with no images
+// this is Turn, unchanged.
+//
+// What the images become is decided once, in attachTurnImages: wire Parts on
+// this turn's user message for a vision-capable model, plus a side-car file
+// per image under the index the message actually lands at (so `recall` can
+// name the bytes after the in-memory Parts are gone), and NOTHING on the
+// message for a text-only model — the #216 wire gate would refuse the whole
+// request — with a note in TurnResult.ImageNotes telling the human why.
+func (cs *CortexSession) TurnWithAttachments(ctx context.Context, input string, images ...TurnImage) (TurnResult, error) {
+	return cs.turnWithImages(ctx, input, input, nil, 0, 0, FinalizeInteractive, images)
+}
+
+// TurnWithProgressAndAttachments is the one entry point that carries BOTH a
+// Progress sink and human-attached images (#218): the SSE turn endpoint needs
+// the stream AND the screenshot, and neither of the two single-purpose
+// siblings can express that. It exists so serve_stream.go did not have to
+// choose between keeping progress events and accepting attachments — dropping
+// the sink would have silently stopped every "progress" event on the wire
+// while still returning a reply, which is exactly the kind of regression a
+// caller cannot see from the response.
+func (cs *CortexSession) TurnWithProgressAndAttachments(ctx context.Context, input string, p Progress, images ...TurnImage) (TurnResult, error) {
+	return cs.turnWithImages(ctx, input, input, p, 0, 0, FinalizeInteractive, images)
+}
+
 // TurnWithProgress is Turn with p (may be nil) wired into runLoop's existing
 // Progress seam (cmd/cortex/loop.go) — the same breadcrumb sink the REPL's
 // live display already drives, just not previously reachable from Turn().
 func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p Progress) (TurnResult, error) {
-	return cs.turn(ctx, input, input, p, 0, 0, FinalizeInteractive)
+	return cs.turnWithImages(ctx, input, input, p, 0, 0, FinalizeInteractive, nil)
 }
 
 // TurnWithBudget is Turn with per-run bound overrides (D11's loop-firing
@@ -168,10 +204,17 @@ func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p P
 func (cs *CortexSession) TurnWithBudget(ctx context.Context, input string, maxIter, tokenBudget int) (TurnResult, error) {
 	// A loop firing has no interlocutor: a forced finalize must not end by
 	// asking whether to continue — nobody is there to answer.
-	return cs.turn(ctx, input, input, nil, maxIter, tokenBudget, FinalizeSubagent)
+	return cs.turnWithImages(ctx, input, input, nil, maxIter, tokenBudget, FinalizeSubagent, nil)
 }
 
+// turn is the no-images path: every pre-#218 entry point lands here, so
+// their behaviour is literally the same function. checklistTask is #220's:
+// which input the task checklist is extracted from (see turnWithImages).
 func (cs *CortexSession) turn(ctx context.Context, input, checklistTask string, progress Progress, maxIterOverride, tokenBudget int, finalize FinalizeStyle) (TurnResult, error) {
+	return cs.turnWithImages(ctx, input, checklistTask, progress, maxIterOverride, tokenBudget, finalize, nil)
+}
+
+func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTask string, progress Progress, maxIterOverride, tokenBudget int, finalize FinalizeStyle, images []TurnImage) (TurnResult, error) {
 	// Stamp transcript entries with this turn's ordinal (resume replays them
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
@@ -301,7 +344,17 @@ func (cs *CortexSession) turn(ctx context.Context, input, checklistTask string, 
 	// "" and its prompt is exactly its input, unchanged — no checklist, no
 	// principle, no checklist fact on its turn (the run's receipt carries the
 	// run's own measurement instead).
-	cs.Append(Message{Role: RoleUser, Content: taskPrompt(input, checklistTask)})
+	// Issue #218: images the human attached to this turn's input go ON the
+	// user message as wire Parts (a text-only model gets none, and a note
+	// instead — see attachTurnImages), so the bytes travel with the input they
+	// belong to rather than as a separate message. The index the message lands
+	// at is len(Request.Messages) measured HERE, which is the key its side-cars
+	// are written under and what a recall citation resolves to — the same
+	// keying rule a read_file image uses (#217).
+	userMsg := Message{Role: RoleUser, Content: taskPrompt(input, checklistTask)}
+	imageNotes := cs.attachTurnImages(&userMsg, images)
+	cs.Append(userMsg)
+	cs.writeTurnImageSideCars(turnStart)
 	cs.turnIntent = input
 
 	// Put the memory index (and, adjacent to it, the skills index) in the
@@ -612,7 +665,7 @@ func (cs *CortexSession) turn(ctx context.Context, input, checklistTask string, 
 		// total includes what a failed turn redacted (captureTurn never runs
 		// here, so cs.redactions is exact at this point).
 		cs.redactionsTotal += cs.redactions
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), Redactions: cs.redactions}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), Redactions: cs.redactions, ImageNotes: imageNotes}, err
 	}
 
 	// Issue #171: captureTurn's artifacts (the journal's web_search/fetch_url
@@ -640,7 +693,7 @@ func (cs *CortexSession) turn(ctx context.Context, input, checklistTask string, 
 		cs.transcriptNote("turn receipt:\n" + rendered)
 	}
 
-	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), LastError: stats.LastError, Redactions: cs.redactions}, nil
+	return TurnResult{Reply: content, StopReason: stats.StopReason, TestReceipt: testReceipt, DebugReceipt: debugReceipt, LintReceipt: lintReceipt, Receipt: turnReceipt.render(), LastError: stats.LastError, Redactions: cs.redactions, ImageNotes: imageNotes}, nil
 }
 
 // reportRecoverableError records the provider error a turn recovered from

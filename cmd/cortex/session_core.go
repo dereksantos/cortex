@@ -191,6 +191,19 @@ type CortexSession struct {
 	pendingImageSet   bool
 	pendingSideCar    tools.ImagePart
 	pendingSideCarSet bool
+	// pendingTurnSideCars are the image parts a HUMAN attached to the turn
+	// (#218), parked by attachTurnImages for writeTurnImageSideCars to persist
+	// at the transcript index the turn's user message lands at. A slice
+	// because one turn can carry several @mentioned images, and unlike the
+	// read_file slot above it is never keyed to a tool observation — the user
+	// message is appended once per turn, so this is set and consumed within
+	// the same turn (cleared unconditionally, so an early return cannot leak
+	// an image onto a later message).
+	pendingTurnSideCars []tools.ImagePart
+	// pendingTurnSideCarRefs are the references (an @mention path, a URL) the
+	// parked images above came from, index-aligned with them, so the manifest
+	// written beside the bytes can name what the human attached.
+	pendingTurnSideCarRefs []string
 
 	SessionID  string
 	transcript *os.File

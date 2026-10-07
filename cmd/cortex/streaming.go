@@ -539,11 +539,12 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 // turn-boundary receipt (issue #141's "tests changed:" line) — printed AFTER
 // the anchor is stopped and stdout restored, so it lands in the terminal's
 // scrollback like every other turn-boundary line.
-func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, TurnResult, error) {
+func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string, images ...TurnImage) (string, TurnResult, error) {
 	var res TurnResult
 	seedOut, err := runUnderAnchor(session, editor, seed, func(ctx context.Context) error {
 		var turnErr error
-		res, turnErr = session.Turn(ctx, input)
+		// Variadic pass-through: with no images this is exactly session.Turn.
+		res, turnErr = session.TurnWithAttachments(ctx, input, images...)
 		return turnErr
 	})
 	return seedOut, res, err
