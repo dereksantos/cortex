@@ -149,14 +149,14 @@ type TurnResult struct {
 // attached (M4.2b3's SSE handler is its only caller today); both delegate to
 // the unexported turn so there's exactly one implementation.
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
-	return cs.turn(ctx, input, nil, 0, 0, FinalizeInteractive)
+	return cs.turn(ctx, input, input, nil, 0, 0, FinalizeInteractive)
 }
 
 // TurnWithProgress is Turn with p (may be nil) wired into runLoop's existing
 // Progress seam (cmd/cortex/loop.go) — the same breadcrumb sink the REPL's
 // live display already drives, just not previously reachable from Turn().
 func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p Progress) (TurnResult, error) {
-	return cs.turn(ctx, input, p, 0, 0, FinalizeInteractive)
+	return cs.turn(ctx, input, input, p, 0, 0, FinalizeInteractive)
 }
 
 // TurnWithBudget is Turn with per-run bound overrides (D11's loop-firing
@@ -168,10 +168,10 @@ func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p P
 func (cs *CortexSession) TurnWithBudget(ctx context.Context, input string, maxIter, tokenBudget int) (TurnResult, error) {
 	// A loop firing has no interlocutor: a forced finalize must not end by
 	// asking whether to continue — nobody is there to answer.
-	return cs.turn(ctx, input, nil, maxIter, tokenBudget, FinalizeSubagent)
+	return cs.turn(ctx, input, input, nil, maxIter, tokenBudget, FinalizeSubagent)
 }
 
-func (cs *CortexSession) turn(ctx context.Context, input string, progress Progress, maxIterOverride, tokenBudget int, finalize FinalizeStyle) (TurnResult, error) {
+func (cs *CortexSession) turn(ctx context.Context, input, checklistTask string, progress Progress, maxIterOverride, tokenBudget int, finalize FinalizeStyle) (TurnResult, error) {
 	// Stamp transcript entries with this turn's ordinal (resume replays them
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
@@ -293,6 +293,15 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// The prompt is what the model SEES: the appended message and, on
 	// resume, the replayed transcript carry the checklist with it, so the
 	// prompt and the record stay the same bytes.
+	//
+	// checklistTask names WHICH input the checklist is extracted from — for
+	// a plain turn it is the input itself, but a plan step's input embeds
+	// the WHOLE overall task (planStepPrompt) and would make every step
+	// account for the entire checklist; a plan run instead measures the
+	// checklist once, off the run's task, on the run's final report
+	// (TurnWithPlan, plan_mode.go), and passes "" for its step turns —
+	// "" turns the injection OFF, so a step's prompt is exactly the step
+	// line's principles and its turn measures no checklist fact.
 	cs.Append(Message{Role: RoleUser, Content: taskPrompt(input)})
 	cs.turnIntent = input
 
@@ -573,9 +582,11 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	if turnUsedTools(cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages))) {
 		turnReceipt = cs.computeReceipt(ctx)
 		// Issue #220 step 3: the checklist fact is set at the turn's END,
-		// after computeReceipt, from the turn's input (the task) and its
-		// reply — then re-rendered. It is measured off the reply the turn
-		// actually produced (content, the model's final answer), NOT the
+		// after computeReceipt, from the turn's checklistTask (the task the
+		// checklist was injected into — the input for a plain turn, "" for
+		// a plan step, which the run's own TurnWithPlan measures) and the
+		// turn's reply — then re-rendered. It is measured off the reply the
+		// turn actually produced (content, the model's final answer), NOT
 		// turn's original input: a reply the finalize hook or the
 		// forced-finalize note appended to (issue #141 / #161 — the answer
 		// the model ACCOUNTS for the checklist in) is the one owed the
@@ -590,7 +601,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		// the rendered receipt unchanged, and it rides the SAME
 		// TurnResult.Receipt + kindNote surface as the #219 facts (the
 		// render below is the single render for the whole receipt).
-		turnReceipt.checklistMissing = checklistMissingItems(input, content)
+		turnReceipt.checklistMissing = checklistMissingItems(checklistTask, content)
 		cs.receipt = turnReceipt
 	}
 	if err != nil {

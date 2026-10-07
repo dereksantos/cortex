@@ -233,30 +233,106 @@ func taskPrompt(task string) string {
 	return b.String()
 }
 
-// checklistItemPresent reports whether item's words all appear in reply —
-// the reply's account of that item. It is a case-INSENSITIVE, WHOLE-TEXT
-// match (strings.Contains over the folded-to-lowercase strings), not a
-// substring of the reply's lines and not a word-boundary search: the model
-// is free to account for an item in any phrasing that names it, and a
-// shorter item ("wire") that the longer one ("wire the handler") already
-// names is accounted for by it. An empty item (taskChecklistItems never
-// yields one) is treated as present so it can never dangle on a receipt.
-// Pure and O(len(reply)·len(item)): a reply and a checklist are both small,
-// and the receipt's one pass over the items is the only caller.
+// checklistStopWords are the words an item's significant content never
+// carries: articles, prepositions, and other function words. checklistItem
+// Present drops them from the ITEM before requiring the reply to name the
+// item's words — they carry no meaning an item could fail on ("add the
+// handler" is accounted for by "added the handler" whether or not the
+// reply kept the "the"). The reply is never stop-worded: an item word that
+// happens to be in this list ("the tests") is still required verbatim, so
+// the list only ever makes matching LOOSER on the item side, never on the
+// reply side.
+var checklistStopWords = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
+	"be": true, "by": true, "for": true, "from": true, "in": true, "into": true,
+	"is": true, "it": true, "its": true, "of": true, "on": true, "or": true,
+	"so": true, "than": true, "that": true, "the": true, "their": true,
+	"then": true, "there": true, "these": true, "this": true, "to": true,
+	"up": true, "with": true,
+}
+
+// checklistItemWords returns item's significant words: lowercased, with
+// punctuation stripped (only ASCII letters and digits survive — "handler."
+// and `handler` are one word), with checklistStopWords dropped, and with
+// the leading "add " form-verb prefix stripped so the form of the verb does
+// not matter ("add the helper" is named by "the helper"). Empty or
+// stop-word-only items yield nil — an empty item (taskChecklistItems never
+// yields one) is then always present, so it can never dangle on a receipt.
+func checklistItemWords(item string) []string {
+	var words []string
+	for _, w := range strings.Fields(strings.ToLower(item)) {
+		var b strings.Builder
+		for _, r := range w {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		w = b.String()
+		if w == "" || checklistStopWords[w] {
+			continue
+		}
+		if len(words) == 0 && w == "add" {
+			// A leading form-verb: "add the helper" == "the helper". A
+			// mid-item "add" ("re-add the flag") stays significant.
+			continue
+		}
+		words = append(words, w)
+	}
+	return words
+}
+
+// checklistItemPresent reports whether the reply accounts for the item:
+// every significant word of the item (checklistItemWords) must appear in
+// the reply — case-insensitive, punctuation-stripped — as a PREFIX of some
+// reply word ("add" matches "added", "test" matches "tests", "wire" matches
+// "wired"/"wires"). The item's words need not be adjacent or in order, so
+// an item named in the reply's own words ("I added the helper" for "add the
+// helper"; "The tests are deferred" for "add the tests") is accounted for,
+// and an item the reply never names is not. An empty item (or one with no
+// significant words) is treated as present so it can never dangle on a
+// receipt. Pure: no session, no config; O(len(reply)) per item, and the
+// receipt's single pass over the items is the only caller.
 func checklistItemPresent(reply, item string) bool {
-	if item == "" {
+	itemWords := checklistItemWords(item)
+	if len(itemWords) == 0 {
 		return true
 	}
-	r := strings.ToLower(reply)
-	return strings.Contains(r, strings.ToLower(item))
+	var replyWords []string
+	for _, w := range strings.Fields(strings.ToLower(reply)) {
+		var b strings.Builder
+		for _, r := range w {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		if s := b.String(); s != "" {
+			replyWords = append(replyWords, s)
+		}
+	}
+	for _, iw := range itemWords {
+		found := false
+		for _, rw := range replyWords {
+			if rw == iw || strings.HasPrefix(rw, iw) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // checklistMissingItems returns the task's checklist items (taskChecklistItems,
 // in order) that the reply does NOT account for — the receipt's
 // "checklist:" fact (issue #220 step 2). Matching is per item through
-// checklistItemPresent: case-insensitive, whole-text. Returns nil in two
-// cases a caller reads as "nothing to measure": the task has no checklist
-// at all (taskChecklistItems nil), and the reply accounts for every item (the
+// checklistItemPresent: every significant word of the item must appear in
+// the reply, case-insensitive, punctuation-stripped, with a word-prefix
+// match ("add" matches "added"), and the reply's own words — an explicit
+// "not done" is an account of the item, too. Returns nil in two cases a
+// caller reads as "nothing to measure": the task has no checklist at all
+// (taskChecklistItems nil), and the reply accounts for every item (the
 // empty-slice case is the same nil — a turn that met its checklist has no
 // missing-item fact). Pure: no session, no config, safe under concurrent
 // turns.

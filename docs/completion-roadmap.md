@@ -133,19 +133,30 @@ topics, fleet slot contention (`docs/archive/refactor-status.md`).
       `docs/study-subagent.md` §5).
 - [x] C4. Checklist accounting on the turn receipt (issue #220, built on
       #219's measurement-only receipt): when a task carries `- [ ]`
-      checklist items, the model's prompt restates them with a per-item
-      "account for this in your reply" principle (principle-over-recipe:
-      the model is told to account for each item in its own words, never to
-      recite the list); at the turn's END the harness measures which items
-      the reply leaves out (case-insensitive, whole-text matching — an item
-      is accounted for when the reply names it) and renders the missing
-      ones, one per line, in a `checklist:` section of the receipt. Like
-      #219's other facts it is measurement-only: it never blocks, never
-      fails a tool call, never changes what the model sees, and rides the
-      same `TurnResult.Receipt` + kindNote surface; a task with no checklist
-      (or a reply that accounted for every item) contributes no section.
-      Plan-then-execute joins the per-step blocks (first step owning an item
-      wins).
+      checklist items, the model's prompt gains a "Task checklist" section
+      restating the items plus a per-item "account for this in your final
+      answer" principle (principle-over-recipe: the model is told to report
+      each item — done, with the evidence, or not done — and that an
+      aggregate summary is not an account; a task with no checklist gets an
+      unchanged prompt). At the turn's END the harness measures which items
+      the reply leaves out — per item, every significant word of the item
+      (lowercased, punctuation-stripped, stop-words dropped, a leading "add"
+      dropped) must appear in the reply, with a word-prefix match ("add"
+      matches "added"), so an item named in the reply's own words — including
+      an explicit "not done" — is accounted for — and renders the missing
+      ones, one per line, in a `checklist:` section of the receipt. It rides
+      the same `TurnResult.Receipt` + kindNote surface as #219's facts: it
+      never blocks and never fails a tool call; it does change the model's
+      prompt (the checklist section + principle, checklist-carrying turns
+      only), which is what makes the account possible. Plan-then-execute
+      measures once per run, not per step (each step's prompt embeds the
+      whole task, so per-step measurement would flag the items other steps
+      own): the checklist is injected only in the run's final per-step
+      report turn — whose reply renders every step's done-note, so an item a
+      later step handled is accounted for even when an earlier step's reply
+      didn't name it — and the receipt joins the report turn's block with
+      the per-step blocks. A task with no checklist (or a reply that
+      accounted for every item) contributes no section.
 
 **Gate C:** README/CLAUDE.md updated for `cortex model`; suite green;
 study-eval rows visible via jq over the journal.

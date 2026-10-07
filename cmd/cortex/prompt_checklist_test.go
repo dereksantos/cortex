@@ -175,9 +175,13 @@ func TestTaskPromptPrincipleIsPerItemNotAggregate(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // checklistItemPresent / checklistMissingItems — the reply-vs-checklist
-// check (issue #220 step 2). The reply's account of an item is a
-// case-insensitive, whole-text match; a missing item is one the reply does
-// not account for.
+// check (issue #220 step 2). The reply's account of an item is per item
+// through checklistItemPresent: every significant word of the item (lower-
+// cased, punctuation-stripped, stop-words dropped, a leading "add" dropped)
+// must appear in the reply — case-insensitive, punctuation-stripped, with a
+// word-prefix match ("add" matches "added") — so the model accounts for an
+// item in its own words, including an explicit "not done". A missing item
+// is one the reply never names.
 // ---------------------------------------------------------------------------
 
 func TestChecklistItemPresent(t *testing.T) {
@@ -188,10 +192,10 @@ func TestChecklistItemPresent(t *testing.T) {
 		want  bool
 	}{
 		{
-			name:  "a rephrased reply does not match (whole-text, not paraphrase)",
+			name:  "a rephrased reply that names the item in its own words",
 			reply: "I added the helper.",
 			item:  "add the helper",
-			want:  false, // the reply says "added", the item says "add" — no verbatim whole-text match
+			want:  true, // "add" matches "added" (word-prefix); "helper" is named
 		},
 		{
 			name:  "whole phrase present verbatim",
@@ -206,10 +210,28 @@ func TestChecklistItemPresent(t *testing.T) {
 			want:  true,
 		},
 		{
+			name:  "an explicit not-done account names the item too",
+			reply: "The tests are deferred.",
+			item:  "add the tests",
+			want:  true, // "tests" is named — an account is an account, done or not
+		},
+		{
 			name:  "item missing from the reply",
 			reply: "I added the helper.",
 			item:  "add the tests",
 			want:  false,
+		},
+		{
+			name:  "item named by an unrelated reply is missing",
+			reply: "I wired the handler instead.",
+			item:  "add the tests",
+			want:  false,
+		},
+		{
+			name:  "a reply word that only STARTS LIKE the item word does not match",
+			reply: "The helpers are in place.",
+			item:  "add the handle",
+			want:  false, // the prefix rule is item-word → reply-word, never the other way
 		},
 		{
 			name:  "shorter item named by a longer phrase in the reply",
@@ -218,9 +240,27 @@ func TestChecklistItemPresent(t *testing.T) {
 			want:  true,
 		},
 		{
+			name:  "punctuation around the reply's word does not hide it",
+			reply: "helper.go:12, done; tests deferred.",
+			item:  "add the helper",
+			want:  true,
+		},
+		{
+			name:  "a leading 'add' prefix is dropped (form-verb), mid-item stays",
+			reply: "The flag is back.",
+			item:  "re-add the flag",
+			want:  false, // "re" (from "re-add") is significant and never named
+		},
+		{
 			name:  "empty item is always present (never dangles)",
 			reply: "anything",
 			item:  "",
+			want:  true,
+		},
+		{
+			name:  "stop-word-only item is always present",
+			reply: "anything",
+			item:  "the and",
 			want:  true,
 		},
 		{
@@ -247,22 +287,28 @@ func TestChecklistMissingItems(t *testing.T) {
 		want  []string // nil when nothing is missing (no checklist, or all met)
 	}{
 		{
-			name:  "all items accounted for (the reply names each item verbatim)",
+			name:  "all items accounted for (each named, in the reply's own words)",
 			task:  "- [ ] add the helper\n- [ ] add the tests\n",
-			reply: "add the helper (helper.go:12) — done; add the tests (helper_test.go:3) — done.",
+			reply: "I added the helper (helper.go:12) — done; the tests are in helper_test.go:3, and they pass.",
 			want:  nil,
 		},
 		{
-			name:  "one item missing from the reply",
+			name:  "some not done: an item the reply explicitly names as deferred is NOT missing",
 			task:  "- [ ] add the helper\n- [ ] add the tests\n",
-			reply: "add the helper (helper.go:12) — done. The tests are deferred.",
+			reply: "I added the helper (helper.go:12). The tests are deferred to the next task.",
+			want:  nil, // the reply accounts for BOTH items — done or not done
+		},
+		{
+			name:  "one item missing from the reply (never named)",
+			task:  "- [ ] add the helper\n- [ ] add the tests\n",
+			reply: "I added the helper (helper.go:12).",
 			want:  []string{"add the tests"},
 		},
 		{
 			name:  "several items missing, kept in task order",
 			task:  "- [ ] scaffold\n- [ ] wire the handler\n- [ ] verify\n",
-			reply: "scaffold (main.go) and verify (go test ./... passed) are done; the handler is left for next time.",
-			want:  []string{"wire the handler"},
+			reply: "scaffold (main.go) is done.",
+			want:  []string{"wire the handler", "verify"},
 		},
 		{
 			name:  "case-insensitive matching",
