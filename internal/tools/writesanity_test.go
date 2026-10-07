@@ -27,6 +27,22 @@ var notWindowsTag = func() string {
 	return "!windows"
 }()
 
+// otherUnixOS is a Unix GOOS tag that this build does not match and does not
+// imply (no GOOS implies another), so a `//go:build <it>` sibling is excluded
+// here while its `!(<it>)` twin builds — on every platform the tests run on
+// (unix builds only; the exclusive pair mirrors lineedit's termios_real.go /
+// termios_stub.go).
+var otherUnixOS = func() string {
+	switch build.Default.GOOS {
+	case "linux", "android":
+		return "darwin"
+	case "darwin", "ios":
+		return "linux"
+	default:
+		return "linux"
+	}
+}()
+
 // writeGoFiles creates dir/files (map name→content) and returns dir.
 func writeGoFiles(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -41,11 +57,14 @@ func writeGoFiles(t *testing.T, files map[string]string) string {
 
 func TestWriteSanityNote(t *testing.T) {
 	tests := []struct {
-		name    string
-		files   map[string]string // package files, written to a temp dir
-		target  string            // the file "just written" (base name in files)
-		want    []string          // substrings the note must contain
-		wantNil bool              // the note must be empty
+		name          string
+		files         map[string]string // package files, written to a temp dir
+		target        string            // the file "just written" (base name in files)
+		want          []string          // substrings the note must contain
+		wantNil       bool              // the note must be empty
+		onUnixOS      bool              // skip on a non-Unix GOOS (where `unix` itself does not hold)
+		requireGOOS   []string          // run only when GOOS is one of these
+		requireNOGOOS []string          // skip when GOOS is one of these
 	}{
 		{
 			name: "clean package is silent",
@@ -469,6 +488,52 @@ func Use() *http.Client {
 			wantNil: true,
 		},
 		{
+			// The repo's own termios pair (internal/lineedit): real.go builds
+			// on darwin || linux, stub.go on its negation. Every known OS name
+			// is judgeable — toolchainTagHolds decides them with go/build's own
+			// expansions — so exactly one of the pair builds here and the pair
+			// must never merge into a bogus duplicate on either OS (and on
+			// neither: an unjudgeable name keeps BOTH, which is the same noise).
+			name: "a darwin-or-linux pair is exclusive on every unix build",
+			files: map[string]string{
+				"real.go": "//go:build darwin || linux\n\npackage p\n\nfunc getTermios() {}\n",
+				"stub.go": "//go:build !(darwin || linux)\n\npackage p\n\nfunc getTermios() {}\n",
+				"p.go":    "package p\n\nfunc Use() { getTermios() }\n",
+			},
+			target:  "p.go",
+			wantNil: true,
+		},
+		{
+			// …and on linux and darwin — where the pair above is genuinely
+			// exclusive — the twin that does NOT build here must not supply its
+			// helper: naming a known OS tag excludes the sibling correctly, the
+			// caller sees the name the excluded file alone declared.
+			name:        "a sibling gated on another unix OS does not supply its helper",
+			requireGOOS: []string{"linux", "darwin"},
+			files: map[string]string{
+				"other.go": "//go:build " + otherUnixOS + "\n\npackage p\n\nfunc otherHelper() string { return \"o\" }\n",
+				"p.go":     "package p\n\nfunc Use() string { return otherHelper() }\n",
+			},
+			target: "p.go",
+			want:   []string{`"otherHelper" is undefined`},
+		},
+		{
+			// A plain known OS with no implication anywhere (solaris is implied
+			// only by illumos): its sibling is excluded on every other build,
+			// which is CORRECT — go/build's matchTag evaluates `solaris` to
+			// false here, so a real build excludes it too and its helper is
+			// genuinely undefined. (On illumos the tag holds and the check
+			// stays silent, so the case is skipped there.)
+			name:          "a solaris-tagged sibling is excluded on non-solaris builds",
+			requireNOGOOS: []string{"solaris", "illumos"},
+			files: map[string]string{
+				"helper_solaris_tag.go": "//go:build solaris\n\npackage p\n\nfunc solarisHelper() string { return \"s\" }\n",
+				"p.go":                  "package p\n\nfunc Use() string { return solarisHelper() }\n",
+			},
+			target: "p.go",
+			want:   []string{`"solarisHelper" is undefined`},
+		},
+		{
 			// Negation is why the judgement is over the whole expression: with
 			// unknown tags answered "satisfied" per tag, `!integration` evaluated
 			// false, this stub vanished, and its caller was told its helper is
@@ -558,6 +623,15 @@ func Use() *http.Client {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.onUnixOS && !unixOS[build.Default.GOOS] {
+				t.Skipf("requires a Unix GOOS, running on %s", build.Default.GOOS)
+			}
+			if len(tt.requireGOOS) > 0 && !containsString(tt.requireGOOS, build.Default.GOOS) {
+				t.Skipf("requires GOOS in %v, running on %s", tt.requireGOOS, build.Default.GOOS)
+			}
+			if containsString(tt.requireNOGOOS, build.Default.GOOS) {
+				t.Skipf("not applicable on GOOS %s", build.Default.GOOS)
+			}
 			dir := writeGoFiles(t, tt.files)
 			target := filepath.Join(dir, tt.target)
 			note := writeSanityNote(target, tt.target)
@@ -577,6 +651,16 @@ func Use() *http.Client {
 			}
 		})
 	}
+}
+
+// containsString reports whether slice contains s.
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // TestWriteSanityNoteProblemCountCountsEveryName pins the issue's core

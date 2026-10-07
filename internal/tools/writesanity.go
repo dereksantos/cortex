@@ -359,44 +359,47 @@ func namesUnknownTag(expr constraint.Expr) bool {
 }
 
 // judgeableTag reports whether a build tag is one this process can decide:
-// a known platform name (so that a mismatch with this build may exclude its
-// file), a GOOS name this build implies, `cgo`, or a `go1.N` release tag
-// (`cgo` and go1.N may each be decided in both directions — a release tag the
-// toolchain does not advertise is genuinely absent from this build). A tag
-// none of those covers — `integration`, `e2e`, `noopt`, a name this toolchain
-// has never heard of — is unknown, and unknown tags are what constraintHolds
-// keeps out of the exclusion business.
+// a known GOOS or GOARCH name (so that a mismatch with this build may
+// exclude its file), `cgo`, or a `go1.N` release tag (`cgo` and go1.N may
+// each be decided in both directions — a release tag the toolchain does not
+// advertise is genuinely absent from this build). A tag none of those covers —
+// `integration`, `e2e`, `noopt`, a name this toolchain has never heard of —
+// is unknown, and unknown tags are what constraintHolds keeps out of the
+// exclusion business.
+//
+// Every known GOOS/GOARCH name is judgeable — a name that contradicts this
+// build may exclude its file — because toolchainTagHolds decides it with the
+// same GOOS-equivalence expansions the real toolchain applies by hand
+// (`linux` on android, `solaris` on illumos, `darwin` on ios). Excluding a
+// `//go:build solaris` sibling on linux is therefore correct, not a lost
+// declaration, and this is what keeps an exclusive platform pair like
+// lineedit's termios_real.go (`darwin || linux`) / termios_stub.go
+// (`!(darwin || linux)`) from merging into one package on either OS.
+// `unix` is the one name decided here rather than by toolchainTagHolds' OS
+// equality: it is a real tag that is not a GOOS, matches any Unix GOOS by
+// expansion, and names no platform to contradict — so on a Unix build it is
+// judgeable true (toolchainTagHolds' unix expansion decides it), and on a
+// non-Unix build it stays unjudgeable: `!unix` holds there while some
+// Unix-only files carry it alongside it, and no GOOS value contradicts it to
+// tell the pair apart. `boringcrypto` and the toolchain's experiment tags
+// stay unjudgeable for the same reason in reverse — only a build INVOKED
+// with them (GOFLAGS=-tags) can say which way they go.
 func judgeableTag(tag string) bool {
 	switch tag {
 	case build.Default.GOOS, build.Default.GOARCH, build.Default.Compiler:
 		return true
 	case "unix":
 		return unixOS[build.Default.GOOS]
-	case "linux":
-		return build.Default.GOOS == "android"
-	case "solaris":
-		return build.Default.GOOS == "illumos"
-	case "darwin":
-		return build.Default.GOOS == "ios"
 	case "cgo":
 		return true // satisfied iff cgo is enabled; toolchainTagHolds decides it
-	}
-	// A tag the real go/build resolves only by expanding the GOOS or by the
-	// lists a build is INVOKED with (GOFLAGS=-tags, the toolchain's experiment
-	// tags) is not one this bare process can settle either way, so its file
-	// stays in. `solaris` on linux is exactly such a tag: a plain known-OS
-	// lookup would exclude the file, and its declarations would go with it.
-	// Negation makes the same point louder — `!solaris` on linux is true for
-	// every real build that defines nothing, and false here.
-	for _, expanded := range []string{"linux", "solaris", "darwin", "unix", "boringcrypto"} {
-		if tag == expanded {
-			return false
-		}
 	}
 	for _, t := range build.Default.ToolTags {
 		if t == tag {
 			return false // a toolchain experiment tag: only that toolchain can say
 		}
+	}
+	if tag == "boringcrypto" {
+		return false // decided by how the toolchain was built, not by this process
 	}
 	if isReleaseTag(tag) {
 		return true // a release tag: present or absent, ReleaseTags answers
