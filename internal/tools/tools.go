@@ -1844,15 +1844,18 @@ func guardDropWarning(before, after string) string {
 }
 
 // guardLineKeyword reports whether a removed line is code-shaped like a
-// safety guard, or "" when it is not. Only shapes that CANNOT be plain English
-// prose fire: an if/for/switch/case keyword, `else`, `return`, `panic(`, or a
-// `.Lock()`/`.Unlock()` call. The keyword must be the first token of the
-// trimmed line (or the line's second token for `else`, as in `} else`), and
-// `return`/`panic`/`Lock`/`Unlock` must be immediately followed by `(` —
-// which no English sentence ever is (a README line "This is for users" or a
-// string literal "wait for the lock" carries `for`/`lock` mid-line or without
-// the paren and is never flagged). A removed line that merely quotes such a
-// shape inside a string literal or prose is not a guard candidate.
+// safety guard, or "" when it is not. Only shapes that CANNOT be plain
+// English prose fire: an if/for/switch/case keyword, `else`, `return`,
+// `panic(`, or a `.Lock()`/`.Unlock()` call. The keyword must be the first
+// token of the trimmed line (or the line's second token for `else`, as in
+// `} else`), and `panic`/`Lock`/`Unlock` must be immediately followed by `(`
+// — which no English sentence ever is (a README line "This is for users" or
+// a string literal "wait for the lock" carries `for`/`lock` mid-line or
+// without the paren and is never flagged). In code a line whose first token
+// is `return` is always a return statement, so the token alone fires — a
+// bare `return` as well as `return err` and `return nil, err`. A removed
+// line that merely quotes such a shape inside a string literal or prose is
+// not a guard candidate.
 func guardLineKeyword(line string) string {
 	trimmed := strings.TrimLeft(strings.TrimSuffix(line, "\n"), " \t")
 	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
@@ -1871,7 +1874,7 @@ func guardLineKeyword(line string) string {
 		return first
 	case second == "else" && (strings.HasSuffix(first, "}") || first == ")"):
 		return "else"
-	case strings.HasPrefix(trimmed, "return ("):
+	case first == "return":
 		return "return"
 	case strings.HasPrefix(trimmed, "panic("):
 		return "panic"

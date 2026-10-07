@@ -623,6 +623,18 @@ func TestEditFileGuardDropWarning(t *testing.T) {
 			wantWarn: false,
 		},
 		{
+			// The early-return half of a guard dropped ON ITS OWN: the
+			// `if err != nil {` line stays, only `\t\treturn err` is replaced.
+			// A bare `return err` (no paren) must still be a guard shape, so
+			// the warning fires even though no if/for/case line is dropped
+			// (#210).
+			name:     "removal drops a bare return err line, if line kept — warns",
+			before:   "package main\nfunc f() error {\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n",
+			old:      "\t\treturn err\n",
+			new:      "\t\tlog.Print(err)\n",
+			wantWarn: true,
+		},
+		{
 			name:     "removal drops an else-guard not in new_string — warns",
 			before:   "package main\nfunc f() {\n\tif x {\n\t\ta()\n\t} else {\n\t\tb()\n\t}\n}\n",
 			old:      "} else {\n\t\tb()\n\t}",
