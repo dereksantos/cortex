@@ -106,8 +106,8 @@ type SubAgentRunner interface {
 // BashOutcome is the structured outcome of a bash tool call (issue #219):
 // whether the command's process RAN, and, when it did, the exit code the
 // process returned (0 when it exited 0; 1 for a signal-killed run — a
-// signal has no exit status, so the failure is reported as a non-zero exit
-// — the real exit code otherwise). It is a POSITIVE signal — Ran is set
+// signal has no exit status, and exec reports -1 for it, so bash maps it to
+// a plain non-zero failure — the real exit code otherwise). It is a POSITIVE signal — Ran is set
 // only on the path that spawned the process — so a consumer of the call's
 // fate (the turn receipt's bash recorder, cmd/cortex) never infers "it ran
 // and exited 0" from the absence of a marker in the result message: a call
@@ -119,22 +119,10 @@ type BashOutcome struct {
 	ExitCode int
 }
 
-// BashOutcomes reports the structured outcome of a bash tool call, if any
-// (issue #219): a non-bash call reports false and is ignored by a consumer
-// of the call's fate. Every path of the bash tool that does not spawn the
-// process reports Ran=false (the message is the reason), and the path that
-// did spawn reports Ran=true with the process's exit code — so the outcome
-// is accurate for EVERY implementor, not an approximation through the
-// message text.
-type BashOutcomes interface {
-	BashOutcome() (BashOutcome, bool)
-}
-
 // ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means
 // the command must not run and message explains why. The structured fate of
-// a bash call — ran or not, and its exit code — is the caller's own
-// BashOutcomes (the bash tool's outcome is what it reads), so the seam
-// carries no outcome of its own.
+// a bash call — ran or not, and its exit code — is the BashOutcome Execute
+// returns, so the seam carries no outcome of its own.
 type ShellGate interface {
 	GateShell(ctx context.Context, command string) (string, bool)
 }
@@ -884,10 +872,6 @@ func init() {
 // method) because ToolCall now lives in internal/agent and methods cannot be
 // added to a type from another package.
 func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
-	return execute(ctx, tc, deps)
-}
-
-func execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	// A tool dispatched without a session (tests, non-interactive paths) runs
 	// against the nil-safe headless defaults: the shell gate fails closed, study
 	// is unavailable, delete is disabled. This preserves the old behavior of the
@@ -2327,8 +2311,8 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome,
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
 	// reads the reason plainly and adapts. The command NEVER RAN: a consumer
-	// of the call's fate (the turn receipt's bash recorder, via the session's
-	// BashOutcomes capability) sees Ran=false for this call — the gate is the
+	// of the call's fate (the turn receipt's bash recorder, via Execute's
+	// returned BashOutcome) sees Ran=false for this call — the gate is the
 	// sole spawn point here, so the refusal means the process was never
 	// started, and the result is a reason, not an exit code.
 	if msg, ok := deps.GateShell(ctx, command); !ok {
@@ -2398,12 +2382,12 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome,
 		}
 		// The process ran: the outcome is Ran=true with the process's own
 		// exit code (exitErr.ExitCode(); a signal-killed run has no exit
-		// status and reports 1 — a failure, never a pass). The outcome is
-		// what a consumer of the call's fate (the turn receipt's bash
-		// recorder, via the BashOutcomes capability) reads — never an
-		// inference from the marker below.
+		// status — ExitCode() reports -1 — and is mapped to 1: a failure,
+		// never a pass). The outcome is what a consumer of the call's fate
+		// (the turn receipt's bash recorder, via Execute's return value)
+		// reads — never an inference from the marker below.
 		exitCode := 1
-		if exitErr != nil {
+		if exitErr != nil && exitErr.ExitCode() >= 0 {
 			exitCode = exitErr.ExitCode()
 		}
 		result += "\n[exit error: " + runErr.Error() + "]"

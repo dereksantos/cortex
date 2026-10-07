@@ -12,12 +12,10 @@ package main
 // recorder), NOT a harness run of the project's commands — the harness runs
 // no project commands for the receipt (trust is the only gate for executing
 // project-declared commands, and a measurement path that ran them itself
-// would bypass that gate). The exit code comes from the bash tool's own
-// observation (the "[exit error: exit status N]" marker, parsed — never
-// inferred from a shadowed tool error), and a command the shell gate
-// REFUSED or the user DECLINED never ran: it records (not run: …) through
-// the structured ShellGateOutcome the dispatcher observes, never an exit
-// code.
+// would bypass that gate). The exit code comes from the BashOutcome
+// tools.Execute returns for the call (never parsed from the result text),
+// and a command the tool disabled, the shell gate REFUSED, or the user
+// DECLINED never ran: it records (not run: …), never an exit code.
 
 import (
 	"context"
@@ -151,7 +149,7 @@ func writeCmdScript(t *testing.T, bin, name, body string) string {
 // (coderDispatcher, loop.go) runs: it records the bash command
 // (receiptBash), executes it through the real bash tool (the shell gate
 // classifies it for real, the process runs for real), and resolves the
-// outcome through the structured ShellGateOutcome (receiptBashOutcome) —
+// outcome from the BashOutcome Execute returned (receiptBashOutcome) —
 // the exact lines where the round-1 shadowed-err blocker lived. The
 // write_file call (when present) runs through the real tool path (the
 // format hook, the turn-end lint arm), so the unformatted fact is measured
@@ -406,6 +404,12 @@ func TestReceiptBashRole(t *testing.T) {
 		{"go test ./... || true", "", false},   // a chain that never fails is not the check
 		{"go test ./... ; echo done", "", false},
 		{"go test ./... > out.txt", "", false},
+		// Shell control AFTER extra flags (past the shared prefix): the
+		// fields[1:] scan, not just the field right after the prefix.
+		{"go test -v ./... | tail -5", "", false},
+		{"go test ./... -count=1 | tail", "", false},
+		{"go test ./... -v || true", "", false},
+		{"go test ./... -v; echo done", "", false},
 		{"go vet ./...", "", false}, // foreign command, same toolchain
 		{"rm -rf /", "", false},
 		{"", "", false},
@@ -438,37 +442,6 @@ func TestReceiptBashRole(t *testing.T) {
 		role, ok := single.receiptBashRole(tc.command)
 		if ok != tc.ok || string(role) != tc.role {
 			t.Errorf("receiptBashRole(%q) = (%q, %v), want (%q, %v)", tc.command, role, ok, tc.role, tc.ok)
-		}
-	}
-}
-
-// TestReceiptExitCodeOf pins the exit-code parse: the bash tool reports a
-// non-zero exit as a trailing "[exit error: <error>]" line, where <error> is
-// the run error's Error() text. exec.ExitError renders as "exit status N"
-// (the number is the process's real exit code), but a run KILLED BY A SIGNAL
-// renders as "signal: killed" and carries no number. A marker that names no
-// exit status — a signal-killed run, or a bare marker — is a real failure
-// reported as exit 1: the receipt's job is to never report a failed run as
-// exit 0. The dispatcher passes only the marker's TAIL (the text after
-// "[exit error: "), so a marker-less input resolves to the absence of an
-// observed failure.
-func TestReceiptExitCodeOf(t *testing.T) {
-	cases := []struct {
-		in   string
-		code int
-		ok   bool
-	}{
-		{"", 0, false},              // marker-less arm: no exit status observed
-		{"exit status 1]", 1, true}, // the real process exit code
-		{"exit status 3]", 3, true},
-		{"exit status ]", 1, true}, // no number: a failure, not a clean exit
-		{"exit status]", 1, true},
-		{"signal: killed]", 1, true}, // signal-killed: no number, a failure
-	}
-	for _, tc := range cases {
-		code, ok := receiptExitCodeOf(tc.in)
-		if ok != tc.ok || code != tc.code {
-			t.Errorf("receiptExitCodeOf(%q) = (%d, %v), want (%d, %v)", tc.in, code, ok, tc.code, tc.ok)
 		}
 	}
 }
@@ -634,8 +607,9 @@ func TestTurnReceiptTranscriptNote(t *testing.T) {
 // model issues the project's OWN test command and the real
 // coderDispatcher's bash arm (loop.go — where the round-1 shadowed-err
 // blocker lived) records it: receiptBash before the call, the real bash
-// tool's real process result, and receiptBashOutcome with the gate's own
-// structured outcome. Only the model and the classifier are stubbed.
+// tool's real process result, and receiptBashOutcome with the BashOutcome
+// Execute returned for that call. Only the model and the classifier are
+// stubbed.
 func TestTurnReceiptRealDispatcher(t *testing.T) {
 	t.Run("real wiring records the model's own failing run's exit", func(t *testing.T) {
 		dir := t.TempDir()
@@ -669,4 +643,72 @@ func TestTurnReceiptRealDispatcher(t *testing.T) {
 			t.Fatalf("TurnResult.Receipt = %q, want the run recorded as (not run: …)", res.Receipt)
 		}
 	})
+	t.Run("the same check run then refused in one turn records the refusal as not run", func(t *testing.T) {
+		dir := t.TempDir()
+		cs := receiptSession(t, dir, true, true)
+		// The first ask is Safe (passcheck runs and exits 0); every later
+		// ask is Risky with no approver, so the real gate blocks the
+		// identical command the second time (a tainted turn's raised bar
+		// or a y-then-n answer has this shape). The second run's outcome
+		// is its OWN call's — never the first run's exit 0.
+		asks := 0
+		cs.classifyShell = func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
+			asks++
+			if asks == 1 {
+				return shellrisk.Safe, "stub: safe", nil
+			}
+			return shellrisk.Risky, "stub: risky", nil
+		}
+		res := receiptBashTurn(t, cs, []*AgentResponse{
+			respWithCalls([]ToolCall{bashCall("t1", "passcheck")}),
+			respWithCalls([]ToolCall{bashCall("t2", "passcheck")}),
+			respWithAnswer("ran it twice"),
+		})
+		var lines []string
+		for _, line := range strings.Split(res.Receipt, "\n") {
+			if strings.Contains(line, "build: passcheck (") {
+				lines = append(lines, line)
+			}
+		}
+		if len(lines) != 2 {
+			t.Fatalf("TurnResult.Receipt = %q, want two passcheck verification lines", res.Receipt)
+		}
+		if !strings.Contains(lines[0], "(exit 0") {
+			t.Errorf("first run line = %q, want the allowed run's exit 0", lines[0])
+		}
+		if !strings.Contains(lines[1], "(not run:") || strings.Contains(lines[1], "exit") {
+			t.Errorf("second run line = %q, want (not run: …) — the refused run never ran", lines[1])
+		}
+	})
+	t.Run("a disabled bash tool records (not run: …), never an exit", func(t *testing.T) {
+		// The session's tools config has no bash gate (IsToolEnabled
+		// enables bash unconditionally), so a disabled bash is driven
+		// through a ToolDeps that reports it disabled: the outcome comes
+		// from the real tools.Execute disabled-tool path and feeds the
+		// recorder exactly as coderDispatcher does.
+		dir := t.TempDir()
+		cs := receiptSession(t, dir, true, true)
+		call := bashCall("t1", "passcheck")
+		cs.receiptBash("passcheck")
+		out, outcome, err := tools.Execute(context.Background(), call, bashDisabledDeps{cs})
+		if !strings.Contains(out, "disabled") {
+			t.Fatalf("Execute = %q, want the disabled-tool notice", out)
+		}
+		cs.receiptBashOutcome("passcheck", outcome, err, time.Millisecond)
+		got := cs.computeReceipt(context.Background()).render()
+		if !strings.Contains(got, "build: passcheck (not run:") {
+			t.Fatalf("receipt = %q, want the disabled call recorded as (not run: …)", got)
+		}
+		if strings.Contains(got, "exit 0") {
+			t.Fatalf("receipt = %q, a disabled bash call must not record exit 0", got)
+		}
+	})
+}
+
+// bashDisabledDeps is the session with bash reported disabled — the shape
+// tools.Execute answers with its clean "is disabled" notice.
+type bashDisabledDeps struct{ *CortexSession }
+
+func (d bashDisabledDeps) IsToolEnabled(name string) bool {
+	return name != tools.FunctionBash && d.CortexSession.IsToolEnabled(name)
 }

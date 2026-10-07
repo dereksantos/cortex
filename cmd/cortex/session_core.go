@@ -321,15 +321,6 @@ type CortexSession struct {
 	receiptModelBash   []receiptModelBashRun
 	receiptUnformatted []string
 	receipt            turnReceipt
-	// bashGateAnswers is the session's per-turn record of the gate's own
-	// answer for each bash command it was asked to answer (issue #219):
-	// the structured fate (tools.BashOutcome — ran, and the exit code) the
-	// receipt reads back via BashOutcome. Cleared at the START of every
-	// turn (receiptDrop), mirroring receiptModelBash's lifecycle: an answer
-	// from an earlier turn is not this turn's measurement. A command the
-	// gate never answered for a call (a call that died before the gate —
-	// a canceled ctx) is simply absent.
-	bashGateAnswers map[string]bashGateAnswer
 
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to

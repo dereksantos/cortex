@@ -14,10 +14,10 @@
 //   - verification: the exit codes of the project's OWN test/build commands
 //     that the model ran THIS turn — its own runs, recorded by the per-turn
 //     bash recorder (receiptBash/receiptBashOutcome, paired on the same
-//     call in coderDispatcher). A run that FAILED records the exit code the
-//     bash tool observed in its result text (the "[exit error: …]" marker,
-//     parsed, never inferred from a shadowed tool error); a run the shell
-//     gate REFUSED or the user DECLINED never ran and records (not run: …)
+//     call in coderDispatcher). A run records the exit code from the
+//     tools.BashOutcome that tools.Execute returned for THAT call (never
+//     parsed from the result text); a call the tool disabled, the shell
+//     gate REFUSED, or the user DECLINED never ran and records (not run: …)
 //     — a blocked check's result is unknown, and it must never render as an
 //     exit code, least of all exit 0. The harness does NOT run the
 //     project's test/build commands itself: running project-declared
@@ -103,49 +103,6 @@ type turnReceipt struct {
 	verification       []receiptVerification
 	unformatted        []string // files the post-edit format hook failed to verify (could not run, failed, timed out)
 	hadReceiptBashRuns bool     // true when the bash recorder saw a verification run this turn
-}
-
-// bashGateAnswer is one command's gate answer in the session's per-turn
-// record (cs.bashGateAnswers, session_core.go): the gate's own structured
-// fate for that command (tools.BashOutcome — whether it ran, and its exit
-// code when it did). Recorded on every gateShell return path (tool_deps.go)
-// — the gate is the only bash spawn point the session answers, so its answer
-// is the receipt's authoritative "it ran / it didn't" signal.
-type bashGateAnswer struct {
-	outcome tools.BashOutcome
-}
-
-// recordBashGate records the gate's answer for command in the session's
-// per-turn record (BashOutcome reads it back): the first answer for a
-// command stands — a command answered again in the same turn (a retry) is
-// the same command, and the first answer is the gate's verdict for it.
-// Measurement only: it never changes the gate's decision.
-func (cs *CortexSession) recordBashGate(command string, outcome tools.BashOutcome) {
-	if cs.bashGateAnswers == nil {
-		cs.bashGateAnswers = map[string]bashGateAnswer{}
-	}
-	if _, ok := cs.bashGateAnswers[command]; !ok {
-		cs.bashGateAnswers[command] = bashGateAnswer{outcome: outcome}
-	}
-}
-
-// setBashGateOutcome OVERWRITES the gate record for command with the
-// post-run outcome the bash tool observed: the gate records its PRE-run
-// answer (recordBashGate — Ran=true once it lets the command through, but
-// it cannot know the exit code before the process runs), and the dispatcher
-// fills in the REAL exit code once the call's own exec result is known
-// (tools.BashOutcome from tools.Execute). The process's fate supersedes the
-// gate's prediction: this is the only arm that may replace an existing
-// record, and only with the outcome of a run that actually happened
-// (Ran=true). Measurement only: it never changes the gate's decision.
-func (cs *CortexSession) setBashGateOutcome(command string, outcome tools.BashOutcome) {
-	if !outcome.Ran {
-		return
-	}
-	if cs.bashGateAnswers == nil {
-		cs.bashGateAnswers = map[string]bashGateAnswer{}
-	}
-	cs.bashGateAnswers[command] = bashGateAnswer{outcome: outcome}
 }
 
 // receiptBash records one test/build command the model is about to run in
@@ -290,21 +247,20 @@ type receiptModelBashRun struct {
 }
 
 // receiptBashOutcome fills in the outcome of the last recorded model bash
-// run for command: how the bash call fared, from the session's own gate
-// answer for the command (issue #219). It is NEVER inferred from the
-// message text: the bash tool reports a non-zero exit in its result text
-// (the "[exit error: exit status N]" marker), and a CLEAN (msg, nil) for a
-// command the tool disabled, a validation rejected, or the shell gate
-// refused or the user declined — the absence of a marker is not an exit
-// code. The structured signal is the gate's own (BashOutcome, tool_deps.go):
-// Ran=true carries the exit code the gate recorded when it spawned the
-// process (the dispatcher sets it from the call's own exec result), and
-// Ran=false — a refusal, a decline, or a call that never reached the gate —
-// records (not run: …), never an exit. A tool-level error (callErr, e.g. a
-// rejected tool call) means the command never ran too. Called from
-// coderDispatcher (loop.go) AFTER the bash call has run. A command
-// receiptBash did not record (a non-verification command) is a no-op.
-func (cs *CortexSession) receiptBashOutcome(command string, callErr error, elapsed time.Duration) {
+// run for command: how the bash call fared, from the structured
+// tools.BashOutcome that tools.Execute returned for THIS call (issue #219).
+// It is NEVER inferred from the message text: the bash tool reports a
+// non-zero exit in its result text (the "[exit error: …]" marker), and a
+// CLEAN (msg, nil) for a command the tool disabled, a validation rejected,
+// or the shell gate refused or the user declined — the absence of a marker
+// is not an exit code. outcome.Ran is a POSITIVE signal, set only on the
+// path that spawned the process, and carries the process's exit code;
+// Ran=false records (not run: …), never an exit. A tool-level error
+// (callErr, e.g. a rejected tool call) means the command never ran too.
+// Called from coderDispatcher (loop.go) AFTER the bash call has run. A
+// command receiptBash did not record (a non-verification command) is a
+// no-op.
+func (cs *CortexSession) receiptBashOutcome(command string, outcome tools.BashOutcome, callErr error, elapsed time.Duration) {
 	if len(cs.receiptModelBash) == 0 {
 		return
 	}
@@ -313,53 +269,17 @@ func (cs *CortexSession) receiptBashOutcome(command string, callErr error, elaps
 		return
 	}
 	last.elapsed = elapsed
-	if callErr != nil {
+	switch {
+	case callErr != nil:
 		// A tool-level error: the command never ran.
 		last.notRun = "not run: " + callErr.Error()
-		return
-	}
-	outcome, ok := cs.BashOutcome(command)
-	switch {
-	case ok && outcome.Ran:
+	case outcome.Ran:
 		last.exitCode = outcome.ExitCode
-	case ok:
-		last.notRun = "not run: refused or declined by the shell risk gate"
 	default:
-		// The gate never answered for this command — the call died before
-		// reaching the gate (a canceled ctx). The command never ran: do not
-		// record an exit code.
-		last.notRun = "not run: never reached the shell risk gate"
+		// The tool disabled the call, a validation rejected it, or the
+		// shell gate refused it / the user declined: it never ran.
+		last.notRun = "not run: refused, declined, or disabled"
 	}
-}
-
-// receiptExitCodeOf extracts the exit code the bash tool observed from the
-// text AFTER its "[exit error: " marker: the tool reports a non-zero exit as
-// a trailing "[exit error: <error>]" line, where <error> is the run error's
-// Error() text: exec.ExitError renders as "exit status N" (the number is
-// the process's real exit code), but a run KILLED BY A SIGNAL renders as
-// "signal: killed" (or "signal: SIGKILL") and carries no number. A marker
-// that names no exit status — a signal-killed run, or a bare marker — is a
-// real failure reported as exit 1: the receipt's job is to never report a
-// failed run as exit 0, and a signal-killed check did not exit 0. ok is
-// false when the text names no exit status at all (the dispatcher passes
-// only the marker's tail, so this is the marker-less arm).
-func receiptExitCodeOf(markerTail string) (code int, ok bool) {
-	rest := strings.TrimSpace(markerTail)
-	if j := strings.IndexByte(rest, ']'); j >= 0 {
-		rest = strings.TrimSpace(rest[:j])
-	}
-	const status = "exit status "
-	if !strings.HasPrefix(rest, status) {
-		if rest == "" {
-			return 0, false
-		}
-		return 1, true // no number: a signal-killed run or a bare marker — a failure
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(rest[len(status):]))
-	if err != nil {
-		return 1, true
-	}
-	return n, true
 }
 
 // FormatHook is the session's per-turn wrapper around the post-edit
@@ -631,6 +551,5 @@ func renderVerificationLine(v receiptVerification) string {
 func (cs *CortexSession) receiptDrop() {
 	cs.receiptModelBash = nil
 	cs.receiptUnformatted = nil
-	cs.bashGateAnswers = nil
 	cs.receipt = turnReceipt{}
 }
