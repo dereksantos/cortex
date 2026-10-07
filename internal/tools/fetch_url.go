@@ -150,6 +150,67 @@ func newSafeHTTPClient() *http.Client {
 	}
 }
 
+// FetchPublicImageBytes downloads an IMAGE from a public http(s) address for
+// turn attachment (#218) and returns its raw bytes — the fetch half that
+// internal/tools cannot do for itself, exposed so an `@https://…/shot.png`
+// mention and a serve-request image URL go through the ONE guarded client
+// this package already keeps rather than a second one that forgot its rules:
+//
+//   - validatePublicURL gates the address and every redirect target, so a
+//     mention can never reach a private network, a non-public IP, or
+//     credentials-in-URL form (the same SSRF posture fetch_url has);
+//   - the response body is capped at maxBytes, so a mention of an enormous
+//     remote file fails with the cap named instead of exhausting memory;
+//   - the timeout, redirect count, and proxy posture are the active
+//     tools.fetch_url.* limits, shared with fetch_url by construction;
+//   - ctx bounds the call, so an interrupted turn stops the download instead
+//     of finishing it for nobody. A nil ctx is treated as background.
+//
+// No HTML is extracted and no untrusted-content framing is applied: this is
+// bytes for an image content part, not text for the model to read. A
+// non-2xx status is an error naming the status.
+func FetchPublicImageBytes(ctx context.Context, rawURL string, maxBytes int) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	u, err := validatePublicURL(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("image url refused: %w", err)
+	}
+	if maxBytes <= 0 {
+		maxBytes = active.FetchMaxBodyBytes
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build image request: %w", err)
+	}
+	req.Header.Set("Accept", "image/png, image/jpeg, image/gif, image/webp")
+	req.Header.Set("User-Agent", fetchUserAgent)
+	resp, err := fetchHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", hostOf(u), err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("fetch %s: unexpected status %s", hostOf(u), resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read image body: %w", err)
+	}
+	if len(body) > maxBytes {
+		return nil, fmt.Errorf("image at %s is over the %d-byte download cap", hostOf(u), maxBytes)
+	}
+	return body, nil
+}
+
+// hostOf names a URL's origin for an error message — scheme and host, never
+// the path or query, which may carry a signed token there is no reason to
+// copy into a log line or a transcript.
+func hostOf(u *url.URL) string {
+	return u.Scheme + "://" + u.Host
+}
+
 func validatePublicURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {

@@ -131,6 +131,40 @@ topics, fleet slot contention (`docs/archive/refactor-status.md`).
       rows sharing the `EvalCellResultPayload` vocabulary alongside the
       current stdout JSONL (the deferred wiring in
       `docs/study-subagent.md` §5).
+- [x] C4. Checklist accounting on the turn receipt (issue #220, built on
+      #219's measurement-only receipt): when a task carries `- [ ]`
+      checklist items, the model's prompt gains a "Task checklist" section
+      restating the items plus a per-item "account for this in your final
+      answer" principle (principle-over-recipe: the model is told to report
+      each item — done, with the evidence, or not done — and that an
+      aggregate summary is not an account; a task with no checklist gets an
+      unchanged prompt). At the turn's END the harness measures which items
+      the reply leaves out — per item, every significant word of the item
+      (lowercased, punctuation-stripped, stop-words dropped, a leading "add"
+      dropped) must appear in the reply, with a word-prefix match ("add"
+      matches "added"), so an item named in the reply's own words — including
+      an explicit "not done" — is accounted for — and renders the missing
+      ones, one per line, in a `checklist:` section of the receipt. It rides
+      the same `TurnResult.Receipt` + kindNote surface as #219's facts: it
+      never blocks and never fails a tool call; it does change the model's
+      prompt (the checklist section + principle, checklist-carrying turns
+      only), which is what makes the account possible. Plan-then-execute
+      measures once per run, not per step (each step's prompt embeds the
+      whole task, so per-step measurement would flag the items other steps
+      own): no step prompt carries the checklist (a step turn's input
+      embeds the whole task — the `- [ ]` lines still start lines — so
+      extracting from it would inject the checklist into every step); the
+      run's reply stays the deterministic per-step report (no model report
+      turn — one that would be a full tools-enabled turn after the per-step
+      checks and would replace that deterministic reply with model text),
+      and the run measures the fact deterministically at the run's end,
+      against the rendered per-step report (every step's line — step text +
+      note — rides in it, so an item named in its own step's text or note is
+      accounted for even when no step's reply named it), landing on the run's
+      joined receipt whether or not any step ran tools — and on a failed or
+      interrupted run too, since the measurement rides the run's deferred
+      stamp, which every return path goes through. A task with no checklist (or a reply that
+      accounted for every item) contributes no section.
 
 **Gate C:** README/CLAUDE.md updated for `cortex model`; suite green;
 study-eval rows visible via jq over the journal.

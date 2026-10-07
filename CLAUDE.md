@@ -96,11 +96,11 @@ Three capabilities distinguish it:
 |---|---|
 | `cortex` | Interactive REPL (default) |
 | `cortex resume [id]` | Resume a prior session — with no id on an interactive TTY, opens the session picker first (ESC falls back to latest; non-TTY / `NO_COLOR` / `CORTEX_LOOP_RENDER=0` take latest directly); its resume banner goes to stderr (issue #118) |
-| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); the verify-before-fix principle rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence — the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); the review-feedback principle (issue #162) likewise rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in each step prompt — every review finding is owed a disposition of addressed / deferred-with-reason / disputed, pick one of several offered alternatives rather than applying them all, fix the class a reviewer's examples illustrate, and put things where the reviewer said, since a step turn is where a review round's findings land and demotion can fold the review out of view; `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118); a turn that ran tools emits a measurement-only receipt on stderr and under the `receipt` JSON key, listing files changed (`git diff --stat` plus untracked files), the exit codes of the model's own runs of the project's test/build commands (`not run:` when the run was refused or blocked), and the files the format hook failed on; it is saved as a transcript note and never shown to the model (issue #219). |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); the verify-before-fix principle rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence — the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); the review-feedback principle (issue #162) likewise rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in each step prompt — every review finding is owed a disposition of addressed / deferred-with-reason / disputed, pick one of several offered alternatives rather than applying them all, fix the class a reviewer's examples illustrate, and put things where the reviewer said, since a step turn is where a review round's findings land and demotion can fold the review out of view; `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118); a turn that ran tools emits a measurement-only receipt on stderr and under the `receipt` JSON key, listing files changed (`git diff --stat` plus untracked files), the exit codes of the model's own runs of the project's test/build commands (`not run:` when the run was refused or blocked), the files the format hook failed on, and (when the task carried a `- [ ]` checklist) the checklist items the reply leaves out — measured at the turn's end, per item, every significant word of the item (lowercased, punctuation-stripped, stop-words dropped) must appear in the reply with a word-prefix match, so an item named in the reply's own words — including an explicit "not done" — is accounted for; one per line, no aggregate; plan-then-execute measures once per run, deterministically at the run's end, against the rendered per-step report (no step prompt carries the checklist); empty when there is no checklist or the reply accounted for every item (issues #219, #220); it is saved as a transcript note and never shown to the model. |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
-| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19) |
+| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19). The turn endpoints (`POST .../turn`, `POST .../turn/stream`) accept an `attachments` body field — a list of `{path}` (workspace-relative, confined by `read_file`'s rule), `{url}` (http(s), fetched only when `tools.enable_web` is on), or `{data}` (base64 image bytes, `data:` URI or bare, from a browser file picker) — resolved by `resolveTurnAttachments` (`cmd/cortex/serve_attachments.go`) into the same `TurnImage` an `@`image mention produces; any refusal is a 400 before the turn runs (issue #218) |
 | `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
 | `cortex project <add\|list\|remove>` | Manage the project registry |
 | `cortex project trust <add\|remove\|list>` | Manage the per-workspace trust list (the post-edit hook's only gate; user config only) |
@@ -186,7 +186,15 @@ the word at the cursor, so surrounding text survives. A submitted `@path`
 mention attaches the file to the turn with the same size rules as `read_file`
 (small files inline, large files as a structural outline + pointer to
 study); the mention is replaced by a `[@path attached]` marker in what the
-model sees. Only an `@` starting a whitespace-delimited word is a mention
+model sees. An `@`mention naming an IMAGE — a workspace file or an
+`@https://…` address — is attached differently (issue #218): its bytes ride
+the turn's user message as a content part (`TurnWithAttachments`), never as
+inlined text, and the REPL prints an attachment line per image plus a reason
+per image that could not attach (the #217 detection/cap/vision verdicts apply;
+a text-only model gets nothing on the wire and a printed note). A URL mention
+is a download gated by `tools.enable_web` — with web tools off it is refused
+with the switch named and never fetched. Only an `@` starting a
+whitespace-delimited word is a mention
 (emails and `@types/node`-style names are prose), and a mention that does not
 resolve to a readable file leaves the input unchanged. History records the
 line exactly as typed.
@@ -282,6 +290,12 @@ the model-driven memory tools
   to an outline line naming the image with a recallable citation — never
   kept in the prompt forever. A resumed marker-only result books no
   image tokens (nothing is on the wire for it). A
+  human-attached image (issue #218, `TurnWithAttachments`) leaves no marker
+  in the message text at all — the user's input is persisted byte-for-byte
+  — and is recorded instead by a per-message side-car manifest
+  (`<id>.m<idx>.images`, `cmd/cortex/image_input.go`) that `recall` and the
+  web-UI transcript view-model (`cmd/cortex/webui_transcript.go`) read to
+  show the attachment. A
   directory returns a bounded listing (directories marked `/`) plus a pointer
   to `outline`, and a missing path returns an oriented error: it points at
   `outline`/`grep` instead of guessing, states the workspace root for
@@ -297,8 +311,13 @@ the model-driven memory tools
   span and retry `edit_file` — or use `write_file` for a whole-file rewrite —
   rather than scripting the change through `bash` (sed/awk/python) (#201:
   scripted multi-line edits corrupt files and skip the diff display + post-
-  edit hook). A successful result appends the current changed region (added
-  lines marked `>`, removed `-`, context unmarked, capped at 12 lines) so the
+  edit hook). An interior-whitespace-only mismatch (e.g. gofmt re-aligned the
+  span's spacing) returns an "only whitespace differs" error with the region's
+  current lines, and a landed edit that removes guard-shaped lines
+  (if/else/for/switch/case/return/panic/Lock/Unlock) not present in the
+  replacement appends a GUARD DROPPED warning naming them (#210). A successful
+  result appends the current changed region (added lines marked `>`, removed
+  `-`, context unmarked, capped at 12 lines) so the
   model's view of the file stays in sync (#173).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
