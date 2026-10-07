@@ -35,12 +35,10 @@ func TestRunLoopDispatchesRecoveredHermesToolCalls(t *testing.T) {
 		}
 		// No structured tool_calls — the call lives in the text. The
 		// model emits the markup on every tool round; the engine must
-		// recover it (dispatch, not return as prose). Issue #230's
-		// "identical-to-in-flight" suppression does NOT fire here:
-		// prevBatchSig is the signature of the LAST DISPATCHED round
-		// (initially empty; the recovery below turns this round's text
-		// into a real dispatch that updates prevBatchSig after dispatch),
-		// so the first markup round is always dispatched.
+		// recover it (dispatch, not return as prose). The recovered
+		// calls are dispatched as ordinary tool rounds: a repeated
+		// batch goes through the no-progress guard, exactly as a
+		// structured batch would.
 		const content = `Let me look. <function_calls>{"name":"read_file","arguments":{"path":"f"}}</function_calls>`
 		return fakeResp(content, nil, 1, 1), false, nil
 	})
@@ -71,20 +69,8 @@ func TestRunLoopDispatchesRecoveredHermesToolCalls(t *testing.T) {
 	if dispatchedPath != "f" {
 		t.Errorf("dispatcher saw path %q, want f", dispatchedPath)
 	}
-	// Issue #230: the FIRST markup round is a genuine (new) call and is
-	// dispatched. The SECOND round re-emits the identical markup with the
-	// call already in flight — #230's suppression treats it as a natural
-	// finish (the markup is stripped, the prose "Let me look." is returned
-	// as the clean-finalize answer). The dispatch still happened (the
-	// recovery worked); the stop reason is "clean-finalize" (the suppressed
-	// second round finished naturally) rather than the pre-#230 "max-iter"
-	// (which would have re-dispatched the identical call as a tool round
-	// and hit the cap).
-	if stats.Iterations != 2 {
-		t.Errorf("iters = %d, want 2 (recovered tool round + suppressed repeat)", stats.Iterations)
-	}
-	if stats.StopReason != "clean-finalize" {
-		t.Errorf("stop = %q, want clean-finalize (the suppressed repeat is a natural finish)", stats.StopReason)
+	if stats.Iterations != 2 || stats.StopReason != "max-iter" {
+		t.Errorf("stop = %q iters = %d, want max-iter after two rounds (recovered tool round + cap)", stats.StopReason, stats.Iterations)
 	}
 }
 

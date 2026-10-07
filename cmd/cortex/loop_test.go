@@ -2164,8 +2164,17 @@ func TestHasToolCallMarkup(t *testing.T) {
 }
 
 // TestLooksTruncated covers the issue #230 truncation detector: it must fire
-// on a clear mid-sentence cutoff (dangling conjunction, article, or short
-// reply ending mid-thought) and stay silent on a complete answer.
+// on a clear mid-sentence cutoff (a dangling conjunction, preposition,
+// relative pronoun, or article/possessive) and stay silent on a complete
+// answer.
+//
+// The dangling-word list deliberately does NOT include "so", "then", or "as":
+// the reviewer's #230 note observed that matching them flags ordinary complete
+// replies ("I think so", "I fixed it, then ran the tests", "the fix as a
+// comment"). The trade-off is that a truncation landing on one of those words
+// is not flagged (it reads as a complete reply, and the turn ends without a
+// re-ask) — accepted, because the list's job is to catch the obvious
+// mid-sentence cutoffs, not every possible tail.
 func TestLooksTruncated(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2268,8 +2277,13 @@ func TestSanitizeFinalAnswerStripsMarkup(t *testing.T) {
 }
 
 // TestRunLoopCleanFinalizeStripsMarkup covers the issue #230 fix in
-// runLoop's clean-finalize path: a natural finish whose content carries
-// leaked Qwen XML markup has it stripped before the answer is returned.
+// runLoop's finalize path: a natural finish whose content carries leaked
+// Qwen XML markup has the markup stripped from the returned answer. The
+// markup is recovered and dispatched as a tool round (the pre-#230
+// behavior the reviewer asked to restore — "go back to
+// recoverTextToolCalls"), so the turn ends via the no-progress guard
+// (the recovered batch is a repeat of the prior round's call), not via
+// clean-finalize. The returned content is stripped of the raw markup.
 func TestRunLoopCleanFinalizeStripsMarkup(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
@@ -2281,30 +2295,29 @@ func TestRunLoopCleanFinalizeStripsMarkup(t *testing.T) {
 		if sends == 1 {
 			return fakeResp("", []ToolCall{readCall("c1", "go.mod")}, 1, 1), false, nil
 		}
-		// Send 2: natural finish with leaked Qwen XML markup. The answer is
-		// sanitized to "Done." in place — no salvage re-ask, no forced
-		// finalize.
+		// Send 2: natural finish with leaked Qwen XML markup. The markup is
+		// recovered and dispatched as a tool round (pre-#230 behavior); the
+		// turn then ends via the no-progress guard (the recovered batch is a
+		// repeat of the prior round's call).
 		return fakeResp("Done. <tool_call><function=bash>\n<parameter=command>\nls\n</parameter>\n</function></tool_call>", nil, 1, 5), false, nil
 	})
 	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
-	if content != "Done." {
-		t.Errorf("content = %q, want %q (markup stripped)", content, "Done.")
-	}
-	// The clean-finalize path sanitizes the markup in place — the natural
-	// finish (no tool calls) happens before MaxIter, the sanitized "Done."
-	// is a complete answer (no truncation re-ask), and nothing forced a
-	// finalize.
-	if stats.StopReason != "clean-finalize" {
-		t.Errorf("stop = %q, want clean-finalize", stats.StopReason)
-	}
+	// The returned content is stripped of the raw markup. The prose "Done."
+	// is what remains (the markup was recovered and dispatched as a tool
+	// round, then the turn ended via the no-progress guard).
 	if hasToolCallMarkup(content) {
 		t.Error("content still carries tool-call markup after sanitization")
+	}
+	// The turn ended via the no-progress guard (the recovered batch is a
+	// repeat of the prior round's call), not via clean-finalize.
+	if stats.StopReason != "no-progress" {
+		t.Errorf("stop = %q, want no-progress", stats.StopReason)
 	}
 }
 
@@ -2401,5 +2414,139 @@ func TestFinalizeLoopMarkupOnlySalvagesEmpty(t *testing.T) {
 	}
 	if !st.Salvaged {
 		t.Error("stats.Salvaged = false, want true (the empty salvage recovered the turn)")
+	}
+}
+
+// TestRunLoopStructuredRoundStripsMarkupInContent covers the issue #230 fix
+// for the recorded 082119.jsonl:281 shape: a tool round that already carries
+// STRUCTURED tool calls, whose content ALSO carries leaked tool-call markup.
+// The markup in the content is stripped so it doesn't leak into the
+// transcript or the final answer, while the structured calls are dispatched
+// as normal.
+func TestRunLoopStructuredRoundStripsMarkupInContent(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var sends int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		if sends == 1 {
+			// A structured tool round whose content ALSO carries leaked
+			// markup (the 082119.jsonl:281 shape).
+			return &AgentResponse{Choices: []Choice{{
+				Index: 0,
+				Message: Message{
+					Role:      "assistant",
+					Content:   "Let me check.\n<tool_call><function=grep>\n<parameter=pattern>\nfoo\n</parameter>\n</function></tool_call>",
+					ToolCalls: []ToolCall{readCall("c1", "f")},
+				},
+			}}, Usage: Usage{PromptTokens: 1, CompletionTokens: 1}}, false, nil
+		}
+		// Final answer.
+		return fakeResp("Done.", nil, 1, 5), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "Done." {
+		t.Errorf("content = %q, want %q", content, "Done.")
+	}
+	// The structured round's content must have its markup stripped in the
+	// transcript — the model's message is appended to req.Messages with the
+	// markup removed, so a resumed session never replays the raw markup.
+	for _, m := range req.Messages {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			if hasToolCallMarkup(m.Content) {
+				t.Errorf("assistant message with tool calls still carries markup: %q", m.Content)
+			}
+			if m.Content != "Let me check." {
+				t.Errorf("assistant message content = %q, want %q (markup stripped)", m.Content, "Let me check.")
+			}
+		}
+	}
+	if stats.StopReason != "clean-finalize" {
+		t.Errorf("stop = %q, want clean-finalize", stats.StopReason)
+	}
+}
+
+// TestSummaryIssueSurface covers the issue #230 `summary_issue` surface on
+// the headless turn path: a final reply the engine's sanitizer could not
+// repair (truncated, and the salvage re-ask also failed) is flagged on
+// TurnResult.SummaryIssue, and the --json output carries it under
+// "summary_issue". A clean reply leaves the flag empty.
+//
+// The "markup reply" case uses the Qwen3-Coder shape: a natural finish whose
+// content carries leaked <tool_call> markup.
+// (The Hermes <function_calls> shape is the same defect class but goes
+// through a different parser path.) The engine's sanitizeFinalAnswer strips
+// the recoverable markup, leaving the prose "Done." as the clean final
+// answer — the reply the model meant, minus the leaked internal
+// representation. The sanitizer REPAIRED the reply, so the flag is empty
+// (the reply is clean). The flag is set when the SANITIZED reply is still
+// malformed (e.g. a truncated reply the salvage re-ask also failed to
+// rewrite); a reply the sanitizer successfully cleaned is clean and leaves
+// the flag empty.
+//
+// The dispatcher is overridden to a no-op: the markup in the reply is a
+// sanitizer defect, not a pending tool call, so the engine must NOT execute
+// it; the override makes the test's intent explicit and keeps the test from
+// running a real shell command.
+func TestSummaryIssueSurface(t *testing.T) {
+	cases := []struct {
+		name       string
+		reply      string
+		wantIssue  string
+		wantAbsent bool
+	}{
+		{name: "clean reply", reply: "I fixed the bug in loop.go.", wantIssue: "", wantAbsent: true},
+		{
+			name:       "markup reply",
+			reply:      "Done. <tool_call><function=bash>\n<parameter=command>\nls\n</parameter>\n</function></tool_call>",
+			wantIssue:  "",
+			wantAbsent: true,
+		},
+		{
+			name:      "truncated reply",
+			reply:     "I fixed the bug and",
+			wantIssue: "truncated",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Hermetic: a temp dir for the session's .cortex/ (transcript,
+			// memory) and a throwaway home for config / journal, so the
+			// test doesn't write into the workspace's real .cortex/.
+			t.Chdir(t.TempDir())
+			cs := newMemSession(t)
+			cs.Request = &AgentRequest{Model: "m", BaseURL: "http://localhost:0", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+			cs.senderOverride = SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+				return fakeResp(tc.reply, nil, 1, 5), false, nil
+			})
+			// No-op dispatcher: the markup in the reply is a sanitizer
+			// defect, not a pending call — the engine must not execute it.
+			cs.coderDispatcherOverride = func() AgentDispatcher {
+				return DispatchFunc(func(context.Context, ToolCall) string { return "noop" })
+			}
+			cs.StartTranscript()
+			if cs.transcript == nil {
+				t.Fatal("StartTranscript failed")
+			}
+			t.Cleanup(func() { cs.Close() })
+			res, err := cs.Turn(context.Background(), "do the thing")
+			if err != nil {
+				t.Fatalf("Turn: %v", err)
+			}
+			if tc.wantAbsent {
+				if res.SummaryIssue != "" {
+					t.Errorf("SummaryIssue = %q, want empty (clean reply)", res.SummaryIssue)
+				}
+			} else if res.SummaryIssue != tc.wantIssue {
+				t.Errorf("SummaryIssue = %q, want %q", res.SummaryIssue, tc.wantIssue)
+			}
+		})
 	}
 }

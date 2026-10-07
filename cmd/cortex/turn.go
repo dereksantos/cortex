@@ -141,10 +141,10 @@ type TurnResult struct {
 	// mid-sentence after sanitization). Non-empty only when the reply is
 	// malformed in a way the engine's in-loop repair could not fix — a
 	// reply the sanitizer successfully stripped or salvaged is clean and
-	// leaves this empty. The caller (RunLoopFiring, the commit step) reads
-	// this to decide whether the reply is safe to commit: a malformed
-	// summary would pollute git history with leaked markup, truncated
-	// prose, or nothing at all.
+	// leaves this empty. The caller (headless `cortex turn`) surfaces it
+	// on the `summary_issue` JSON key and a stderr line: a driver that
+	// feeds the reply into a commit message can check for it before doing
+	// so.
 	SummaryIssue string
 	// Receipt carries the measurement-only turn receipt (issue #219,
 	// step 1, turn_receipt.go): the workspace's `git diff --stat` block

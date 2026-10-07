@@ -182,6 +182,13 @@ func runTurnCLI(args []string) {
 			if res.Redactions > 0 {
 				out["redactions"] = res.Redactions
 			}
+			// Issue #230: a final reply the engine's sanitizer could not
+			// repair (empty, tool-call markup, or truncated) is flagged so a
+			// driver that feeds the reply into a commit message can check for
+			// it before doing so.
+			if res.SummaryIssue != "" {
+				out["summary_issue"] = res.SummaryIssue
+			}
 			if turnErr != nil {
 				out["error"] = turnErr.Error()
 				out["interrupted"] = res.Interrupted
@@ -236,6 +243,12 @@ func reportTurnText(stdout, stderr io.Writer, turnErr error, res TurnResult, ses
 	}
 	if res.LastError != nil {
 		fmt.Fprintln(stderr, backendErrorLine(res.LastError))
+	}
+	// Issue #230: a final reply the engine's sanitizer could not repair
+	// (empty, tool-call markup, or truncated) is flagged on stderr — a
+	// driver that feeds the reply into a commit message can check for it.
+	if res.SummaryIssue != "" {
+		fmt.Fprintf(stderr, "summary issue: %s\n", res.SummaryIssue)
 	}
 	printRedactions(stderr, res.Redactions)
 	fmt.Fprintf(stderr, "session: %s\n", sessionID)

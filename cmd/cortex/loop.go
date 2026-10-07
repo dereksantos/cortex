@@ -500,29 +500,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// Recover tool calls the model wrote into its text instead of
 		// emitting as structured tool_calls (Qwen XML or Hermes
 		// <function_calls> tags), so a call isn't silently lost (empty
-		// tool_calls reads as a final answer). Issue #230: a recovered
-		// call that is BYTE-IDENTICAL to the batch already in flight is
-		// not a new action — it's the model re-emitting the call it
-		// already asked for as text (the recorded 082119.jsonl:281 case:
-		// a <tool_call><function=grep> block in the
-		// assistant content of the round that was already executing grep).
-		// Re-dispatching it would re-run the same tool; the correct
-		// treatment is to treat the round as a natural finish with the
-		// markup stripped, so the sanitizer (below) and the no-progress
-		// guard decide what happens next — the call is neither dropped
-		// nor re-run. A genuinely NEW call (different signature) is
-		// recovered and dispatched as a tool round (the pre-#230
-		// behavior).
-		if calls := parseToolCallsFromContent(msg.Content); len(calls) > 0 && len(msg.ToolCalls) == 0 {
-			if toolCallSignature(calls) != prevBatchSig {
-				msg.ToolCalls = calls
-				msg.Content = stripToolMarkup(msg.Content)
-			}
-			// else: byte-identical to the in-flight batch — leave the
-			// message as a natural finish (no tool calls); the sanitizer
-			// below strips the markup and the clean-finalize path
-			// returns the prose.
-		}
+		// tool_calls reads as a final answer). A repeated batch — the
+		// model re-emitting the same call it already ran — goes through
+		// the no-progress guard below, exactly as a structured batch would:
+		// the guard nudges on the penultimate repeat and finalizes on the
+		// next, so a model that legitimately re-issues a call gets a chance
+		// to change course before the loop ends.
+		//
+		recoverTextToolCalls(&msg)
 		// This round's assistant message is appended at the dispatch point
 		// below (before any tool results) — UNLESS it's an empty natural finish
 		// that the issue #149 off-retry may replace: in that case only the
@@ -690,6 +675,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// off-retry recovered above (replacing the dropped empty message) — and
 		// the assistant message must be on the wire before any tool results (the
 		// API ordering invariant).
+		// Issue #230: a structured tool round whose content ALSO carries
+		// leaked tool-call markup (the 082119.jsonl:281 shape) has the markup
+		// stripped from the content before the message is appended, so the
+		// transcript never replays the raw markup on resume. The structured
+		// calls are dispatched as normal — only the content is cleaned.
+		if len(msg.ToolCalls) > 0 && hasToolCallMarkup(msg.Content) {
+			msg.Content = strings.TrimSpace(stripToolMarkup(msg.Content))
+		}
 		appendMsg(msg)
 
 		sig := toolCallSignature(msg.ToolCalls)
@@ -946,11 +939,17 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 	// the existing "salvage once" bound: a recovery by the empty salvage
 	// above already set Salvaged, so this won't re-ask.
 	if answer != "" && (stats.MaxTokensClamped || looksTruncated(answer)) && !stats.Salvaged {
-		if a2 := salvageClampedFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
+		if a2 := sanitizeFinalAnswer(salvageClampedFinalize(ctx, send, req, stats, appendMsg)); a2 != "" {
 			answer = a2
 		}
 	}
-	return reportWithheldToolCalls(answer), *stats, nil
+	// The reply the model meant as its final answer must not ship raw
+	// tool-call markup: the sanitizer's empty-salvage chain above repaired
+	// the markup-only case, and a reply that is PROSE PLUS leftover markup
+	// (a call the model re-emitted after its answer, or a block the strip
+	// left behind) is the same class — strip it, then report what was
+	// withheld.
+	return reportWithheldToolCalls(sanitizeFinalAnswer(answer)), *stats, nil
 }
 
 // reportWithheldToolCalls is the forced-wrap-up half of issue #132's text
@@ -1158,24 +1157,23 @@ func hasToolCallMarkup(content string) bool {
 // (issue #230). The check is intentionally conservative — it fires only on
 // a clear mid-sentence cutoff pattern, not on every non-sentence-ending
 // character, so a reply that ends with a letter (a common, natural ending
-// for a terse answer) is not flagged. The patterns:
+// for a terse answer) is not flagged. The rules, in order:
 //
-//   - ends with a conjunction or preposition ("and", "or", "but", "to",
-//     "in", "on", "at", "by", "for", "with", "from", "that", "which",
-//     "who", "whom", "whose") followed by nothing — a sentence that was
-//     clearly going to continue;
-//   - ends with a dangling "my" or "the" (indefinite article / possessive
-//     with no noun after it) — the recorded "Let me restate my complete
-//     final" case, where the model was cut off before naming the final
-//     answer;
-//   - ends with a word of 3+ letters that is NOT a sentence-ending
-//     character and the answer is short (under 15 words) — a short reply
-//     that ends mid-thought is more likely truncated than a long one.
+//  1. The answer (trimmed) is empty, or its last byte is a
+//     sentence-ending character ('.', '!', '?', ')', ']', '}', '"',
+//     '\”, '`'), or a mid-sentence punctuation mark (',', ';', ':',
+//     '-') — not truncated.
+//  2. The trailing run of letters (the last word, lowercased) is one of
+//     the dangling words below — truncated. These are conjunctions,
+//     prepositions, relative pronouns, and articles/possessives that
+//     dangle at the end of a sentence: "and", "or", "but", "to", "in",
+//     "on", "at", "by", "for", "with", "from", "that", "which", "who",
+//     "whom", "whose", "the", "my", "a", "an", "of", "if".
+//  3. Otherwise — not truncated.
 //
 // This is a heuristic, not a proof: a reply that ends mid-sentence but
-// doesn't match these patterns (e.g. ends with a 4-letter noun) is not
-// flagged. The commit step's SummaryIssue check is the last line of
-// defense — a missed truncation here still gets caught there.
+// doesn't match the dangling-word list (e.g. ends with a noun) is not
+// flagged.
 func looksTruncated(answer string) bool {
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
@@ -1203,12 +1201,12 @@ func looksTruncated(answer string) bool {
 	if lastWord == "" {
 		return false
 	}
-	// A dangling conjunction, preposition, or relative pronoun: the
-	// sentence was clearly going to continue.
+	// A dangling conjunction, preposition, relative pronoun, or
+	// article/possessive: the sentence was clearly going to continue.
 	switch lastWord {
 	case "and", "or", "but", "to", "in", "on", "at", "by", "for",
 		"with", "from", "that", "which", "who", "whom", "whose",
-		"the", "my", "a", "an", "of", "as", "if", "then", "so":
+		"the", "my", "a", "an", "of", "if":
 		return true
 	}
 	return false
