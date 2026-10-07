@@ -81,6 +81,12 @@ func TestBareSedInFlags(t *testing.T) {
 			"{\"sed note\", `" + bare + "'s/x/y/' f.go && true`},\n}\n" +
 			"for _, tc := range cases {\n\tt.Run(tc.name, func(t *testing.T) {\n\t\tbashCall(t, tc.cmd)\n\t})\n}\n", true},
 		{"env-prefixed bare sed -i executed", "bashCall(t, `LC_ALL=C " + bare + "'s/x/y/' f.go`)\n", true},
+		{"inline range table whose tc.cmd IS executed: flagged",
+			"for _, tc := range []struct{ name, cmd string }{{\"x\", `" + bare + "'s/x/y/' f.go`}} {\n" +
+				"\tbashCall(t, tc.cmd)\n}\n", true},
+		{"inline range table: bare form in a non-cmd column: not flagged",
+			"for _, tc := range []struct{ name, cmd string }{{`" + bare + "'s/x/y/' f.go`, `echo hi`}} {\n" +
+				"\tbashCall(t, tc.cmd)\n}\n", false},
 		{"sed without -i is a read: fine anywhere", "bashCall(t, `sed -n '1,10p' f.go`)\n", false},
 		{"cmd/cortex bashCall(id, command): flagged", "bashCall(\"c1\", \"" + bare + "'s/x/y/' f.go\")\n", true},
 		{"cmd/cortex bashCallResp(command): flagged", "bashCallResp(`" + bare + "'s/x/y/' f.go`)\n", true},
@@ -146,7 +152,7 @@ func TestNoExecutedBareSedInInTests(t *testing.T) {
 // flagsBareSedIn reports whether src EXECUTES a bare `sed -i` command: a
 // bareSedIn string literal that is an argument to a shell-executing call
 // (bashCall / bashCallResp / Execute — see shellExecHelpers), or one that
-// lives in a command table whose `cmd` field the enclosing loop passes to
+// lives in a command table whose command field the enclosing loop passes to
 // such a call (the literal reaches the shell at loop time). It parses the
 // source with go/parser, so wrapped calls, nested calls, and string
 // literals inside comments are all decided by the AST rather than line
@@ -187,10 +193,12 @@ func flagsBareSedIn(src string) bool {
 }
 
 // tableCmdIsExecuted reports whether the bareSedIn literal lit lives in a
-// command table that reaches a shell at loop time: the table's `cmd` field
+// command table that reaches a shell at loop time: the table's command field
 // is selected by the loop's value variable and passed to a shell-executing
-// call in the loop body. Detector tables (whose cmd is only parsed) never
-// satisfy the last condition, so they stay clean.
+// call in the loop body. The field name is taken from that call
+// (`tc.<field>`), not hardcoded, so a table whose command field is called
+// `command` is covered the same way. Detector tables (whose command field is
+// only parsed) never satisfy the last condition, so they stay clean.
 func tableCmdIsExecuted(file *ast.File, fset *token.FileSet, lit *ast.BasicLit) bool {
 	ranges := []*ast.RangeStmt{}
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -200,34 +208,42 @@ func tableCmdIsExecuted(file *ast.File, fset *token.FileSet, lit *ast.BasicLit) 
 		return true
 	})
 	for _, r := range ranges {
-		cmd := tableCmdField(file, r)
-		if cmd == "" {
-			continue
-		}
-		if !litInTable(lit, file, r, fset) {
+		st := tableStructType(file, r)
+		if st == nil {
 			continue
 		}
 		for _, call := range execCallsIn(r.Body, file, fset) {
-			if passesTableCmd(call, cmd, r) {
-				return true
+			if field, ok := passedTableField(call, r); ok {
+				if !structHasStringField(st, field) {
+					continue
+				}
+				if litInTable(lit, file, r, st, field, fset) {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
 
-// litInTable reports whether lit sits in the table range loop r iterates:
-// the loop's range expression (inline `range []struct{...}`) or the composite
-// literal that initialises the named variable it ranges over.
-func litInTable(lit *ast.BasicLit, file *ast.File, r *ast.RangeStmt, fset *token.FileSet) bool {
-	// Inline form: lit is inside the range expression itself.
-	if inside(lit, r.X, fset) {
-		return true
+// litInTable reports whether lit sits in the table range loop r iterates and
+// is the value of the field named field — the command field the loop passes
+// to a shell-executing call. That field may live in the loop's range
+// expression (an inline `range []struct{...}`) or in the composite literal
+// that initialises the named variable it ranges over.
+func litInTable(lit *ast.BasicLit, file *ast.File, r *ast.RangeStmt, st *ast.StructType, field string, fset *token.FileSet) bool {
+	// Inline form: `for _, tc := range []struct{...}{...}` — the range
+	// expression IS the table, and lit must be in the `field` column of a row
+	// (not merely anywhere in the expression).
+	if c, ok := r.X.(*ast.CompositeLit); ok {
+		if litInCmdField(lit, c, st, field, fset) {
+			return true
+		}
 	}
 	// Named-variable form: `for _, tc := range cases` where
-	// `cases := []struct{...}{...}`. The lit must be in the `cmd` field of a
-	// composite element in a literal assigned to the range variable in the
-	// SAME function as the loop.
+	// `cases := []struct{...}{...}`. The lit must be in the `field` field of
+	// a row in a composite literal assigned to the range variable in the SAME
+	// function as the loop.
 	if id, ok := r.X.(*ast.Ident); ok {
 		fn := enclosingFunc(r, file, fset)
 		for _, c := range allComposites(file) {
@@ -237,7 +253,7 @@ func litInTable(lit *ast.BasicLit, file *ast.File, r *ast.RangeStmt, fset *token
 			if fn == nil || !compositeAssignedTo(c, id.Name, fn) {
 				continue
 			}
-			if litInCmdField(lit, c, fset) {
+			if litInCmdField(lit, c, st, field, fset) {
 				return true
 			}
 		}
@@ -245,28 +261,28 @@ func litInTable(lit *ast.BasicLit, file *ast.File, r *ast.RangeStmt, fset *token
 	return false
 }
 
-// litInCmdField reports whether lit is the value of the `cmd` field in some
-// element of composite literal c. For keyed elements the field name must be
-// "cmd". For unkeyed elements the lit's position in the element must match
-// the cmd field's index in the struct type.
-func litInCmdField(lit *ast.BasicLit, c *ast.CompositeLit, fset *token.FileSet) bool {
-	cmdIdx := cmdFieldIndex(c)
+// litInCmdField reports whether lit is the value of the field named field in
+// some row of the table composite c (whose struct element type is st). For
+// keyed rows the field name must match; for unkeyed rows the lit's position
+// in the row must match field's index in st.
+func litInCmdField(lit *ast.BasicLit, c *ast.CompositeLit, st *ast.StructType, field string, fset *token.FileSet) bool {
+	cmdIdx := structFieldIndex(st, field)
 	for i, el := range c.Elts {
 		if !inside(lit, el, fset) {
 			continue
 		}
-		// Keyed element: &ast.KeyValueExpr{Key: Ident("cmd"), Value: lit}
+		// Keyed row: &ast.KeyValueExpr{Key: Ident(field), Value: lit}.
 		if kv, ok := el.(*ast.KeyValueExpr); ok {
-			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "cmd" {
+			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == field {
 				return true
 			}
 			continue
 		}
-		// Unkeyed element: each row is itself a composite literal. The lit
-		// must be the cmdIdx-th field of the row.
+		// Unkeyed row: each row is itself a composite literal. The lit must
+		// be the cmdIdx-th field of the row.
 		if row, ok := el.(*ast.CompositeLit); ok {
-			for j, field := range row.Elts {
-				if !inside(lit, field, fset) {
+			for j, f := range row.Elts {
+				if !inside(lit, f, fset) {
 					continue
 				}
 				if cmdIdx >= 0 && j == cmdIdx {
@@ -283,29 +299,63 @@ func litInCmdField(lit *ast.BasicLit, c *ast.CompositeLit, fset *token.FileSet) 
 	return false
 }
 
-// cmdFieldIndex returns the index of the `cmd` field in the struct type of
-// composite literal c, or -1 if the struct type is unknown or has no cmd
-// field.
-func cmdFieldIndex(c *ast.CompositeLit) int {
-	arr, ok := c.Type.(*ast.ArrayType)
-	if !ok {
-		return -1
+// structFields expands struct type st's fields into a flat list, one entry
+// per named field: a `struct{ a, b string }` declaration is a single AST
+// Field whose Names list carries both `a` and `b`, so it expands to two
+// entries. The position of an entry is the field's index in the struct (the
+// order used by unkeyed composite-literal rows). Anonymous (embedded) fields
+// are skipped — they have no position a table row could fill.
+func structFields(st *ast.StructType) []string {
+	out := []string{}
+	if st == nil || st.Fields == nil {
+		return out
 	}
-	st, ok := arr.Elt.(*ast.StructType)
-	if !ok || st.Fields == nil {
-		return -1
+	for _, f := range st.Fields.List {
+		for _, n := range f.Names {
+			out = append(out, n.Name)
+		}
 	}
-	idx := -1
-	for i, f := range st.Fields.List {
-		if f.Names == nil || f.Names[0].Name != "cmd" {
+	return out
+}
+
+// structFieldIndex returns the index of the `string` field named field in
+// struct type st — counting the expanded field list, so a grouped
+// `struct{ a, cmd string }` places cmd at index 1 — or -1 if st has no such
+// field (or it is not a string field).
+func structFieldIndex(st *ast.StructType, field string) int {
+	for i, name := range structFields(st) {
+		if name != field {
 			continue
 		}
-		if stype, ok := f.Type.(*ast.Ident); ok && stype.Name == "string" {
-			idx = i
-			break
+		if f := structStringField(st, field); f {
+			return i
 		}
 	}
-	return idx
+	return -1
+}
+
+// structHasStringField reports whether struct type st has a `string` field
+// named field.
+func structHasStringField(st *ast.StructType, field string) bool {
+	return structFieldIndex(st, field) >= 0
+}
+
+// structStringField reports whether the field named field in st is a string
+// field.
+func structStringField(st *ast.StructType, field string) bool {
+	if st == nil || st.Fields == nil {
+		return false
+	}
+	for _, f := range st.Fields.List {
+		for _, n := range f.Names {
+			if n.Name != field {
+				continue
+			}
+			stype, ok := f.Type.(*ast.Ident)
+			return ok && stype.Name == "string"
+		}
+	}
+	return false
 }
 
 // enclosingFunc returns the *ast.FuncDecl (or *ast.FuncLit) that encloses
@@ -373,26 +423,25 @@ func compositeAssignedTo(c *ast.CompositeLit, name string, scope ast.Node) bool 
 	return found
 }
 
-// tableCmdField returns the field name the range loop's table carries as its
-// command: the table's struct element type has a `cmd string` field (inline
-// `range []struct{...}` or a named variable whose type is such a struct).
-// Returns "" if the table has no command field (a detector-only table).
-func tableCmdField(file *ast.File, r *ast.RangeStmt) string {
-	if st, ok := r.X.(*ast.CompositeLit); ok {
-		if t, ok := st.Type.(*ast.StructType); ok {
-			return cmdFieldName(t)
+// tableStructType returns the struct element type of the table the range
+// loop iterates — for an inline `range []struct{...}{...}` (the range
+// expression's composite has an *ast.ArrayType whose Elt is the struct) or a
+// named variable whose declaration initialises it with such a composite.
+// Returns nil if the loop does not range over a struct table.
+func tableStructType(file *ast.File, r *ast.RangeStmt) *ast.StructType {
+	if c, ok := r.X.(*ast.CompositeLit); ok {
+		if arr, ok := c.Type.(*ast.ArrayType); ok {
+			if st, ok := arr.Elt.(*ast.StructType); ok {
+				return st
+			}
 		}
 	}
-	// Named-variable form: `for _, tc := range cases` — resolve the
-	// variable's declared type (a composite literal whose element type is
-	// the struct).
 	if id, ok := r.X.(*ast.Ident); ok {
-		declType := declaredType(id.Name, file)
-		if t, ok := declType.(*ast.StructType); ok {
-			return cmdFieldName(t)
+		if st, ok := declaredType(id.Name, file).(*ast.StructType); ok {
+			return st
 		}
 	}
-	return ""
+	return nil
 }
 
 // declaredType returns the declared type of variable name in file (the
@@ -426,64 +475,56 @@ func declaredType(name string, file *ast.File) ast.Expr {
 	return result
 }
 
-// cmdFieldName returns the name of the `string` field named cmd in struct
-// type t, or "" if none exists.
-func cmdFieldName(t *ast.StructType) string {
-	if t.Fields == nil {
-		return ""
-	}
-	for _, f := range t.Fields.List {
-		if f.Names == nil || f.Names[0].Name != "cmd" {
-			continue
-		}
-		if stype, ok := f.Type.(*ast.Ident); ok && stype.Name == "string" {
-			return "cmd"
-		}
-	}
-	return ""
+// execCallsIn returns the shell-executing calls anywhere inside body —
+// directly in its statements and nested inside any function literals (the
+// common `t.Run(tc.name, func(t *testing.T) { bashCall(t, tc.cmd) })` shape).
+func execCallsIn(body ast.Node, file *ast.File, fset *token.FileSet) []*ast.CallExpr {
+	return execCallsInNode(body, fset)
 }
 
-// execCallsIn returns the shell-executing calls inside body.
-func execCallsIn(body ast.Node, file *ast.File, fset *token.FileSet) []*ast.CallExpr {
+// execCallsInNode returns the shell-executing calls inside node n, recursing
+// into function literals so calls in `t.Run(_, func() { bashCall(...) })`
+// closures are found.
+func execCallsInNode(n ast.Node, fset *token.FileSet) []*ast.CallExpr {
 	calls := []*ast.CallExpr{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		id, ok := identOf(call.Fun)
-		if !ok || !shellExecHelpers[id.Name] {
-			return true
-		}
-		if inside(call, body, fset) {
-			calls = append(calls, call)
+	ast.Inspect(n, func(x ast.Node) bool {
+		switch v := x.(type) {
+		case *ast.CallExpr:
+			if id, ok := identOf(v.Fun); ok && shellExecHelpers[id.Name] {
+				calls = append(calls, v)
+			}
+		case *ast.FuncLit:
+			calls = append(calls, execCallsInNode(v.Body, fset)...)
+			return false // don't double-count via the walk above
 		}
 		return true
 	})
 	return calls
 }
 
-// passesTableCmd reports whether call passes the loop's table command field
-// to its helper: some argument of call selects the table's cmd field on the
-// loop's value variable (`tc.cmd`).
-func passesTableCmd(call *ast.CallExpr, cmdField string, r *ast.RangeStmt) bool {
+// passedTableField reports the name of the table's command field that call
+// selects on the loop's value variable and passes to its helper — `tc.<field>`
+// for some argument of call — or ok=false if call passes no such field. The
+// field name comes from the call, not a hardcoded "cmd", so a table whose
+// command field is named `command` (passed as `tc.command`) is covered too.
+func passedTableField(call *ast.CallExpr, r *ast.RangeStmt) (string, bool) {
 	valName := ""
 	if id, ok := r.Value.(*ast.Ident); ok {
 		valName = id.Name
 	}
 	if valName == "" {
-		return false
+		return "", false
 	}
 	for _, arg := range call.Args {
 		sel, ok := arg.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != cmdField {
+		if !ok {
 			continue
 		}
 		if id, ok := sel.X.(*ast.Ident); ok && id.Name == valName {
-			return true
+			return sel.Sel.Name, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // inside reports whether node m's position span is inside node n's span.
