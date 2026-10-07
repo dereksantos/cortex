@@ -65,40 +65,69 @@ func TestBareSedInFlags(t *testing.T) {
 	portable := "sed -i" + ".bak"
 	src := "package guard\n\nfunc body(t *testing.T) {\n"
 	for _, tc := range []struct {
-		name string
-		body string
-		want bool // should the guard flag this file?
+		name     string
+		body     string // wrapped in `func body` when fullFile is empty
+		fullFile string // used verbatim when set (multi-function fixtures)
+		want     bool   // should the guard flag this file?
 	}{
-		{"executed bare sed -i", "bashCall(t, `" + bare + "'s/x/y/' main.go`)\n", true},
-		{"executed bare sed -i -e", "bashCall(t, `" + bare + "-e 's/x/y/' main.go`)\n", true},
-		{"executed portable sed -i.bak", "bashCall(t, `" + portable + " 's/x/y/' main.go`)\n", false},
+		{"executed bare sed -i", "bashCall(t, `" + bare + "'s/x/y/' main.go`)\n", "", true},
+		{"executed bare sed -i -e", "bashCall(t, `" + bare + "-e 's/x/y/' main.go`)\n", "", true},
+		{"executed portable sed -i.bak", "bashCall(t, `" + portable + " 's/x/y/' main.go`)\n", "", false},
 		{"detector table: bare form parsed, never executed", "cmds := []string{`" + bare + "'s/x/y/' f.go`}\n" +
-			"for _, cmd := range cmds {\n\tdetectInPlaceRewrites(cmd)\n}\n", false},
+			"for _, cmd := range cmds {\n\tdetectInPlaceRewrites(cmd)\n}\n", "", false},
 		{"detector table with tc.cmd field: commands are only parsed", "cases := []struct {\n\tname string\n\tcmd  string\n} {\n" +
 			"{\"bare form\", `" + bare + "'s/x/y/' f.go`},\n}\n" +
-			"for _, tc := range cases {\n\tdetectInPlaceRewrites(tc.cmd)\n}\n", false},
+			"for _, tc := range cases {\n\tdetectInPlaceRewrites(tc.cmd)\n}\n", "", false},
 		{"table whose tc.cmd IS executed: flagged", "cases := []struct {\n\tname string\n\tcmd  string\n} {\n" +
 			"{\"sed note\", `" + bare + "'s/x/y/' f.go && true`},\n}\n" +
-			"for _, tc := range cases {\n\tt.Run(tc.name, func(t *testing.T) {\n\t\tbashCall(t, tc.cmd)\n\t})\n}\n", true},
-		{"env-prefixed bare sed -i executed", "bashCall(t, `LC_ALL=C " + bare + "'s/x/y/' f.go`)\n", true},
+			"for _, tc := range cases {\n\tt.Run(tc.name, func(t *testing.T) {\n\t\tbashCall(t, tc.cmd)\n\t})\n}\n", "", true},
+		// Same name `cases` already declared in an EARLIER function of the file
+		// with a different struct: the table's struct must come from the
+		// loop's own composite, not a file-wide lookup (issue #228). The
+		// first test's cases has fields {in, want} — `structHasStringField`
+		// for field `cmd` would return false against that struct, causing a
+		// false pass if the guard looked up the type file-wide.
+		{"named table in a second function reuses the name: flagged", "",
+			"package guard\n\n" +
+				"func first(t *testing.T) {\n" +
+				"cases := []struct { in, want string }{ {`" + bare + "'s/x/y/' f.go`, `x`} }\n" +
+				"for _, tc := range cases { _ = tc }\n}\n\n" +
+				"func second(t *testing.T) {\n" +
+				"cases := []struct { name, cmd string }{{\"x\", `" + bare + "'s/x/y/' f.go`}}\n" +
+				"for _, tc := range cases { bashCall(t, tc.cmd) }\n}\n",
+			true},
+		{"file-scope var table whose tc.cmd IS executed: flagged", "",
+			"package guard\n\n" +
+				"var cases = []struct {\n\tname string\n\tcmd  string\n}{\n" +
+				"{\"var note\", `" + bare + "'s/x/y/' f.go`},\n}\n\n" +
+				"func body2(t *testing.T) {\n" +
+				"for _, tc := range cases { bashCall(t, tc.cmd) }\n}\n",
+			true},
+		{"env-prefixed bare sed -i executed", "bashCall(t, `LC_ALL=C " + bare + "'s/x/y/' f.go`)\n", "", true},
 		{"inline range table whose tc.cmd IS executed: flagged",
 			"for _, tc := range []struct{ name, cmd string }{{\"x\", `" + bare + "'s/x/y/' f.go`}} {\n" +
-				"\tbashCall(t, tc.cmd)\n}\n", true},
+				"\tbashCall(t, tc.cmd)\n}\n", "", true},
 		{"inline range table: bare form in a non-cmd column: not flagged",
 			"for _, tc := range []struct{ name, cmd string }{{`" + bare + "'s/x/y/' f.go`, `echo hi`}} {\n" +
-				"\tbashCall(t, tc.cmd)\n}\n", false},
-		{"sed without -i is a read: fine anywhere", "bashCall(t, `sed -n '1,10p' f.go`)\n", false},
-		{"cmd/cortex bashCall(id, command): flagged", "bashCall(\"c1\", \"" + bare + "'s/x/y/' f.go\")\n", true},
-		{"cmd/cortex bashCallResp(command): flagged", "bashCallResp(`" + bare + "'s/x/y/' f.go`)\n", true},
-		{"tools.Execute of a bash call: flagged", "Execute(context.Background(), bashCall(t, `" + bare + "'s/x/y/' f.go`), deps)\n", true},
-		{"cmd/cortex Execute of a bash call: flagged", "tools.Execute(context.Background(), bashCall(`" + bare + "'s/x/y/' f.go`), deps)\n", true},
-		{"call split across lines: flagged", "bashCall(t,\n\t`" + bare + "'s/x/y/' f.go`)\n", true},
-		{"helper called with the same name but no sed: not flagged", "bashCall(t, `echo ok`)\n", false},
-		{"a comment mentioning the bare form: not flagged", "bashCall(t, `echo ok`) // `" + bare + "'s/x/y/' f.go`\n", false},
+				"\tbashCall(t, tc.cmd)\n}\n", "", false},
+		{"sed without -i is a read: fine anywhere", "bashCall(t, `sed -n '1,10p' f.go`)\n", "", false},
+		{"cmd/cortex bashCall(id, command): flagged", "bashCall(\"c1\", \"" + bare + "'s/x/y/' f.go\")\n", "", true},
+		{"cmd/cortex bashCallResp(command): flagged", "bashCallResp(`" + bare + "'s/x/y/' f.go`)\n", "", true},
+		{"tools.Execute of a bash call: flagged", "Execute(context.Background(), bashCall(t, `" + bare + "'s/x/y/' f.go`), deps)\n", "", true},
+		{"cmd/cortex Execute of a bash call: flagged", "tools.Execute(context.Background(), bashCall(`" + bare + "'s/x/y/' f.go`), deps)\n", "", true},
+		{"call split across lines: flagged", "bashCall(t,\n\t`" + bare + "'s/x/y/' f.go`)\n", "", true},
+		{"helper called with the same name but no sed: not flagged", "bashCall(t, `echo ok`)\n", "", false},
+		{"a comment mentioning the bare form: not flagged", "bashCall(t, `echo ok`) // `" + bare + "'s/x/y/' f.go`\n", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := flagsBareSedIn(src + tc.body + "}\n"); got != tc.want {
-				t.Errorf("flagsBareSedIn(%q) = %v, want %v", tc.body, got, tc.want)
+			var source string
+			if tc.fullFile != "" {
+				source = tc.fullFile
+			} else {
+				source = src + tc.body + "}\n"
+			}
+			if got := flagsBareSedIn(source); got != tc.want {
+				t.Errorf("flagsBareSedIn() = %v, want %v (body %q)", got, tc.want, tc.body)
 			}
 		})
 	}
@@ -208,8 +237,19 @@ func tableCmdIsExecuted(file *ast.File, fset *token.FileSet, lit *ast.BasicLit) 
 		return true
 	})
 	for _, r := range ranges {
-		st := tableStructType(file, r)
-		if st == nil {
+		// The table is the composite the loop iterates: the inline
+		// `range []struct{...}{...}` expression itself, or the composite
+		// that declares the named variable it ranges over — resolved from
+		// the loop's own function scope (declaredTableComposite), never a
+		// file-wide lookup (test files reuse table names across functions).
+		var c *ast.CompositeLit
+		var st *ast.StructType
+		if cl, ok := r.X.(*ast.CompositeLit); ok {
+			c, st = cl, structEl(cl)
+		} else if id, ok := r.X.(*ast.Ident); ok {
+			c, st = declaredTableComposite(id.Name, enclosingFunc(r, file, fset), file)
+		}
+		if c == nil || st == nil {
 			continue
 		}
 		for _, call := range execCallsIn(r.Body, file, fset) {
@@ -217,7 +257,7 @@ func tableCmdIsExecuted(file *ast.File, fset *token.FileSet, lit *ast.BasicLit) 
 				if !structHasStringField(st, field) {
 					continue
 				}
-				if litInTable(lit, file, r, st, field, fset) {
+				if litInCmdField(lit, c, st, field, fset) {
 					return true
 				}
 			}
@@ -226,39 +266,18 @@ func tableCmdIsExecuted(file *ast.File, fset *token.FileSet, lit *ast.BasicLit) 
 	return false
 }
 
-// litInTable reports whether lit sits in the table range loop r iterates and
-// is the value of the field named field — the command field the loop passes
-// to a shell-executing call. That field may live in the loop's range
-// expression (an inline `range []struct{...}`) or in the composite literal
-// that initialises the named variable it ranges over.
-func litInTable(lit *ast.BasicLit, file *ast.File, r *ast.RangeStmt, st *ast.StructType, field string, fset *token.FileSet) bool {
-	// Inline form: `for _, tc := range []struct{...}{...}` — the range
-	// expression IS the table, and lit must be in the `field` column of a row
-	// (not merely anywhere in the expression).
-	if c, ok := r.X.(*ast.CompositeLit); ok {
-		if litInCmdField(lit, c, st, field, fset) {
-			return true
+// structEl returns the *ast.StructType element type of composite c when its
+// declared type is `[]struct{...}` (a named *ast.ArrayType), or nil.
+func structEl(c *ast.CompositeLit) *ast.StructType {
+	if c == nil {
+		return nil
+	}
+	if arr, ok := c.Type.(*ast.ArrayType); ok {
+		if st, ok := arr.Elt.(*ast.StructType); ok {
+			return st
 		}
 	}
-	// Named-variable form: `for _, tc := range cases` where
-	// `cases := []struct{...}{...}`. The lit must be in the `field` field of
-	// a row in a composite literal assigned to the range variable in the SAME
-	// function as the loop.
-	if id, ok := r.X.(*ast.Ident); ok {
-		fn := enclosingFunc(r, file, fset)
-		for _, c := range allComposites(file) {
-			if !inside(lit, c, fset) {
-				continue
-			}
-			if fn == nil || !compositeAssignedTo(c, id.Name, fn) {
-				continue
-			}
-			if litInCmdField(lit, c, st, field, fset) {
-				return true
-			}
-		}
-	}
-	return false
+	return nil
 }
 
 // litInCmdField reports whether lit is the value of the field named field in
@@ -383,96 +402,81 @@ func enclosingFunc(n ast.Node, file *ast.File, fset *token.FileSet) ast.Node {
 	return result
 }
 
-// allComposites returns every composite literal in file.
-func allComposites(file *ast.File) []*ast.CompositeLit {
-	out := []*ast.CompositeLit{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		if c, ok := n.(*ast.CompositeLit); ok {
-			out = append(out, c)
-		}
-		return true
-	})
-	return out
-}
-
-// compositeAssignedTo reports whether composite literal c is the value of an
-// assignment whose left-hand side is the ident name, within the given scope
-// node (a function body). scope may be nil (matches anywhere in the file).
-func compositeAssignedTo(c *ast.CompositeLit, name string, scope ast.Node) bool {
-	if scope == nil {
-		return false
-	}
-	found := false
-	ast.Inspect(scope, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Lhs) == 0 || len(as.Rhs) == 0 {
-			return true
-		}
-		id, ok := as.Lhs[0].(*ast.Ident)
-		if !ok || id.Name != name {
-			return true
-		}
-		if as.Rhs[0] == c {
-			found = true
-		}
-		return true
-	})
-	return found
-}
-
-// tableStructType returns the struct element type of the table the range
-// loop iterates — for an inline `range []struct{...}{...}` (the range
-// expression's composite has an *ast.ArrayType whose Elt is the struct) or a
-// named variable whose declaration initialises it with such a composite.
-// Returns nil if the loop does not range over a struct table.
-func tableStructType(file *ast.File, r *ast.RangeStmt) *ast.StructType {
-	if c, ok := r.X.(*ast.CompositeLit); ok {
-		if arr, ok := c.Type.(*ast.ArrayType); ok {
-			if st, ok := arr.Elt.(*ast.StructType); ok {
-				return st
+// declaredTableComposite finds the composite literal that initialises a
+// slice-of-struct table named name — a `cases := []struct{...}{...}`
+// assignment or a `var cases = []struct{...}{...}` declaration — scoped to
+// enclosing function fn (or file scope when fn is nil). It returns the
+// composite (whose Type is the slice *ast.ArrayType) and its element struct
+// type, or nil if no such declaration exists in that scope. A variable
+// whose declaration does not initialise a composite — or whose name is
+// shadowed by an earlier, differently-typed declaration in another function
+// — is resolved from this declaration only: test files reuse `cases` and
+// `tests` across functions, so a file-wide first-match lookup can return a
+// struct that belongs to a different test (issue #228).
+func declaredTableComposite(name string, fn ast.Node, file *ast.File) (*ast.CompositeLit, *ast.StructType) {
+	// Search the enclosing function first (local declarations), then file
+	// scope (package-level var declarations). Test files reuse names like
+	// `cases` across functions, so the local declaration shadows any file-scope
+	// one with the same name; a loop in function A must not resolve to a table
+	// declared in function B even if B appears earlier in the file (issue #228).
+	search := func(scope ast.Node) *ast.CompositeLit {
+		var found *ast.CompositeLit
+		ast.Inspect(scope, func(n ast.Node) bool {
+			if found != nil {
+				return false
 			}
-		}
+			var v *ast.CompositeLit
+			switch d := n.(type) {
+			case *ast.AssignStmt:
+				if len(d.Lhs) == 0 || len(d.Rhs) == 0 {
+					return true
+				}
+				id, ok := d.Lhs[0].(*ast.Ident)
+				if !ok || id.Name != name {
+					return true
+				}
+				if c, ok := d.Rhs[0].(*ast.CompositeLit); ok {
+					v = c
+				}
+			case *ast.ValueSpec:
+				for i, nameId := range d.Names {
+					if nameId.Name != name || i >= len(d.Values) {
+						continue
+					}
+					if c, ok := d.Values[i].(*ast.CompositeLit); ok {
+						v = c
+						break
+					}
+				}
+			default:
+				return true
+			}
+			if v == nil {
+				return true
+			}
+			if arr, ok := v.Type.(*ast.ArrayType); ok {
+				if _, ok := arr.Elt.(*ast.StructType); ok {
+					found = v
+					return false
+				}
+			}
+			return true
+		})
+		return found
 	}
-	if id, ok := r.X.(*ast.Ident); ok {
-		if st, ok := declaredType(id.Name, file).(*ast.StructType); ok {
-			return st
-		}
+	var found *ast.CompositeLit
+	if fn != nil {
+		found = search(fn)
 	}
-	return nil
-}
-
-// declaredType returns the declared type of variable name in file (the
-// element type of the slice it was initialised with). Returns nil if the
-// variable is not declared in this file as a composite literal.
-func declaredType(name string, file *ast.File) ast.Expr {
-	var result ast.Expr
-	ast.Inspect(file, func(n ast.Node) bool {
-		if result != nil {
-			return false
-		}
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Lhs) == 0 || len(as.Rhs) == 0 {
-			return true
-		}
-		id, ok := as.Lhs[0].(*ast.Ident)
-		if !ok || id.Name != name {
-			return true
-		}
-		lit, ok := as.Rhs[0].(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		if arr, ok := lit.Type.(*ast.ArrayType); ok {
-			result = arr.Elt
-		} else {
-			result = lit.Type
-		}
-		return false
-	})
-	return result
+	if found == nil {
+		found = search(file)
+	}
+	if found == nil {
+		return nil, nil
+	}
+	arr := found.Type.(*ast.ArrayType)
+	st, _ := arr.Elt.(*ast.StructType)
+	return found, st
 }
 
 // execCallsIn returns the shell-executing calls anywhere inside body —
