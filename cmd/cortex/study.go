@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/dereksantos/cortex/internal/outline"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -158,7 +159,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 		// `cortex study` with no parent call), and the timestamp gutter keeps
 		// it on the same left margin as every other line in the transcript.
 		fmt.Println(tools.TimestampPrefix() + tools.IndentPrefix() +
-			withColor(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), green))
+			style.Paint(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), style.Action))
 	}
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }

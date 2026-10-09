@@ -9,18 +9,19 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
 func compactNow(session *CortexSession, reason string) {
-	fmt.Println(withColor(reason+" - compacting via study...", yellow))
+	fmt.Println(style.Paint(reason+" - compacting via study...", style.Warn))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if err := session.Compact(ctx); err != nil {
 		fmt.Printf("compact: %v\n", err)
 		return
 	}
-	fmt.Println(withColor("compacted -> session "+session.SessionID, gray))
+	fmt.Println(style.Paint("compacted -> session "+session.SessionID, style.Dim))
 }
 
 // runStudyCLI runs one-off study. project, when non-empty, resolves via the

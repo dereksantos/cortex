@@ -16,6 +16,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/loopui"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -171,21 +172,6 @@ var curationBudgetTokens = tools.DefaultLimits().CurationBudgetTokens
 // promptGlyph is the input affordance at the end of the status line.
 const promptGlyph = tools.PromptGlyph
 
-// Color palette and the NO_COLOR-aware wrapper live in the ui package;
-// aliased here so the many call sites in main.go read unchanged.
-const (
-	red     = tools.Red
-	cyan    = tools.Cyan
-	green   = tools.Green
-	blue    = tools.Blue
-	magenta = tools.Magenta
-	yellow  = tools.Yellow
-	gray    = tools.Gray
-	reset   = tools.Reset
-)
-
-func withColor(v string, c string) string { return tools.Color(v, c) }
-
 type Spinner = loopui.Spinner
 
 func NewSpinner() *Spinner { return loopui.NewSpinner() }
@@ -235,7 +221,7 @@ var (
 
 // printAvailableTools prints the list of available tools to stdout.
 func printAvailableTools() {
-	fmt.Println(withColor("Available tools:", cyan))
+	fmt.Println(style.Paint("Available tools:", style.Accent))
 	for _, tool := range tools.All {
 		fmt.Printf("  - %s\n", tool.Function.Name)
 	}
@@ -258,7 +244,7 @@ var helpLines = []string{
 // printHelp lists the slash commands, plain text, one per line — matching
 // the REPL's plain style (no icons; ANSI color only).
 func printHelp() {
-	fmt.Println(withColor("Commands:", cyan))
+	fmt.Println(style.Paint("Commands:", style.Accent))
 	for _, line := range helpLines {
 		fmt.Println("  " + line)
 	}
@@ -291,12 +277,12 @@ var usageLines = []string{
 func printUsage() {
 	fmt.Println("cortex " + version())
 	fmt.Println()
-	fmt.Println(withColor("Usage:", cyan))
+	fmt.Println(style.Paint("Usage:", style.Accent))
 	for _, line := range usageLines {
 		fmt.Println("  " + line)
 	}
 	fmt.Println()
-	fmt.Println(withColor("Flags:", cyan))
+	fmt.Println(style.Paint("Flags:", style.Accent))
 	fmt.Println("  --help, -h        show this list")
 	fmt.Println("  --version, -v     print the version and exit")
 	fmt.Println("  --tools           list the agent's registered tools at startup")
@@ -500,7 +486,7 @@ func main() {
 	// One static hint after the greeting, every run (not just first-run) — the
 	// discoverability surface for /help now that the REPL carries no icon set
 	// to hint at itself visually.
-	fmt.Println(withColor("type /help for commands", gray))
+	fmt.Println(style.Paint("type /help for commands", style.Dim))
 
 	// Interactive terminals get the raw-mode line editor (arrows, editing,
 	// bracketed paste, ESC-to-interrupt). Piped/redirected input — tests, CI,
@@ -606,7 +592,7 @@ func main() {
 		// /clear resets the conversation; /compact distills it via study.
 		if input == "/clear" {
 			session.Clear()
-			fmt.Println(withColor("cleared -> session "+session.SessionID, gray))
+			fmt.Println(style.Paint("cleared -> session "+session.SessionID, style.Dim))
 			continue
 		}
 		if input == "/compact" {
@@ -699,11 +685,11 @@ func main() {
 				compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
 			}
 		case errors.Is(err, context.Canceled):
-			fmt.Println(withColor("interrupted", yellow))
+			fmt.Println(style.Paint("interrupted", style.Warn))
 		default:
 			fmt.Printf("turn error: %v\n", err)
 			if d := diagnoseModelError(err); d != "" {
-				fmt.Println(withColor(d, yellow))
+				fmt.Println(style.Paint(d, style.Warn))
 			}
 			// An overflow error names the code model's real window: learn it
 			// (the gauge and read_file guard self-correct, C2) and compact so
@@ -720,12 +706,12 @@ func main() {
 	// Report and record the session. emitSessionMetrics rides the eval journal class.
 	if session.turns > 0 {
 		session.emitSessionMetrics()
-		fmt.Println(withColor(session.sessionSummary(), gray))
+		fmt.Println(style.Paint(session.sessionSummary(), style.Dim))
 		// Pre-fill the resume command with this session's id so picking it back
 		// up is copy-paste, not a hunt through .cortex/sessions/.
 		if session.SessionID != "" {
-			fmt.Println(withColor(fmt.Sprintf("resume: %s resume %s", invokedName(), session.SessionID), gray))
+			fmt.Println(style.Paint(fmt.Sprintf("resume: %s resume %s", invokedName(), session.SessionID), style.Dim))
 		}
 	}
-	fmt.Println(withColor("exiting", gray))
+	fmt.Println(style.Paint("exiting", style.Dim))
 }

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // ansiRe matches the SGR codes Color emits. Every assertion here runs on
@@ -219,7 +221,7 @@ func TestRenderDiffColorPaths(t *testing.T) {
 		defer restoreColor(t, false)()
 		got := renderDiff("a\n", "b\n", diffOptions{})
 		joined := strings.Join(got, "\n")
-		if !strings.Contains(joined, Green) || !strings.Contains(joined, Red) {
+		if !strings.Contains(joined, string(style.OK)) || !strings.Contains(joined, string(style.Err)) {
 			t.Errorf("want green + red in colored output, got %q", joined)
 		}
 	})
@@ -237,12 +239,10 @@ func TestRenderDiffColorPaths(t *testing.T) {
 	})
 }
 
-// restoreColor pins colorDisabled for one test and restores it after.
+// restoreColor pins NO_COLOR behavior for one test and restores it after.
 func restoreColor(t *testing.T, disabled bool) func() {
 	t.Helper()
-	prev := colorDisabled
-	colorDisabled = disabled
-	return func() { colorDisabled = prev }
+	return style.ForceColor(!disabled)
 }
 
 // --- the tools that print diffs -----------------------------------------

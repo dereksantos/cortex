@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -69,7 +70,7 @@ func (cs *CortexSession) SummarizeText(ctx context.Context, content, goal string
 
 	// Map: summarize each chunk in order.
 	if !cs.quiet {
-		fmt.Println(withColor(fmt.Sprintf("  run: summarize via %s (%d chunks)", cs.Study.Model, len(chunks)), green))
+		fmt.Println(style.Paint(fmt.Sprintf("  run: summarize via %s (%d chunks)", cs.Study.Model, len(chunks)), style.Action))
 	}
 	partials := make([]string, 0, len(chunks))
 	for i, ch := range chunks {

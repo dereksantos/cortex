@@ -283,5 +283,6 @@ go test ./...                # full suite
 - `internal/outline/` — the structural map (`Outline`/`Render`; `go/ast` + regex tiers, breadth-first to budget)
 - `internal/journal/` — append-only event log (incl. `study.result` telemetry)
 - `internal/shellrisk/` — command risk classifier
+- `internal/style/` — terminal styling: semantic color roles (`Dim`/`Accent`/`Action`/`OK`/`Warn`/`Err`), NO_COLOR, and width helpers (`Width`/`Clip`/`Justify`/`Wrap`); pick a role by meaning, never a hue ([`docs/tui-polish.md`](docs/tui-polish.md))
 - `pkg/llm/` — LLM providers
 - `pkg/config/` — layered config

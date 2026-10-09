@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // printFileDiff prints the diff of a file change under the tool-action line
@@ -32,7 +34,7 @@ func printFileDiff(deps Quieter, before, after string) {
 	if deps.Quiet() || richRenderDisabled {
 		return
 	}
-	emitLines(renderDiff(before, after, diffOptions{Width: termWidth(), Indent: indentPrefix()}))
+	emitLines(renderDiff(before, after, diffOptions{Width: style.TermWidth(), Indent: indentPrefix()}))
 }
 
 // emitLines writes already-rendered lines to the terminal — or, inside a
@@ -204,13 +206,13 @@ func (o diffOptions) body(rows []diffRow) []string {
 // note renders a gray one-line remark (the new-file/no-change header, the
 // elision count, a degradation notice).
 func (o diffOptions) note(s string) string {
-	return Color(truncatePlain(o.prefix()+s, o.Width), Gray)
+	return style.Paint(truncatePlain(o.prefix()+s, o.Width), style.Dim)
 }
 
 // hunkHeader renders the standard unified-diff position header.
 func (o diffOptions) hunkHeader(h hunk) string {
 	s := fmt.Sprintf("@@ -%d,%d +%d,%d @@", h.oldStart, h.oldCount, h.newStart, h.newCount)
-	return Color(truncatePlain(o.prefix()+s, o.Width), Gray)
+	return style.Paint(truncatePlain(o.prefix()+s, o.Width), style.Dim)
 }
 
 // row renders one diff row: line number, marker, text. Removed rows carry the
@@ -226,11 +228,11 @@ func (o diffOptions) row(r diffRow, numW int) string {
 	plain = truncatePlain(plain, o.Width)
 	switch r.op {
 	case '+':
-		return Color(plain, Green)
+		return style.Paint(plain, style.OK)
 	case '-':
-		return Color(plain, Red)
+		return style.Paint(plain, style.Err)
 	default:
-		return Color(plain, Gray)
+		return style.Paint(plain, style.Dim)
 	}
 }
 
@@ -455,12 +457,5 @@ func truncatePlain(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	r := []rune(s)
-	if len(r) <= width {
-		return s
-	}
-	if width == 1 {
-		return "…"
-	}
-	return string(r[:width-1]) + "…"
+	return style.Clip(s, width)
 }

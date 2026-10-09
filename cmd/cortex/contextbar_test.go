@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // TestRenderContextBarBlocks pins exact rendered strings for representative
@@ -289,16 +290,16 @@ func TestColoredGaugeZonesColorsEachZoneDifferently(t *testing.T) {
 	tailStr := humanK(cs.tailTokens())
 	pressure := ctxColor(cs.LastPromptTokens, cs.windowSize())
 
-	if !strings.Contains(got, gray+headStr) {
+	if !strings.Contains(got, string(style.Dim)+headStr) {
 		t.Errorf("coloredGauge() = %q, want gray to wrap the head number %q", got, headStr)
 	}
-	if !strings.Contains(got, gray+zoneDivider) {
+	if !strings.Contains(got, string(style.Dim)+zoneDivider) {
 		t.Errorf("coloredGauge() = %q, want gray to wrap the '|' divider", got)
 	}
-	if !strings.Contains(got, pressure+tailStr) {
+	if !strings.Contains(got, string(pressure)+tailStr) {
 		t.Errorf("coloredGauge() = %q, want the pressure color %q to wrap the tail number %q", got, pressure, tailStr)
 	}
-	if idx := strings.Index(got, gray); idx == -1 || idx > strings.Index(got, pressure+tailStr) {
+	if idx := strings.Index(got, string(style.Dim)); idx == -1 || idx > strings.Index(got, string(pressure)+tailStr) {
 		t.Errorf("coloredGauge() = %q, want gray (head) to precede the pressure-colored tail", got)
 	}
 }

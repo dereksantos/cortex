@@ -12,6 +12,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/fslock"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 const (
@@ -167,26 +168,26 @@ func (cs *CortexSession) showLoadedContext(id string) {
 	// Only show demotion info if we have turns (not a fresh session)
 	if totalTurns > 0 {
 		fmt.Printf("%s  %d turns (%d demoted, %d hydrated tail)\n",
-			withColor("context:", green),
+			style.Paint("context:", style.Action),
 			totalTurns, demotedTurns, hydratedTurns)
 	}
 
 	// Show message count
 	fmt.Printf("%s  %d messages\n",
-		withColor("messages:", green),
+		style.Paint("messages:", style.Action),
 		msgCount)
 
 	// Show session age if available
 	if info.ModTime.IsZero() {
 		fmt.Printf("%s  %s\n",
-			withColor("session:", gray),
-			withColor(id, cyan))
+			style.Paint("session:", style.Dim),
+			style.Paint(id, style.Accent))
 	} else {
 		age := relTime(info.ModTime)
 		fmt.Printf("%s  %s (%s old)\n",
-			withColor("session:", gray),
-			withColor(id, cyan),
-			withColor(age, gray))
+			style.Paint("session:", style.Dim),
+			style.Paint(id, style.Accent),
+			style.Paint(age, style.Dim))
 	}
 }
 
@@ -530,13 +531,13 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 func (cs *CortexSession) printSessions() {
 	infos, err := listSessions(cs.SessionsDir(), 15)
 	if err != nil || len(infos) == 0 {
-		fmt.Println(withColor("no sessions found", gray))
+		fmt.Println(style.Paint("no sessions found", style.Dim))
 		return
 	}
 	for _, s := range infos {
 		marker := "  "
 		if s.ID == cs.SessionID {
-			marker = withColor("> ", green)
+			marker = style.Paint("> ", style.OK)
 		}
 		preview := s.First
 		if preview == "" {
@@ -547,7 +548,7 @@ func (cs *CortexSession) printSessions() {
 		}
 		fmt.Printf("%s%s  %-8s  %2d msgs  %s\n", marker, s.ID, relTime(s.ModTime), s.Messages, preview)
 	}
-	fmt.Println(withColor(fmt.Sprintf("resume at startup: %s resume <id>", invokedName()), gray))
+	fmt.Println(style.Paint(fmt.Sprintf("resume at startup: %s resume <id>", invokedName()), style.Dim))
 }
 
 func (cs *CortexSession) Clear() {
