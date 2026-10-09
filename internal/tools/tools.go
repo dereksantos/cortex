@@ -589,7 +589,7 @@ var EditFile = newTool(FunctionEditFile,
 		"view, copy from it — so you can correct the edit without a separate read; "+
 		"a not-found names that your old_string does not match the file as it is "+
 		"now, without asserting a cause (it may be stale, or mistyped or copied "+
-		"from elsewhere). If the only difference is whitespace (e.g. gofmt "+
+		"from elsewhere). If the only difference is whitespace (e.g. a formatter "+
 		"re-aligned the span's interior spacing), the error says \"only whitespace differs\", "+
 		"points at that region's current lines, and refuses to land the edit — copy "+
 		"the region exactly and retry.",
@@ -658,7 +658,7 @@ var OutlineTool = newTool(FunctionOutline,
 var Bash = newTool(FunctionBash,
 	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit. In-place file rewrites (sed -i, ed, perl -pi, awk, python -c, > redirects) and file reads (cat, head, tail, tac, sed, grep) are reported on the result — use edit_file or write_file for edits (diff display + post-edit hook) and read_file/outline/grep for reads (sized, quote-aware readers that a bash shell command skips).",
 	objectSchema(map[string]any{
-		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
+		"command": stringProp("The command to run, e.g. 'make test' or 'ls src'."),
 	}, "command"))
 
 // RemoveTool is the remove_path tool declaration: deletes a file or
@@ -2223,7 +2223,7 @@ func whitespaceOnlyDiffError(fileLines []string, start, k int) error {
 		}
 		fmt.Fprintf(&b, "\n  %s%d: %s", marker, i+1, line)
 	}
-	return fmt.Errorf("old_string not found: only whitespace differs from the file (near line %d) — the content is the same but its whitespace is stale (e.g. gofmt re-aligned it after you read it)%s%s", line1, b.String(), notFoundDirective)
+	return fmt.Errorf("old_string not found: only whitespace differs from the file (near line %d) — the content is the same but its whitespace is stale (e.g. a formatter re-aligned it after you read it)%s%s", line1, b.String(), notFoundDirective)
 }
 
 // notFoundDirective is appended to every "old_string not found" failure so a

@@ -157,12 +157,11 @@ func TestAgentModelArg(t *testing.T) {
 // Agent subagent's system prompt — the headless implementation loop, where
 // Risky shell commands count as Blocked and there is no approver, so this is
 // where blocked checks happen most often. The prompt must carry the same
-// intent as the shared blocked-check principle (cmd/cortex's
-// blockedCheckPrinciple): a blocked or refused check leaves its result
-// unknown, no guessing, no proxy check standing in for it, and anything
-// unverified marked in the report. The keywords are asserted against the
-// Agent prompt only — deliberately loose, rewrite-tolerant checks (the same
-// style as TestDefaultPromptEncodesBlockedCheckGuidance), not exact wording —
+// intent as the base system prompt's "if a check couldn't run, its result is
+// unknown": a blocked or refused check leaves its result unknown, no
+// guessing, no proxy check standing in for it, and anything unverified
+// marked in the report. The keywords are asserted against the Agent prompt
+// only — deliberately loose, rewrite-tolerant checks, not exact wording —
 // so the guidance can rephrase without breaking the test, but a revert that
 // drops the idea fails loudly.
 func TestAgentPromptEncodesBlockedCheckGuidance(t *testing.T) {

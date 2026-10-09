@@ -240,7 +240,7 @@ func StudySeed(goal, path, ol string) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "GOAL: %s\nPATH: %s\n\n", goal, path)
-	fmt.Fprintf(&b, "Search scope: keep grep/outline/read_file under PATH (%s). Start with grep for symbols, strings, facts, logs, journals, or multi-file questions; use outline when structure is missing. If the goal asks what/which file, grep for filename-shaped text first (for example `[A-Za-z0-9_.-]+\\.(go|md|json|yaml|toml)`).\n\n", path)
+	fmt.Fprintf(&b, "Search scope: keep grep/outline/read_file under PATH (%s). Start with grep for symbols, strings, facts, logs, journals, or multi-file questions; use outline when structure is missing. If the goal asks what/which file, grep for filename-shaped text first (for example `[A-Za-z0-9_.-]+\\.[A-Za-z0-9]+`).\n\n", path)
 	if strings.TrimSpace(ol) != "" {
 		b.WriteString("OUTLINE (each unit's line span is what you read with read_file):\n\n")
 		b.WriteString(ol)
