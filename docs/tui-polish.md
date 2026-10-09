@@ -1,6 +1,12 @@
 # REPL Polish — Scope
 
-> **Status. PROPOSED (2026-10-09).** Nothing here is built. Visual mock of the
+> **Status. Track 1 BUILT (2026-10-09, branch `feat/repl-polish-foundation`);
+> tracks 2–5 PROPOSED.** Track 1 landed as: `internal/style` (roles, NO_COLOR,
+> `Width`/`Clip`/`Justify`/`Wrap`); literal-string render goldens in
+> `internal/tools/render_golden_test.go` and `cmd/cortex/render_golden_test.go`
+> (clock seam `tools.Now`); the startup header in `cmd/cortex/header.go`. The
+> goldens surfaced one gap for track 2: a nested tool line's elapsed/summary
+> suffix is never clipped, so it overruns narrow terminals. Visual mock of the
 > proposed turn, startup, input, picker and confirm surfaces:
 > <https://claude.ai/artifact/5a9HJ1ZEqhEc3yhvedRD4Q> (hand-written lines, not
 > real output).

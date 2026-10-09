@@ -206,7 +206,7 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 // formatSubagentDone renders the closing line of a subagent block: calls,
 // elapsed, anything suppressed, and the digest size or the error.
 func formatSubagentDone(f *nestFrame, elapsed time.Duration, digest string, err error) string {
-	parts := []string{countNoun(f.calls, "call"), fmtElapsed(elapsed)}
+	parts := []string{CountNoun(f.calls, "call"), fmtElapsed(elapsed)}
 	if f.suppressed > 0 {
 		parts = append(parts, fmt.Sprintf("%d not shown", f.suppressed))
 	}
@@ -244,7 +244,7 @@ func summarizeResult(out string, err error) string {
 		return "no output"
 	}
 	if n := strings.Count(t, "\n") + 1; n > 1 {
-		return countNoun(n, "line") + ", " + humanSize(len(out))
+		return CountNoun(n, "line") + ", " + humanSize(len(out))
 	}
 	return style.Clip(t, summaryTextCap)
 }

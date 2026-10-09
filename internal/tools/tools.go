@@ -1164,7 +1164,7 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
 		printToolAction(deps, fmt.Sprintf("edit_file(%s)", a.Path))
 	} else {
-		printToolAction(deps, fmt.Sprintf("edit_file(%s, %s)", a.Path, countNoun(len(edits), "edit")))
+		printToolAction(deps, fmt.Sprintf("edit_file(%s, %s)", a.Path, CountNoun(len(edits), "edit")))
 	}
 
 	// Filesystem access goes through the session's workdir anchor; messages
@@ -1202,14 +1202,14 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// applied result), so the diff costs nothing but the rendering.
 	printFileDiff(deps, string(data), content)
 	if multi {
-		return fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), nil
+		return fmt.Sprintf("edited %s (%s, %s)", a.Path, CountNoun(len(edits), "edit"), CountNoun(total, "replacement")), nil
 	}
-	return fmt.Sprintf("edited %s (%s)", a.Path, countNoun(total, "replacement")), nil
+	return fmt.Sprintf("edited %s (%s)", a.Path, CountNoun(total, "replacement")), nil
 }
 
-// countNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the
-// nouns used here (edit, replacement).
-func countNoun(n int, noun string) string {
+// CountNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the
+// nouns used here (edit, replacement, call, line, turn, note).
+func CountNoun(n int, noun string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, noun)
 	}

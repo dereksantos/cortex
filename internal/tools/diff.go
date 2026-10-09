@@ -128,16 +128,16 @@ func renderDiff(before, after string, opt diffOptions) []string {
 		return []string{opt.note(fmt.Sprintf("binary content, %d bytes → %d bytes", len(before), len(after)))}
 	case len(before)+len(after) > diffMaxInputBytes:
 		return []string{opt.note(fmt.Sprintf("%s → %s (too large to diff)",
-			countNoun(len(splitLines(before)), "line"), countNoun(len(splitLines(after)), "line")))}
+			CountNoun(len(splitLines(before)), "line"), CountNoun(len(splitLines(after)), "line")))}
 	}
 
 	a, b := splitLines(before), splitLines(after)
 	var out []string
 	switch {
 	case before == "":
-		out = append(out, opt.note("new file, "+countNoun(len(b), "line")))
+		out = append(out, opt.note("new file, "+CountNoun(len(b), "line")))
 	case after == "":
-		out = append(out, opt.note("emptied, "+countNoun(len(a), "line")+" removed"))
+		out = append(out, opt.note("emptied, "+CountNoun(len(a), "line")+" removed"))
 	}
 
 	rows := diffRows(a, b)
