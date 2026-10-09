@@ -64,58 +64,26 @@ const planStepCap = 6
 const planStepFloor = 2
 
 // noReproMarker is the output-shape convention a no-repro step reply must
-// follow (issue #178). The principle (prompt.go's verifyBeforeFixPrinciple)
-// says a reported problem that doesn't reproduce is finished by SAYING so
-// with the evidence — but it does not name the words to say. This marker is
-// those words: each step prompt (planStepPrompt) tells the model to lead such
-// a reply with "Not reproduced:" + the evidence, and noReproNote anchors on
-// the same words. The principle tells the model WHAT to conclude; this
-// convention tells it HOW to write that conclusion down so the note survives
-// into the per-step report and the later steps' prompts — one phrase, two
-// places (each step prompt and the probe), no procedure.
+// follow (issue #178). The base system prompt says a reported problem that
+// doesn't reproduce is finished by reporting so with the evidence, but does
+// not name the words to say. This marker is those words: each step prompt
+// (planStepPrompt) tells the model to lead such a reply with "Not
+// reproduced:" + the evidence, and noReproNote anchors on the same words, so
+// the note survives into the per-step report and the later steps' prompts.
 //
 // The marker belongs only in the step prompts, NOT in the planning
-// instruction: the planning turn has no "step", cannot run tools, and its
-// output-shape rules ("nothing before the list") contradict a reply led by
-// "Not reproduced:" — a model that followed the marker there would produce a
-// plan parsePlan cannot parse, and the run would silently fall back to a
-// single turn. The planning prompt's verifyBeforeFixPrinciple line is enough
-// to shape the plan; the output convention only means something on a step
-// turn that has tools.
+// instruction: the planning turn cannot run tools, and its output-shape
+// rules ("nothing before the list") contradict a reply led by "Not
+// reproduced:" — a model that followed the marker there would produce a
+// plan parsePlan cannot parse.
 const noReproMarker = `If this step's outcome is that the reported problem does not reproduce, begin your reply with "Not reproduced:" followed by the evidence (the command you ran and what it showed).`
 
 // planModeInstruction is the planning turn's prompt. It fixes the output
 // shape parsePlan relies on: bare "N. text" lines, one per step, 2–6 of
 // them. It asks for no tool use and no prose beyond the list so the reply
-// stays mechanically parseable.
-//
-// The verify-before-fix principle (issue #178) restates prompt.go's
-// verifyBeforeFixPrinciple — the same text every other turn gets in the base
-// system prompt — as a single principle, not a task-shaped procedure:
-// prompts state principles, and the procedure a model draws from them is its
-// own. The planning turn is one model call, so it never reads its own
-// earlier output; restating the principle in the prompt (rather than relying
-// on the system prompt alone) keeps the plan shaped around observable bugs
-// while the output-shape rules above stay the only other instruction in the
-// turn.
-//
-// The test-target and spec-test principles (issue #225) restate prompt.go's
-// testTargetPrinciple and specTestPrinciple the same way: the plan's steps are
-// where a lower-level helper can be named in place of the user-facing path a
-// criterion names (testTargetPrinciple — test the surface, not the helper it
-// routes through), and a planned step that bends a failing acceptance test to
-// pass is a deviation owed a report (specTestPrinciple — a test written from
-// the issue's criteria is a spec). Both ride with the plan so every step turn
-// inherits the obligation even after demotion folds the planning turn out of
-// view.
-//
-// It also carries the comment-truth principle (issue #231): a planned step is
-// where a comment or summary claim can be written ahead of the behavior it
-// describes — the step's text (or the summary written for it) states the
-// intent before the code exists, and demotion at the turn boundaries (#131)
-// folds the planning turn out of view, so the standing principle rides with
-// the plan (same const the base system prompt carries) to keep the obligation
-// alive across every step.
+// stays mechanically parseable. It restates none of the working principles:
+// the planning turn runs through cs.turn, so the base system prompt (which
+// carries them) rides along, and the system message is never demoted.
 const planModeInstruction = `You are planning a multi-part task. First produce ONLY a plan, then I will execute each step as its own turn.
 
 Respond with a numbered list of steps, one per line, in this exact shape:
@@ -128,11 +96,7 @@ Rules:
 - Give 2 to 6 steps (a small, ordered list — no more than 6).
 - One line per step, starting at 1; nothing before the list, nothing after.
 - No prose, no headings, no bullet markers — only "N. step" lines.
-- Do not use any tools; just output the numbered list.
-- ` + verifyBeforeFixPrinciple + `
-- ` + testTargetPrinciple + `
-- ` + specTestPrinciple + `
-- ` + commentsTruthPrinciple + ``
+- Do not use any tools; just output the numbered list.`
 
 // planStepLineRe matches one ordered step: a line whose leading "N. " (a
 // number, a dot, then at least one space) is followed by step text. The
@@ -469,13 +433,13 @@ func (cs *CortexSession) TurnWithPlan(ctx context.Context, task string, attachme
 	stepResults := make([]StepResult, 0, len(steps))
 	for i, step := range steps {
 		// Issue #178: every step prompt carries the ORIGINAL task (not just
-		// the step line) AND the verify-before-fix principle: demotion at
-		// the turn boundaries (#131) can fold the planning turn — the only
-		// place the full task text lived — into the outline, and a later step
-		// must not run blind to the overall goal or the requirements the step
-		// text didn't restate (#94's failure mode). planStepPrompt restates
-		// both so each step turn (tools present) carries them, together with
-		// the earlier done steps' notes (earlierNotes).
+		// the step line): demotion at the turn boundaries (#131) can fold the
+		// planning turn — the only place the full task text lived — into the
+		// outline, and a later step must not run blind to the overall goal or
+		// the requirements the step text didn't restate (#94's failure mode).
+		// planStepPrompt restates it so each step turn (tools present)
+		// carries it, together with the earlier done steps' notes
+		// (earlierNotes).
 		//
 		// Issue #220: the step runs through stepTurn — the checklist is NOT
 		// injected into the step's prompt (a step that accounts for the whole
@@ -631,54 +595,13 @@ func noReproNote(reply string) string {
 }
 
 // planStepPrompt builds the prompt for ONE planned step's turn (issue #178).
-// It restates BOTH the overall task and the verify-before-fix principle
-// (prompt.go's verifyBeforeFixPrinciple, already in the base system prompt),
-// so each step turn (tools present) carries them even after demotion folds
-// the planning turn into the outline (#131 / #94's failure mode). The
-// step's tools are present here (unlike the planning turn), so the model can
-// and should run the test or command that confirms the problem.
-//
-// It also carries the no-repro output-shape convention (noReproMarker): the
-// principle says a non-reproducing problem is finished by saying so with the
-// evidence, but doesn't name the words — the marker tells the model to lead
-// such a reply with "Not reproduced:" so noReproNote recognizes the verdict
-// and carries it into the report and the later steps' prompts.
-//
-// It also carries the test-target and spec-test principles (issue #225):
-// a step turn is where a failing acceptance test actually gets bent and where
-// a lower-level helper gets tested in place of the user-facing path the
-// criterion names — testTargetPrinciple and specTestPrinciple ride with every
-// step (same consts the base system prompt carries) so demotion at the turn
-// boundaries (#131) cannot fold the only copy out of view.
-//
-// And it restates the review-feedback principle (reviewFeedbackPrinciple,
-// issue #162): a step turn is where a review round's findings actually get
-// applied, and demotion at the turn boundaries (#131) can fold the review
-// itself out of the window — leaving the step with a paraphrase of one or two
-// findings and no obligation to account for the rest. That is how PR #158's
-// placeholder survived two rounds and PR #145 applied both offered
-// alternatives. The step prompt is the last place those findings can be
-// pinned, so the standing principle rides with every step (same const the
-// base system prompt carries).
-//
-// And it restates the locate-before-writing principle
-// (locateBeforeWritingPrinciple, issue #224): a step turn is where new code —
-// mostly test files — actually gets written, and turn-boundary demotion can
-// fold the sessions' earlier grep/outline work out of the window, leaving the
-// step to write against helpers, type shapes and paths it assumes exist. The
-// tick 20261006T074738Z reviews are the case: one step wrote seven undefined
-// identifiers at once and another carried a type-shape compile error from the
-// previous session's step. The standing principle (same const the base system
-// prompt carries) rides with every step so the locate-before-writing half of
-// the guidance survives demotion.
-// And it restates the comment-truth principle (commentsTruthPrinciple, issue
-// #231): the step turn is where the behavior actually changes — a reordered
-// call, a new overwrite, a removed guard — so the comments adjacent to the
-// edited span (and the summary written for the step) can go stale against it,
-// and demotion at the turn boundaries (#131) folds the plan out of view. The
-// same const the base system prompt carries rides with every step so the
-// obligation to keep comments and claims truthful to the shipped code survives
-// the fold.
+// It restates the overall task, so each step turn carries it even after
+// demotion folds the planning turn into the outline (#131 / #94's failure
+// mode), plus the no-repro output-shape convention (noReproMarker) so
+// noReproNote can recognize a "not reproduced" verdict and carry it into the
+// report and the later steps' prompts. The working principles are NOT
+// restated: the step turn runs through cs.turn with the base system prompt,
+// which is never demoted.
 //
 // earlierNotes are the DONE steps' notes in order (skipped when empty): an
 // earlier step's no-repro note (issue #178) must reach a later step, so a
@@ -687,8 +610,8 @@ func noReproNote(reply string) string {
 // outcome a later step builds on.
 func planStepPrompt(task string, i, total int, step string, earlierNotes []string) string {
 	p := fmt.Sprintf(
-		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s",
-		task, i, total, step, verifyBeforeFixPrinciple, blockedCheckPrinciple, reviewFeedbackPrinciple, locateBeforeWritingPrinciple, testTargetPrinciple, specTestPrinciple, commentsTruthPrinciple, noReproMarker,
+		"Overall task: %s\n\nPlan step %d of %d: %s\n\n%s",
+		task, i, total, step, noReproMarker,
 	)
 	if len(earlierNotes) > 0 {
 		p += "\n\nEarlier steps:" + notesList(earlierNotes)
