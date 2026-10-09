@@ -45,6 +45,13 @@ type compatToolsMessage struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ReasoningContent / Reasoning are the response-side chain-of-thought
+	// fields (llama.cpp --reasoning-format, vLLM, LiteLLM: reasoning_content;
+	// OpenRouter/Ollama: reasoning) — the blocking-path counterparts of
+	// streamDelta's fields in stream.go. Decode-only: compatToolsMessage is
+	// never marshaled into a request.
+	ReasoningContent string `json:"reasoning_content"`
+	Reasoning        string `json:"reasoning"`
 }
 
 // GenerateWithTools issues one chat-completions request with tool
@@ -105,10 +112,15 @@ func (c *OpenAICompatClient) GenerateWithTools(ctx context.Context, msgs []ChatM
 	}
 
 	choice := resp.Choices[0]
+	reasoning := choice.Message.ReasoningContent
+	if reasoning == "" {
+		reasoning = choice.Message.Reasoning
+	}
 	out := ChatResult{
 		Content:      choice.Message.Content,
 		ToolCalls:    choice.Message.ToolCalls,
 		FinishReason: choice.FinishReason,
+		Reasoning:    reasoning,
 	}
 	stats := GenerationStats{
 		InputTokens:  resp.Usage.PromptTokens,

@@ -151,6 +151,14 @@ type ChatResult struct {
 	Content      string
 	ToolCalls    []ToolCall
 	FinishReason string
+	// Reasoning is the model's chain-of-thought, captured from the
+	// response message's reasoning_content (or its `reasoning` alias) by
+	// OpenAICompatClient.GenerateWithTools. Empty when the backend returned
+	// none (and always empty from OpenRouterClient, which does not capture
+	// it). Capture only: this package never re-sends it — the shipped
+	// round-trip lives in cmd/cortex's wire assembly
+	// (AgentRequest.scopedReasoning), scoped to the current turn.
+	Reasoning string
 }
 
 // orToolsRequest mirrors orRequest but adds the tool-call surface.

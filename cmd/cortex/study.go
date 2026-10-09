@@ -53,6 +53,7 @@ func (cs *CortexSession) specForRole(role string) ModelSpec {
 func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentRequest {
 	dialect := dialectFor(cs.Config.isOpenRouter())
 	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens, dialect)
+	req.OmitReasoning = !cs.Config.keepReasoningEnabled()
 	inheritedModel := ""
 	if sa.Role != roleStudy && sa.Role != roleLearn && sa.Role != roleLearnUser && cs.Request != nil {
 		inheritedModel = cs.Request.Model

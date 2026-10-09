@@ -54,6 +54,61 @@ type Msg struct {
 	Content    string
 	ToolCallID string
 	ToolName   string
+	// Reasoning is the assistant chain-of-thought this message will carry on
+	// the wire — set by the caller ONLY when it is actually sent (the current
+	// turn's reasoning, when the round-trip is on), so an estimator that
+	// counts it books exactly what goes out. PlanReasoningShed drops it
+	// before PlanWholePromptStubbing stubs any tool result.
+	Reasoning string
+}
+
+// PlanReasoningShed returns the indices (into msgs) whose Reasoning should be
+// dropped, oldest-first — the FIRST thing shed when the whole prompt is over
+// budget, before any tool result is stubbed: an earlier step's reasoning is
+// the cheapest context to lose (the model already acted on it; its tool calls
+// and their results stay). Empty (nil) means under the high watermark, or no
+// sheddable reasoning — byte for byte unchanged.
+//
+// It fires when fixed + Σ estimator(msgs) exceeds budget.HighWM (the same
+// whole-prompt total PlanWholePromptStubbing measures) and drops reasoning
+// oldest-first until the projected total is at or under budget.LowWM. The
+// newest reasoning-bearing message is never shed — it is the plan the model
+// is acting on right now. The caller applies the plan (clears Reasoning on
+// those messages) and then runs PlanWholePromptStubbing over the shed
+// messages, which stubs tool results only if shedding was not enough.
+func PlanReasoningShed(msgs []Msg, estimator func(Msg) int, budget WholePromptBudget, fixed int) []int {
+	if budget.HighWM <= 0 || budget.LowWM <= 0 || len(msgs) == 0 {
+		return nil
+	}
+	var candidates []int
+	for i, m := range msgs {
+		if m.Reasoning != "" {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) <= 1 {
+		return nil // nothing older than the newest reasoning
+	}
+	candidates = candidates[:len(candidates)-1]
+
+	total := fixed
+	for _, m := range msgs {
+		total += estimator(m)
+	}
+	if total <= budget.HighWM {
+		return nil
+	}
+	var shed []int
+	for _, i := range candidates {
+		if total <= budget.LowWM {
+			break
+		}
+		without := msgs[i]
+		without.Reasoning = ""
+		total += estimator(without) - estimator(msgs[i])
+		shed = append(shed, i)
+	}
+	return shed
 }
 
 // PlanInTurnDemotion returns the indices (into msgs) of the tool results that
