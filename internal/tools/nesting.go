@@ -200,7 +200,13 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 	if deps.Quiet() {
 		return
 	}
-	parts := []string{countNoun(f.calls, "call"), fmtElapsed(time.Since(f.start))}
+	fmt.Println(formatSubagentDone(f, time.Since(f.start), digest, err))
+}
+
+// formatSubagentDone renders the closing line of a subagent block: calls,
+// elapsed, anything suppressed, and the digest size or the error.
+func formatSubagentDone(f *nestFrame, elapsed time.Duration, digest string, err error) string {
+	parts := []string{countNoun(f.calls, "call"), fmtElapsed(elapsed)}
 	if f.suppressed > 0 {
 		parts = append(parts, fmt.Sprintf("%d not shown", f.suppressed))
 	}
@@ -213,7 +219,7 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 	if w := style.TermWidth(); w > 0 {
 		plain = style.Clip(plain, w-len(gutterPad))
 	}
-	fmt.Println(TimestampPrefix() + style.Paint(plain, style.Dim))
+	return TimestampPrefix() + style.Paint(plain, style.Dim)
 }
 
 // subagentAction renders the parent-level action line for a subagent call. The

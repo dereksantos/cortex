@@ -12,6 +12,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // toolMarker is Qwen's native tool-call opener. When the proxy doesn't
@@ -253,7 +254,7 @@ func (p *streamPrinter) begin() {
 		p.onStatus(false, "") // answer started — clear the thinking status
 	}
 	fmt.Fprintln(p.writer())
-	fmt.Fprint(p.writer(), gutterPrefix(time.Now()))
+	fmt.Fprint(p.writer(), gutterPrefix(tools.Now()))
 	p.gutterOpen = p.md != nil // render mode: first block joins this line
 	p.began = true
 }
@@ -369,7 +370,7 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 		return
 	}
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(time.Now()), style.Paint(line, style.Dim))
+		gutterPrefix(tools.Now()), style.Paint(line, style.Dim))
 	p.crumbed = true // thoughtStat: skip, this step's trace already showed
 }
 
@@ -423,7 +424,7 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 	}
 	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(time.Now()), style.Paint(line, style.Dim))
+		gutterPrefix(tools.Now()), style.Paint(line, style.Dim))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap

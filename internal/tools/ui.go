@@ -39,6 +39,13 @@ func isOff(v string) bool {
 // aligned regardless of which side printed the line. Always dim (2026-07-19):
 // the timestamp carries no per-role/per-tool color, so it reads as one
 // consistent margin rather than a row of color-coded tags.
-func TimestampPrefix() string {
-	return fmt.Sprintf("%s  ", style.Paint(time.Now().Format("15:04:05"), style.Dim))
+func TimestampPrefix() string { return Gutter(Now()) }
+
+// Gutter renders the timestamp gutter for ts.
+func Gutter(ts time.Time) string {
+	return fmt.Sprintf("%s  ", style.Paint(ts.Format("15:04:05"), style.Dim))
 }
+
+// Now is the REPL's display clock: every gutter timestamp reads it. A var so
+// render goldens can pin the time.
+var Now = time.Now

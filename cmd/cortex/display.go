@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // gutterPrefix renders the "HH:MM:SS  " shown before every printed line. The
@@ -15,16 +16,14 @@ import (
 // (2026-07-19) — every timestamp, on every line (user/assistant/tool alike),
 // is plain gray so the gutter reads as one consistent margin rather than a
 // row of role-coded tags.
-func gutterPrefix(ts time.Time) string {
-	return fmt.Sprintf("%s  ", style.Paint(ts.Format("15:04:05"), style.Dim))
-}
+func gutterPrefix(ts time.Time) string { return tools.Gutter(ts) }
 
 func (m Message) render(ts time.Time) string {
 	return gutterPrefix(ts) + m.Content
 }
 
 func (m Message) Print() {
-	fmt.Println(m.render(time.Now()))
+	fmt.Println(m.render(tools.Now()))
 }
 
 // turnPhase is the coder's current state relative to the model: idle
