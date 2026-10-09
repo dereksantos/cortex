@@ -446,6 +446,7 @@ func main() {
 	// and re-targets the session at that project's root, so the resumed (or
 	// fresh) session's ContextDir/SessionsDir/instructions/confinement all
 	// follow the project instead of the CWD.
+	resumed := false
 	if len(os.Args) >= 2 && os.Args[1] == "resume" {
 		project, rest := parseProjectFlag(os.Args[2:])
 		if project != "" {
@@ -461,7 +462,7 @@ func main() {
 			fmt.Printf("resume: %v - starting fresh\n", err)
 			session.StartTranscript()
 		} else {
-			session.showLoadedContext(session.SessionID)
+			resumed = true
 		}
 	} else {
 		session.StartTranscript()
@@ -471,6 +472,13 @@ func main() {
 	// can't open). Shut down with the transcript at exit.
 	session.EnableMemory()
 	defer session.Close()
+
+	// The opening header (docs/tui-polish.md, track 1): version · project ·
+	// model, plus what a resume carried over. After EnableMemory so the note
+	// count is real.
+	for _, line := range renderHeader(session.startupFacts(resumed)) {
+		fmt.Println(line)
+	}
 
 	// First-run greeting (Phase 1 / M1.5): fires exactly once, before the
 	// read loop, so the very first thing a fresh machine sees from `cortex`
