@@ -57,6 +57,15 @@ type Limits struct {
 	// turn's distinct touched files gets a single total budget here, and a
 	// linter that runs past it is cut off and the receipt says so.
 	TurnLintBudgetSec int
+
+	// SteerShellReads restores the bash tool's previous file-access steering
+	// (tools.steer_shell_reads): a note on plain shell reads (cat, head, tail,
+	// tac, sed -n, grep) pointing at read_file/outline/grep, and the
+	// edit_file/write_file note on EVERY shell-created file, scratch or not.
+	// false (the default) leaves shell reads un-noted and steers only shell
+	// rewrites of tracked repository files (inPlaceRewriteNote). Not a
+	// numeric cap, but the same process-wide, set-once-at-construction seam.
+	SteerShellReads bool
 }
 
 // DefaultLimits reproduces today's hardcoded constants exactly.
@@ -118,6 +127,7 @@ func Configure(l Limits) {
 		MaximumSearchMax:     orDefault(l.MaximumSearchMax, def.MaximumSearchMax),
 		HookCommandBudgetSec: orDefault(l.HookCommandBudgetSec, def.HookCommandBudgetSec),
 		TurnLintBudgetSec:    orDefault(l.TurnLintBudgetSec, def.TurnLintBudgetSec),
+		SteerShellReads:      l.SteerShellReads,
 	}
 	fetchHTTPClient = newSafeHTTPClient()
 }

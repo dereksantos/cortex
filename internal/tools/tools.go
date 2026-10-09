@@ -656,7 +656,7 @@ var OutlineTool = newTool(FunctionOutline,
 // Bash is the bash tool declaration: runs a shell command behind the
 // shellrisk gate (safe runs, risky prompts, blocked refuses).
 var Bash = newTool(FunctionBash,
-	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit. In-place file rewrites (sed -i, ed, perl -pi, awk, python -c, > redirects) and file reads (cat, head, tail, tac, sed, grep) are reported on the result — use edit_file or write_file for edits (diff display + post-edit hook) and read_file/outline/grep for reads (sized, quote-aware readers that a bash shell command skips).",
+	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Reading and searching files with the shell (cat, sed -n, grep, head, tail) is fine, as are scratch files outside the repository or not tracked by git; read_file/outline/grep are also available (read_file for sized, quote-aware reads). Shell rewrites of tracked repository files (sed -i, ed, perl -pi, awk, python -c, > redirects, tee) are reported on the result — use edit_file or write_file for those (diff display + post-edit hook), and remove_path for deletes.",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'make test' or 'ls src'."),
 	}, "command"))
@@ -1309,7 +1309,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 			if skel := fileSkeleton(fsPath); skel != "" {
 				printToolAction(deps, fmt.Sprintf("read_file(%s) → skeleton (~%dk tokens, too large)", path, estTokens/1000))
 				return fmt.Sprintf("%s is ~%d tokens — too large to read whole. Its structural outline is below; "+
-					"read_file(%q, start, end) an exact span, study(%q, goal) for curated content, or bash `sed -n 'A,Bp' %s` for a raw range.\n\n%s",
+					"read_file(%q, start, end) an exact span, study(%q, goal) for curated content, or read a raw range with the shell (e.g. `sed -n 'A,Bp' %s`) — any of these is fine.\n\n%s",
 					path, estTokens, path, path, path, skel), nil
 			}
 			// outline.Render itself failed (e.g. an unreadable path) — the same

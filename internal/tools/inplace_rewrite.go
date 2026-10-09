@@ -3,9 +3,12 @@ package tools
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // inplace_rewrite.go: best-effort detection of file rewrites made THROUGH the
@@ -841,29 +844,54 @@ func splitProducerParts(s string) []producerPart {
 // inPlaceRewriteNote renders the model-facing note for one bash command that
 // touches files (issue #201 rewrites, issue #209 reads). It names the touched
 // targets — workdir-relative when a workdir is anchored, so the model can act
-// on the same path it uses everywhere — and steers to the right tool for each
-// form: rewrite targets (in-place, redirect, script) steer to
-// edit_file/write_file (diff display + post-edit hook), read targets (plain
-// cat/head/tail/tac/sed/grep) steer to read_file/outline/grep (the dedicated
-// readers a bash shell command skips). One combined note when the command has
-// both kinds. "" when the command names no target at all; the caller (bash)
-// appends it to the result on both the run and the refused paths.
+// on the same path it uses everywhere — and steers rewrites of repository
+// files to edit_file/write_file (diff display + post-edit hook). "" when the
+// command names no target the note applies to; the caller (bash) appends it
+// to the result on both the run and the refused paths.
+//
+// Default stance (tools.steer_shell_reads absent/false): shell READS are
+// fine and get no note at all, and a shell-CREATED file (a `>`/`>>` redirect
+// or a tee — the redirect form) gets no note when it is scratch: outside the
+// workspace (e.g. /tmp) or not tracked by git (scratchTargets). The in-place
+// and script forms (sed -i, ed, perl -pi, gawk -i inplace, python -c ...)
+// and a redirect onto a TRACKED file keep the steering exactly as before —
+// shell edits corrupted repository files (issue #201).
+//
+// With tools.steer_shell_reads true (active.SteerShellReads) the previous
+// behavior returns unchanged: every rewrite target is steered regardless of
+// tracked-ness, and plain cat/head/tail/tac/sed/grep reads get the read note
+// steering to read_file/outline/grep.
 func inPlaceRewriteNote(deps ToolDeps, command string) string {
+	steer := active.SteerShellReads
 	rewrites := detectInPlaceRewrites(command)
-	reads := detectShellReads(command)
+	var reads []rewriteTarget
+	if steer {
+		reads = detectShellReads(command)
+	}
 	if len(rewrites) == 0 && len(reads) == 0 {
 		return ""
 	}
-	var rewriteTargets, readTargets []rewriteTarget
+	wd := workdirOf(deps)
+	var scratch map[string]bool
+	if !steer {
+		scratch = scratchTargets(wd, rewrites)
+	}
+	var rewriteTargets []rewriteTarget
 	for _, t := range rewrites {
-		if t.form != rewriteFormRead {
-			rewriteTargets = append(rewriteTargets, t)
+		if t.form == rewriteFormRead {
+			continue
 		}
+		if t.form == rewriteFormRedirect && scratch[t.raw] {
+			continue // a scratch create/overwrite: no steering by default
+		}
+		rewriteTargets = append(rewriteTargets, t)
 	}
 	// detectShellReads already drops any path the command also rewrote (the
 	// rewrite wins the dedup), so the two sets never share a path.
-	readTargets = reads
-	wd := workdirOf(deps)
+	readTargets := reads
+	if len(rewriteTargets) == 0 && len(readTargets) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	if len(rewriteTargets) > 0 {
 		b.WriteString("note: this command rewrites file(s) in place: ")
@@ -889,6 +917,85 @@ func inPlaceRewriteNote(deps ToolDeps, command string) string {
 		b.WriteString(" — use read_file (or outline/grep) for file reads: they are the dedicated readers, sized and quote-aware, that a bash shell command skips.")
 	}
 	return b.String()
+}
+
+// scratchTargets reports which redirect-form targets (a `>`/`>>` redirect or
+// a tee — the shell's create/overwrite forms) are SCRATCH: outside the
+// workspace, or inside it but not tracked by git. Tracked-ness is one
+// `git ls-files` over the in-workspace candidates, run only when the command
+// has such a target. When the workspace is not a git repository, or git
+// fails for any reason, every in-workspace target counts as tracked — the
+// conservative answer keeps the steering. wd is the session workdir; ""
+// means the process CWD (where bash runs when no workdir is anchored).
+func scratchTargets(wd string, rewrites []rewriteTarget) map[string]bool {
+	scratch := map[string]bool{}
+	root := wd
+	if root == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
+	}
+	if root == "" {
+		return scratch // no workspace to compare against: keep the steering
+	}
+	rels := map[string][]string{} // workspace-relative path -> raw spellings
+	var order []string
+	for _, t := range rewrites {
+		if t.form != rewriteFormRedirect {
+			continue
+		}
+		rel, err := relInsideWorkdir(filepath.Clean(absOf(t.raw, root)), root)
+		if err != nil {
+			scratch[t.raw] = true // outside the workspace (e.g. /tmp): scratch
+			continue
+		}
+		if _, ok := rels[rel]; !ok {
+			order = append(order, rel)
+		}
+		rels[rel] = append(rels[rel], t.raw)
+	}
+	if len(order) == 0 {
+		return scratch
+	}
+	tracked, ok := gitTrackedPaths(root, order)
+	if !ok {
+		return scratch // not a repo / git failed: in-workspace counts as tracked
+	}
+	for _, rel := range order {
+		if !tracked[rel] {
+			for _, raw := range rels[rel] {
+				scratch[raw] = true
+			}
+		}
+	}
+	return scratch
+}
+
+// gitTrackedPathsTimeout bounds the tracked-ness check: a slow or wedged git
+// must never stall the bash tool; on timeout the check fails and every
+// candidate counts as tracked (the conservative answer).
+const gitTrackedPathsTimeout = 2 * time.Second
+
+// gitTrackedPaths returns which of rels (slash-separated, relative to root)
+// git tracks, via one `git ls-files` run in root. ok is false when root is
+// not inside a git work tree or git fails.
+func gitTrackedPaths(root string, rels []string) (map[string]bool, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTrackedPathsTimeout)
+	defer cancel()
+	args := append([]string{"--literal-pathspecs", "ls-files", "-z", "--"}, rels...)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	tracked := map[string]bool{}
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p != "" {
+			tracked[filepath.ToSlash(filepath.Clean(p))] = true
+		}
+	}
+	return tracked, true
 }
 
 // inPlaceRewriteHookNote closes the hook gap (issue #201, step 4): when a
