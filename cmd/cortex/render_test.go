@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 func TestSplitBlocks(t *testing.T) {
@@ -281,13 +283,13 @@ func TestCtxColor(t *testing.T) {
 	win := 131072
 	tests := []struct {
 		used int
-		want string
+		want style.Role
 	}{
-		{0, green},
-		{win / 4, green},       // 25%
-		{win * 6 / 10, yellow}, // 60%
-		{win * 9 / 10, red},    // 90%
-		{win, red},             // full
+		{0, style.OK},
+		{win / 4, style.OK},        // 25%
+		{win * 6 / 10, style.Warn}, // 60%
+		{win * 9 / 10, style.Err},  // 90%
+		{win, style.Err},           // full
 	}
 	for _, tt := range tests {
 		if got := ctxColor(tt.used, win); got != tt.want {
@@ -369,15 +371,15 @@ func TestPromptReflectsPhase(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request()}
 
 	sess.phase = phaseIdle
-	if got := sess.Prompt(); !strings.HasPrefix(got, withColor(".", gray)) {
+	if got := sess.Prompt(); !strings.HasPrefix(got, style.Paint(".", style.Dim)) {
 		t.Errorf("idle Prompt() = %q, want to start with the dim gray .", got)
 	}
 	sess.phase = phaseThinking
-	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("*", brightCyan)) {
+	if got := sess.Prompt(); !strings.HasPrefix(got, style.Paint("*", style.Live)) {
 		t.Errorf("thinking Prompt() = %q, want to start with the bright cyan *", got)
 	}
 	sess.phase = phaseStreaming
-	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("~", brightGreen)) {
+	if got := sess.Prompt(); !strings.HasPrefix(got, style.Paint("~", style.Streaming)) {
 		t.Errorf("streaming Prompt() = %q, want to start with the bright green ~", got)
 	}
 }
@@ -441,7 +443,7 @@ func TestMessageRender(t *testing.T) {
 	for _, role := range []string{"assistant", RoleSystem, RoleTool, RoleUser} {
 		m := Message{Role: role, Content: "hello"}
 		got := m.render(ts)
-		for _, want := range []string{"14:23:01", "hello", gray} {
+		for _, want := range []string{"14:23:01", "hello", string(style.Dim)} {
 			if !strings.Contains(got, want) {
 				t.Errorf("render(role=%s) = %q, missing %q", role, got, want)
 			}
@@ -455,10 +457,10 @@ func TestContextRatio(t *testing.T) {
 		t.Errorf("contextRatio = %v, want 0.8", got)
 	}
 	// The gauge color and the compact trigger share the same threshold.
-	if ctxColor(800, 1000) != red {
+	if ctxColor(800, 1000) != style.Err {
 		t.Error("gauge should be red exactly at compactThreshold")
 	}
-	if ctxColor(799, 1000) != yellow {
+	if ctxColor(799, 1000) != style.Warn {
 		t.Error("gauge should be yellow just under compactThreshold")
 	}
 }

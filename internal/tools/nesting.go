@@ -33,7 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // nestedCallDisplayCap bounds how many of one subagent's calls are printed. A
@@ -204,15 +205,15 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 		parts = append(parts, fmt.Sprintf("%d not shown", f.suppressed))
 	}
 	if err != nil {
-		parts = append(parts, "error: "+clipRunes(firstLine(err.Error()), summaryTextCap))
+		parts = append(parts, "error: "+style.Clip(firstLine(err.Error()), summaryTextCap))
 	} else {
 		parts = append(parts, "digest "+humanSize(len(digest)))
 	}
 	plain := f.indent + f.name + " done: " + strings.Join(parts, ", ")
-	if w := termWidth(); w > 0 {
-		plain = clipRunes(plain, w-len(gutterPad))
+	if w := style.TermWidth(); w > 0 {
+		plain = style.Clip(plain, w-len(gutterPad))
 	}
-	fmt.Println(TimestampPrefix() + Color(plain, Gray))
+	fmt.Println(TimestampPrefix() + style.Paint(plain, style.Dim))
 }
 
 // subagentAction renders the parent-level action line for a subagent call. The
@@ -220,7 +221,7 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 // clipped.
 func subagentAction(name, path, goal string) string {
 	if g := strings.TrimSpace(firstLine(goal)); g != "" {
-		return fmt.Sprintf("%s(%s, %s)", name, path, clipRunes(g, 48))
+		return fmt.Sprintf("%s(%s, %s)", name, path, style.Clip(g, 48))
 	}
 	return fmt.Sprintf("%s(%s)", name, path)
 }
@@ -230,7 +231,7 @@ func subagentAction(name, path, goal string) string {
 // shape otherwise.
 func summarizeResult(out string, err error) string {
 	if err != nil {
-		return "error: " + clipRunes(firstLine(err.Error()), summaryTextCap)
+		return "error: " + style.Clip(firstLine(err.Error()), summaryTextCap)
 	}
 	t := strings.TrimSpace(out)
 	if t == "" {
@@ -239,7 +240,7 @@ func summarizeResult(out string, err error) string {
 	if n := strings.Count(t, "\n") + 1; n > 1 {
 		return countNoun(n, "line") + ", " + humanSize(len(out))
 	}
-	return clipRunes(t, summaryTextCap)
+	return style.Clip(t, summaryTextCap)
 }
 
 // fmtElapsed renders a call's wall time at the precision that reads: whole
@@ -268,19 +269,4 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
-}
-
-// clipRunes shortens s to max visible characters, marking the cut.
-func clipRunes(s string, max int) string {
-	if max <= 0 {
-		return "…"
-	}
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	r := []rune(s)
-	if max == 1 {
-		return "…"
-	}
-	return string(r[:max-1]) + "…"
 }

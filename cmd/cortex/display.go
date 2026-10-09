@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // gutterPrefix renders the "HH:MM:SS  " shown before every printed line. The
@@ -14,7 +16,7 @@ import (
 // is plain gray so the gutter reads as one consistent margin rather than a
 // row of role-coded tags.
 func gutterPrefix(ts time.Time) string {
-	return fmt.Sprintf("%s  ", withColor(ts.Format("15:04:05"), gray))
+	return fmt.Sprintf("%s  ", style.Paint(ts.Format("15:04:05"), style.Dim))
 }
 
 func (m Message) render(ts time.Time) string {
@@ -38,17 +40,6 @@ const (
 	phaseStreaming
 )
 
-// brightCyan and brightGreen are the aixterm "bright" SGR variants of the
-// palette's existing cyan and green — the same hues Prompt() already uses
-// elsewhere (cyan for the trailing promptGlyph, green for the gauge's
-// healthy state), just at higher contrast. Used only for the state light's
-// active phases, so it visibly pops against idle's already-dim gray rather
-// than introducing a color the rest of the bar doesn't.
-const (
-	brightCyan  = "\033[96m"
-	brightGreen = "\033[92m"
-)
-
 // phaseGlyph renders the state light: one static ASCII character whose shape
 // (not just its color) carries the state, so it still reads under NO_COLOR —
 // "." idle, "*" thinking (reasoning or a running tool), "~" streaming. Plain
@@ -58,11 +49,11 @@ const (
 func phaseGlyph(p turnPhase) string {
 	switch p {
 	case phaseThinking:
-		return withColor("*", brightCyan)
+		return style.Paint("*", style.Live)
 	case phaseStreaming:
-		return withColor("~", brightGreen)
+		return style.Paint("~", style.Streaming)
 	default:
-		return withColor(".", gray)
+		return style.Paint(".", style.Dim)
 	}
 }
 
@@ -85,7 +76,7 @@ func (cs *CortexSession) setPhase(p turnPhase) bool {
 
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
-	status := withColor(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), gray)
+	status := style.Paint(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), style.Dim)
 	// The gauge is the two-zone numeric form (contextbar.go's gaugeZones) by
 	// default; coloredGauge composes its per-zone coloring (gray head/gray
 	// divider/pressure-colored tail) or, for the selectable bar styles, the
@@ -96,9 +87,9 @@ func (cs *CortexSession) Prompt() string {
 	gauge := cs.coloredGauge(promptGaugeCells, win)
 	cost := ""
 	if cs.costUSD > 0 {
-		cost = withColor(" | "+humanCost(cs.costUSD), gray)
+		cost = style.Paint(" | "+humanCost(cs.costUSD), style.Dim)
 	}
-	return fmt.Sprintf("%s %s%s%s  %s ", phaseGlyph(cs.phase), status, gauge, cost, withColor(promptGlyph, cyan))
+	return fmt.Sprintf("%s %s%s%s  %s ", phaseGlyph(cs.phase), status, gauge, cost, style.Paint(promptGlyph, style.Accent))
 }
 
 func streamingEnabled() bool {

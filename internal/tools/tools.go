@@ -21,11 +21,11 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // The tool-call vocabulary lives in internal/agent (the leaf the engine and this
@@ -756,19 +756,19 @@ func formatToolAction(indent, action, suffix string) string {
 	if i := strings.IndexByte(action, '('); i >= 0 {
 		name, args = action[:i], action[i:]
 	}
-	if w := termWidth(); w > 0 && args != "" {
-		fixed := len(gutterPad) + utf8.RuneCountInString(indent+"tool: "+name)
+	if w := style.TermWidth(); w > 0 && args != "" {
+		fixed := len(gutterPad) + style.Width(indent+"tool: "+name)
 		if suffix != "" {
-			fixed += 2 + utf8.RuneCountInString(suffix)
+			fixed += 2 + style.Width(suffix)
 		}
-		args = clipRunes(args, w-fixed)
+		args = style.Clip(args, w-fixed)
 	}
-	line := Color("tool: "+name, Green)
+	line := style.Paint("tool: "+name, style.Action)
 	if args != "" {
-		line += Color(args, Gray)
+		line += style.Paint(args, style.Dim)
 	}
 	if suffix != "" {
-		line += Color("  "+suffix, Gray)
+		line += style.Paint("  "+suffix, style.Dim)
 	}
 	return TimestampPrefix() + indent + line
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // Anchor pins a one-row editable prompt to the bottom of the terminal and keeps
@@ -43,15 +45,12 @@ type Anchor struct {
 	done chan struct{} // closed when both the key loop and ticker have exited
 }
 
-// dim wraps s in the bright-black SGR so the status row reads as transient
-// metadata. lineedit keeps its own copy rather than importing the cmd/cortex
-// palette (that would invert the dependency).
-const (
-	ansiDim   = "\033[90m"
-	ansiReset = "\033[0m"
-)
+// ansiReset closes any SGR run; the inspector appends it to a clipped line
+// so a cut mid-style can't bleed color into the rest of the frame.
+const ansiReset = "\033[0m"
 
-func dim(s string) string { return ansiDim + s + ansiReset }
+// dim paints s in the Dim role so the status row reads as transient metadata.
+func dim(s string) string { return style.Paint(s, style.Dim) }
 
 // Anchor pins an editable prompt seeded with seed and returns it plus a context
 // cancelled when the user hits ESC or Ctrl-C. Start the turn, route its output

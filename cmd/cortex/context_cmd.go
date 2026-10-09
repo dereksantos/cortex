@@ -23,6 +23,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/skills"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // agentsMarker is the exact separator systemPromptContent (session_core.go)
@@ -81,7 +82,7 @@ func (cs *CortexSession) contextHeaderLine() string {
 	if cs.ws != nil {
 		turn = cs.ws.TotalTurns()
 	}
-	return withColor(fmt.Sprintf("context — %s · %s window · turn %d", cs.Request.Model, humanK(cs.windowSize()), turn), gray)
+	return style.Paint(fmt.Sprintf("context — %s · %s window · turn %d", cs.Request.Model, humanK(cs.windowSize()), turn), style.Dim)
 }
 
 // cacheHeadlineLine renders the prefix-cache health line. Once a request
@@ -93,7 +94,7 @@ func (cs *CortexSession) contextHeaderLine() string {
 // never shows the old, misleading "0 / <window>" figure.
 func (cs *CortexSession) cacheHeadlineLine() string {
 	if cs.LastPromptTokens <= 0 {
-		return withColor(fmt.Sprintf("prefix cache  — no requests yet · zone A assembled at %s", humanK(cs.headTokens())), gray)
+		return style.Paint(fmt.Sprintf("prefix cache  — no requests yet · zone A assembled at %s", humanK(cs.headTokens())), style.Dim)
 	}
 	cached := cs.LastCachedTokens
 	evaluated := cs.LastPromptTokens - cached
@@ -101,16 +102,16 @@ func (cs *CortexSession) cacheHeadlineLine() string {
 		evaluated = 0
 	}
 	pct := 100 * cached / cs.LastPromptTokens
-	color := red
+	color := style.Err
 	switch {
 	case pct >= cacheHitGreenPct:
-		color = green
+		color = style.OK
 	case pct >= cacheHitYellowPct:
-		color = yellow
+		color = style.Warn
 	}
-	return withColor("prefix cache  ", gray) +
-		withColor(fmt.Sprintf("%d%%", pct), color) +
-		withColor(fmt.Sprintf(" hit last turn · %s evaluated of %s prompt", humanK(evaluated), humanK(cs.LastPromptTokens)), gray)
+	return style.Paint("prefix cache  ", style.Dim) +
+		style.Paint(fmt.Sprintf("%d%%", pct), color) +
+		style.Paint(fmt.Sprintf(" hit last turn · %s evaluated of %s prompt", humanK(evaluated), humanK(cs.LastPromptTokens)), style.Dim)
 }
 
 // gridComponents returns zone A's four pieces in wire order — the same
@@ -142,21 +143,21 @@ func (cs *CortexSession) gridHighWatermark() int {
 // on position — green before the demote watermark, red at/after it, per
 // context_grid.go's tailCellPastWatermark). System renders in the
 // terminal's own default color (no wrap) — "bright/default" per the design.
-func contextGridCellColor(glyph rune, idx, window, hiWatermark int) string {
+func contextGridCellColor(glyph rune, idx, window, hiWatermark int) style.Role {
 	switch glyph {
 	case glyphOutline:
-		return blue
+		return style.HueBlue
 	case glyphMemory:
-		return magenta
+		return style.HueMagenta
 	case glyphSkills:
-		return yellow
+		return style.HueYellow
 	case glyphTail:
 		if tailCellPastWatermark(idx, window, hiWatermark) {
-			return red
+			return style.HueRed
 		}
-		return green
+		return style.HueGreen
 	case glyphFree:
-		return gray
+		return style.Dim
 	default: // glyphSystem
 		return ""
 	}
@@ -180,14 +181,14 @@ func coloredContextGridLines(placement contextGridPlacement, window, hiWatermark
 			idx := r*gridCols + c
 			glyph := placement.glyphs[idx]
 			if color := contextGridCellColor(glyph, idx, window, hiWatermark); color != "" {
-				cells.WriteString(withColor(string(glyph), color))
+				cells.WriteString(style.Paint(string(glyph), color))
 			} else {
 				cells.WriteRune(glyph)
 			}
 		}
-		line := withColor(gridGutterLabel(offset, width), gray) + "  " + cells.String()
+		line := style.Paint(gridGutterLabel(offset, width), style.Dim) + "  " + cells.String()
 		if r == demoteRow {
-			line += withColor("  ◂ demote", gray)
+			line += style.Paint("  ◂ demote", style.Dim)
 		}
 		lines = append(lines, line)
 	}
@@ -198,10 +199,10 @@ func coloredContextGridLines(placement contextGridPlacement, window, hiWatermark
 // color (may be "") wraps the glyph only — name/tokens/detail render in the
 // terminal's default color except for whatever the detail string itself
 // colors (e.g. the outline row's cyan recall citation).
-func gridLegendRow(glyph rune, color, name string, tokens int, detail string) string {
+func gridLegendRow(glyph rune, color style.Role, name string, tokens int, detail string) string {
 	g := string(glyph)
 	if color != "" {
-		g = withColor(g, color)
+		g = style.Paint(g, color)
 	}
 	line := fmt.Sprintf("%s %-7s %6s", g, name, gridTokenLabel(tokens))
 	if detail != "" {
@@ -232,20 +233,20 @@ func (cs *CortexSession) gridLegendLines() []string {
 		lines = append(lines, gridLegendRow(glyphSystem, "", "system", t, ""))
 	}
 	if t := cs.outlineTokens(); t > 0 {
-		lines = append(lines, gridLegendRow(glyphOutline, blue, "outline", t, cs.outlineLegendDetail()))
+		lines = append(lines, gridLegendRow(glyphOutline, style.HueBlue, "outline", t, cs.outlineLegendDetail()))
 	}
 	if t := cs.memoryIndexTokens(); t > 0 {
-		lines = append(lines, gridLegendRow(glyphMemory, magenta, "memory", t, cs.memoryLegendDetail()))
+		lines = append(lines, gridLegendRow(glyphMemory, style.HueMagenta, "memory", t, cs.memoryLegendDetail()))
 	}
 	if t := cs.skillsIndexTokens(); t > 0 {
 		count := len(skills.Discover(cs.skillsDirs()))
-		lines = append(lines, gridLegendRow(glyphSkills, yellow, "skills", t, fmt.Sprintf("%d skills", count)))
+		lines = append(lines, gridLegendRow(glyphSkills, style.HueYellow, "skills", t, fmt.Sprintf("%d skills", count)))
 	}
 	if cs.ws != nil && cs.ws.TotalTurns() > 0 {
-		lines = append(lines, gridLegendRow(glyphTail, green, "tail", cs.ws.TailTokens(), cs.tailLegendDetail()))
+		lines = append(lines, gridLegendRow(glyphTail, style.HueGreen, "tail", cs.ws.TailTokens(), cs.tailLegendDetail()))
 	}
 	if free := cs.freeTokens(cs.windowSize()); free > 0 {
-		lines = append(lines, gridLegendRow(glyphFree, gray, "free", free, ""))
+		lines = append(lines, gridLegendRow(glyphFree, style.Dim, "free", free, ""))
 	}
 
 	return lines
@@ -261,7 +262,7 @@ func (cs *CortexSession) outlineLegendDetail() string {
 	}
 	detail := fmt.Sprintf("%d entries", len(cs.outline))
 	if span := cs.outlineSpanCitation(); span != "" {
-		detail += " · recall " + withColor(span, cyan)
+		detail += " · recall " + style.Paint(span, style.Accent)
 	}
 	return detail
 }

@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/dereksantos/cortex/internal/lineedit"
-	"golang.org/x/term"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // renderEnabled reports whether the REPL should markdown-render and
@@ -37,7 +37,7 @@ func anchoredInput() bool {
 
 // terminalWidth is the current stdout column count, for glamour word-wrap.
 func terminalWidth() int {
-	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+	if w := style.TermWidth(); w > 0 {
 		return w
 	}
 	return 80

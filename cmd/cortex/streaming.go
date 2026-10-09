@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // toolMarker is Qwen's native tool-call opener. When the proxy doesn't
@@ -117,7 +118,7 @@ func (p *streamPrinter) refreshLabel(tail string) {
 	et := elapsedTail(p.start, p.tickTail)
 	switch {
 	case p.spinner != nil:
-		p.spinner.SetLabel(withColor("thinking... "+et, gray))
+		p.spinner.SetLabel(style.Paint("thinking... "+et, style.Dim))
 	case p.onStatus != nil:
 		p.onStatus(true, et)
 	}
@@ -368,7 +369,7 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 		return
 	}
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(time.Now()), withColor(line, gray))
+		gutterPrefix(time.Now()), style.Paint(line, style.Dim))
 	p.crumbed = true // thoughtStat: skip, this step's trace already showed
 }
 
@@ -422,7 +423,7 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 	}
 	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(time.Now()), withColor(line, gray))
+		gutterPrefix(time.Now()), style.Paint(line, style.Dim))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap

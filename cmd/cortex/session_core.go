@@ -14,6 +14,7 @@ import (
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -214,7 +215,7 @@ func (cs *CortexSession) newWorkingSet(base int) *cache.WorkingSet {
 // os.Stderr — stdout must stay machine-clean for headless `turn --json`
 // consumers (the session id is already stderr-only for the same reason).
 func printStartupWarning(w io.Writer, msg string) {
-	fmt.Fprintln(w, withColor(msg, yellow))
+	fmt.Fprintln(w, style.Paint(msg, style.Warn))
 }
 
 func NewCortexSession() *CortexSession {
