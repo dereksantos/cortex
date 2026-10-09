@@ -67,23 +67,33 @@ func TestRegisterEmptyRolePanics(t *testing.T) {
 // must survive in both (the "read_file/outline/grep" reader trio), not the
 // exact wording, so a rephrase keeps the test green as long as the principle
 // does.
-func TestStudyAndAgentSystemForbidBashFileReads(t *testing.T) {
-	for name, sys := range map[string]string{
-		"study": studySystem,
-		"agent": agentSystem,
-	} {
-		t.Run(name, func(t *testing.T) {
-			lower := strings.ToLower(sys)
-			// Both prompts must name the reader trio as the file-reading path…
-			if !strings.Contains(lower, "read_file/outline/grep") {
-				t.Errorf("%s system prompt must name the readers (read_file/outline/grep), got:\n%s", name, sys)
+func TestSubagentShellStance(t *testing.T) {
+	tests := []struct {
+		name    string
+		sys     string
+		want    []string // substrings that must appear (lowercased)
+		notWant []string
+	}{
+		// Study has no bash tool: its readers are read_file/outline/grep.
+		{"study names its readers", studySystem, []string{"read_file/outline/grep"}, nil},
+		// The agent subagent has bash: shell reads are allowed, repository
+		// edits still go through the editing tools (diff + post-edit hook).
+		{"agent allows shell reads, steers repo edits", agentSystem,
+			[]string{"reading and searching with the shell is fine", "edit_file/write_file"},
+			[]string{"never use bash shell readers"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lower := strings.ToLower(tt.sys)
+			for _, w := range tt.want {
+				if !strings.Contains(lower, w) {
+					t.Errorf("prompt missing %q:\n%s", w, tt.sys)
+				}
 			}
-			// …and must carry an explicit prohibition on reading files via the shell.
-			if !strings.Contains(lower, "read files") && !strings.Contains(lower, "read file") {
-				t.Errorf("%s system prompt must prohibit reading files with the shell, got:\n%s", name, sys)
-			}
-			if !strings.Contains(lower, "bash") && !strings.Contains(lower, "shell") {
-				t.Errorf("%s system prompt must name the shell as the prohibited file-reading path, got:\n%s", name, sys)
+			for _, w := range tt.notWant {
+				if strings.Contains(lower, w) {
+					t.Errorf("prompt still contains %q:\n%s", w, tt.sys)
+				}
 			}
 		})
 	}
