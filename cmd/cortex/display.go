@@ -103,26 +103,23 @@ func (cs *CortexSession) setPhase(p turnPhase) bool {
 func (cs *CortexSession) refreshAnchor() {
 	if cs.live != nil {
 		cs.live.SetPrompt(cs.Prompt())
-		cs.live.SetRight(cs.PromptStatus())
 	}
 }
 
-// Prompt is the input row's left side: the state light, then the marker the
-// cursor follows — ". > ". What used to precede the marker (version, model,
-// gauge, cost) moved: the model and gauge to PromptStatus at the row's right
-// edge, the version to the startup header, the cost to each turn's footer
+// Prompt is the input row: the dim status (PromptStatus), then the state
+// light and the marker, with the cursor last — "qwen3.8-27b  1k|22k  . ❯ ".
+// Version moved to the startup header and cost to each turn's footer
 // (docs/tui-polish.md, track 2).
 func (cs *CortexSession) Prompt() string {
-	return fmt.Sprintf("%s %s ", phaseGlyph(cs.phase), style.Paint(promptGlyph, style.Accent))
+	return fmt.Sprintf("%s  %s %s ", cs.PromptStatus(), phaseGlyph(cs.phase), style.Paint(promptGlyph, style.Accent))
 }
 
-// PromptStatus is the input row's right side: the model, then the context
-// gauge. The gauge is the two-zone numeric form (contextbar.go's gaugeZones)
-// by default; coloredGauge composes its per-zone coloring (gray head/gray
-// divider/pressure-colored tail) or, for the selectable bar styles, the
-// single ctxColor wrap that predates gaugeZones. ctxColor keys off
-// LastPromptTokens (the last request's actual billed size, not the gauge's
-// own head+tail estimate).
+// PromptStatus is the model, then the context gauge. The gauge is the
+// two-zone numeric form (contextbar.go's gaugeZones) by default; coloredGauge
+// composes its per-zone coloring (gray head/gray divider/pressure-colored
+// tail) or, for the selectable bar styles, the single ctxColor wrap that
+// predates gaugeZones. ctxColor keys off LastPromptTokens (the last request's
+// actual billed size, not the gauge's own head+tail estimate).
 func (cs *CortexSession) PromptStatus() string {
 	return style.Paint(cs.Request.Model, style.Dim) + "  " + cs.coloredGauge(promptGaugeCells, cs.windowSize())
 }

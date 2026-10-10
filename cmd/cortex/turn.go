@@ -84,6 +84,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	began := time.Now()
 	cs.lastTurn = nil
 	cs.turnStep = 0
+	cs.turnThought = ""
 
 	turnStart := len(cs.Request.Messages)
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
@@ -200,6 +201,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 	summary := summarizeTurn(turnMsgs, time.Since(began), stats.Cost)
+	summary.Thought = cs.turnThought
 	cs.lastTurn = &summary
 
 	return TurnResult{Reply: content, StopReason: stats.StopReason}, nil

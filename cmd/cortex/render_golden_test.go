@@ -50,11 +50,11 @@ func TestRenderGoldenPromptBar(t *testing.T) {
 		wantLeft   string
 		wantStatus string
 	}{
-		{"idle", phaseIdle, false, ". > ", "qwen3-coder-q3  10k|60k"},
-		{"thinking", phaseThinking, false, "* > ", "qwen3-coder-q3  10k|60k"},
-		{"streaming", phaseStreaming, false, "~ > ", "qwen3-coder-q3  10k|60k"},
-		{"idle colored", phaseIdle, true, "<90>.</> <36>></> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
-		{"thinking colored", phaseThinking, true, "<96>*</> <36>></> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
+		{"idle", phaseIdle, false, "qwen3-coder-q3  10k|60k  . ❯ ", "qwen3-coder-q3  10k|60k"},
+		{"thinking", phaseThinking, false, "qwen3-coder-q3  10k|60k  * ❯ ", "qwen3-coder-q3  10k|60k"},
+		{"streaming", phaseStreaming, false, "qwen3-coder-q3  10k|60k  ~ ❯ ", "qwen3-coder-q3  10k|60k"},
+		{"idle colored", phaseIdle, true, "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>  <90>.</> <36>❯</> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
+		{"thinking colored", phaseThinking, true, "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>  <96>*</> <36>❯</> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -141,8 +141,8 @@ func TestRenderGoldenAnswer(t *testing.T) {
 		width int
 		want  string
 	}{
-		{"80 cols", 80, "\n14:02:31  Added  --json  to  cortex learn . The report struct already carried\n          json tags, so the flag only switches the printer between the text and\n          JSON encoders.\n\n          •  learn.go : new  --json  flag\n          •  learn_test.go : covers both printers\n\n          Tests pass.\n\n"},
-		{"140 cols caps", 140, "\n14:02:31  Added  --json  to  cortex learn . The report struct already carried json tags, so the flag\n          only switches the printer between the text and JSON encoders.\n\n          •  learn.go : new  --json  flag\n          •  learn_test.go : covers both printers\n\n          Tests pass.\n\n"},
+		{"80 cols", 80, "\n14:02:31  Added --json to cortex learn. The report struct already carried json\n          tags, so the flag only switches the printer between the text and JSON\n          encoders.\n\n          - learn.go: new --json flag\n          - learn_test.go: covers both printers\n\n          Tests pass.\n\n"},
+		{"140 cols caps", 140, "\n14:02:31  Added --json to cortex learn. The report struct already carried json tags, so the flag\n          only switches the printer between the text and JSON encoders.\n\n          - learn.go: new --json flag\n          - learn_test.go: covers both printers\n\n          Tests pass.\n\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

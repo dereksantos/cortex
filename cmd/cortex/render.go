@@ -68,10 +68,22 @@ type markdownRenderer struct {
 // timestamp gutter instead (writeBlock indents continuation lines under it,
 // docs/tui-polish.md track 2), so glamour's own two-space margin would only
 // push it off that column.
+//
+// The rest of the theme is quieted to the REPL's own palette
+// (docs/tui-polish.md): inline code is accent-colored text with no padded
+// background chip, headings are bold in the default foreground (H1 loses its
+// colored badge), and list items use a plain "-".
 var headingStyle = func() ansi.StyleConfig {
 	s := styles.DarkStyleConfig
 	noMargin := uint(0)
 	s.Document.Margin = &noMargin
+	accent := "6" // ANSI cyan — style.Accent's hue
+	s.Code.Prefix, s.Code.Suffix = "", ""
+	s.Code.Color, s.Code.BackgroundColor = &accent, nil
+	s.Heading.Color = nil
+	s.H1.Prefix, s.H1.Suffix = "", ""
+	s.H1.Color, s.H1.BackgroundColor = nil, nil
+	s.Item.BlockPrefix = "- "
 	s.Heading.BlockSuffix = ""
 	s.H2.Prefix = ""
 	s.H3.Prefix = ""

@@ -407,22 +407,19 @@ func estimatedReasoningTokens(trace string) int {
 	return len(trace) / 4
 }
 
-// thoughtStat prints one dim gutter line summarizing how long and how much a
-// model call spent deliberating — "thought 14s | 1.1k tok" — mirroring
-// breadcrumb's format. Uses res.Usage's reported reasoning-token count when
-// the backend provides one, otherwise estimates from the accumulated trace
-// length. No-op with no reasoning at all, when neither the elapsed-time nor
-// token threshold is met (a quick deliberation isn't worth a dedicated
-// line), or when breadcrumb already printed the trace for this same step (one
-// gray gutter line per step, not two). Callers only construct a streamPrinter
-// outside quiet mode, so this is implicitly never shown headless.
-func (p *streamPrinter) thoughtStat(res *AgentResponse) {
+// thoughtStat is how long a model call spent deliberating — "thought 14s" —
+// for the turn footer (footer.go). Uses res.Usage's reported reasoning-token
+// count when the backend provides one, otherwise estimates from the
+// accumulated trace length, to judge whether the deliberation was substantial.
+// "" with no reasoning at all, when neither the elapsed-time nor token
+// threshold is met, or when breadcrumb already showed this step's trace.
+func (p *streamPrinter) thoughtStat(res *AgentResponse) string {
 	if p.crumbed {
-		return
+		return ""
 	}
 	trace := p.reason.String()
 	if trace == "" {
-		return
+		return ""
 	}
 	var elapsed time.Duration
 	if !p.start.IsZero() {
@@ -436,12 +433,9 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 		tok = estimatedReasoningTokens(trace)
 	}
 	if elapsed < thoughtStatMinSeconds*time.Second && tok <= thoughtStatMinTokens {
-		return
+		return ""
 	}
-	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
-	tools.FlushFold()
-	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(tools.Now()), style.Paint(line, style.Dim))
+	return fmt.Sprintf("thought %ds", int(elapsed.Seconds()))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap
@@ -498,8 +492,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		p.stopTicker() // before the clear below, so no straggler tick redraws
 		p.finish()
 		cs.live.SetThinking(false, "")
-		p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
-		p.thoughtStat(res) // else: a turn-end "thought Ns | tok" stat, if reasoning was substantial
+		p.breadcrumb(res)                  // persist the reasoning trace of a silent tool step
+		cs.noteThought(p.thoughtStat(res)) // else: "thought Ns" for the footer, if reasoning was substantial
 		return res, true, err
 	}
 	s := NewSpinner()
@@ -518,8 +512,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	if !p.began {
 		s.Stop() // stop before the breadcrumb so the line is clean
 	}
-	p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
-	p.thoughtStat(res) // else: a turn-end "thought Ns | tok" stat, if reasoning was substantial
+	p.breadcrumb(res)                  // persist the reasoning trace of a silent tool step
+	cs.noteThought(p.thoughtStat(res)) // else: "thought Ns" for the footer, if reasoning was substantial
 	return res, true, err
 }
 
@@ -560,7 +554,6 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 // next prompt. ESC/Ctrl-C cancels via the anchor's context.
 func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
 	anchor, ctx := editor.Anchor(session.Prompt(), seed)
-	anchor.SetRight(session.PromptStatus())
 	r, w, err := os.Pipe()
 	if err != nil {
 		// Pipe setup failed (rare): fall back to the silent-capture path so the

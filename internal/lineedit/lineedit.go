@@ -39,7 +39,7 @@ type Terminal struct {
 	accepted func(line string, width int) string
 }
 
-// SetAcceptedLine sets how a line submitted through ReadLineStatus is left in
+// SetAcceptedLine sets how a line submitted through ReadLineEcho is left in
 // scrollback: on Enter the prompt row is redrawn as f(line, width) before the
 // newline — so the status that sat beside the input while editing needn't be
 // kept in the history. f may return several rows joined by "\r\n" (the
@@ -221,23 +221,22 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 // It backs the type-ahead path: keystrokes captured while a turn streamed land
 // here as the starting draft, so the user's in-flight input isn't lost.
 func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
-	return t.readLine(prompt, "", prefill, nil)
+	return t.readLine(prompt, prefill, nil)
 }
 
-// ReadLineStatus is ReadLinePrefilled with right, a status shown at the row's
-// right edge while the input leaves room for it (renderLine), and the
-// accepted-line rewrite (SetAcceptedLine) applied on Enter.
-func (t *Terminal) ReadLineStatus(prompt, right, prefill string) (string, error) {
-	return t.readLine(prompt, right, prefill, t.accepted)
+// ReadLineEcho is ReadLinePrefilled with the accepted-line rewrite
+// (SetAcceptedLine) applied on Enter — the REPL's main input read.
+func (t *Terminal) ReadLineEcho(prompt, prefill string) (string, error) {
+	return t.readLine(prompt, prefill, t.accepted)
 }
 
-func (t *Terminal) readLine(prompt, right, prefill string, accepted func(string, int) string) (string, error) {
+func (t *Terminal) readLine(prompt, prefill string, accepted func(string, int) string) (string, error) {
 	src := newReaderSource(t.fd)
 	buf := &buffer{}
 	if prefill != "" {
 		setBuffer(buf, prefill)
 	}
-	redraw := func() { io.WriteString(t.out, renderLine(prompt, right, buf, t.width())) }
+	redraw := func() { io.WriteString(t.out, renderLine(prompt, buf, t.width())) }
 	redraw()
 
 	// History navigation: hpos indexes into history; at history.Len() means the

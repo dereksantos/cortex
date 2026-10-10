@@ -373,15 +373,15 @@ func TestPromptReflectsPhase(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request()}
 
 	sess.phase = phaseIdle
-	if got := sess.Prompt(); !strings.HasPrefix(got, style.Paint(".", style.Dim)) {
+	if got := sess.Prompt(); !strings.Contains(got, style.Paint(".", style.Dim)+" "+style.Paint(promptGlyph, style.Accent)) {
 		t.Errorf("idle Prompt() = %q, want to start with the dim gray .", got)
 	}
 	sess.phase = phaseThinking
-	if got := sess.Prompt(); !strings.HasPrefix(got, style.Paint("*", style.Live)) {
+	if got := sess.Prompt(); !strings.Contains(got, style.Paint("*", style.Live)+" "+style.Paint(promptGlyph, style.Accent)) {
 		t.Errorf("thinking Prompt() = %q, want to start with the bright cyan *", got)
 	}
 	sess.phase = phaseStreaming
-	if got := sess.Prompt(); !strings.HasPrefix(got, style.Paint("~", style.Streaming)) {
+	if got := sess.Prompt(); !strings.Contains(got, style.Paint("~", style.Streaming)+" "+style.Paint(promptGlyph, style.Accent)) {
 		t.Errorf("streaming Prompt() = %q, want to start with the bright green ~", got)
 	}
 }

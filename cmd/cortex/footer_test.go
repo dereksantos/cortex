@@ -36,22 +36,20 @@ func TestSummarizeTurn(t *testing.T) {
 
 func TestRenderFooterGolden(t *testing.T) {
 	tests := []struct {
-		name  string
-		s     turnSummary
-		gauge string
-		want  string
+		name string
+		s    turnSummary
+		want string
 	}{
-		{"full", turnSummary{Elapsed: 20 * time.Second, Tools: 7, FilesChanged: 1, Cost: 0.004}, "24k|131k",
-			"          20s · 7 tools · 1 file changed · 24k|131k · $0.0040"},
-		{"answer only", turnSummary{Elapsed: 800 * time.Millisecond}, "3k|131k",
-			"          0.8s · 3k|131k"},
-		{"long turn, local model", turnSummary{Elapsed: 185 * time.Second, Tools: 31, FilesChanged: 4}, "",
+		{"full", turnSummary{Elapsed: 72 * time.Second, Thought: "thought 38s", Tools: 7, FilesChanged: 1, Cost: 0.004},
+			"          1m12s · thought 38s · 7 tools · 1 file changed · $0.0040"},
+		{"answer only", turnSummary{Elapsed: 800 * time.Millisecond}, "          0.8s"},
+		{"long turn, local model", turnSummary{Elapsed: 185 * time.Second, Tools: 31, FilesChanged: 4},
 			"          3m05s · 31 tools · 4 files changed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer style.ForceColor(false)()
-			if got := renderFooter(tt.s, tt.gauge); got != tt.want {
+			if got := renderFooter(tt.s); got != tt.want {
 				t.Errorf("footer changed.\n got: %q\nwant: %q", got, tt.want)
 			}
 		})
