@@ -96,9 +96,7 @@ func TestRenderGoldenToolSurface(t *testing.T) {
 		color bool
 		want  string
 	}{
-		{"no tty", 0, false, `14:02:11  outline  cmd/cortex/learn.go  2 lines, 28 B
-14:02:11  grep     "NewFlagSet", cmd/cortex  cmd/cortex/learn.go:41: fs := flag.NewFlagSet
-14:02:11  read     cmd/cortex/learn.go:40-96  57 lines, 285 B
+		{"no tty", 0, false, `14:02:11  outline learn.go · grep "NewFlagSet" · read learn.go
 14:02:11  edit     cmd/cortex/learn.go  +2 -1
             @@ -1,6 +1,7 @@
             1   func learnCmd(args []string) error {
@@ -115,9 +113,7 @@ func TestRenderGoldenToolSurface(t *testing.T) {
 14:02:11    outline  internal/loops  31 lines, 62 B
 14:02:11    read     internal/loops/scheduler.go:12-58  1.2s  47 lines, 94 B
 14:02:11    study done: 2 calls, 6.2s, digest 2.3 KB`},
-		{"80 cols", 80, false, `14:02:11  outline  cmd/cortex/learn.go                             2 lines, 28 B
-14:02:11  grep     "NewFlagSet", cmd/cortex                 cmd/cortex/learn.go…
-14:02:11  read     cmd/cortex/learn.go:40-96                     57 lines, 285 B
+		{"80 cols", 80, false, `14:02:11  outline learn.go · grep "NewFlagSet" · read learn.go
 14:02:11  edit     cmd/cortex/learn.go                                     +2 -1
             @@ -1,6 +1,7 @@
             1   func learnCmd(args []string) error {
@@ -134,9 +130,7 @@ func TestRenderGoldenToolSurface(t *testing.T) {
 14:02:11    outline  internal/loops                               31 lines, 62 B
 14:02:11    read     internal/loops/scheduler.go:12-58       1.2s  47 lines, 94…
 14:02:11    study done: 2 calls, 6.2s, digest 2.3 KB`},
-		{"140 cols caps at 100", 140, false, `14:02:11  outline  cmd/cortex/learn.go                                                 2 lines, 28 B
-14:02:11  grep     "NewFlagSet", cmd/cortex                              cmd/cortex/learn.go:41: fs…
-14:02:11  read     cmd/cortex/learn.go:40-96                                         57 lines, 285 B
+		{"140 cols caps at 100", 140, false, `14:02:11  outline learn.go · grep "NewFlagSet" · read learn.go
 14:02:11  edit     cmd/cortex/learn.go                                                         +2 -1
             @@ -1,6 +1,7 @@
             1   func learnCmd(args []string) error {
@@ -153,9 +147,7 @@ func TestRenderGoldenToolSurface(t *testing.T) {
 14:02:11    outline  internal/loops                                                   31 lines, 62 B
 14:02:11    read     internal/loops/scheduler.go:12-58                          1.2s  47 lines, 94 B
 14:02:11    study done: 2 calls, 6.2s, digest 2.3 KB`},
-		{"40 cols clips", 40, false, `14:02:11  outline  cmd/co…  2 lines, 28…
-14:02:11  grep     "NewFl…  cmd/cortex/…
-14:02:11  read     cmd/co…  57 lines, 2…
+		{"40 cols clips", 40, false, `14:02:11  outline learn.go · grep "NewF…
 14:02:11  edit     cmd/cortex/le…  +2 -1
             @@ -1,6 +1,7 @@
             1   func learnCmd(args []st…
@@ -172,9 +164,7 @@ func TestRenderGoldenToolSurface(t *testing.T) {
 14:02:11    outline  inte…  31 lines, 6…
 14:02:11    read     inte…  1.2s  47 li…
 14:02:11    study done: 2 calls, 6.2s, …`},
-		{"80 cols colored", 80, true, `<90>14:02:11</>  <32>outline</>  cmd/cortex/learn.go                             <90>2 lines, 28 B</>
-<90>14:02:11</>  <32>grep</>     "NewFlagSet", cmd/cortex                 <90>cmd/cortex/learn.go…</>
-<90>14:02:11</>  <32>read</>     cmd/cortex/learn.go:40-96                     <90>57 lines, 285 B</>
+		{"80 cols colored", 80, true, `<90>14:02:11</>  <90>outline learn.go · grep "NewFlagSet" · read learn.go</>
 <90>14:02:11</>  <32>edit</>     cmd/cortex/learn.go                                     <90>+2 -1</>
 <90>            @@ -1,6 +1,7 @@</>
 <90>            1   func learnCmd(args []string) error {</>

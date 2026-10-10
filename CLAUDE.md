@@ -131,8 +131,16 @@ past 1s) right-aligned at the content width (terminal capped at 100) —
 laid out by `internal/tools/toolline.go`'s `formatToolLine`; while it runs
 the live status row names it. Subagent calls (`study`/`agent`) are the
 exception: their line prints before they run so their nested calls land
-under it. Role lines are colored by their timestamp instead of a
-per-role icon (`cmd/cortex/display.go`'s `gutter`); the "thinking" indicator
+under it. A run of the coder's read-only calls (read/grep/outline/recall/
+memory reads) folds into one dim line — `read 3 files · grep 2 searches` —
+printed when the run ends (`internal/tools/fold.go`; cmd/cortex calls
+`tools.FlushFold()` before its own mid-turn output). The input row is
+cursor-first (`. > `) with the model + gauge at its right edge
+(`PromptStatus`); on Enter the row is rewritten as a timestamped echo of the
+input (`lineedit.Terminal.SetAcceptedLine`). Answers sit under the gutter and
+end with a one-line footer (`cmd/cortex/footer.go`). Every line carries the
+same dim `HH:MM:SS` gutter instead of a per-role icon (`cmd/cortex/display.go`'s
+`gutterPrefix`); the "thinking" indicator
 is a static label with only its elapsed-seconds tick moving (no animated
 spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and
 the anchored status row (`internal/lineedit/live.go`). Two things print

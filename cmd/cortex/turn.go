@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 func (cs *CortexSession) startActivity(label string) {
 	cs.setPhase(phaseThinking) // a running tool is busy time, same light as reasoning
 	if cs.live != nil {
-		cs.live.SetActivity(label)
+		cs.live.SetActivity(tools.ShortAction(label))
 	}
 }
 
@@ -82,6 +83,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	defer cs.setPhase(phaseIdle)
 	began := time.Now()
 	cs.lastTurn = nil
+	cs.turnStep = 0
 
 	turnStart := len(cs.Request.Messages)
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
@@ -146,7 +148,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	if maxIterOverride > 0 {
 		maxIter = maxIterOverride
 	}
-	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
+	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), Finalize: finalize}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
@@ -181,6 +183,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	ts.AfterToolResult = onAfterToolResult
 
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	tools.FlushFold() // a read-only run still held when the turn ends
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens

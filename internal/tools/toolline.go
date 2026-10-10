@@ -73,6 +73,14 @@ func splitAction(action string) (verb, target string) {
 	return verb, target
 }
 
+// ShortAction is an action as the tool lines name it — "read greet.py" for
+// "read_file(greet.py)" — for surfaces that label a call in flight (the
+// REPL's live status row) so they match the line it will print.
+func ShortAction(action string) string {
+	verb, target := splitAction(action)
+	return strings.TrimSpace(verb + " " + target)
+}
+
 // formatToolLine renders one finished tool call at nesting margin indent.
 // result is the right-hand column ("+9 -2", "6.8s  31 lines, 1.2 KB"); failed
 // paints the verb and result as an error. Width 0 (piped, CI) clips nothing

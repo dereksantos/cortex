@@ -36,16 +36,17 @@ type Terminal struct {
 
 	// accepted, when set, renders the row a submitted line leaves behind in
 	// scrollback (see SetAcceptedLine).
-	accepted func(line string) string
+	accepted func(line string, width int) string
 }
 
 // SetAcceptedLine sets how a line submitted through ReadLineStatus is left in
-// scrollback: on Enter the prompt row is redrawn as f(line) before the
+// scrollback: on Enter the prompt row is redrawn as f(line, width) before the
 // newline — so the status that sat beside the input while editing needn't be
-// kept in the history. f must return a single row. Nil (the default) leaves
+// kept in the history. f may return several rows joined by "\r\n" (the
+// terminal is in raw mode); width is the terminal's. Nil (the default) leaves
 // the row as typed. Plain ReadLine/ReadLinePrefilled (a y/N answer, say)
 // never use it.
-func (t *Terminal) SetAcceptedLine(f func(line string) string) { t.accepted = f }
+func (t *Terminal) SetAcceptedLine(f func(line string, width int) string) { t.accepted = f }
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
 func (t *Terminal) SetHistory(h *History) { t.history = h }
@@ -230,7 +231,7 @@ func (t *Terminal) ReadLineStatus(prompt, right, prefill string) (string, error)
 	return t.readLine(prompt, right, prefill, t.accepted)
 }
 
-func (t *Terminal) readLine(prompt, right, prefill string, accepted func(string) string) (string, error) {
+func (t *Terminal) readLine(prompt, right, prefill string, accepted func(string, int) string) (string, error) {
 	src := newReaderSource(t.fd)
 	buf := &buffer{}
 	if prefill != "" {
@@ -256,7 +257,7 @@ func (t *Terminal) readLine(prompt, right, prefill string, accepted func(string)
 		case keyEnter:
 			line := buf.string()
 			if accepted != nil {
-				io.WriteString(t.out, "\r\033[K"+accepted(line))
+				io.WriteString(t.out, "\r\033[K"+accepted(line, t.width()))
 			}
 			io.WriteString(t.out, "\r\n")
 			return line, nil // caller decides what to record (AddHistory)
