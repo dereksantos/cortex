@@ -68,7 +68,15 @@ func grep(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// not a harness failure — the model fixes the pattern and retries.
 		return fmt.Sprintf("invalid regex %q: %v (grep uses RE2 — no lookahead or backreferences)", pattern, err), nil
 	}
-	return grepFiles(ctx, resolveWorkdir(deps, root), re, active.GrepMaxHits)
+	// A missing path isn't a dead end (issue #142): point at outline, state the
+	// workspace root when the given path is absolute or outside it, and offer
+	// nearby existing candidates. The "." default always exists (CWD/workdir),
+	// so the not-found branch only fires for an explicit bad path.
+	fsRoot := resolveWorkdir(deps, root)
+	if _, err := os.Stat(fsRoot); err != nil && os.IsNotExist(err) {
+		return "", pathNotFoundError(root, fsRoot, workdirRootForErrors(deps))
+	}
+	return grepFiles(ctx, fsRoot, re, active.GrepMaxHits)
 }
 
 func isBroadJournalGrep(root, pattern string) bool {

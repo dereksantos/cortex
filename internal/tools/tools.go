@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -101,8 +102,26 @@ type SubAgentRunner interface {
 	RunSubagent(ctx context.Context, sa Subagent, seed string) (digest string, err error)
 }
 
-// ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means the
-// command must not run and message explains why.
+// BashOutcome is the structured outcome of a bash tool call (issue #219):
+// whether the command's process RAN, and, when it did, the exit code the
+// process returned (0 when it exited 0; 1 for a signal-killed run — a
+// signal has no exit status, and exec reports -1 for it, so bash maps it to
+// a plain non-zero failure — the real exit code otherwise). It is a POSITIVE signal — Ran is set
+// only on the path that spawned the process — so a consumer of the call's
+// fate (the turn receipt's bash recorder, cmd/cortex) never infers "it ran
+// and exited 0" from the absence of a marker in the result message: a call
+// the tool disabled, a call a validation rejected, and a command the shell
+// gate refused (or the user declined) all come back Ran=false, and the
+// message is the reason, not a run.
+type BashOutcome struct {
+	Ran      bool
+	ExitCode int
+}
+
+// ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means
+// the command must not run and message explains why. The structured fate of
+// a bash call — ran or not, and its exit code — is the BashOutcome Execute
+// returns, so the seam carries no outcome of its own.
 type ShellGate interface {
 	GateShell(ctx context.Context, command string) (string, bool)
 }
@@ -153,6 +172,17 @@ type Quieter interface {
 	Quiet() bool
 }
 
+// AttributionProvider exposes the commit-attribution trailer for the bash
+// tool's git-commit backstop (classifyAttribution). The provider
+// resolves it fully itself (the code role's resolved model included) —
+// AttributionCommit returns "" when attribution is disabled or no commit
+// trailer is configured.
+type AttributionProvider interface {
+	// AttributionCommit returns the commit trailer to add to a git commit
+	// (model already substituted), or "" for none.
+	AttributionCommit() string
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -180,6 +210,8 @@ type ToolDeps interface {
 	OutlineModifier
 	// WatermarkAdjuster provides methods to adjust working set watermarks.
 	WatermarkAdjuster
+	// AttributionProvider exposes attribution configuration.
+	AttributionProvider
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -203,14 +235,17 @@ func (headlessDeps) SummarizeText(context.Context, string, string, int) (string,
 	return "", false, errors.New("summarize unavailable: no session")
 }
 func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool) {
-	v := shellrisk.Classify(ctx, command, nil)
+	// The headless stub has no session, so no taint state: the classifier
+	// note is "" (issue #102 threads the session's taint through the real
+	// gate only, and there is no judge call here either — fn is nil).
+	v := shellrisk.Classify(ctx, command, "", nil)
 	switch v.Level {
 	case shellrisk.Safe:
 		return "", true
 	case shellrisk.Blocked:
-		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
+		return shellrisk.RefusedMessage(v.Reason), false
 	default: // Risky — no interactive approver in a headless context.
-		return fmt.Sprintf("blocked (risk: %s). No interactive approval is available in this session — re-issue a safer command, or ask the user to run it.", v.Reason), false
+		return shellrisk.BlockedMessage(v.Reason), false
 	}
 }
 func (headlessDeps) AllowDelete() (string, bool) { return "", false }
@@ -239,6 +274,215 @@ func (headlessDeps) MergeOutlineEntries(string, string) (string, error) {
 }
 func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
+}
+func (headlessDeps) AttributionCommit() string { return "" }
+
+// HookMode is the post-edit hook's mode switch (issue #129 piece 2):
+// off | format | all. "all" (the default, the zero value) runs the
+// per-file format AND the per-package lint; "format" runs format only;
+// "off" runs nothing. The ordering is deliberate — the numeric value IS
+// the restrictiveness, so a monotone-down "lower" is a plain comparison
+// (toward a LARGER value) and the effective mode is the MORE
+// restrictive of (ceiling, session) — larger wins (moreRestrictive). A
+// /hook command (or a per-call `hook: "skip"`) may LOWER a session
+// toward off, but nothing RAISES it: an operator turns a slow hook down
+// or off, and a mode the operator never configured (less restrictive than
+// the ceiling) is unreachable.
+type HookMode int
+
+const (
+	HookModeAll    HookMode = iota // format + per-file/per-package lint (default)
+	HookModeFormat                 // format only, no lint
+	HookModeOff                    // nothing runs
+)
+
+// hookMode is the package-internal spelling of HookMode (the REPL /hook
+// command and every other internal call site can use either).
+type hookMode = HookMode
+
+// ParseHookMode maps a mode value (config field, env var, REPL command) to
+// its mode; the empty string is the "absent" sentinel that resolves to the
+// default (all), and an unrecognized value is the safe off — a typo must
+// never ENABLE a hook the operator did not name.
+func ParseHookMode(s string) HookMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "all":
+		return HookModeAll
+	case "format":
+		return HookModeFormat
+	case "off":
+		return HookModeOff
+	}
+	return HookModeOff
+}
+
+// activeCeiling is the process-wide configured ceiling. cmd/cortex installs
+// it once per process (SetHookCeiling, from the resolved config); tests that
+// pin the resolution install/restore it around the call, the way the Limits
+// tests save/restore the package vars.
+var activeCeiling = HookModeAll
+
+// SetHookCeiling installs the process-wide mode ceiling (cmd/cortex calls it
+// once at session construction, after resolving env > project > user).
+func SetHookCeiling(m HookMode) { activeCeiling = m }
+
+// PostEditHookState is the session-scoped state of the post-edit hook
+// (issue #129): the once-per-session "hook inactive: workspace not
+// trusted" note flag AND the session-mode — where a /hook command has
+// lowered the session below its configured ceiling (all→format→off only;
+// it never raises, see PostEditHookState.SetMode). A session (a
+// *CortexSession in cmd/cortex) is the unit of both "once per session" and
+// "the current mode": the note fires on the first write/edit of a session
+// on an untrusted workspace and stays quiet afterwards, and /hook off takes
+// effect from the next write/edit of that same session. The flag is marked
+// consumed only when the note is actually emitted, so a session that gets
+// trusted mid-session announces nothing after the flip. It is a POINTER
+// behind the HookState capability so the state mutates in place on the
+// session that owns it — and so a test's value-passed deps copies all
+// share the same session state.
+type PostEditHookState struct {
+	inactiveAnnounced bool
+	mode              hookMode // the session's current mode (HookModeAll = untouched)
+}
+
+// SetMode lowers the session-mode to m (all→format→off only): a REPL /hook
+// command is its sole caller, and it is a monotone-down setter — an attempt
+// to raise is a no-op (an operator turns the hook DOWN or off, never up).
+// It does NOT clamp against the process-wide ceiling (SetHookCeiling):
+// effectiveMode folds the ceiling in at read time, so a session can hold a
+// mode the operator never configured — the effective mode is still
+// capped, but a ceiling that is RAISED later (a future reload) does not
+// silently re-widen a session the operator explicitly turned down. The
+// agent has NO setter: it can only skip one call (effectiveHookMode),
+// and nothing here touches trust.
+func (s *PostEditHookState) SetMode(m HookMode) {
+	if s == nil || m <= s.mode {
+		return
+	}
+	s.mode = m
+}
+
+// SessionMode is the current session-mode (all when the state is nil — a
+// caller with no session has no /hook to lower it from).
+func (s *PostEditHookState) SessionMode() HookMode {
+	if s == nil {
+		return HookModeAll
+	}
+	return s.mode
+}
+
+// inactiveNoteDue reports whether the "hook inactive" note may still be
+// announced for this session (the once-per-session flag: false once it has
+// been). It is non-consuming and never announces anything itself — the
+// caller marks it consumed only when the note is actually emitted, so a
+// trusted workspace (which never emits the note) and a command-less edit
+// (which never reaches the note) do not burn the session's one slot. It
+// is the ONLY cross-call state the hook keeps: the rest of the hook is
+// stateless per edit.
+func (s *PostEditHookState) inactiveNoteDue() bool {
+	return !s.inactiveAnnounced
+}
+
+// announceInactive marks the one-time note as announced. Called only from
+// the untrusted branch of runProjectCommandHook, after the note has been
+// produced and is about to be appended to the tool result.
+func (s *PostEditHookState) announceInactive() {
+	s.inactiveAnnounced = true
+}
+
+// moreRestrictive is the LARGER of two modes — the mode that runs LESS
+// (off=2 > format=1 > all=0, so larger is more restrictive). Every
+// "fold in the more restrictive" site (the ceiling, a /hook lowering, a
+// per-call skip) goes through this one comparison.
+func moreRestrictive(a, b HookMode) HookMode {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+// effectiveMode is the hook mode a session operates in: the
+// more-restrictive of the configured ceiling and the session's current
+// mode. Both together are monotone-down from the config — nothing here
+// can raise.
+func effectiveMode(sessionMode HookMode) HookMode {
+	return moreRestrictive(sessionMode, activeCeiling)
+}
+
+// EffectiveHookMode is the hook mode the session with this state operates
+// in (the more-restrictive of the session-mode and the process-wide
+// configured ceiling; nil state = a caller without a session, so just the
+// ceiling). The REPL's /hook display and a session's hook behavior must
+// agree on this value.
+func EffectiveHookMode(state *PostEditHookState) HookMode {
+	return effectiveMode(state.SessionMode())
+}
+
+// effectiveHookMode is the hook mode for THIS tool call: the session's
+// effective mode, further lowered to off when the call itself carries
+// `hook: "skip"` (the per-call opt-out — the agent lowers for one write/edit,
+// never raises, and nothing here touches trust). state nil = a caller
+// without a session: the ceiling directly.
+func effectiveHookMode(state *PostEditHookState, skip bool) HookMode {
+	m := EffectiveHookMode(state)
+	if skip && m != HookModeOff {
+		m = HookModeOff
+	}
+	return m
+}
+
+// hookStateOf extracts the session's post-edit hook state from deps (the
+// PostEditHookState: the "hook inactive" flag AND the session-mode a /hook
+// command lowers in place), or nil when the capability is absent (every
+// existing implementor that hasn't adopted it): such a caller has no session
+// to announce the untrusted note for and no session to lower for, so its
+// mode is the bare ceiling (min(ceiling, all) = ceiling) and the note is not
+// surfaced.
+func hookStateOf(deps ToolDeps) *PostEditHookState {
+	state, ok := deps.(HookStateProvider)
+	if !ok {
+		return nil
+	}
+	return state.HookState()
+}
+
+// HookStateProvider is the OPTIONAL ToolDeps capability that exposes the
+// session's post-edit hook state (see PostEditHookState). It is asserted
+// dynamically by hookStateOf, so every existing ToolDeps implementor is
+// untouched; a session that doesn't implement it has no per-session
+// announcement (the hook's untrusted note is a per-session observation,
+// and a stateless caller has no session to announce it for).
+type HookStateProvider interface {
+	HookState() *PostEditHookState
+}
+
+// FormatHookNoter is the OPTIONAL ToolDeps capability that supplies the
+// session's per-turn WRAPPER around the post-edit format hook
+// (cmd/cortex's CortexSession.FormatHook, issue #219): it runs the hook
+// exactly as this package's production path does and records the hook's
+// outcome for the turn's measurement-only receipt. A session without it
+// (subagent Toolsets, hand-built callers) has the hook run directly — the
+// model-facing note is byte-identical, only the receipt recording is
+// skipped.
+type FormatHookNoter interface {
+	FormatHook(ctx context.Context, fsPath string, hookSkip bool) string
+}
+
+// formatHookNote runs the post-edit format hook for fsPath through the
+// session's wrapper when the capability is present, directly otherwise. The
+// note returned is the model-facing one, byte-identical to the direct run
+// in either case — the wrapper only records the note's outcome on the
+// session's turn-receipt state alongside returning it. hookSkip is the
+// per-call `hook: "skip"` opt-out: the wrapper must fold it into the
+// effective mode the same way the direct run does (effectiveHookMode), or
+// a skip on a session that implements the capability would silently run the
+// formatter anyway.
+func formatHookNote(ctx context.Context, deps ToolDeps, fsPath string, hookSkip bool) string {
+	if noter, ok := deps.(FormatHookNoter); ok {
+		return noter.FormatHook(ctx, fsPath, hookSkip)
+	}
+	note, _ := runProjectCommandHook(ctx, projectCommandsOf(deps), workdirOf(deps), fsPath, workspaceTrusted(deps), hookStateOf(deps), effectiveHookMode(hookStateOf(deps), hookSkip))
+	return note
 }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
@@ -301,7 +545,10 @@ var ReadFile = newTool(FunctionReadFile,
 		"headings/sections with line spans, whatever the file type supports) comes "+
 		"back instead. With start/end: exactly those 1-indexed lines, which bypasses "+
 		"the size limit — the precise way to pull one declaration after a "+
-		"skeleton/outline/study points you at its line span.",
+		"skeleton/outline/study points you at its line span. An image file "+
+		"(png/jpeg/gif/webp) read whole attaches as an image part for vision "+
+		"models (refused for a text-only model or over the size cap); a ranged "+
+		"read of an image is refused.",
 	objectSchema(map[string]any{
 		"path":  stringProp("Path to the file to read, relative to the working directory."),
 		"start": map[string]any{"type": "integer", "description": "Optional: 1-indexed first line to read. When set, only the line range is returned (the size limit does not apply)."},
@@ -315,6 +562,7 @@ var WriteFile = newTool(FunctionWriteFile,
 	objectSchema(map[string]any{
 		"path":    stringProp("Path to the file to write."),
 		"content": stringProp("The full contents to write to the file."),
+		"hook":    stringProp("Optional: \"skip\" skips the post-edit format/lint hook for this call only (never raises it, never affects trust)."),
 	}, "path", "content"))
 
 // EditFile is the edit_file tool declaration: exact-match (whitespace-
@@ -326,12 +574,30 @@ var EditFile = newTool(FunctionEditFile,
 		"byte-perfect. old_string must still resolve to exactly one place unless "+
 		"replace_all is set. Prefer this over write_file for changes to an existing "+
 		"file. To make several changes at once, pass an `edits` array — they apply "+
-		"in order and atomically (all succeed or the file is left untouched).",
+		"in order and atomically (all succeed or the file is left untouched). The "+
+		"result reports lines removed/added, warns when an edit removes more "+
+		"lines than it adds, and includes the current changed region (line- "+
+		"numbered) so your view of the file stays in sync. A landed edit that "+
+		"removes a line with a conditional, return, or panic/lock-adjacent shape "+
+		"(if/else/for/switch/case/return/panic/lock — the shapes of a safety "+
+		"guard) that does not reappear in the replacement's added lines appends a "+
+		"\"GUARD DROPPED\" WARNING naming the dropped line, so a large block edit that "+
+		"silently removes a guard is surfaced in the observation. On a failure, the "+
+		"error lists the line numbers of every match (ambiguity) or the closest "+
+		"region in the file — the file's CURRENT content, not your possibly-stale "+
+		"view, copy from it — so you can correct the edit without a separate read; "+
+		"a not-found names that your old_string does not match the file as it is "+
+		"now, without asserting a cause (it may be stale, or mistyped or copied "+
+		"from elsewhere). If the only difference is whitespace (e.g. gofmt "+
+		"re-aligned the span's interior spacing), the error says \"only whitespace differs\", "+
+		"points at that region's current lines, and refuses to land the edit — copy "+
+		"the region exactly and retry.",
 	objectSchema(map[string]any{
 		"path":        stringProp("Path to the file to edit."),
 		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
 		"new_string":  stringProp("Replacement text (single edit). May be empty to delete old_string."),
 		"replace_all": boolProp("Replace every occurrence instead of requiring a unique match. Default false."),
+		"hook":        stringProp("Optional: \"skip\" skips the post-edit format/lint hook for this call only (never raises it, never affects trust)."),
 		"edits": map[string]any{
 			"type":        "array",
 			"description": "Optional: multiple edits applied in order, atomically. When set, the top-level old_string/new_string are ignored.",
@@ -389,7 +655,7 @@ var OutlineTool = newTool(FunctionOutline,
 // Bash is the bash tool declaration: runs a shell command behind the
 // shellrisk gate (safe runs, risky prompts, blocked refuses).
 var Bash = newTool(FunctionBash,
-	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit.",
+	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit. In-place file rewrites (sed -i, ed, perl -pi, awk, python -c, > redirects) and file reads (cat, head, tail, tac, sed, grep) are reported on the result — use edit_file or write_file for edits (diff display + post-edit hook) and read_file/outline/grep for reads (sized, quote-aware readers that a bash shell command skips).",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
@@ -615,7 +881,7 @@ func init() {
 // tools need — study does; the file tools ignore both. It is a function (not a
 // method) because ToolCall now lives in internal/agent and methods cannot be
 // added to a type from another package.
-func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	// A tool dispatched without a session (tests, non-interactive paths) runs
 	// against the nil-safe headless defaults: the shell gate fails closed, study
 	// is unavailable, delete is disabled. This preserves the old behavior of the
@@ -625,16 +891,18 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		deps = headlessDeps{}
 	}
 
-	// Check if tool is enabled via config
+	// Check if tool is enabled via config. The command never ran: the
+	// BashOutcome is Ran=false, so a consumer of the call's fate (the turn
+	// receipt's bash recorder) never reads a disabled tool's clean result as
+	// a pass.
 	if !deps.IsToolEnabled(tc.Function.Name) {
-		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), nil
+		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), BashOutcome{}, nil
 	}
 
-	// Validate tool call (dynamic checks beyond config)
-	if deps != nil {
-		if ok, msg := deps.ValidateToolCall(tc); !ok {
-			return msg, nil
-		}
+	// Validate tool call (dynamic checks beyond config) — a rejection never
+	// ran either.
+	if ok, msg := deps.ValidateToolCall(tc); !ok {
+		return msg, BashOutcome{}, nil
 	}
 
 	// Time the call and let its announcement out on the far side with the
@@ -644,58 +912,81 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		beginNestedCall()
 	}
 	start := time.Now()
-	out, err := dispatchTool(ctx, tc, deps)
+	out, outcome, err := dispatchTool(ctx, tc, deps)
 	finishCall(time.Since(start), out, err)
-	return out, err
+	return out, outcome, err
 }
 
-// dispatchTool routes one tool call to its implementation.
-func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+// dispatchTool routes one tool call to its implementation. It returns the
+// call's BashOutcome for a BASH call only — the outcome the bash tool
+// itself computed (Ran=false for a gate refusal, a disabled tool, or a
+// validation rejection; Ran=true with the process's exit code for a run) —
+// and the zero outcome (which reports "not a bash call" to the caller) for
+// every other tool.
+func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
-		return readFile(tc, deps)
+		out, err := readFile(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionWriteFile:
-		return writeFile(tc, deps)
+		out, err := writeFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionEditFile:
-		return editFile(tc, deps)
+		out, err := editFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionOutline:
-		return outlineTool(tc, deps)
+		out, err := outlineTool(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionGrep:
-		return grep(ctx, tc, deps)
+		out, err := grep(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionBash:
 		return bash(ctx, tc, deps)
 	case FunctionRemove:
-		return removePath(tc, deps)
+		out, err := removePath(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryWrite:
-		return memoryWrite(tc, deps)
+		out, err := memoryWrite(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryRead:
-		return memoryRead(tc, deps)
+		out, err := memoryRead(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemorySearch:
-		return memorySearch(tc, deps)
+		out, err := memorySearch(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionMemoryForget:
-		return memoryForget(tc, deps)
+		out, err := memoryForget(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionRecall:
-		return recall(ctx, tc, deps)
+		out, err := recall(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionFetchURL:
-		return fetchURL(ctx, tc, deps)
+		out, err := fetchURL(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionWebSearch:
-		return webSearch(ctx, tc, deps)
+		out, err := webSearch(ctx, tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextEvict:
-		return contextEvict(tc, deps)
+		out, err := contextEvict(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextMerge:
-		return contextMerge(tc, deps)
+		out, err := contextMerge(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionContextAdjustWatermarks:
-		return contextAdjustWatermarks(tc, deps)
+		out, err := contextAdjustWatermarks(tc, deps)
+		return out, BashOutcome{}, err
 	case FunctionScanLandscape:
-		return scanLandscape(deps)
+		out, err := scanLandscape(deps)
+		return out, BashOutcome{}, err
 	}
 	// Any registered subagent tool (study, and future inheritors reflect/dream)
 	// shares this one dispatch path via the name→profile registry.
 	if sa, ok := Lookup(name); ok {
-		return runSubagent(ctx, tc, deps, sa)
+		out, err := runSubagent(ctx, tc, deps, sa)
+		return out, BashOutcome{}, err
 	}
-	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
+	return "", BashOutcome{}, fmt.Errorf(`no available tools matching name "%s"`, name)
 }
 
 // --- Helpers shared across tools ----------------------------------------
@@ -751,7 +1042,15 @@ func outlineTool(tc ToolCall, deps ToolDeps) (string, error) {
 		budget = n
 	}
 	printToolAction(deps, fmt.Sprintf("outline(%s)", path))
-	return outline.Render(resolveWorkdir(deps, path), budget)
+	fsPath := resolveWorkdir(deps, path)
+	text, err := outline.Render(fsPath, budget)
+	if err != nil && os.IsNotExist(err) {
+		// A missing path isn't a dead end (issue #142): point at outline/grep,
+		// state the workspace root when the given path is absolute or outside
+		// it, and offer nearby existing candidates.
+		return "", pathNotFoundError(path, fsPath, workdirRootForErrors(deps))
+	}
+	return text, err
 }
 
 // --- subagent tools (study, and future inheritors reflect/dream) --------
@@ -926,15 +1225,34 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
 	fsPath := resolveWorkdir(deps, path)
+	// A directory is not a read: os.ReadFile would return a bare "is a
+	// directory" error that dead-ends the model (issue #142 — the same
+	// path-guessing family as the workspace note). Return a bounded listing
+	// instead (like outline does for a directory) plus a "use outline/
+	// read_file on a file" note so the model can orient and target a file
+	// rather than dead-ending on the error. Checked BEFORE the ranged-read
+	// branch below, so a directory with start/end gets the listing too.
+	if info, statErr := os.Stat(fsPath); statErr == nil && info.IsDir() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → directory", path))
+		return directoryListing(path, fsPath), nil
+	}
 	// Ranged read: exact 1-indexed lines, bypassing the size gate (a range is
 	// bounded). This is the navigator's precise pull — project_index/study hands
 	// back a line span, and read_file(path, start, end) reads exactly it.
 	if start, ok := tc.IntArg("start"); ok && start > 0 {
+		// A line range over an image is meaningless (binary bytes), and the
+		// image branch below only fires on whole-file reads — refuse the ranged
+		// case explicitly so a model doesn't get base64 sliced mid-frame (#217).
+		if isImagePath(path, fsPath) {
+			printToolAction(deps, fmt.Sprintf("read_file(%s) → image, range refused", path))
+			return imageRefusal(path, imageExtType(path)) +
+				"line ranges are meaningless over image bytes — read it without start/end to attach it as an image part.", nil
+		}
 		end, hasEnd := tc.IntArg("end")
 		if !hasEnd || end < start {
 			end = start + active.DefaultRangeLines - 1
 		}
-		return readRange(deps, fsPath, start, end)
+		return readRange(deps, path, fsPath, start, end)
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
@@ -963,23 +1281,149 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	printToolAction(deps, fmt.Sprintf("read_file(%s)", path))
 	data, err := os.ReadFile(fsPath)
 	if err != nil {
+		// A missing file isn't a dead end (issue #142): point the model at
+		// outline/grep, state the real workspace root when the given path is
+		// absolute or outside it, and offer nearby existing candidates.
+		if os.IsNotExist(err) {
+			return "", pathNotFoundError(path, fsPath, workdirRootForErrors(deps))
+		}
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
+	// Image input (issue #217): a detected image never returns as a text
+	// string — three outcomes, all named with the file type (image.go).
+	if mediaType, ok := detectImage(path, data); ok {
+		return imageReadResult(deps, path, mediaType, data)
+	}
 	return string(data), nil
+}
+
+// imageReadResult decides what an image whole-file read hands back (#217):
+//   - inside a subagent (study/agent) → a refusal: the subagent's engine
+//     never splices image parts onto its tool messages, so an "attached"
+//     marker would tell the model about an image it cannot see.
+//   - a deps that records nothing (no ImageSink owner) → the same refusal:
+//     a marker with no attachment behind it is the same lie.
+//   - over tools.image_max_bytes → a refusal naming type, size, and cap,
+//     pointing at downscaling — no attachment, no partial image.
+//   - a text-only model (deps answers ImageGate false) → a refusal naming
+//     the file type and the base64 escape hatch — no attachment.
+//   - otherwise → the short marker observation with the attachment
+//     recorded on the deps' ImageSink (the dispatching session), so the
+//     dispatcher can splice the image part onto the tool-result message
+//     for the vision model.
+func imageReadResult(deps ToolDeps, path, mediaType string, data []byte) (string, error) {
+	if inSubagent() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (subagent)", path))
+		return imageRefusal(path, mediaType) +
+			"image input isn't available inside a subagent — no image part can reach the subagent's model; read it from the main conversation.", nil
+	}
+	sink, ok := deps.(ImageSink)
+	if !ok {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (no attachment owner)", path))
+		return imageRefusal(path, mediaType) +
+			"this dispatch has nowhere to attach an image part, so the bytes are withheld — read it from a session that can carry one.", nil
+	}
+	if max := active.ImageMaxBytes; len(data) > max {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image too large (%d bytes)", path, len(data)))
+		return imageRefusal(path, mediaType) + fmt.Sprintf(
+			"it is %d bytes, over the %d-byte image cap (tools.image_max_bytes) — downscale or crop it with bash and read the smaller file.",
+			len(data), max), nil
+	}
+	if gate, ok := deps.(ImageGate); ok && !gate.ImageInputEnabled() {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → image refused (text-only model)", path))
+		return imageRefusal(path, mediaType) +
+			"the bound model does not accept image input, so the bytes are withheld — route the turn to a vision-capable model (models.code.vision), or bash `base64 " + path + "` if you only need the raw encoding.", nil
+	}
+	part, obs := imagePartFor(path, mediaType, data)
+	sink.RecordImage(part)
+	return obs, nil
+}
+
+// IsImagePath reports whether a file looks like an image by extension or
+// by magic bytes in its first block (the ranged-read refusal probe —
+// cheap, and it must not read a whole multi-MB file just to ask).
+//
+// Exported for #218: the @mention loader asks the same question before
+// deciding whether to load a mentioned file as an image part or attach it as
+// text, and one probe is the point — a private copy of the extension table
+// in the caller is how the two paths drift apart.
+func IsImagePath(displayPath, fsPath string) bool {
+	if _, ok := imageMediaTypes[strings.ToLower(filepath.Ext(displayPath))]; ok {
+		return true
+	}
+	f, err := os.Open(fsPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 12)
+	n, _ := io.ReadFull(f, buf)
+	return sniffImageBytes(buf[:n]) != ""
+}
+
+// isImagePath is the package-internal spelling, kept so the ranged-read
+// refusal site reads as it always did.
+var isImagePath = IsImagePath
+
+// imageExtType resolves the MIME type a refusal should name for a path
+// already known to be an image; a magic-only file with an unknown
+// extension falls back to the generic image type.
+func imageExtType(displayPath string) string {
+	if mt, ok := imageMediaTypes[strings.ToLower(filepath.Ext(displayPath))]; ok {
+		return mt
+	}
+	return "image"
+}
+
+// directoryListing is the read_file response for a directory (issue #142): a
+// bounded, ls-like listing — every direct child's name (directories marked with
+// a trailing "/") — followed by a note that this is a directory, that
+// read_file targets a FILE, and that outline(path) gives a deeper structural
+// map when the flat listing isn't enough. The listing is bounded so a huge
+// directory can't blow up the context; beyond the cap the rest are elided with
+// a "grep/outline" pointer.
+func directoryListing(display, fsPath string) string {
+	const cap = 200
+	ents, err := os.ReadDir(fsPath)
+	var b strings.Builder
+	if err != nil {
+		// stat said directory but ReadDir failed (permissions, race) — the
+		// same error a direct read would hit; don't pretend there's a listing.
+		return fmt.Sprintf("%s is a directory, not a file. read_file reads a FILE; to list or map it, use outline(%q) or bash `ls %s`. (ReadDir error: %v)", display, display, display, err)
+	}
+	shown := 0
+	for _, e := range ents {
+		if shown >= cap {
+			fmt.Fprintf(&b, "… +%d more — outline(%q) or grep for the rest\n", len(ents)-shown, display)
+			break
+		}
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		b.WriteString(name)
+		b.WriteByte('\n')
+		shown++
+	}
+	return fmt.Sprintf("%s is a directory, not a file — read_file reads a FILE. Its contents:\n\n%s\nTo go deeper, outline(%q) for a structural map, or read_file on one of the files above.", display, strings.TrimRight(b.String(), "\n"), display)
 }
 
 // readRange returns lines [start,end] (1-indexed, inclusive) of a file, capped
 // at MaxRangeLines. The output carries a "@path:start-end" header so the model
 // sees exactly which lines it got (and a truncation note when the request was
 // clamped). Lines beyond EOF are silently dropped — asking past the end yields
-// what exists, not an error.
-func readRange(deps ToolDeps, path string, start, end int) (string, error) {
+// what exists, not an error. display is the model-visible path (used in the
+// header and the not-found error); fsPath is the resolved path actually read.
+func readRange(deps ToolDeps, display, fsPath string, start, end int) (string, error) {
 	if end-start+1 > active.MaxRangeLines {
 		end = start + active.MaxRangeLines - 1
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(fsPath)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		if os.IsNotExist(err) {
+			return "", pathNotFoundError(display, fsPath, workdirRootForErrors(deps))
+		}
+		return "", fmt.Errorf("read %s: %w", display, err)
 	}
 	lines := strings.Split(string(data), "\n")
 	// A file ending in "\n" splits to a trailing "" that isn't a real line; drop
@@ -988,13 +1432,13 @@ func readRange(deps ToolDeps, path string, start, end int) (string, error) {
 		lines = lines[:n-1]
 	}
 	if start > len(lines) {
-		return "", fmt.Errorf("%s has %d lines; start %d is past the end", path, len(lines), start)
+		return "", fmt.Errorf("%s has %d lines; start %d is past the end", display, len(lines), start)
 	}
 	hi := end
 	if hi > len(lines) {
 		hi = len(lines)
 	}
-	printToolAction(deps, fmt.Sprintf("read_file(%s:%d-%d)", path, start, hi))
+	printToolAction(deps, fmt.Sprintf("read_file(%s:%d-%d)", display, start, hi))
 	body := strings.Join(lines[start-1:hi], "\n")
 	// Byte ceiling: the line clamp alone doesn't bound a span of VERY long lines
 	// (minified JSON, journal JSONL — ~2.6 KB/line), which could return hundreds of
@@ -1010,7 +1454,7 @@ func readRange(deps ToolDeps, path string, start, end int) (string, error) {
 		body = body[:cut]
 		note = fmt.Sprintf("\n… [truncated at %d bytes — lines here are very long; grep for the specific text you need]", maxReadBytes)
 	}
-	return fmt.Sprintf("@%s:%d-%d\n%s%s", path, start, hi, body, note), nil
+	return fmt.Sprintf("@%s:%d-%d\n%s%s", display, start, hi, body, note), nil
 }
 
 // defaultMaxReadBytes is the per-read byte ceiling — a span of very long
@@ -1035,13 +1479,27 @@ func fileSkeleton(path string) string {
 
 // --- write_file ---------------------------------------------------------
 
-func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
+func writeFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
 	}
 	content, err := tc.StringArg("content")
 	if err != nil {
+		return "", err
+	}
+	// hook: "skip" opts OUT of the post-edit hook for this call only — the
+	// agent lowers it, never raises it (the mode ceiling is unaffected), and
+	// it never touches trust.
+	hookArg, _ := tc.StringArg("hook")
+	hookSkip := strings.TrimSpace(hookArg) == "skip"
+	// Issue #102: on a tainted turn the workspace is the write boundary —
+	// a page that steered the request must not get an escape-the-workspace
+	// write waved through as ordinary work. Untainted turns pass through
+	// untouched (today's behavior, absolute paths and all). Confined before
+	// the action line prints and before any filesystem touch; the post-edit
+	// hook path below is unaffected — a write that passes still hooks.
+	if err := ConfineWrites(tc, deps); err != nil {
 		return "", err
 	}
 	printToolAction(deps, fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
@@ -1053,13 +1511,60 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// new file, the honest form for a create. Best-effort: an unreadable
 	// existing file just yields a whole-content diff, never a failed write.
 	before, diffable := priorContent(deps, fsPath)
+	// The #141 large-deletion warning's before-side, read independently of the
+	// diff-gating above so it survives quiet/headless sessions — where a
+	// terminal diff never shows but the model still needs to hear the loss.
+	// Read BEFORE the write, alongside the diff's before-side.
+	warnBefore := deleteWarnBefore(fsPath)
 	if err := os.WriteFile(fsPath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	if diffable {
 		printFileDiff(deps, before, content)
 	}
-	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+	result := resultWithWarning(fmt.Sprintf("wrote %d bytes to %s", len(content), path), largeDeletionWarning(warnBefore, content))
+	// Post-edit hook (issue #129): run the project's format/lint on the file
+	// just written. Never fails the write — it only appends a note. The note
+	// goes last: the tool's own observation about the change it applied (the
+	// #141 large-deletion NOTE) comes first, then what the project's commands
+	// said about the result. Trust is the hard gate (an untrusted workspace
+	// runs nothing and, once per session, says so) and the mode (config /
+	// env / /hook, plus this call's `hook: "skip"`) turns it down or off.
+	note := formatHookNote(ctx, deps, fsPath, hookSkip)
+	if note != "" {
+		result += "\n" + note
+	}
+	// Issue #224: the write-sanity pass — for a .go file, report EVERY
+	// package-name problem (duplicate package-level declarations, references
+	// to names that exist nowhere) in one note, so a guessed-helper session
+	// fixes all of them in one round instead of one build per error. Like
+	// every post-edit observation it never fails the write; non-Go and clean
+	// packages get a byte-identical result.
+	if sn := writeSanityNote(fsPath, path); sn != "" {
+		result += "\n" + sn
+	}
+	return result, nil
+}
+
+// deleteWarnBefore reads a file's current content solely for the #141
+// large-deletion warning. Unlike priorContent it is NOT gated on Quiet or
+// richRenderDisabled — the warning is meant to reach the model in headless
+// runs, where no terminal diff is printed — so it reads the file whenever it
+// exists and is small enough to matter. "" (treated as a create, no warning)
+// when the file is missing, unreadable, or oversized.
+func deleteWarnBefore(fsPath string) string {
+	info, err := os.Stat(fsPath)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil || info.Size() > diffMaxInputBytes {
+		return ""
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // priorContent reads a file's current contents for the diff's before-side.
@@ -1101,13 +1606,17 @@ type editOp struct {
 // whitespace-tolerant (so a model that mis-indents old_string still lands the
 // edit). replace_all relaxes uniqueness for renames; an `edits` array applies
 // several changes atomically — if any fails the file is left untouched.
-func editFile(tc ToolCall, deps ToolDeps) (string, error) {
+func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	var a struct {
 		Path       string   `json:"path"`
 		OldString  string   `json:"old_string"`
 		NewString  string   `json:"new_string"`
 		ReplaceAll bool     `json:"replace_all"`
 		Edits      []editOp `json:"edits"`
+		// Hook opts OUT of the post-edit hook for this call only (`"skip"`);
+		// the agent lowers it, never raises it — the mode ceiling is untouched,
+		// as is trust.
+		Hook string `json:"hook"`
 	}
 	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
 		if err := json.Unmarshal([]byte(s), &a); err != nil {
@@ -1117,10 +1626,26 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if a.Path == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	hookSkip := strings.TrimSpace(a.Hook) == "skip"
+
+	// Issue #102: the tainted-turn write boundary, same as writeFile —
+	// escape paths are rejected before any filesystem touch; untainted
+	// calls and the post-edit hook path are unchanged.
+	if err := ConfineWrites(tc, deps); err != nil {
+		return "", err
+	}
 
 	edits := a.Edits
 	multi := len(edits) > 0
 	if !multi {
+		if a.OldString == "" {
+			// A single-edit call that carries neither old_string nor an edits
+			// array is missing its whole edit payload. Naming "old_string must
+			// not be empty" here (as applyEdit would) describes a different
+			// mistake and sends the model to retry the same shape. Point at the
+			// missing field with an example so the retry lands on the first try.
+			return "", fmt.Errorf("no edit specified: set old_string (and optionally new_string), or pass an edits array like {\"edits\":[{\"old_string\":\"...\",\"new_string\":\"...\"}]}")
+		}
 		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
 		printToolAction(deps, fmt.Sprintf("edit_file(%s)", a.Path))
 	} else {
@@ -1161,10 +1686,324 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// already holds both sides in memory (data was read above, content is the
 	// applied result), so the diff costs nothing but the rendering.
 	printFileDiff(deps, string(data), content)
+	// Issue #141: a large deletion is the shape of the #127 incident (a test
+	// file sed'd away); the model sees it named in its own observation, not
+	// just as a diff on a terminal a headless run has. Both sides are already
+	// in memory here, so the check costs nothing.
+	warn := largeDeletionWarning(string(data), content)
+	editsNoun := ""
 	if multi {
-		return fmt.Sprintf("edited %s (%s, %s)", a.Path, CountNoun(len(edits), "edit"), CountNoun(total, "replacement")), nil
+		editsNoun = CountNoun(len(edits), "edit")
 	}
-	return fmt.Sprintf("edited %s (%s)", a.Path, CountNoun(total, "replacement")), nil
+	// Issue #173: the model's view of the file is stale after every edit
+	// (earlier edits in the same session changed it). Return a bounded
+	// snippet of the current changed region so the model's next edit anchors
+	// on the file's actual content, not the view it held before this call.
+	msg := editResultMessage(a.Path, editsNoun, CountNoun(total, "replacement"), string(data), content)
+	msg += changedRegionSnippet(string(data), content)
+	result := resultWithWarning(msg, warn)
+	// Post-edit hook (issue #129): run the project's format/lint on the file
+	// just edited. Never fails the edit — it only appends a note. The note
+	// goes last: the tool's own observations about the change it applied
+	// (the #153 line delta and removal WARNING, then the #141 large-deletion
+	// NOTE) come first, then what the project's commands said about the
+	// result. Trust is the hard gate (an untrusted workspace runs nothing and,
+	// once per session, says so) and the mode (config / env / /hook, plus this
+	// call's `hook: "skip"`) turns it down or off.
+	note := formatHookNote(ctx, deps, fsPath, hookSkip)
+	if note != "" {
+		result += "\n" + note
+	}
+	// Issue #224: the write-sanity pass, same as writeFile — every package-
+	// name problem in one note, never a veto, byte-identical for non-Go.
+	if sn := writeSanityNote(fsPath, a.Path); sn != "" {
+		result += "\n" + sn
+	}
+	return result, nil
+}
+
+// editResultMessage renders the model-facing result for a landed edit. Beyond
+// the "edited N (M replacement)" summary it reports the lines removed/added —
+// the thing the TTY-only diff doesn't put into context. A replacement that
+// drops more than it adds is the shape of the silent code loss from #152 (an
+// edit that succeeds but removes code the model didn't mean to touch), so when
+// the edit removes meaningfully more lines than it adds, the result appends a
+// warning to make the loss visible where the model actually reads it.
+func editResultMessage(path, editsNoun, replNoun, before, after string) string {
+	removed, added := lineDelta(before, after)
+	delta := fmt.Sprintf("%-d/%+d lines", -removed, added)
+	summary := replNoun
+	if editsNoun != "" {
+		summary = editsNoun + ", " + replNoun
+	}
+	msg := fmt.Sprintf("edited %s (%s, %s)", path, summary, delta)
+	if removed > added && removed >= 2 {
+		msg += fmt.Sprintf("; WARNING: removed %d lines and added %d — re-read the edited region below (or with read_file) to confirm nothing was meant to stay", removed, added)
+	}
+	// The guard-drop check is meaningless for prose files (a README line like
+	// "This is for users" is not a safety guard); gate it on the extension so
+	// it only inspects files written in a source language.
+	if guardCodeFile(path) {
+		msg += guardDropWarning(before, after)
+	}
+	return msg
+}
+
+// guardCodeFile reports whether path names a source-code file, the only
+// place a dropped if/for/return/Lock line is a safety guard. Anything that is
+// plain prose or config (.md, .txt, .rst, .yaml, .yml, .json, .toml, .ini, .cfg
+// …) is excluded so an English sentence in a README never raises the warning.
+func guardCodeFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".md", ".markdown", ".txt", ".rst", ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".conf", ".csv", ".adoc":
+		return false
+	}
+	return true
+}
+
+// guardDropWarning is the #210 receipt for landed edits: when a replacement
+// removes lines containing conditionals, returns, or panic/lock-adjacent
+// shapes (if/else/for/switch/case/return/panic/lock — the shapes a safety
+// guard takes) that do not reappear in the replacement, it appends a WARNING
+// naming the dropped lines. This is the incident from PR #208, where a large
+// block edit silently deleted the
+// `subagentDepth(ctx) != 0 || cs == nil` guard from gateShell — the generic
+// "removed N lines" warning fires on the same shape, but it does not tell the
+// model that the dropped lines looked like a guard, which is the detail that
+// prompts a check. "Reappear in the replacement" is judged against the lines
+// the edit ADDED (the '+' rows of the same diff, equivalently new_string)
+// with leading/trailing whitespace ignored — never against the whole file,
+// because a guard line like `\t\treturn err` or `defer mu.Unlock()` that also
+// sits elsewhere in the file must still count as dropped. It is silent when
+// the dropped guard line reappears among the added lines (a move, not a loss)
+// and for plain removals.
+func guardDropWarning(before, after string) string {
+	var dropped []string
+	// The lines the replacement added: the '+' rows of this edit's diff. In
+	// the single-edit path that is exactly new_string's lines; in the
+	// edits-array path each edit's warning only sees that edit's own added
+	// lines, which is the correct scope for "does it reappear in the
+	// replacement".
+	added := map[string]bool{}
+	rows := diffRows(splitLines(before), splitLines(after))
+	for _, r := range rows {
+		if r.op == '+' {
+			added[strings.TrimSpace(r.text)] = true
+		}
+	}
+	for _, r := range rows {
+		key := strings.TrimSpace(r.text)
+		if r.op == '-' && guardLineKeyword(r.text) != "" && key != "" && !added[key] {
+			dropped = append(dropped, r.text)
+		}
+	}
+	if len(dropped) == 0 {
+		return ""
+	}
+	if len(dropped) > 3 {
+		dropped = dropped[:3]
+	}
+	var b strings.Builder
+	b.WriteString("\nGUARD DROPPED: the replacement removed these lines that contain a conditional or return and do not reappear in the replacement's added lines:")
+	for _, d := range dropped {
+		line := strings.TrimSuffix(d, "\n")
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		b.WriteString("\n  - " + line)
+	}
+	b.WriteString(" — if this was a safety guard (a check, an early return, an unlock), re-add it.")
+	return b.String()
+}
+
+// guardLineKeyword reports whether a removed line is code-shaped like a
+// safety guard, or "" when it is not. Only shapes that CANNOT be plain
+// English prose fire: an if/for/switch/case keyword, `else`, `return`,
+// `panic(`, or a `.Lock()`/`.Unlock()` call. The keyword must be the first
+// token of the trimmed line (or the line's second token for `else`, as in
+// `} else`), and `panic`/`Lock`/`Unlock` must be immediately followed by `(`
+// — which no English sentence ever is (a README line "This is for users" or
+// a string literal "wait for the lock" carries `for`/`lock` mid-line or
+// without the paren and is never flagged). In code a line whose first token
+// is `return` is always a return statement, so the token alone fires — a
+// bare `return` as well as `return err` and `return nil, err`. A removed
+// line that merely quotes such a shape inside a string literal or prose is
+// not a guard candidate.
+func guardLineKeyword(line string) string {
+	trimmed := strings.TrimLeft(strings.TrimSuffix(line, "\n"), " \t")
+	if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+		return ""
+	}
+	fields := strings.Fields(trimmed)
+	first, second := "", ""
+	if len(fields) > 0 {
+		first = fields[0]
+	}
+	if len(fields) > 1 {
+		second = fields[1]
+	}
+	switch {
+	case first == "if" || first == "for" || first == "switch" || first == "case":
+		return first
+	case second == "else" && (strings.HasSuffix(first, "}") || first == ")"):
+		return "else"
+	case first == "return":
+		return "return"
+	case strings.HasPrefix(trimmed, "panic("):
+		return "panic"
+	}
+	// A .Lock()/ .Unlock() call anywhere on the line: the paren after the
+	// word is what keeps prose like "wait for the lock" from matching.
+	for _, needle := range []string{".Lock(", ".Unlock("} {
+		if strings.Contains(trimmed, needle) {
+			return "lock"
+		}
+	}
+	return ""
+}
+
+// changedRegionSnippet renders the current content of the changed region of a
+// landed edit as a bounded, line-numbered snippet — the model-facing "your
+// file now looks like this" receipt that keeps the model's view of the file in
+// sync after an edit (#173). The snippet shows the changed lines plus a little
+// context on each side, each with its line number in the NEW file (the state
+// the model will edit next against). Returns "" when there is no changed
+// region to show (e.g. an empty replacement that removed the whole file).
+func changedRegionSnippet(before, after string) string {
+	if before == after {
+		return ""
+	}
+	rows := diffRows(splitLines(before), splitLines(after))
+	// Find the range of rows that are changed ('+' or '-').
+	first, last := -1, -1
+	for i, r := range rows {
+		if r.op == '+' || r.op == '-' {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		return ""
+	}
+	// Include up to 2 lines of context on each side.
+	ctx := 2
+	lo := first - ctx
+	if lo < 0 {
+		lo = 0
+	}
+	hi := last + ctx
+	if hi >= len(rows) {
+		hi = len(rows) - 1
+	}
+	// Cap the total snippet at 12 lines.
+	const maxLines = 12
+	if hi-lo+1 > maxLines {
+		// Center the window on the changed region.
+		mid := (first + last) / 2
+		lo = mid - maxLines/2
+		if lo < 0 {
+			lo = 0
+		}
+		hi = lo + maxLines - 1
+		if hi >= len(rows) {
+			hi = len(rows) - 1
+			lo = hi - maxLines + 1
+			if lo < 0 {
+				lo = 0
+			}
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\nCurrent changed region:")
+	for i := lo; i <= hi; i++ {
+		r := rows[i]
+		var marker string
+		var lineNum int
+		switch r.op {
+		case '+':
+			marker, lineNum = ">", r.new
+		case '-':
+			marker, lineNum = "-", r.old
+		default:
+			marker, lineNum = " ", r.new
+		}
+		line := strings.TrimSuffix(r.text, "\n")
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		fmt.Fprintf(&b, "\n  %s%d: %s", marker, lineNum, line)
+	}
+	return b.String()
+}
+
+// lineDelta returns the number of lines removed and added going from before to
+// after, counted from the real line diff — a replacement that swaps lines for
+// the same number of different lines still removes the old ones and adds the
+// new ones, so both sides go non-zero where a line-count comparison would read
+// 0/+0 and stay silent (the #152 incident). It reuses the diff the TTY renders
+// (diffRows), so what the model is told matches what the terminal shows.
+func lineDelta(before, after string) (removed, added int) {
+	for _, r := range diffRows(splitLines(before), splitLines(after)) {
+		switch r.op {
+		case '-':
+			removed++
+		case '+':
+			added++
+		}
+	}
+	return removed, added
+}
+
+// largeDeletionWarning is the #141 receipt for the tool itself: when a
+// write_file or edit_file call removes most of an existing file's content,
+// the observation carries a named note so the model confirms the deletion
+// was intentional and mentions it in its summary. The turn-level testguard
+// receipt (internal/testguard) is the harness-side complement — it says WHICH
+// tests the turn removed, so the two surfaces together let a reviewer judge
+// the loss rather than discover it in the diff.
+//
+// The threshold is 50% kept: a change that removes MORE than half the file's
+// lines warns ("most of a file", the shape the issue names). A half-file cut
+// or less is silent — a routine refactor should not be flagged as a loss.
+// The floor (largeDeletionFloorLines) keeps small files out of the check
+// entirely, where a proportion is too coarse to mean anything.
+func largeDeletionWarning(before, after string) string {
+	b, a := splitLines(before), splitLines(after)
+	if len(b) < largeDeletionFloorLines {
+		return ""
+	}
+	// kept < 50% of the original — i.e. more than half removed.
+	if len(a)*100 >= len(b)*largeDeletionKeptPercent {
+		return ""
+	}
+	return fmt.Sprintf("\nNOTE: this change removed most of the file's content (%d → %d lines, %d%% kept). "+
+		"Confirm the deletion was intended and mention it in your summary so a reviewer can judge the loss.",
+		len(b), len(a), len(a)*100/len(b))
+}
+
+// largeDeletionFloorLines is the smallest before-side the #141 large-deletion
+// warning considers: below it a file is too small for a line proportion to
+// mean anything (emptying a 3-line stub is a normal edit).
+const largeDeletionFloorLines = 20
+
+// largeDeletionKeptPercent is the share of a file's lines that must survive to
+// avoid the #141 warning: a change that keeps less than this (removes more
+// than 100−this) warns. 50% kept means the bar sits at the "most of a file"
+// line the issue names — a half-file cut (50% kept) is silent, a 49%-kept
+// change warns, and emptying the file always does.
+const largeDeletionKeptPercent = 50
+
+// resultWithWarning appends w to s when w is non-empty, separated by a
+// newline — keeping the tools' single-line results single-line in the
+// normal case.
+func resultWithWarning(s, w string) string {
+	if w == "" {
+		return s
+	}
+	return s + w
 }
 
 // CountNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the
@@ -1185,14 +2024,18 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 		return "", 0, fmt.Errorf("old_string must not be empty")
 	}
 	if old == new {
-		return "", 0, fmt.Errorf("old_string and new_string are identical; nothing to change")
+		return "", 0, fmt.Errorf("old_string and new_string are identical; nothing to change. Re-read the span to see its current state rather than re-issuing the same edit")
 	}
 	if n := strings.Count(content, old); n > 0 {
 		if replaceAll {
 			return strings.ReplaceAll(content, old, new), n, nil
 		}
 		if n > 1 {
-			return "", 0, fmt.Errorf("old_string found %d times; add surrounding context to make it unique, or set replace_all", n)
+			// Ambiguous: list every occurrence's line so the model can see
+			// exactly where each one is and add surrounding context to
+			// disambiguate (or set replace_all).
+			lines := matchLineNumbers(content, old, n)
+			return "", 0, fmt.Errorf("old_string found %d times (at lines %s); add surrounding context to make it unique, or set replace_all", n, lines)
 		}
 		return strings.Replace(content, old, new, 1), 1, nil
 	}
@@ -1203,13 +2046,24 @@ func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
 // then re-indents the replacement to the file's actual indentation. Tier 1
 // ignores only trailing whitespace; tier 2 also ignores leading indentation —
 // the safer tolerance is tried first. A match must still be unique unless
-// replace_all is set.
+// replace_all is set. So leading/trailing whitespace differences (a
+// mis-indented anchor) still LAND, re-indented to the file's own indentation.
+//
+// Only when BOTH tiers fail does the interior-whitespace case get a distinct
+// error (#210): if the span's lines equal the file's lines once all
+// whitespace is collapsed — an interior realignment such as gofmt — the
+// "only whitespace differs" error is returned, carrying the region's CURRENT
+// lines so the model copies them exactly. That error, like the generic
+// not-found, states the observable fact (old_string does not match the file
+// as it is now) without asserting a cause: the span may be stale, or it may
+// be mistyped or copied from elsewhere — only the model can tell which, from
+// the current content it is shown.
 func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error) {
 	fileLines := dropTrailingEmpty(strings.SplitAfter(content, "\n"))
 	oldLines := dropTrailingEmpty(strings.SplitAfter(old, "\n"))
 	k := len(oldLines)
 	if k == 0 || k > len(fileLines) {
-		return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
+		return "", 0, fmt.Errorf("old_string not found: it does not match the file as it is now — it may be stale, or mistyped or copied from elsewhere. Copy the next edit from the file's CURRENT content%s%s", nearMissHint(fileLines, oldLines), notFoundDirective)
 	}
 	for tier := 1; tier <= 2; tier++ {
 		var starts []int
@@ -1222,12 +2076,122 @@ func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error
 			continue
 		}
 		if !replaceAll && len(starts) > 1 {
-			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace); add context or set replace_all", len(starts))
+			lines := make([]int, len(starts))
+			for i, s := range starts {
+				lines[i] = s + 1
+			}
+			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace) (at lines %s); add context or set replace_all", len(starts), intListComma(lines))
 		}
 		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
 	}
-	return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
+	// The span is not in the file even ignoring leading/trailing whitespace.
+	// Check the gofmt realignment case (#210) before the generic not-found
+	// error: the span's lines equal the file's lines with
+	// ALL whitespace ignored (interior spaces too — aligned assignments,
+	// aligned comments) but differ byte-for-byte. Tier-1/2 cannot bridge
+	// interior whitespace, so the edit genuinely failed, and the error can
+	// name that only whitespace differs so the model copies the region
+	// exactly instead of guessing.
+	if wsStart, found := allWhitespaceOnlyWindow(fileLines, oldLines); found {
+		return "", 0, whitespaceOnlyDiffError(fileLines, wsStart, k)
+	}
+	// State the observable fact, not a cause: old_string may be stale, or it
+	// may be mistyped, invented, or copied from another file — the model tells
+	// which from the file's CURRENT content (the closest-region hint when one
+	// is near enough), and copies its next edit from there.
+	return "", 0, fmt.Errorf("old_string not found: it does not match the file as it is now — it may be stale, or mistyped or copied from elsewhere. Copy the next edit from the file's CURRENT content%s%s", nearMissHint(fileLines, oldLines), notFoundDirective)
 }
+
+// allWhitespaceOnlyWindow scans for a run of fileLines whose lines equal
+// oldLines when every run of whitespace is collapsed to a single space, but
+// which do NOT match exactly (exact matches are handled upstream). Unlike the
+// tier-1/2 tolerant match (which trims only leading/trailing whitespace),
+// this catches interior whitespace differences — the gofmt realignment
+// signature (#210), e.g. aligned assignments or aligned struct fields that
+// the model's stale span does not have. Returns (start, true) for the first
+// such window, (0, false) when none exists.
+func allWhitespaceOnlyWindow(fileLines, oldLines []string) (int, bool) {
+	k := len(oldLines)
+	if k == 0 || k > len(fileLines) {
+		return 0, false
+	}
+	for i := 0; i+k <= len(fileLines); i++ {
+		exact := true
+		onlyWS := true
+		for j := 0; j < k; j++ {
+			if fileLines[i+j] == oldLines[j] {
+				continue
+			}
+			exact = false
+			if collapseWS(fileLines[i+j]) != collapseWS(oldLines[j]) {
+				onlyWS = false
+				break
+			}
+		}
+		if !exact && onlyWS {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// collapseWS collapses every run of whitespace (space, tab, newline) in s to a
+// single space. Two lines that collapse to the same string differ only in
+// whitespace.
+func collapseWS(s string) string {
+	var b strings.Builder
+	prev := false
+	for _, r := range s {
+		ws := r == ' ' || r == '\t' || r == '\n'
+		if ws && prev {
+			continue
+		}
+		if ws {
+			b.WriteByte(' ')
+		} else {
+			b.WriteRune(r)
+		}
+		prev = ws
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// whitespaceOnlyDiffError renders the "only whitespace differs" not-found
+// error: it names the region, explains the whitespace is stale (e.g. gofmt
+// re-aligned it), and shows the region's CURRENT content so the model's next
+// call works from fresh text.
+func whitespaceOnlyDiffError(fileLines []string, start, k int) error {
+	line1 := start + 1
+	lo := start - 1
+	if lo < 0 {
+		lo = 0
+	}
+	hi := start + k - 1
+	if hi >= len(fileLines) {
+		hi = len(fileLines) - 1
+	}
+	var b strings.Builder
+	b.WriteString("\n  closest region, the file's CURRENT content (only whitespace differs — copy it exactly):")
+	for i := lo; i <= hi; i++ {
+		line := strings.TrimSuffix(fileLines[i], "\n")
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		marker := " "
+		if i == start {
+			marker = ">"
+		}
+		fmt.Fprintf(&b, "\n  %s%d: %s", marker, i+1, line)
+	}
+	return fmt.Errorf("old_string not found: only whitespace differs from the file (near line %d) — the content is the same but its whitespace is stale (e.g. gofmt re-aligned it after you read it)%s%s", line1, b.String(), notFoundDirective)
+}
+
+// notFoundDirective is appended to every "old_string not found" failure so a
+// failed match steers the model back toward the edit tools instead of
+// scripting the change through bash (issue #201: sed/awk/inline-python edits
+// skip the diff display and the post-edit hook, and damaged files were then
+// "repaired" with destructive git commands).
+const notFoundDirective = " — do not script this change through bash (sed/awk/python): use read_file to re-read the current span, then retry edit_file; for a whole-file rewrite use write_file."
 
 // windowMatches reports whether a run of file lines equals the old block under
 // the given tolerance tier.
@@ -1333,19 +2297,24 @@ func leadingWS(s string) string {
 	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
 }
 
-// nearMissHint points the model at the file line most similar (by word overlap)
-// to old's first meaningful line, so a failed match is fixable in one retry
-// instead of looping. Returns "" when nothing is similar enough.
+// nearMissHint returns the current content of the file region closest (by word
+// overlap) to old, so a failed edit is self-correcting: the model can see what
+// is actually in the file around the best-matching line and craft a corrected
+// old_string without a separate read_file call. Every meaningful line of old is
+// scored against every file line and the snippet anchors on the overall best
+// (not just old's first line): a multi-line span whose first line is absent —
+// an added context line, a stale line the turn itself replaced — still finds
+// the region its other lines point at. The snippet shows at most 3 lines of
+// context (the closest line plus one above and below, clipped at the file's
+// edges), each with its line number. Returns "" when nothing is similar enough.
 func nearMissHint(fileLines, oldLines []string) string {
-	target := ""
+	targets := make([]map[string]bool, 0, len(oldLines))
 	for _, l := range oldLines {
-		if t := strings.TrimSpace(strings.TrimSuffix(l, "\n")); t != "" {
-			target = t
-			break
+		if t := wordSet(strings.TrimSpace(strings.TrimSuffix(l, "\n"))); len(t) > 0 {
+			targets = append(targets, t)
 		}
 	}
-	tset := wordSet(target)
-	if len(tset) == 0 {
+	if len(targets) == 0 {
 		return ""
 	}
 	bestIdx, bestScore := -1, 0.0
@@ -1354,18 +2323,39 @@ func nearMissHint(fileLines, oldLines []string) string {
 		if body == "" {
 			continue
 		}
-		if s := jaccard(tset, wordSet(body)); s > bestScore {
-			bestScore, bestIdx = s, i
+		ws := wordSet(body)
+		for _, tset := range targets {
+			if s := jaccard(tset, ws); s > bestScore {
+				bestScore, bestIdx = s, i
+			}
 		}
 	}
 	if bestIdx < 0 || bestScore < 0.5 {
 		return ""
 	}
-	line := strings.TrimSpace(strings.TrimSuffix(fileLines[bestIdx], "\n"))
-	if len(line) > 80 {
-		line = line[:80] + "…"
+	// Render at most 3 lines of context around the closest line.
+	start := bestIdx - 1
+	if start < 0 {
+		start = 0
 	}
-	return fmt.Sprintf(" — closest is line %d: %q (re-read the file if it changed)", bestIdx+1, line)
+	end := bestIdx + 2
+	if end > len(fileLines) {
+		end = len(fileLines)
+	}
+	var b strings.Builder
+	b.WriteString(" — closest region, the file's CURRENT content (re-read the file if it changed):")
+	for i := start; i < end; i++ {
+		line := strings.TrimSpace(strings.TrimSuffix(fileLines[i], "\n"))
+		if len(line) > 80 {
+			line = line[:80] + "…"
+		}
+		marker := " "
+		if i == bestIdx {
+			marker = ">"
+		}
+		fmt.Fprintf(&b, "\n  %s%d: %s", marker, i+1, line)
+	}
+	return b.String()
 }
 
 // wordSet splits text into a set of lowercased alphanumeric tokens.
@@ -1392,6 +2382,45 @@ func jaccard(a, b map[string]bool) float64 {
 	return float64(inter) / float64(len(a)+len(b)-inter)
 }
 
+// matchLineNumbers returns the 1-based line numbers of the first max occurrences
+// of needle in content, joined by ", ". The cap keeps a high-count ambiguity
+// error bounded (the model sees enough to pick a disambiguating context).
+func matchLineNumbers(content, needle string, max int) string {
+	var lines []int
+	pos := 0
+	for i := 0; i < max; i++ {
+		idx := strings.Index(content[pos:], needle)
+		if idx < 0 {
+			break
+		}
+		line := 1 + strings.Count(content[:pos+idx], "\n")
+		lines = append(lines, line)
+		pos += idx + len(needle)
+	}
+	if len(lines) == 0 {
+		return "?"
+	}
+	return intListComma(lines)
+}
+
+// intListComma renders "a, b, c, …" from a slice of ints, capping at 10 entries
+// with a trailing "…" when the slice is longer.
+func intListComma(lines []int) string {
+	if len(lines) > 10 {
+		return strings.Join(intsToStrings(lines[:10]), ", ") + ", …"
+	}
+	return strings.Join(intsToStrings(lines), ", ")
+}
+
+// intsToStrings converts []int to []string of decimal representations.
+func intsToStrings(lines []int) []string {
+	out := make([]string, len(lines))
+	for i, n := range lines {
+		out[i] = fmt.Sprintf("%d", n)
+	}
+	return out
+}
+
 // --- remove_path --------------------------------------------------------
 
 // RemovePath deletes a file or directory, confined to the workspace. It is the
@@ -1404,6 +2433,13 @@ func removePath(tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	path, err := tc.StringArg("path")
 	if err != nil {
+		return "", err
+	}
+	// Issue #102: on a tainted turn, confine to the workspace root — the
+	// deleteRoot below may be configured narrower, but the taint floor
+	// applies even when the configured root is wider (or absent): an
+	// escape rejected here carries ConfinePath's shape + the taint reason.
+	if err := ConfineWrites(tc, deps); err != nil {
 		return "", err
 	}
 	abs, err := confinedPath(root, path)
@@ -1467,19 +2503,47 @@ func confinedPath(root, p string) (string, error) {
 
 // --- bash ---------------------------------------------------------------
 
-func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome, error) {
 	command, err := tc.StringArg("command")
 	if err != nil {
-		return "", err
+		return "", BashOutcome{}, err
 	}
 	if strings.TrimSpace(command) == "" {
-		return "", fmt.Errorf("empty command")
+		return "", BashOutcome{}, fmt.Errorf("empty command")
 	}
+	// Attribution backstop BEFORE the risk gate: when attribution is on and
+	// the command is a single git commit without the trailer, add it — the
+	// gate must classify (and a confirm prompt must show) the command that
+	// will actually run, not a pre-rewrite version of it. A commit it could
+	// not safely rewrite gets attributionNote appended to its result instead.
+	// The decision itself is journaled (issue #146) so compliance is measured:
+	// the intent goes down here, before the gate, so a command that never runs
+	// (refused) still records why it was left alone — and nothing is written at
+	// all for a command that isn't a git commit.
+	command, attributionNote, attributionOutcome := classifyAttribution(command, deps)
+	journalAttributionIntent(deps, command, attributionOutcome)
+	// attributionTrailer is what a verified receipt must find in the commit
+	// message; "" (attribution off) means there is no fact to verify.
+	attributionTrailer := deps.AttributionCommit()
+	// In-place rewrite detection (issue #201) scans the same command the gate
+	// classifies: the attribution backstop only ever touches `git commit`, so
+	// the scanned command is what will actually run. The note rides BOTH
+	// outcomes — a command that was refused (and made no change) still tells
+	// the model what it would have touched, so the steering happens before
+	// the damage, not after.
+	rewriteNote := inPlaceRewriteNote(deps, command)
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
-	// reads the reason plainly and adapts.
+	// reads the reason plainly and adapts. The command NEVER RAN: a consumer
+	// of the call's fate (the turn receipt's bash recorder, via Execute's
+	// returned BashOutcome) sees Ran=false for this call — the gate is the
+	// sole spawn point here, so the refusal means the process was never
+	// started, and the result is a reason, not an exit code.
 	if msg, ok := deps.GateShell(ctx, command); !ok {
-		return msg, nil
+		if rewriteNote != "" {
+			msg += "\n" + rewriteNote
+		}
+		return msg, BashOutcome{}, nil
 	}
 	// leadBin is the first token, used only for the grep-empty heuristic below.
 	leadBin := ""
@@ -1493,10 +2557,23 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// keeps this safe now that a command is no longer a single inert binary.
 	// The command runs in the session's workdir when one is anchored — a
 	// serve/loop-hosted session's shell must act in ITS project, not wherever
-	// the hosting process was started (workdir.go).
+	// the hosting process was started (workdir.go). runDir is that same
+	// directory ("" = the process CWD) kept for the attribution HEAD reads
+	// before and after the run, which must look at the repository the commit
+	// actually lands in.
+	runDir := workdirOf(deps)
+	// attributionBeforeHEAD is HEAD as of just before the command runs, so the
+	// post-run receipt can tell a commit this command made from a pre-existing
+	// HEAD it merely mentions. Read only for a command the backstop recognized
+	// as a commit — never for outcomeNotACommit, so a plain `ls` or `go test`
+	// spawns no git process.
+	attributionBeforeHEAD := ""
+	if attributionOutcome != outcomeNotACommit {
+		attributionBeforeHEAD, _, _ = attributionHead(runDir)
+	}
 	shellCmd := exec.CommandContext(ctx, "bash", "-c", command)
-	if wd := workdirOf(deps); wd != "" {
-		shellCmd.Dir = wd
+	if runDir != "" {
+		shellCmd.Dir = runDir
 	}
 	out, runErr := shellCmd.CombinedOutput()
 	result := string(out)
@@ -1518,14 +2595,60 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// model nothing to act on and it retried the same command in a loop
 		// (2026-06-14). Name the empty-result case explicitly. Exit >=2 is a real
 		// grep error and keeps its stderr (merged into result by CombinedOutput).
+		// A REWRITE target suppresses this (the command changed something, so
+		// the note is meaningful); a pure READ target does not (issue #209):
+		// `grep -n Absent f.txt` is a read, and its no-match result must still
+		// read as "(no matches)", not as a rewritten-file note.
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
-			leadBin == "grep" && strings.TrimSpace(result) == "" {
-			return "(no matches)", nil
+			leadBin == "grep" && strings.TrimSpace(result) == "" && !hasRewriteTarget(command) {
+			return "(no matches)", BashOutcome{Ran: true, ExitCode: 1}, nil
 		}
-		return result + "\n[exit error: " + runErr.Error() + "]", nil
+		// The process ran: the outcome is Ran=true with the process's own
+		// exit code (exitErr.ExitCode(); a signal-killed run has no exit
+		// status — ExitCode() reports -1 — and is mapped to 1: a failure,
+		// never a pass). The outcome is what a consumer of the call's fate
+		// (the turn receipt's bash recorder, via Execute's return value)
+		// reads — never an inference from the marker below.
+		exitCode := 1
+		if exitErr != nil && exitErr.ExitCode() >= 0 {
+			exitCode = exitErr.ExitCode()
+		}
+		result += "\n[exit error: " + runErr.Error() + "]"
+		// A failed command made no commit (or not one to be proud of): the
+		// intent receipt stands alone, with no verified fact behind it.
+		if attributionNote != "" {
+			result += "\n" + attributionNote
+		}
+		if rewriteNote != "" {
+			result += "\n" + rewriteNote
+		}
+		return result, BashOutcome{Ran: true, ExitCode: exitCode}, nil
 	}
-	return result, nil
+	// The command succeeded: read the repository back and journal the FACT of
+	// the commit it landed — SHA and whether the trailer is really in the
+	// message — rather than trusting the rewrite. Only a HEAD that MOVED
+	// counts: a command that mentions git commit but commits nothing (nothing
+	// to commit, `|| true`) gets no receipt naming somebody else's commit.
+	// No-op unless deps journal (issue #146).
+	journalAttributionVerified(runDir, attributionBeforeHEAD, attributionTrailer, command, attributionOutcome, deps)
+	if attributionNote != "" {
+		result += "\n" + attributionNote
+	}
+	if rewriteNote != "" {
+		result += "\n" + rewriteNote
+	}
+	// Post-edit hook for in-place rewrites (issue #201, step 4): the command
+	// ran, so run the same format-only hook write_file/edit_file run on each
+	// workdir target it touched. Never fails the bash call — it only appends
+	// a note. The note rides ONLY the success path: a refused command made no
+	// change, so there is nothing to format (the steering note above already
+	// named the targets before the damage).
+	if hookNote := inPlaceRewriteHookNote(ctx, deps, command); hookNote != "" {
+		result += "\n" + hookNote
+	}
+	// The process ran and exited 0.
+	return result, BashOutcome{Ran: true, ExitCode: 0}, nil
 }
 
 // bashStudyWindow is the consuming-model window the shell-output study is
@@ -1629,12 +2752,143 @@ func ParseXMLToolCalls(content string) []ToolCall {
 	return calls
 }
 
-// StripToolMarkup removes Qwen tool-call XML from content so we don't print the
-// raw markup after converting it to tool calls. Any genuine prose preamble
-// around the markup is preserved.
+// stripToolMarkup removes tool-call markup from content so we don't print the
+// raw markup after converting it to tool calls: Qwen XML blocks, any
+// <function_call(s)> tags — closed or truncated — and any orphaned tag that
+// a truncated reply left open (the opener with no closer). Any genuine prose
+// preamble or trailing text around the markup is preserved.
 func StripToolMarkup(s string) string {
 	s = fnRe.ReplaceAllString(s, "")
+	// A Hermes tag with a closing tag: strip the whole block.
+	s = tagClosedRe.ReplaceAllString(s, "")
+	// The Qwen3-Coder <tool_call> wrapper is NOT a recovery target (the payload
+	// inside is the native XML shape fnRe already stripped above) — it is
+	// display-only, so drop the bare wrapper markers here. Without this, a
+	// reply whose content is prose + an XML block wrapped in the tags
+	// would print the leftover empty wrapper after the XML strip.
 	s = strings.ReplaceAll(s, "<tool_call>", "")
 	s = strings.ReplaceAll(s, "</tool_call>", "")
+	// A truncated tag: drop everything from the orphaned opener on — its
+	// payload is the model's intended call, already recovered (or reported),
+	// and keeping it would leak raw markup into the display.
+	s = tagOrphanRe.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
+}
+
+// tagClosedRe is a complete Hermes-style call tag (for display stripping).
+var tagClosedRe = regexp.MustCompile(`(?is)<function_calls?>([\s\S]*?)</function_calls?>`)
+
+// tagOrphanRe is a Hermes-style opening tag with no matching close (a
+// truncated reply): it eats the opener and everything after it.
+var tagOrphanRe = regexp.MustCompile(`(?is)<function_calls?>[\s\S]*$`)
+
+// ToolCallsFromContent is the single entry point for recovering tool calls a
+// model wrote into its reply text instead of emitting as structured
+// tool_calls: the Qwen3-Coder native XML shape (ParseXMLToolCalls) and
+// Hermes-style JSON calls in <function_calls> tags (ParseFunctionCallsTags).
+// Returns nil when the content carries neither — a plain prose answer. The
+// engine (cmd/cortex's runLoop) calls it at every response that has no
+// structured tool_calls.
+func ToolCallsFromContent(content string) []ToolCall {
+	if calls := ParseXMLToolCalls(content); len(calls) > 0 {
+		return calls
+	}
+	return ParseFunctionCallsTags(content)
+}
+
+// tagOpenRe matches a Hermes-style function-call OPENING tag:
+//
+//	<function_calls>
+//	  {"name": "bash", "arguments": {"command": "ls"}}
+//	</function_calls>
+//
+// (and the singular <function_call> spelling some gateways emit). Unlike the
+// Qwen XML shape — <function=NAME><parameter=P> — the call is a JSON object
+// with a "name" field and an "arguments" field that is an object (not the
+// JSON-encoded string the OpenAI wire uses). The regex matches the opener only,
+// without requiring the closing tag: an open model can emit the opener and its
+// payload and then stop (truncated reply), and the JSON inside is still
+// recoverable. ParseFunctionCallsTags decodes the JSON after each opener and
+// bounds it at the next closing tag (tagCloseRe) or the end of content;
+// StripToolMarkup handles the display removal (closed or orphaned tag).
+var tagOpenRe = regexp.MustCompile(`(?is)<function_calls?>`)
+
+// tagCloseRe matches a Hermes-style function-call CLOSING tag.
+var tagCloseRe = regexp.MustCompile(`(?is)</function_calls?>`)
+
+// hermesCall is one call from a Hermes-style tag: the wire names plus an
+// arguments field as a JSON object.
+type hermesCall struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+// ParseFunctionCallsTags extracts Hermes-style tool calls from raw content.
+// Returns nil if no tag (or no parseable call inside a tag) is present.
+// Each call is normalized into the same ToolCall shape the OpenAI path
+// produces — arguments re-marshaled into the JSON-ENCODED-STRING Arguments
+// field the wire uses — so a parsed call flows through Execute unchanged.
+// The arguments object is re-marshaled as-is (its own JSON types survive):
+// a string arg lands as a JSON string, a number as a JSON number — the same
+// shape a native tool call's Arguments would carry.
+//
+// The decoder tolerates the shapes an open model actually emits: one object,
+// several objects, or a JSON array, and it stops at the first non-JSON token
+// or at a closing tag, so trailing prose (even with braces), a second tag,
+// or a truncated closer can't sink the parse.
+func ParseFunctionCallsTags(content string) []ToolCall {
+	var calls []ToolCall
+	n := 0
+	for {
+		// Locate the next tag opener; everything after it is the payload
+		// (a greedy tail — the decoder below bounds the actual JSON).
+		m := tagOpenRe.FindStringIndex(content)
+		if m == nil {
+			return calls
+		}
+		rest := content[m[1]:]
+		// A closing tag bounds the JSON: a second tag or trailing markup must
+		// not be parsed with this block's calls.
+		if end := tagCloseRe.FindStringIndex(rest); end != nil {
+			rest = rest[:end[0]]
+		}
+		d := json.NewDecoder(strings.NewReader(rest))
+		var callsHere []hermesCall
+		// One object, several objects, or a JSON array — decode whichever
+		// shape starts (leading whitespace skipped), then stop at the first
+		// non-JSON token.
+		t := strings.TrimLeft(rest, " \t\r\n")
+		if strings.HasPrefix(t, "[") {
+			_ = d.Decode(&callsHere)
+		} else {
+			for {
+				var c hermesCall
+				if err := d.Decode(&c); err != nil {
+					break
+				}
+				callsHere = append(callsHere, c)
+			}
+		}
+		for _, c := range callsHere {
+			if c.Name == "" {
+				continue // no name: not a call (or a truncated payload)
+			}
+			n++
+			raw, err := json.Marshal(c.Arguments)
+			if err != nil {
+				continue
+			}
+			if string(raw) == "null" {
+				raw = []byte("{}") // missing or null arguments: an empty object
+			}
+			calls = append(calls, ToolCall{
+				ID:       fmt.Sprintf("fc-%d", n),
+				Type:     "function",
+				Function: FunctionCall{Name: c.Name, Arguments: string(raw)},
+			})
+		}
+		// Continue past this block so a second tag after trailing prose is
+		// still recovered; a block with no parseable call simply advances.
+		content = content[m[1]:]
+	}
 }

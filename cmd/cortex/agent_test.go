@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 )
@@ -92,15 +93,15 @@ func TestAgentToolEndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test-fixture: always risky", nil
 	}
 	cs := &CortexSession{
 		quiet:         true,
 		classifyShell: stubRisky,
-		confirmRisky: func(string) bool {
+		confirmRisky: func(string) lineedit.ConfirmChoice {
 			t.Fatal("confirmRisky must not be invoked for a call at subagent depth")
-			return true
+			return lineedit.ConfirmYes
 		},
 		Request: &AgentRequest{
 			Model:    "coder-m",
@@ -132,12 +133,12 @@ func TestAgentToolEndToEnd(t *testing.T) {
 	subagentFinalWire := wires[2]
 	var sawBlocked bool
 	for _, m := range subagentFinalWire {
-		if m.Role == RoleTool && strings.Contains(strings.ToLower(m.Content), "no interactive approval") {
+		if m.Role == RoleTool && strings.Contains(m.Content, "this action is not permitted in this session") {
 			sawBlocked = true
 		}
 	}
 	if !sawBlocked {
-		t.Errorf("subagent's own wire did not carry the headless-blocked bash result: %+v", subagentFinalWire)
+		t.Errorf("subagent's own wire did not carry the shared blocked bash result (shellrisk.BlockedMessage): %+v", subagentFinalWire)
 	}
 
 	// The subagent's digest must land back on the coder's OWN turn as a tool

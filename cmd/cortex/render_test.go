@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -677,6 +678,55 @@ func TestWrapRendered(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("wrapRendered = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMarkdownRendererPlainTextContract pins what the markdown renderer must
+// keep across glamour upgrades (#190, glamour v1 → charm.land/glamour/v2):
+// the text survives, H2+ headings carry no literal "##" (headingStyle strips
+// them), and no retired icon glyph or box-drawing border appears — the REPL
+// is plain-text by decision (2026-07-19). Tables are left out: glamour draws
+// them with box-drawing rules on purpose, in v1 and v2 alike.
+func TestMarkdownRendererPlainTextContract(t *testing.T) {
+	ansiRE := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	r := newMarkdownRenderer(80)
+	if r == nil {
+		t.Fatal("newMarkdownRenderer(80) returned nil")
+	}
+	tests := []struct {
+		name     string
+		block    string
+		wantText []string
+		notWant  []string
+	}{
+		{"h2 heading", "## Install steps", []string{"Install steps"}, []string{"##"}},
+		{"h3 heading", "### Notes", []string{"Notes"}, []string{"###"}},
+		{"list", "- first item\n- second item", []string{"first item", "second item"}, nil},
+		{"code block", "```go\nfunc main() {}\n```", []string{"func main() {}"}, []string{"```"}},
+		{"link", "See [the docs](https://example.com/docs).", []string{"the docs"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := ansiRE.ReplaceAllString(r.render(tt.block), "")
+			for _, w := range tt.wantText {
+				if !strings.Contains(plain, w) {
+					t.Errorf("render(%q) = %q, missing %q", tt.block, plain, w)
+				}
+			}
+			for _, nw := range tt.notWant {
+				if strings.Contains(plain, nw) {
+					t.Errorf("render(%q) = %q, should not contain %q", tt.block, plain, nw)
+				}
+			}
+			for _, ch := range plain {
+				if ch >= 0x2500 && ch <= 0x257F {
+					t.Errorf("render(%q) contains box-drawing %q: %q", tt.block, ch, plain)
+				}
+				if strings.ContainsRune("❯◆▸✻⤷⚠✦", ch) {
+					t.Errorf("render(%q) contains retired icon %q: %q", tt.block, ch, plain)
+				}
 			}
 		})
 	}

@@ -11,7 +11,7 @@ import (
 // drift out of sync with what's really wired up.
 func TestHelpListsEveryCommand(t *testing.T) {
 	body := strings.Join(helpLines, "\n")
-	for _, cmd := range []string{"/help", "/context", "/compact", "/clear", "/sessions", "/model", "/quit"} {
+	for _, cmd := range []string{"/help", "/context", "/compact", "/clear", "/undo", "/sessions", "/model", "/quit", "/plan"} {
 		if !strings.Contains(body, cmd) {
 			t.Errorf("helpLines missing %q; got:\n%s", cmd, body)
 		}

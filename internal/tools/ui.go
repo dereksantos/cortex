@@ -17,6 +17,13 @@ import (
 // unfinished — so the prompt is the one glyph the REPL keeps.
 const PromptGlyph = "❯"
 
+// SetColorDisabledForTest pins NO_COLOR behavior for the duration of one
+// test and returns a func that restores the previous value. Exported ONLY for
+// that purpose; it delegates to style.ForceColor, the one color switch.
+func SetColorDisabledForTest(disabled bool) (restore func()) {
+	return style.ForceColor(!disabled)
+}
+
 // richRenderDisabled honors the same CORTEX_LOOP_RENDER=0 escape hatch
 // cmd/cortex's renderEnabled reads: with it set, the terminal falls back to
 // the plainest output the REPL has — which now also means the flat one-line

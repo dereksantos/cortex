@@ -36,8 +36,16 @@ read input → run agentic tool calls → capture the turn → curate context �
 ```
 
 Sessions accumulate across turns and persist as raw JSONL transcripts in
-`.cortex/sessions/<id>.jsonl` (resumable). The agent reads `AGENTS.md` from
-the repo root into its seed if present.
+`.cortex/sessions/<id>.jsonl` (resumable). The agent seeds its system prompt
+from the repo's instruction file, resolved priority-ordered with first match
+winning (no concatenation): `AGENTS.md`, then `CLAUDE.md`, then
+`.github/copilot-instructions.md` — the walk starts at the CWD and goes up to
+the filesystem root; the nearest directory containing any candidate wins,
+and within it the first file in that order is loaded (findUp semantics with
+the list applied per level); the loaded file is capped at
+`limits.max_instruction_bytes` and the system prompt's
+`# Project instructions (<file>)` header (and `/context`'s system legend row)
+names which file it came from.
 
 Three capabilities distinguish it:
 
@@ -59,7 +67,10 @@ Three capabilities distinguish it:
    playbooks under `.cortex/skills` et al (`internal/skills`) — are indexed
    the same way, injected adjacent to the memory index: only name+description
    sit in context until the model reads a skill's `SKILL.md` with `read_file`
-   on demand, per the standard's progressive-disclosure design. Separately,
+   on demand, per the standard's progressive-disclosure design. A one-line
+   workspace note (the absolute workspace root — `workspaceNote`) is injected
+   on every turn at the same slot, so the model never guesses foreign absolute
+   paths (issue #142). Separately,
    `captureTurn()` records each turn (files edited, commands run, final answer)
    to the append-only journal — mechanical, no model — the record
    `study(.cortex/journal)` reads on demand. See
@@ -84,29 +95,57 @@ Three capabilities distinguish it:
 | Command | Purpose |
 |---|---|
 | `cortex` | Interactive REPL (default) |
-| `cortex resume [id]` | Resume a prior session (default: latest) |
-| `cortex turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
+| `cortex resume [id]` | Resume a prior session — with no id on an interactive TTY, opens the session picker first (ESC falls back to latest; non-TTY / `NO_COLOR` / `CORTEX_LOOP_RENDER=0` take latest directly); its resume banner goes to stderr (issue #118) |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); the verify-before-fix principle rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence — the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); the review-feedback principle (issue #162) likewise rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in each step prompt — every review finding is owed a disposition of addressed / deferred-with-reason / disputed, pick one of several offered alternatives rather than applying them all, fix the class a reviewer's examples illustrate, and put things where the reviewer said, since a step turn is where a review round's findings land and demotion can fold the review out of view; the spec-test principle (issue #225) and test-target principle likewise ride in the base system prompt and are restated in the planning and step prompts — a failing test written from the issue's acceptance criteria is a spec, so making it green by editing the test instead of the behavior the criterion names is a deviation owed a report, and a criterion is verified only through the user-facing surface it describes, not a lower-level helper; the comment-truth principle (issue #231) likewise rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a comment must say what the code does, not what was intended, and a summary or docs claim describing behavior is the same class: it must match the code you shipped; `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118); a turn that ran tools emits a measurement-only receipt on stderr and under the `receipt` JSON key, listing files changed (`git diff --stat` plus untracked files), the exit codes of the model's own runs of the project's test/build commands (`not run:` when the run was refused or blocked), the files the format hook failed on, and (when the task carried a `- [ ]` checklist) the checklist items the reply leaves out — measured at the turn's end, per item, every significant word of the item (lowercased, punctuation-stripped, stop-words dropped) must appear in the reply with a word-prefix match, so an item named in the reply's own words — including an explicit "not done" — is accounted for; one per line, no aggregate; plan-then-execute measures once per run, deterministically at the run's end, against the rendered per-step report (no step prompt carries the checklist); empty when there is no checklist or the reply accounted for every item (issues #219, #220); it is saved as a transcript note and never shown to the model; a final reply the engine's sanitizer could not repair (still empty, still carrying tool-call markup, or still truncated after salvage) is flagged on stderr as `summary issue: <value>` (values `empty`/`markup`/`truncated`) and under the `summary_issue` JSON key with `--json` — a driver that feeds the reply into a commit message can check for it before doing so (issue #230). |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
-| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19) |
+| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19). The turn endpoints (`POST .../turn`, `POST .../turn/stream`) accept an `attachments` body field — a list of `{path}` (workspace-relative, confined by `read_file`'s rule), `{url}` (http(s), fetched only when `tools.enable_web` is on), or `{data}` (base64 image bytes, `data:` URI or bare, from a browser file picker) — resolved by `resolveTurnAttachments` (`cmd/cortex/serve_attachments.go`) into the same `TurnImage` an `@`image mention produces; any refusal is a 400 before the turn runs (issue #218) |
 | `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
 | `cortex project <add\|list\|remove>` | Manage the project registry |
+| `cortex project trust <add\|remove\|list>` | Manage the per-workspace trust list (the post-edit hook's only gate; user config only) |
+| `cortex project commands [--json] [--project <name>]` | Show the project's resolved format/lint/test/build commands (discovery + declarations; `--json` for the machine-readable shape) |
 | `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
-REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
-`/model [name]`, `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
+REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/undo [N]`
+(issue #111 — per-turn checkpoints: a snapshot is taken at the START of every
+turn, while the repo is a git repo — the tracked tree via `git stash create`,
+falling back to HEAD's commit when the tracked tree is clean — plus the set of
+untracked, non-ignored files then present, recorded under
+`refs/cortex/checkpoints/<session>/<turn>` (`internal/checkpoint` +
+`cmd/cortex/checkpoint.go`). The snapshot is COMMITTED to the per-session undo
+stack only at the turn's END, and only if the turn changed the working tree:
+`commitCheckpoint` re-snapshots the tracked TREE (the stash commit's tree
+object, or HEAD's tree when the tree is clean — never the commit hash, since
+a stash commit embeds timestamps) and the untracked set, and keeps the
+checkpoint iff either differs from the turn-start baseline — so a
+turn that only ran read-only bash (tests, `git status`) records nothing, while
+a turn that edits only through the `agent` subagent still does (the turn-end
+tree diff is the one signal that catches every mutation path). The stack is
+pruned to the newest 50 (`maxCheckpointRefs`) per session. `/undo [N]`, default
+1, restores the Nth-most-recent snapshot to the working tree — it writes the
+snapshot's tracked files back (preserving file modes), re-materialises a
+turn-deleted file, and removes the files the turn CREATED (untracked paths
+absent from the snapshot's baseline) — while leaving pre-existing untracked
+files, the index, the user's `git stash` list, and `.cortex/` untouched; it
+prints only the files it actually changed, records a transcript note so the
+model learns its edits were reverted, and drops the consumed refs. One line
+when not in a git repo or when there is nothing to undo), `/sessions`,
+`/model [name]`, `/plan <task>`, `/hook off|format|all` (turns the post-edit
+hook down or off for this session — monotone-down, never raises it; bare
+`/hook` shows the current mode), `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
 commands are the `input ==` checks inside the REPL's input loop (`for {`).
 `/help` lists the commands; `/context`
 (`cmd/cortex/context_cmd.go` + `context_grid.go`) renders the current
 session's two-zone context window (docs/context-architecture.md) as a fixed
 8×16 glyph grid spanning the whole model window — one glyph per component
-(system prompt, outline, memory index, skills index, hydrated tail, free
-space), a demote-watermark tick, and a legend — under a header and a
-prefix-cache health headline. On an interactive TTY that map opens in the
+(system prompt, outline, memory index, skills index, workspace note, hydrated
+tail, free space), a demote-watermark tick, and a legend — under a header
+(carrying the session's cumulative in/out tokens and, when reported, cost)
+and a prefix-cache health headline. On an interactive TTY that map opens in the
 **inspector** (`internal/lineedit/inspect.go`): an alternate-screen, scrollable
 view that restores the user's scrollback byte-for-byte on exit. The REPL stays
 scrollback-native by default; the inspector is the on-demand escape hatch for
@@ -118,36 +157,85 @@ scrolling report, byte for byte. While a turn's pinned prompt is live the
 inspector does not open a competing reader — the anchor is suspended and its
 key loop forwards raw bytes, the same "serve it from the loop that owns the
 terminal" rule `Anchor.Confirm` follows.
+
+`/sessions` (`cmd/cortex/session_picker.go`) is the inspector's second consumer,
+and the first that is **interactive** rather than read-only: the harness grew a
+cursor plus `Selecter`/`Cursorer`/`Accepter`/`Filterer` view interfaces so typed
+text reaches the view instead of quitting, Enter reports acceptance, and the
+caller reads the pick after the screen closes. The picker filters by prompt, id,
+and model (case-insensitive substring, newest-first preserved) and resumes on
+Enter; ESC leaves the current session alone. It carries the same strict
+enhancement gate as `/context` (`sessionsInspectable` mirrors
+`contextInspectable`), so a pipe, `NO_COLOR`, or `CORTEX_LOOP_RENDER=0` prints the
+plain list exactly as before. `cortex resume` with no id opens the same picker at
+startup (`resumePickerUsable` + `pickSessionAtStartup`), cancelling there falls
+through to today's latest-session resume. `main.go` reaches the harness through
+one seam, `var inspectSession`, so tests can capture the view without a TTY.
 Memory is model-driven — ask in natural language ("remember that …" /
 "forget the … note") and the agent calls the memory tools; the old
 `/remember` and `/forget` slash commands were removed with the mechanical
 capture/retract pipeline.
 
+Tab completes in the interactive REPL (issue #108; the engine is pure in
+`internal/lineedit/completion.go`, wired by `cmd/cortex/mentions.go`):
+slash commands, the `/model <id>` argument (bare model ids from one source —
+the slash completer's Sub hook), and `@path` file mentions (workspace-relative,
+`.gitignore`-aware, `..`/absolute escapes refused). First Tab fills the common
+prefix, later Tabs cycle the candidates — each candidate splices in place of
+the word at the cursor, so surrounding text survives. A submitted `@path`
+mention attaches the file to the turn with the same size rules as `read_file`
+(small files inline, large files as a structural outline + pointer to
+study); the mention is replaced by a `[@path attached]` marker in what the
+model sees. An `@`mention naming an IMAGE — a workspace file or an
+`@https://…` address — is attached differently (issue #218): its bytes ride
+the turn's user message as a content part (`TurnWithAttachments`), never as
+inlined text, and the REPL prints an attachment line per image plus a reason
+per image that could not attach (the #217 detection/cap/vision verdicts apply;
+a text-only model gets nothing on the wire and a printed note). A URL mention
+is a download gated by `tools.enable_web` — with web tools off it is refused
+with the switch named and never fetched. Only an `@` starting a
+whitespace-delimited word is a mention
+(emails and `@types/node`-style names are prose), and a mention that does not
+resolve to a readable file leaves the input unchanged. History records the
+line exactly as typed.
+
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
 ◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept — with
 one exception Derek made 2026-10-09: the prompt marker is `❯`
-(`tools.PromptGlyph`). Every
-tool call prints ONE line when it finishes — `HH:MM:SS  verb     target …
-result`, verb in a fixed column, result (diff `+9 -2`, a summary, elapsed
-past 1s) right-aligned at the content width (terminal capped at 100) —
-laid out by `internal/tools/toolline.go`'s `formatToolLine`; while it runs
-the live status row names it. Subagent calls (`study`/`agent`) are the
-exception: their line prints before they run so their nested calls land
-under it. A run of the coder's read-only calls (read/grep/outline/recall/
-memory reads) folds into one dim line — `read 3 files · grep 2 searches` —
-printed when the run ends (`internal/tools/fold.go`; cmd/cortex calls
-`tools.FlushFold()` before its own mid-turn output). The input row is
-status first, cursor last — `qwen3.8-27b  1k|22k  . ❯ ` (`Prompt`/
-`PromptStatus`); on Enter the row is rewritten as a timestamped echo of the
-input (`lineedit.Terminal.SetAcceptedLine`, via `ReadLineEcho`). Answers sit
-under the gutter, rendered with a quieted glamour theme (accent inline code,
-no chips, plain bold headings, `-` bullets), and end with a one-line footer
-(`cmd/cortex/footer.go`: elapsed · thought · tools · files · cost). Every line carries the
-same dim `HH:MM:SS` gutter instead of a per-role icon (`cmd/cortex/display.go`'s
-`gutterPrefix`); the "thinking" indicator
-is a static label with only its elapsed-seconds tick moving (no animated
-spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and
-the anchored status row (`internal/lineedit/live.go`). Two things print
+(`tools.PromptGlyph`). Every tool call prints ONE line when it finishes —
+`HH:MM:SS  verb     target …  result`, verb in a fixed column, result (diff
+`+9 -2`, a summary, elapsed past 1s) right-aligned at the content width
+(terminal capped at 100) — laid out by `internal/tools/toolline.go`'s
+`formatToolLine`; while it runs the live status row names it. Subagent calls
+(`study`/`agent`) are the exception: their line prints before they run so
+their nested calls land under it. A run of the coder's read-only calls
+(read/grep/outline/recall/memory reads) folds into one dim line — `read 3
+files · grep 2 searches` — printed when the run ends
+(`internal/tools/fold.go`; cmd/cortex calls `tools.FlushFold()` before its
+own mid-turn output). The input row is status first, cursor last —
+`qwen3.8-27b  1k|22k  . ❯ ` (`Prompt`/`PromptStatus`); on Enter the row is
+rewritten as a timestamped echo of the input
+(`lineedit.Terminal.SetAcceptedLine`, via `ReadLineEcho`). Answers sit under
+the gutter, rendered with a quieted glamour theme (accent inline code, no
+chips, plain bold headings, `-` bullets), and end with a one-line footer
+(`cmd/cortex/footer.go`: elapsed · thought · tools · files · cost). Every
+line carries the same dim `HH:MM:SS` gutter instead of a per-role icon
+(`cmd/cortex/display.go`'s `gutterPrefix`); the plain spinner
+(`internal/loopui/spinner.go`) is a static label with only its
+elapsed-seconds tick moving (no animated spinner frames). The anchored
+status row (`internal/lineedit/live.go`, issue #109) appends live stats to
+the activity label, refreshed per model round-trip: the coding model's name,
+the context-window fill (`ctx %`), the last request's billed `in / out`
+tokens (the in side is the last request's prompt, the out side the last
+response's completion — both refreshed per request, so they pair the same
+turn, not two different turns), the session's cumulative cost — shown only
+when the backend actually reported one, never estimated — and the turn's
+elapsed seconds. The row shows ONE elapsed counter: when the activity label
+already carries its own seconds tick (the thinking indicator), the
+turn-elapsed segment is dropped so the row never shows two disagreeing
+counters. When the row exceeds the available width it trims right to left —
+cost drops first, then the token counts, then the context fill — with the
+model name kept last. Two things print
 *under* a tool line, both plain-text by the same rule (`+`/`-`,
 indentation, and color only — no connectors or box-drawing):
 `edit_file`/`write_file` render the change as a bounded unified diff
@@ -178,18 +266,173 @@ the model-driven memory tools
   Study's read set plus `write_file`/`edit_file`/`bash`, depth cap 1, Risky
   shell treated as Blocked inside it. Runs as the coder's current model by
   default (optional per-call `model` arg); config gate `tools.enable_agent`.
+- The built-in system prompt carries a locate-first working-style principle
+  (issue #142), spliced into the `# How you work` block and mirrored here
+  verbatim (a drift tripwire, same pattern as the debugging principle under
+  Constraints → Testing):
+
+  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers.
+
+  The built-in system prompt also carries the writing half of that principle
+  (issue #224) as `locateBeforeWritingPrinciple`, spliced right after the
+  locate-first line and mirrored here verbatim (the same drift tripwire):
+
+  Locate before writing. Before writing code that names a helper, constant, type or path you have not seen in this session, grep or outline for it and use what actually exists — never invent identifiers, type shapes, or file paths; a name that is not there comes back undefined. Before adding a new package-level name (a test helper, a const, a fixture), grep the package (including its other _test.go files) so the name exists where you call it and does not collide with one already declared; checking first costs one tool call, a guessed name costs a build-and-fix round per guess.
+
+  It answers the self-dev loop's tick 20261006T074738Z: new code (mostly test
+  files) was written against helpers, type shapes and paths that were never
+  located (seven undefined identifiers at once; a compile error carried from
+  one session to the next; a duplicated package-level const). It rides in the
+  base system prompt and is restated in each plan step prompt (where new
+  files actually get written and demotion can fold the locate work away).
+
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
-  redirects to `study`; large Go files return a declaration skeleton.
+  redirects to `study`; large Go files return a declaration skeleton. An
+  image file (png/jpeg/gif/webp, by extension or magic bytes) read whole
+  attaches as an image content part for vision models (issue #217): the
+  observation is a short `[image: …]` marker and the bytes ride the
+  tool-result message's wire Parts (spliced by the coder Toolset's
+  `SpliceImages` hook, `cmd/cortex/image_input.go`), with a side-car copy
+  beside the transcript that `recall` names after demotion. The
+  attachment is handed off through the `ImageSink` seam onto the
+  dispatching session's own field — never process-global state, so
+  concurrent sessions (serve, discord) can't take each other's image. A
+  text-only model (the #216 verdict, exposed to the tools as
+  `ImageInputEnabled`), a file over `tools.read.image_max_bytes`, or a
+  read inside a subagent (whose engine never splices Parts) gets a short
+  refusal naming the file type; a ranged read of an image is refused.
+  Images with wire Parts count toward the window at a documented
+  per-image estimate (`tools.ImageTokensOf`, decoded bytes ÷ 3) booked in
+  `estTurnTokens`, shown by `/context`'s images legend row, and demoted
+  to an outline line naming the image with a recallable citation — never
+  kept in the prompt forever. A resumed marker-only result books no
+  image tokens (nothing is on the wire for it). A
+  human-attached image (issue #218, `TurnWithAttachments`) leaves no marker
+  in the message text at all — the user's input is persisted byte-for-byte
+  — and is recorded instead by a per-message side-car manifest
+  (`<id>.m<idx>.images`, `cmd/cortex/image_input.go`) that `recall` and the
+  web-UI transcript view-model (`cmd/cortex/webui_transcript.go`) read to
+  show the attachment. A
+  directory returns a bounded listing (directories marked `/`) plus a pointer
+  to `outline`, and a missing path returns an oriented error: it points at
+  `outline`/`grep` instead of guessing, states the workspace root for
+  absolute or out-of-workspace paths, and lists nearby existing candidates
+  (issue #142).
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
-  over `write_file` for edits.
+  over `write_file` for edits. Failure results are self-correcting: an
+  ambiguous match lists every occurrence's line number. A not-found match
+  scores EVERY line of the old block against the file and anchors a bounded
+  snippet of the closest region on the best-scoring line (not just the first,
+  so a multi-line span whose first line is absent still finds the region its
+  other lines point at); it also appends a directive to re-read the current
+  span and retry `edit_file` — or use `write_file` for a whole-file rewrite —
+  rather than scripting the change through `bash` (sed/awk/python) (#201:
+  scripted multi-line edits corrupt files and skip the diff display + post-
+  edit hook). An interior-whitespace-only mismatch (e.g. gofmt re-aligned the
+  span's spacing) returns an "only whitespace differs" error with the region's
+  current lines, and a landed edit that removes guard-shaped lines
+  (if/else/for/switch/case/return/panic/Lock/Unlock) not present in the
+  replacement appends a GUARD DROPPED warning naming them (#210). A successful
+  result appends the current changed region (added lines marked `>`, removed
+  `-`, context unmarked, capped at 12 lines) so the
+  model's view of the file stays in sync (#173). On a `.go` file a successful
+  result may also carry the write-sanity note described in the next bullet.
+- After `write_file`/`edit_file` lands, a post-edit hook runs the project's
+  own format on the file just touched — it is FORMAT-ONLY. Lint moved to
+  the turn END: in mode "all" on a trusted workspace it runs once per turn
+  over the distinct `write_file`/`edit_file` paths (including the `agent`
+  subagent's, minus files deleted since) — one run per file for `{file}`,
+  one per distinct package dir for `{dir}` — under the turn's total lint
+  budget (`project.turn_lint_budget_sec`, default 60s); findings reach the
+  model in a tools-withheld finalize round and appear in the REPL, in
+  `cortex turn` stderr + its `lint` JSON field, and in the journal.
+  Workspace trust (the user config's `project.trusted`, set via
+  `cortex project trust`) is the ONLY gate: on an untrusted workspace it
+  runs nothing (one-line "hook inactive" note on the session's first
+  edit), on a trusted one it runs the applicable per-file format command
+  as a shell-free argv (templates with shell syntax are skipped with a
+  note), each with a 10s budget — and appends a note (what ran, what it
+  reported) to the result; the note never fails the edit. Commands are
+  declared in `project.commands` or the `## Commands` section of the
+  resolved instruction file (AGENTS.md → CLAUDE.md →
+  .github/copilot-instructions.md; docs/configuration.md); `cortex
+  project commands` shows each command's source and when it runs
+  (per-edit / turn-end / never / inactive).
+  Independently of that hook and of workspace trust, a `.go` file that lands
+  also gets a write-sanity pass (`internal/tools/writesanity.go`, stdlib
+  only): it parses the written file's PACKAGE — same-package `_test.go`
+  siblings included, build-constrained siblings excluded — and appends ONE
+  note listing every duplicate package-level declaration and every bare name
+  undefined anywhere in the package, so a session fixes a whole batch of
+  compile errors in one round instead of one per build (#224). The note never
+  vetoes the write, and it is silent for non-Go files, unparseable files, and
+  packages with nothing wrong.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked.
+  Blocked. The Risky prompt shows the classifier's reason above the command
+  and offers `y` (once), `n`, `a` (always this session, exact command), and
+  `p` (always this session, command prefix, e.g. `make test*`) (issue #107).
+  Session approvals are memory-only — a fresh session starts with none —
+  and are journaled to `.cortex/journal/shell/` as `shell.approval` entries.
+  Approvals never override a Blocked verdict: the gate checks approvals
+  after classification, so a Blocked command takes its own arm first.
+  Every refusal (blocked, refused, or declined) carries the shared
+  unknown-value tail from the shellrisk constructors (issue #200), neutral
+  about what the command was for: if it was meant to check something, that
+  result is still unknown — don't guess it, don't substitute a check of
+  something else, mark it unverified.
+  The gate also tracks "same-action" effect classes so a blocked
+  action can't be re-routed in a later command: `git-history-write` and
+  `hook-disabling` act as one barred group (a refused `git commit` can't
+  re-enter as `--no-verify`), and `git-stash` is its OWN group — it covers
+  `git stash`/`git stash <sub>` for every mutating sub —
+  push/pop/apply/branch/drop/clear/store, bare `git stash` included — with
+  the read-only `show` and `list` excluded, and a refused `git stash pop`
+  bars a later `git stash push` but NOT an unrelated `git commit` (#201).
+  Whether a stash is Risky at all is a classifier decision: the prompt marks
+  working-tree-discarding git operations (stash pop/apply/clear,
+  `checkout --`, restore) risky because they can lose uncommitted work.
+  Once a `fetch_url`/`web_search` result enters a turn, that turn is
+  **tainted** (issue #102): every gray-zone command the intent judge would
+  have auto-approved is raised to Risky and needs an explicit approval, the
+  stored `a`/`p` session approvals do NOT apply, and `git push` (any git
+  subcommand beginning with `push`) is never auto-approved even when the safe
+  path or the judge would let it — the floor raises to Risky, never Blocks,
+  so a human can still run it. Headless runs block instead with
+  `shellrisk.TaintBlockedMessage`. The taint is per-turn only: it is cleared
+  at the START of every turn (`turn.go`) and is inert outside a turn.
+  Separately, when a command rewrites
+  a file in place (`sed -i`, `ed -s`, `perl -pi`, gawk's `awk -i inplace`,
+  an interpreter `-c` script string, or a redirect/append target —
+  quote-aware; plain awk only READS its file list), the tool appends a note
+  naming each touched target (workdir-relative when a workdir is anchored) and
+  steering to `edit_file`/`write_file`, whose diff display and post-edit hook
+  scripted edits skip (#201). When such a rewrite targets a workdir path, the
+  same format-only post-edit hook `write_file`/`edit_file` run is run on it
+  and its note folded into the result, so script-edits get the same format
+  coverage as tool edits (only on the success path — a refused command made no
+  change; untrusted/no-format-command no-ops). The hook never runs on a
+  script-form target: a `-c` program's arguments are only a guess at the file
+  it opens, so the steering note names it but the formatter is not pointed
+  at it.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
 - `web_search` and `fetch_url` provide bounded, read-only public web access;
   `fetch_url` blocks local/private destinations and unsafe redirects. Both are
-  coder-only and can be disabled with `tools.enable_web: false`.
+  coder-only and can be disabled with `tools.enable_web: false`. Every result
+  comes back **framed as untrusted data** (issue #102): a
+  `tools.UntrustedMarker` banner plus BEGIN/END delimiters say the content is
+  data to read, never instructions to follow, and any delimiter/marker line
+  the page itself carries is defanged to `[removed delimiter]` so the frame is
+  the harness's alone. That marker is what taints the turn for the `bash`
+  gate above (see the taint paragraph under `bash`).
+- On a tainted turn, `write_file`, `edit_file`, and `remove_path` confine
+  their `path` to the workspace root — the escapes ordinary work may make
+  (an absolute path outside the root, a `..` that leaves it) are rejected with
+  `ConfinePath`'s shape plus the taint reason (`tools.ConfineWrites`, checked
+  in-tool before any filesystem touch, so the subagent leg is covered too —
+  `RunSubagent` hands the same session to the child as its `ToolDeps`).
+  Untainted turns keep today's escape behavior unchanged.
 - The context tools let the model curate its own working set on top of the
   mechanical demotion policy: evict or merge outline entries (merge installs
   one spanning `#m<first>-<last>` citation, so recall stays lossless) and
@@ -251,8 +494,9 @@ is canonical; storage is regeneratable from it. Per-segment flock makes
 capture cross-process safe. See [`docs/journal.md`](docs/journal.md).
 Invariants still enforced: **local-only by default**
 (`journal.AssertLocalOnly` is a code-review tripwire for outbound paths),
-**`.cortex/` in `.gitignore`**, **jq-readable plain JSONL**, closed
-segments gzippable.
+**`.cortex/` is gitignored** (self-ignoring — a session in a git workspace
+writes a lone-`*` `.cortex/.gitignore` rather than editing the user's file,
+#119), **jq-readable plain JSONL**, closed segments gzippable.
 
 ## Go patterns
 
@@ -274,6 +518,21 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 - Assertions via `t.Errorf` / `t.Fatalf` / `t.Fatal` — no testify/assert.
 - Table-driven tests with `t.Run` subtests.
 - Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
+- Tests that EXECUTE shell commands must use forms portable across GNU and BSD (macOS) tools — e.g. `sed -i.bak 's/x/y/' f` instead of bare `sed -i 's/x/y/' f` (BSD sed reads the next argument as a backup suffix; #228, `internal/tools/shell_portability_test.go` guards this).
+
+Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
+
+Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
+
+Test the path the requirement names. A criterion is verified only through the user-facing surface it describes — the command, the API, the entry point the user invokes — not through a lower-level helper that surface routes through: a test that never calls the surface proves nothing about it, no matter how green.
+
+A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it.
+
+Every finding a review raises is owed an explicit disposition: addressed, deferred with a reason, or disputed. A finding left with none of these is a finding you dropped, and a dropped finding is invisible to the next round, so it comes back. When a reviewer offers several options as alternatives, pick one and say which — applying all of them is not thoroughness, it stacks behaviour the reviewer meant as a choice. When a reviewer gives example instances, name and fix the underlying class rather than only the instances listed: a fix that covers the examples and not the class needs another round for the next example. Where the reviewer asked for something to live, put it there — a note the reviewer asked to keep belongs in the place they named, not in a nearby file that happens to be open.
+
+A failing test written from the issue's acceptance criteria is a spec. Making it green by editing the test, its setup, or its expectation — instead of fixing the behavior the criterion names — is a deviation you must report in your summary, not a fix: the criterion stays unmet, a green suite does not count as coverage, and the defect the test caught must be fixed in production, never patched around in the test. If the criterion itself is wrong, say so with the evidence instead of silently rewriting it.
+
+A comment must say what the code does, not what you intended it to do. A comment the code doesn't implement is worse than no comment — it misleads the next reader, who is often you in a later session. After a behavioral change, re-read the comments adjacent to the span you edited — reordered calls, a new overwrite, a removed guard all stale them — and fix or delete any that no longer hold. A summary or docs claim describing behavior is the same class: it must match the code you shipped, and claiming behavior the code doesn't implement is a deviation owed the same report as a test you bent to pass.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,

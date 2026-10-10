@@ -19,12 +19,43 @@ import (
 // /api/projects/{name}/sessions/{id}/turn.
 type turnRequest struct {
 	Input string `json:"input"`
+	// Attachments (#218) are images to carry on this turn, each named by a
+	// workspace-relative `path`, an http(s) `url` (gated by tools.enable_web),
+	// or base64 `data` posted by a browser file picker. Resolved by
+	// resolveTurnAttachments (serve_attachments.go), which is the same routine
+	// the SSE endpoint uses, so the two cannot disagree about what is
+	// attachable.
+	Attachments []TurnAttachment `json:"attachments,omitempty"`
 }
 
 // turnResponse is the wire shape POST .../turn returns.
 type turnResponse struct {
 	Reply       string `json:"reply"`
 	Interrupted bool   `json:"interrupted"`
+}
+
+// decodeTurnRequest reads a turn body and resolves its attachments, answering
+// the HTTP status itself and returning ok=false when it did. Both turn
+// endpoints go through here so the decoding and the attachment rules live in
+// exactly one place (the issue's "no duplicated decoding") — a body shape or
+// a confinement rule changed for one endpoint cannot miss the other.
+//
+// The two checks are ordered decode-then-resolve, and both are 400: a
+// malformed body has no attachments to interpret, and an attachment refusal
+// must be answered BEFORE the turn is claimed under the session mutex, so a
+// rejected request never serializes behind (or displaces) a running turn.
+func decodeTurnRequest(w http.ResponseWriter, r *http.Request, cs *CortexSession) (turnRequest, []TurnImage, bool) {
+	var body turnRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+		return body, nil, false
+	}
+	images, attErr := resolveTurnAttachments(r.Context(), cs, body.Attachments)
+	if attErr != nil {
+		http.Error(w, attErr.Error(), attachmentHTTPStatus(attErr))
+		return body, nil, false
+	}
+	return body, images, true
 }
 
 // handleTurn serves POST /api/projects/{name}/sessions/{id}/turn: runs
@@ -57,16 +88,15 @@ func handleTurn(mgr *SessionManager) http.HandlerFunc {
 		}
 		mgr.Touch(id) // M4.7: a live request resets the idle-eviction clock
 
-		var body turnRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+		body, images, ok := decodeTurnRequest(w, r, ms.cs)
+		if !ok {
 			return
 		}
 
 		ms.mu.Lock()
 		defer ms.mu.Unlock()
 
-		result, err := ms.cs.Turn(r.Context(), body.Input)
+		result, err := ms.cs.TurnWithAttachments(r.Context(), body.Input, images...)
 		if err != nil {
 			http.Error(w, "turn failed: "+err.Error(), http.StatusInternalServerError)
 			return

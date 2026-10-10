@@ -18,13 +18,21 @@ import (
 const (
 	maxJSFileLines = 300
 	// maxTotalJSLines rose from 1200 with the memory screen's memory.js
-	// (docs/cross-source-learning.md piece 4, ~225 lines): the per-file cap
-	// above is the real regression guard against any one screen growing
-	// into a framework; the total is a sanity ceiling that grows in step
-	// with each new legitimate screen (dashboard/session/landscape/models/
-	// loops/memory today) rather than gating a 7th screen from existing at
-	// all.
-	maxTotalJSLines = 1500
+	// (docs/cross-source-learning.md piece 4, ~225 lines), and from 1500 with
+	// the turn composer's image attachments (issue #218 step 6): the picker,
+	// base64 reader, and pre-send validator in attach.js, plus the composer
+	// wiring in app.js and the transcript's attached-image rendering in
+	// session.js — 195 lines of fetch/render/validate, which is precisely what
+	// this cap permits and precisely what it was raised for before.
+	//
+	// The honest reading of the total: at HEAD it stood at 1458 of 1500, so 42
+	// lines of slack for a whole screen's worth of work. Any web-UI feature of
+	// real size must raise this number, which is why the per-file cap above is
+	// the guard that actually holds behavior in check (and TestWebUIAttachJSIsNot
+	//Framework below re-asserts it for the newest file specifically). A ceiling
+	// that forces either a bump or a starvation is not doing the job the
+	// framework-growth guard was meant to do; the per-file cap is.
+	maxTotalJSLines = 1700
 )
 
 func TestWebUIJavaScriptSizeCaps(t *testing.T) {

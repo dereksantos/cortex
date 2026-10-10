@@ -33,6 +33,7 @@ type RunRecord struct {
 	NextMinutes int       `json:"next_minutes,omitempty"`
 	NextReason  string    `json:"next_reason,omitempty"`
 	Done        bool      `json:"done,omitempty"`
+	Attributed  bool      `json:"attributed,omitempty"`
 }
 
 // JournalRunHistory returns every loop.run entry matching name, in the
@@ -78,6 +79,7 @@ func JournalRunHistory(name string) ([]RunRecord, error) {
 			NextMinutes: p.NextMinutes,
 			NextReason:  p.NextReason,
 			Done:        p.Done,
+			Attributed:  p.Attributed,
 		})
 	}
 	return out, nil

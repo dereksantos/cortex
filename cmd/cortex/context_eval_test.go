@@ -31,6 +31,8 @@ import (
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // contextEvalBackend records every wire payload and answers each request with
@@ -77,12 +79,18 @@ func (b *contextEvalBackend) allWires() [][]Message {
 	return out
 }
 
+// newContextEvalSession builds a scripted test session whose stored system
+// message is the REAL base system prompt (SystemPrompt — byte-stable for the
+// session's life; the per-turn memory section rides the ephemeral wire slot,
+// not here) rather than a one-char stand-in. Keeping the envelope realistic
+// makes the bounded-wire budget honest: the envelope's token cost is counted
+// from the session's actual Messages[0], not a guess.
 func newContextEvalSession(t *testing.T, backend *contextEvalBackend, window int) *CortexSession {
 	t.Helper()
 	cs := &CortexSession{Window: window, quiet: true, Request: &AgentRequest{
 		Model:    "m",
 		BaseURL:  backend.srv.URL,
-		Messages: []Message{{Role: RoleSystem, Content: "sys"}},
+		Messages: []Message{{Role: RoleSystem, Content: SystemPrompt}},
 	}}
 	cs.ws = cs.newWorkingSet(1)
 	cs.StartTranscript()
@@ -136,7 +144,15 @@ func assertWireComplete(t *testing.T, cs *CortexSession, wire []Message, markers
 // envelope + outline cap + tail high watermark (+ slack for headers/labels).
 func assertWireBounded(t *testing.T, cs *CortexSession, wire []Message, label string) {
 	t.Helper()
-	budget := cs.windowSize()/8 + cs.windowSize()/2 + cache.TokensOf(len("sys")) + 300
+	// The budget is envelope + outline cap + tail high watermark + slack for
+	// headers/labels. The envelope's system message is the session's stable
+	// base prompt (CortexArgs.Request() → systemPromptContent — byte-stable
+	// for the session's life), so account for its real size. The per-turn
+	// memory section (memoryPromptSection) also rides the wire — in the
+	// ephemeral slot — once the outline is non-empty, so account for it here
+	// rather than in the slack.
+	system := cs.Request.Messages[0].Content
+	budget := cs.windowSize()/8 + cs.windowSize()/2 + cache.TokensOf(len(system)) + cache.TokensOf(len(memoryPromptSection)) + 300
 	if got := cache.TokensOf(len(wireText(wire))); got > budget {
 		t.Errorf("%s: wire is ~%d tokens, over the zone budget %d", label, got, budget)
 	}
@@ -216,7 +232,6 @@ func TestContextEvalSteadyState(t *testing.T) {
 	backend := newContextEvalBackend(t)
 	// Window 4000 → tail watermarks high=2000/low=1333 tokens, outline cap 500.
 	cs := newContextEvalSession(t, backend, 4000)
-
 	const nTurns = 8
 	filler := strings.Repeat("filler ", 400) // ~2800 chars ≈ 700 tokens per turn
 	var markers []string
@@ -256,14 +271,16 @@ func TestContextEvalSteadyState(t *testing.T) {
 
 	// Cache economics: on turns where zone A did not change, re-prefill must be
 	// just the previous reply + the new input (pure append). Demotion turns may
-	// re-prefill up to the outline + tail budgets.
+	// re-prefill up to the outline + tail budgets — plus the per-turn memory
+	// section, which appears in the ephemeral slot the same turn the outline
+	// first becomes non-empty.
 	wires := backend.allWires()
 	demotions := 0
 	for i := 1; i < len(wires); i++ {
 		got := rePrefillChars(wires[i-1], wires[i])
 		if outlineZone(wires[i]) != outlineZone(wires[i-1]) {
 			demotions++
-			budget := (cs.windowSize()/8 + cs.windowSize()/2 + 300) * cache.CharsPerToken
+			budget := (cs.windowSize()/8 + cs.windowSize()/2 + cache.TokensOf(len(memoryPromptSection)) + 300) * cache.CharsPerToken
 			if got > budget {
 				t.Errorf("demotion turn %d re-prefills %d chars, over budget %d", i+1, got, budget)
 			}
@@ -415,6 +432,303 @@ func TestTurnMemoryIndexKeepsSystemStable(t *testing.T) {
 	}
 	if got := rePrefillChars(wires[0], wires[1]); got > len("turn 2")+64 {
 		t.Fatalf("unchanged memory index caused %d chars of re-prefill, want append-only suffix", got)
+	}
+}
+
+// ephemeralSlot returns the per-turn ephemeral wire slot's content (the user
+// message carrying the memory section / memory index / skills index), or "" if
+// the slot is absent from the wire.
+func ephemeralSlot(wire []Message) string {
+	for i := range wire {
+		m := wire[i]
+		if m.Role != RoleUser || strings.HasPrefix(m.Content, outlineHeader) {
+			continue
+		}
+		if m.Content == "" || strings.Contains(m.Content, "These are notes you saved in earlier sessions") ||
+			strings.Contains(m.Content, "memory_search") || strings.Contains(m.Content, "## Skills") {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// TestTurnMemorySectionEphemeralSlot drives real Turn() calls and checks the
+// full memory section (memoryPromptSection) reaches the model only through the
+// ephemeral wire slot — never the stored system message — and only when a
+// memory note or a demoted outline exists:
+//
+//   - no notes, no outline → section absent from the ephemeral slot;
+//   - notes present → section present, in front of the index;
+//   - the stored system message is byte-identical across every turn.
+func TestTurnMemorySectionEphemeralSlot(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	backend := newContextEvalBackend(t)
+	cs := newContextEvalSession(t, backend, 4000)
+	// Memory without a capturer: EnableMemory wires the note store and the
+	// journal capturer together, but capture writes are best-effort (an
+	// error is a no-op) and the user tier reads the developer's real
+	// ~/.cortex/memory, so neither belongs in this test's assertion surface.
+	if mem, err := memory.New(cs.ContextDir()); err == nil {
+		cs.memory = mem
+	}
+
+	// 1. No notes, no outline: no memory index AND no memory section.
+	if _, err := cs.Turn(context.Background(), "plain first turn"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ephemeralSlot(backend.lastWire()); got != "" {
+		t.Fatalf("no notes, no outline: ephemeral slot must be empty, got %q", got)
+	}
+
+	system := cs.Request.Messages[0].Content
+	if strings.Contains(system, "memory_search") {
+		t.Fatal("the stored system message carries the full memory section — it must stay the static base prompt")
+	}
+
+	// 2. A note exists: section present, ahead of the index.
+	if _, err := cs.MemoryWrite("cache-marker", "A durable cache marker.", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.Turn(context.Background(), "second turn"); err != nil {
+		t.Fatal(err)
+	}
+	got := ephemeralSlot(backend.lastWire())
+	if !strings.Contains(got, memoryPromptSection) {
+		t.Error("notes present: the ephemeral slot must carry the full memory section")
+	}
+	if !strings.Contains(got, "cache-marker") {
+		t.Error("notes present: the ephemeral slot must still carry the memory index")
+	}
+	if strings.Index(got, "memory_search") > strings.Index(got, "cache-marker") {
+		t.Error("the section must ride ahead of the index in the ephemeral slot")
+	}
+	if cs.Request.Messages[0].Content != system {
+		t.Error("writing a note mutated the cache-critical system message")
+	}
+
+	// 3. Notes forgotten: section flips back off — the system message never
+	// moves, only the ephemeral slot changes.
+	if _, err := cs.MemoryForget("cache-marker", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.Turn(context.Background(), "third turn"); err != nil {
+		t.Fatal(err)
+	}
+	got = ephemeralSlot(backend.lastWire())
+	if strings.Contains(got, "memory_search") {
+		t.Error("after forgetting the only note, the memory section must be absent again")
+	}
+	if cs.Request.Messages[0].Content != system {
+		t.Error("forgetting a note mutated the cache-critical system message")
+	}
+}
+
+// TestTurnMemorySectionSkillsOnlyDoesNotTrigger guards the skills-only
+// regression (issue #151): a workspace with Agent Skills but zero memory
+// notes and an empty outline must NOT get the full memory section — the
+// skills index rides the ephemeral slot alone, and the stored system message
+// stays the base prompt.
+func TestTurnMemorySectionSkillsOnlyDoesNotTrigger(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	// One discovered skill, nothing else: no memory store, empty outline.
+	skillDir := t.TempDir()
+	writeTestSkill(t, skillDir, "a-skill", "Does a thing.")
+	backend := newContextEvalBackend(t)
+	cs := newContextEvalSession(t, backend, 4000)
+	cs.Config = &Config{Skills: SkillsConfig{Dirs: []string{skillDir}}}
+
+	if _, err := cs.Turn(context.Background(), "first turn"); err != nil {
+		t.Fatal(err)
+	}
+	got := ephemeralSlot(backend.lastWire())
+	if !strings.Contains(got, "## Skills") {
+		t.Fatal("skills present: the ephemeral slot must carry the skills index")
+	}
+	if strings.Contains(got, "memory_search") || strings.Contains(got, memoryPromptSection) {
+		t.Error("skills only: the full memory section must NOT be injected (no notes, no outline)")
+	}
+}
+
+// TestTurnMemorySectionPromptFileSuppresses guards the prompt.file regression
+// (issue #151): prompt.file REPLACES the built-in base prompt, so the
+// built-in memory section must not ride on top of a custom base — the custom
+// prompt owns its own memory guidance (and the section's opening line assumes
+// the built-in base's short memory line, which a custom prompt may not have).
+// The memory INDEX note still rides the ephemeral slot (index injection is
+// orthogonal to the base prompt); only the built-in guidance section is
+// suppressed, and the stored system message stays the custom base, byte
+// stable.
+func TestTurnMemorySectionPromptFileSuppresses(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	// A file-replaced base: configurePrompt sets the live promptBase, exactly
+	// as NewCortexSession does for a prompt.file config — the same state
+	// turn.go's builtinBase check (promptBase == SystemPrompt) keys off.
+	resetPrompt(t)
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("You are a custom agent."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configurePrompt(&Config{Prompt: PromptConfig{File: promptPath}})
+
+	backend := newContextEvalBackend(t)
+	cs := newContextEvalSession(t, backend, 4000)
+	if promptBase != "You are a custom agent." {
+		t.Fatalf("prompt.file config did not replace the base prompt; got %q", promptBase)
+	}
+	cs.Request.Messages[0].Content = promptBase // the stored system message is the custom base
+
+	// Memory without a capturer: EnableMemory wires the note store and the
+	// journal capturer together, but capture writes are best-effort (an
+	// error is a no-op) and the user tier reads the developer's real
+	// ~/.cortex/memory, so neither belongs in this test's assertion surface.
+	if mem, err := memory.New(cs.ContextDir()); err == nil {
+		cs.memory = mem
+	}
+	if _, err := cs.MemoryWrite("custom-base-note", "A durable note under a custom base.", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cs.Turn(context.Background(), "first turn"); err != nil {
+		t.Fatal(err)
+	}
+	got := ephemeralSlot(backend.lastWire())
+	// The index note still rides — notes exist and index injection is
+	// orthogonal to the base prompt.
+	if !strings.Contains(got, "custom-base-note") {
+		t.Error("prompt.file base: the ephemeral slot must still carry the memory index note")
+	}
+	// The built-in guidance section must NOT ride on top of the custom base.
+	if strings.Contains(got, memoryPromptSection) {
+		t.Error("prompt.file base: the built-in memory section must NOT be injected (the custom base owns its memory guidance)")
+	}
+	if strings.Contains(got, "memory_search") {
+		t.Error("prompt.file base: the built-in memory guidance (memory_search) must NOT ride the ephemeral slot")
+	}
+	if cs.Request.Messages[0].Content != promptBase {
+		t.Error("the custom base system message must stay byte-stable")
+	}
+}
+
+// TestTurnMemorySectionOutlinePresentThroughTurn drives a real Turn() through
+// demotion (no memory notes at all) and checks the acceptance case the
+// pure-helper table covers only in isolation: once the outline exists, the
+// full memory section rides the ephemeral wire slot on that turn — and the
+// stored system message stays the static base prompt.
+func TestTurnMemorySectionOutlinePresentThroughTurn(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	backend := newContextEvalBackend(t)
+	// Window 4000 with ~700-token inputs: the tail outgrows its watermarks
+	// within a few turns, so demotion (and the outline) is guaranteed.
+	cs := newContextEvalSession(t, backend, 4000)
+
+	system := cs.Request.Messages[0].Content
+	if strings.Contains(system, "memory_search") {
+		t.Fatal("the stored system message carries the full memory section — it must stay the static base prompt")
+	}
+
+	filler := strings.Repeat("filler ", 400) // ~2800 chars ≈ 700 tokens per turn
+	seenOutline := false
+	for i := 1; i <= 8 && !seenOutline; i++ {
+		if _, err := cs.Turn(context.Background(), fmt.Sprintf("u%d-marker %s", i, filler)); err != nil {
+			t.Fatalf("turn %d: %v", i, err)
+		}
+		if len(cs.outline) == 0 {
+			continue
+		}
+		seenOutline = true
+		// First turn with a non-empty outline: the section must be in the
+		// ephemeral slot — even with zero memory notes — and the system
+		// message must be untouched.
+		got := ephemeralSlot(backend.lastWire())
+		if !strings.Contains(got, memoryPromptSection) {
+			t.Error("outline present, no notes: the ephemeral slot must carry the full memory section")
+		}
+		if !strings.Contains(got, "memory_search") {
+			t.Error("outline present, no notes: the section's memory guidance is missing from the ephemeral slot")
+		}
+		if cs.Request.Messages[0].Content != system {
+			t.Error("demotion mutated the cache-critical system message")
+		}
+	}
+	if !seenOutline {
+		t.Fatal("scripted session never demoted a turn; the outline-present case was never exercised")
+	}
+}
+
+// TestTurnMemorySectionFoldedOutlineOnly keeps the memory section on the
+// ephemeral wire slot in the folded-only state: context_evict has removed
+// every live outline entry while the folded digest (with @session citations)
+// remains, and no memory notes exist. turn.go treats that state as
+// "outline present" for the outline block — the section's decision must
+// agree, or the recall guidance vanishes while its citations are still on
+// the wire.
+func TestTurnMemorySectionFoldedOutlineOnly(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	// A well-behaved fold summarizer: compresses but keeps every citation
+	// (the lossy variant is TestContextEvalFoldKeepsHistoryReachable).
+	origFold := foldSummarize
+	foldSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {
+		return "FOLDED-DIGEST " + strings.Join(evalCitationRe.FindAllString(content, -1), " "), true, nil
+	}
+	defer func() { foldSummarize = origFold }()
+
+	backend := newContextEvalBackend(t)
+	// Window 2000 → tail watermarks high=1000/low=666 tokens, outline cap
+	// 250: ~550-token inputs cross the high watermark within a few turns,
+	// and two live entries (~200 tokens each) push the outline over its
+	// cap so the fold fires while the session is still small.
+	cs := newContextEvalSession(t, backend, 2000)
+	cs.Request.Tools = tools.All
+
+	system := cs.Request.Messages[0].Content
+	// No memory notes for the whole test.
+	const nTurns = 12
+	filler := strings.Repeat("filler ", 250) // ~1750 chars ≈ 440 tokens per turn
+	for i := 1; i <= nTurns; i++ {
+		if _, err := cs.Turn(context.Background(), fmt.Sprintf("f%d-marker %s", i, filler)); err != nil {
+			t.Fatalf("turn %d: %v", i, err)
+		}
+	}
+	// Fold the oldest two live entries into a digest (a mechanical tool
+	// round — the same path context_merge takes through the model).
+	for i := 0; i+2 <= len(cs.outline); i++ {
+		if _, err := cs.MergeOutlineEntries(cs.outline[i].Citation, cs.outline[i+1].Citation); err != nil {
+			t.Fatalf("fold setup: %v", err)
+		}
+	}
+	if len(cs.outline) == 0 || cs.outlineFolded == "" {
+		t.Fatalf("setup did not fold the outline: live=%d folded=%q demoted=%d tail=%d", len(cs.outline), cs.outlineFolded, cs.ws.Demoted(), cs.ws.TailTokens())
+	}
+	// Evict every remaining live entry: only the folded digest is left.
+	for _, e := range cs.outline {
+		if !cs.RemoveOutlineEntry(e.Citation) {
+			t.Fatalf("setup: evict of %s failed", e.Citation)
+		}
+	}
+
+	if _, err := cs.Turn(context.Background(), "folded-marker question"); err != nil {
+		t.Fatalf("folded turn: %v", err)
+	}
+	if len(cs.outline) != 0 || cs.outlineFolded == "" {
+		t.Fatalf("state drifted: live=%d folded=%q", len(cs.outline), cs.outlineFolded)
+	}
+	if cs.Request.OutlineBlock == "" {
+		t.Fatal("the outline block (folded digest) did not reach the wire")
+	}
+	got := ephemeralSlot(backend.lastWire())
+	if !strings.Contains(got, memoryPromptSection) {
+		t.Error("folded-only outline, no notes: the ephemeral slot must still carry the full memory section (the digest's @session citations are on the wire)")
+	}
+	if !strings.Contains(got, "memory_search") {
+		t.Error("folded-only outline, no notes: the section's memory guidance is missing from the ephemeral slot")
+	}
+	if cs.Request.Messages[0].Content != system {
+		t.Error("the folded-only outline state mutated the cache-critical system message")
 	}
 }
 

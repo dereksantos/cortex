@@ -15,7 +15,7 @@ anywhere in this runner.
 ```bash
 ./scripts/bench/polyglot/run.sh --only 3            # smoke test, minutes
 ./scripts/bench/polyglot/run.sh --exercise wordy,matrix
-./scripts/bench/polyglot/run.sh --model coder-cuda --timeout 15m
+./scripts/bench/polyglot/run.sh --model qwen3.8-27b --timeout 15m
 ./scripts/bench/polyglot/run.sh                     # FULL slice — hours of GPU
 ```
 
@@ -28,7 +28,7 @@ Flags (`--list` prints the corpus and exits):
 |---|---|---|
 | `--only N` | all | first N exercises in name order |
 | `--exercise a,b` | — | explicit names, in the order given; overrides `--only` |
-| `--model` | `qwen3-coder-q3` | model id for the `code` role |
+| `--model` | `qwen3.8-27b` | model id for the `code` role |
 | `--study-model` | `study` | model id for the `study` role |
 | `--window` | `131072` | context window, tokens |
 | `--temperature` | `0` | sampling temperature |

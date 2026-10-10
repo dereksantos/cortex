@@ -64,16 +64,171 @@ type Verdict struct {
 	Tier   string // "deny-floor" | "safe-path" | "classified" | "fail-closed"
 }
 
+// blockedUnknownClause is the shared tail every refusal carries (issue #200).
+// It is deliberately neutral about WHAT the refused command was for: most
+// blocked commands are not checks (deny-floor rm -rf, a forced push, a
+// history rewrite), so the tail only speaks about the UNKNOWN VALUE in the
+// case the command was meant to check something — never as a suggestion to
+// find another way to do the refused thing. It also bars the papering-over
+// the PR #196/#197 transcripts show: a blocked rune-count command was
+// answered with hand-counted numbers written into comments and goldens, and
+// a refused mutation run was replaced by probes of a different property —
+// then both were stated as fact in commit summaries.
+const blockedUnknownClause = " If it was meant to check something, that result is still unknown: don't guess it or substitute a check of something else, and mark it unverified in your final answer and anything you write."
+
+// BlockedMessage is the single shared source for the message a blocked
+// command returns to the model (issue #169; reworded for issue #200). Both
+// call sites — the session's gateShell and the headlessDeps stub — must use
+// it so the wording can't drift: a Risky command with no interactive
+// approver, a Risky command inside a subagent, and a Risky command whose
+// approver timed out all read identically to the model. The phrasing states
+// that the *action* isn't allowed (not just this spelling of it), tells the
+// model to continue without it rather than to route around the block with a
+// same-effect variant — the behavior the per-turn same-action gate
+// (EffectClass) enforces mechanically — and tells it to report the gap in
+// its final answer. It carries the neutral unknown-value tail
+// (blockedUnknownClause): if the command was meant to check something, that
+// result is still unknown — don't guess it, don't substitute a check of
+// something else, mark it unverified.
+func BlockedMessage(reason string) string {
+	return "blocked (risk: " + reason + "): this action is not permitted in this session. Don't retry it with a different command that has the same effect; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
+}
+
+// RefusedMessage is the single shared source for the message a deny-floor
+// (catastrophic) command returns to the model (issue #200). It used to be
+// duplicated inline at the two refusal call sites (cmd/cortex's gateShell and
+// internal/tools's headlessDeps.GateShell) — exactly the wording-drift risk
+// the #169 constructors were made to remove — so both now use this one. It
+// carries the same neutral unknown-value tail as BlockedMessage
+// (blockedUnknownClause).
+func RefusedMessage(reason string) string {
+	return "refused by the safety gate (" + reason + "): this command will not run; choose a safer approach." + blockedUnknownClause
+}
+
+// SameActionBlockedMessage is the message a same-effect command returns to
+// the model when it belongs to an effect class that was already blocked in
+// the current turn (issue #169; reworded for issue #200). The block is
+// mechanical: the harness records the class of the first blocked command in a
+// turn and refuses any later command in the same class before it is even
+// classified. The message names the class (so the model knows *what* is
+// barred, not just that this spelling was), points it back to the earlier
+// block, tells the model to report the gap in its final answer, and carries
+// the same neutral unknown-value tail as BlockedMessage.
+func SameActionBlockedMessage(effectClass string) string {
+	return "blocked (same action: " + effectClass + "): same action as an earlier blocked command in this turn. This action is not permitted; continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
+}
+
+// TaintBlockedMessage is the message a Risky command returns to the model
+// when untrusted web content entered the current turn (issue #102) and the
+// taint rule took over approval: the command's own classifier verdict no
+// longer matters, the verdict that gets a pass is the human's, not the
+// judge's. A Risky command WITH a reachable approver prompts with the
+// taint reason appended (see gateShell); this is what the model reads when
+// the prompt cannot happen — a headless session, a subagent, an approver
+// timeout — so like the sibling constructors it is the single shared source
+// for the wording. The framing states why the bar is raised this turn (the
+// turn's intent judge is no longer trusted to wave this through, because
+// attacker-controllable content helped shape the request), so the model
+// understands a refusal here is not the ordinary Risky gate repeating
+// itself. It carries the same neutral unknown-value tail as BlockedMessage.
+func TaintBlockedMessage(sources string) string {
+	return "blocked (untrusted content this turn: " + sources + "): a command needing approval cannot run in a turn that read web content, because that content could have shaped this request — the risk judge's safe verdict does not count here; only a human decision would. Continue without it, and say in your final answer what you couldn't do." + blockedUnknownClause
+}
+
+// TaintNote renders the classifier-facing note for a turn's taint sources
+// (issue #102): the sentence cmd/cortex threads through ClassifyFn's
+// untrustedContent argument so the intent judge knows the task context and
+// the request it serves may have been steered by web content. Sources are
+// joined verbatim, first-seen order — the same single ordering rule the
+// prompt and blocked messages follow (rendering lives here, in the package
+// that reads the note, so producer and consumer can't drift).
+func TaintNote(sources []string) string {
+	return "untrusted web content entered this turn (" + strings.Join(sources, ", ") + ")"
+}
+
+// GitPushTaintReason names the taint-only git-push floor for the prompt
+// line and the reason a Safe verdict was raised (see IsGitPush): a push
+// publishes whatever the tainted turn produced, so after untrusted content
+// it needs a human, whatever the judge says. Shared wording between the
+// floor's raise in gateShell and any reader of the verdict.
+const GitPushTaintReason = "git push after untrusted web content: an outbound publish of whatever this turn produced; a human decision is required"
+
+// IsGitPush reports whether the command pushes a git remote — any git
+// invocation whose subcommand begins with "push", git-scoped and
+// boundary-split exactly like EffectClass (a chained/piped command is seen
+// as the sequence of simple commands it is; a non-git binary never
+// matches, so `docker push` is this floor's blind spot, not its target —
+// the classifier still sees it). Unlike EffectClass it is not a same-action
+// ledger class: git-push is a TAINT-ONLY floor (issue #102) — a
+// command it matches reads as Risky on a tainted turn even when the
+// classifier holds it Safe, and is judged normally when the turn is clean.
+// It never Blocks: the push may still run on a human's explicit approval,
+// which is the whole point — after untrusted content no push is ever
+// auto-approved.
+func IsGitPush(command string) bool {
+	for _, part := range strings.FieldsFunc(command, func(r rune) bool {
+		return r == '|' || r == '&' || r == ';' || r == '\n'
+	}) {
+		fields := strings.Fields(part)
+		if len(fields) == 0 {
+			continue
+		}
+		// Same rule as effectClassOfPart: an env-mutated invocation's
+		// identity cannot be determined reliably from tokens alone; leave
+		// it to the classifier (and remember an env prefix never changes
+		// what `git push` does downstream of itself).
+		if strings.Contains(fields[0], "=") {
+			continue
+		}
+		if lastPathElement(fields[0]) != "git" {
+			continue
+		}
+		sub, ok := firstSubcommand(fields[1:])
+		if !ok {
+			continue
+		}
+		// "push" and every push-spelling subcommand (e.g. nothing in git
+		// today, but a future `push-something` is still a push) begin with
+		// the word; the floor names the effect, not one exact token.
+		if strings.HasPrefix(sub, "push") {
+			return true
+		}
+	}
+	return false
+}
+
+// DeclinedMessage is the message a Risky command returns to the model when
+// the interactive approver said no (issue #200). It used to be duplicated
+// inline in cmd/cortex's gateShell (the confirmRisky and approveRisky paths);
+// both now use this one. Unlike BlockedMessage the action itself is allowed —
+// a human chose not to run it — but it carries the same neutral
+// unknown-value tail: if it was meant to check something, that result is
+// still unknown, so mark it unverified.
+func DeclinedMessage() string {
+	return "declined by the user; not run. Ask before retrying, or use a safer command." + blockedUnknownClause
+}
+
 // ClassifyFn is the tier-3 gray-zone classifier. It returns Safe or Risky
 // (never Blocked — the deny-floor owns catastrophe) plus a reason. An error
 // makes Classify fail closed to Risky. ProviderClassifier builds the
 // LLM-backed implementation; tests inject their own.
-type ClassifyFn func(ctx context.Context, command string) (Level, string, error)
+//
+// untrustedContent is "" on an ordinary turn, or a human-readable note that
+// untrusted web content entered the current turn (issue #102) — the judge
+// context the session threads in so the classifier can never wave a command
+// through on a fetched page's say-so. A classifier that ignores it is
+// permitted (the harness's own floors — the git-push floor, the gray-zone
+// raise in gateShell — cover the gap); one that honors it judges
+// the command under the raised bar.
+type ClassifyFn func(ctx context.Context, command, untrustedContent string) (Level, string, error)
 
 // Classify runs the three tiers in safety order and returns the verdict.
 // fn may be nil (no classifier wired) — gray-zone commands then fail closed
-// to Risky so they are gated rather than silently run.
-func Classify(ctx context.Context, command string, fn ClassifyFn) Verdict {
+// to Risky so they are gated rather than silently run. untrustedContent is
+// the issue #102 taint note threaded to fn ("" when the turn is clean); it
+// changes nothing about the tiers themselves — the taint's mechanical teeth
+// are the caller's (the git-push floor, the gray-zone raise in gateShell).
+func Classify(ctx context.Context, command, untrustedContent string, fn ClassifyFn) Verdict {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" {
 		return Verdict{Level: Blocked, Reason: "empty command", Tier: "deny-floor"}
@@ -94,7 +249,7 @@ func Classify(ctx context.Context, command string, fn ClassifyFn) Verdict {
 	if fn == nil {
 		return Verdict{Level: Risky, Reason: "no classifier available; gated for safety", Tier: "fail-closed"}
 	}
-	lvl, reason, err := fn(ctx, cmd)
+	lvl, reason, err := fn(ctx, cmd, untrustedContent)
 	if err != nil {
 		return Verdict{Level: Risky, Reason: "classifier unavailable (" + err.Error() + "); gated for safety", Tier: "fail-closed"}
 	}
@@ -293,4 +448,250 @@ func lastPathElement(s string) string {
 		return s[i+1:]
 	}
 	return s
+}
+
+// --- Same-effect classes (issue #169) -------------------------------------
+
+// EffectClass names an action class whose members a harness treats as
+// "the same action" once one member has been blocked in the turn. A
+// classifier miss that would have routed around the block is not an
+// obstacle to work around — it is the same action, and the block stands.
+//
+// The classes today:
+//
+//	hook-disabling       --no-verify and -c core.hooksPath=… (and its global
+//	                      variant). Checked FIRST: a command that is BOTH a
+//	                      git history write AND hook-disabling (e.g. `git
+//	                      commit --no-verify`) is reported as the hook-
+//	                      disabling action, since the hook flag is the more
+//	                      specific "route around the gate" signal.
+//	git-history-write    commit / commit-tree, update-ref, and `git reset`
+//	                      in a form that can move HEAD or a branch ref
+//	                      (explicit commit arg, or one of the explicit mode
+//	                      flags --soft/--mixed/--hard/--merge/--keep). A
+//	                      bare `git reset` is in the class (over-
+//	                      approximation — see its case comment); `git
+//	                      reset -- <path>` is the unstage form and is NOT in
+//	                      the class.
+//	git-stash            `git stash` and `git stash <sub>` for every sub
+//	                      EXCEPT `show` and `list`. The mutating stash
+//	                      subcommands all risk the working tree: push
+//	                      records work away (losing it from the tree),
+//	                      pop/apply/branch write it back, drop/clear
+//	                      discard it, store writes it; a bare `git stash`
+//	                      is the push form. `show` and `list` only read.
+//	                      (Issue #201: a stash/pop round-trip used to check
+//	                      pre-existing failures risks losing uncommitted
+//	                      work if the pop conflicts.)
+//
+// Detection is deliberately coarse: it over-approximates "same effect" so a
+// plausible variant of a blocked action is caught, at the cost of lumping a
+// few benign commands with their risky twins. Detection is git-scoped:
+// subcommand forms are recognized only for the `git` binary (a `docker
+// commit` or `svn commit` is a different tool's action, not the git history
+// write this class names).
+//
+// For the per-turn same-action ledger the classes group as follows
+// (EffectClasses: a blocked command bars every class in the set that
+// contains its class): `git-history-write` and `hook-disabling` act as ONE
+// barred group — `git commit --no-verify` and `git -c
+// core.hooksPath=… commit` are BOTH history writes AND hook-disabling
+// spells of exactly the workaround the issue names — a commit that skipped
+// hooks after a blocked commit — so a hook-disabling variant must not re-
+// enter the classifier after a blocked plain commit. `git-stash` is its OWN
+// group (issue #201): a declined `git stash pop` bars a later `git stash
+// push` in the same turn, but it must NOT bar an unrelated `git commit` —
+// a stash is not a way to re-route a commit, and lumping it with the
+// history-write group over-blocked legitimate work. Making the stash class
+// Risky at all is a CLASSIFIER decision (the prompt marks git operations
+// that discard working-tree state risky); the effect class only keeps a
+// declined stash from re-entering as another stash form.
+const (
+	EffectGitHistoryWrite = "git-history-write"
+	EffectHookDisabling   = "hook-disabling"
+	EffectGitStash        = "git-stash"
+)
+
+// EffectClasses returns the effect classes a command's class bars for the
+// per-turn same-action ledger (issue #169). git-history-write and
+// hook-disabling are one barred group (see EffectClass); git-stash bars
+// only itself (a declined stash must not bar an unrelated commit); a class
+// with no grouping — or no class at all — bars itself / nothing.
+func EffectClasses(effectClass string) []string {
+	switch effectClass {
+	case EffectGitHistoryWrite, EffectHookDisabling:
+		return []string{EffectGitHistoryWrite, EffectHookDisabling}
+	case EffectGitStash:
+		return []string{EffectGitStash}
+	case "":
+		return nil
+	default:
+		return []string{effectClass}
+	}
+}
+
+var (
+	// hooksDisableFlagRe is the flag that silences pre-commit/commit-msg
+	// hooks on a single invocation.
+	hooksDisableFlagRe = regexp.MustCompile(`^--no-verify$`)
+	// hooksConfigRe is a `core.hooksPath=…`-style override of where git
+	// looks for hooks (a variant of disabling hooks: point them at an empty
+	// directory). Matches the value after `-c`, or the bare `core.hooksPath=`
+	// form (including `--global-core.hooksPath=…`).
+	hooksConfigRe = regexp.MustCompile(`^(?:--global-)?core\.hooksPath=`)
+	// historySubRe is a git subcommand that creates or rewrites commit
+	// objects. `commit` also matches `commit-tree` (a model reaching for
+	// `git commit-tree` is reaching for exactly this).
+	historySubRe = regexp.MustCompile(`^commit(-tree)?$`)
+)
+
+// EffectClass returns the effect class cmd belongs to, or "" when it
+// belongs to no tracked class. It looks at the WHOLE command string: a
+// chained command that contains a member counts as that member (the shell
+// will run every part of it).
+func EffectClass(command string) string {
+	// Split on shell-control boundaries so a chained/piped command is seen
+	// as the sequence of simple commands it is. Quoted arguments are not
+	// shell-aware, but the class matchers only care about subcommand and
+	// flag words, and a quoted "git commit" in a string literal is not a
+	// command.
+	for _, part := range strings.FieldsFunc(command, func(r rune) bool {
+		return r == '|' || r == '&' || r == ';' || r == '\n'
+	}) {
+		if c := effectClassOfPart(part); c != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// effectClassOfPart inspects one whitespace-separated simple command.
+func effectClassOfPart(part string) string {
+	fields := strings.Fields(part)
+	if len(fields) == 0 {
+		return ""
+	}
+	// A leading VAR=val is an env-mutated invocation, not a bare binary —
+	// its class cannot be determined reliably from tokens alone.
+	if strings.Contains(fields[0], "=") {
+		return ""
+	}
+	bin := lastPathElement(fields[0])
+	args := fields[1:]
+	// `git -C <dir> commit` — the firstSubcommand walk already skips the
+	// value of -C, but its args still include <dir>. Reuse firstSubcommand's
+	// own skip logic so we get a sub + its real args.
+	sub, ok := firstSubcommand(args)
+	if !ok {
+		return ""
+	}
+	// Detection is git-scoped: a non-git binary has none of these classes —
+	// `docker commit c1 img`, `svn commit -m x` and friends are different
+	// tools' actions, not the git history write / hook bypass this gates.
+	if bin != "git" {
+		return ""
+	}
+	// --no-verify / -c core.hooksPath=… are git-level flags that can appear
+	// before OR after the subcommand; they disable hooks on any git command
+	// in this invocation. Scan all args — a `-c` flag consumes the NEXT
+	// token as its value, and the two tokens together form the config
+	// override (neither one alone is the flag).
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-c" && i+1 < len(args) {
+			i++
+			if hooksConfigRe.MatchString(args[i]) {
+				return EffectHookDisabling
+			}
+			continue
+		}
+		if hooksDisableFlagRe.MatchString(a) {
+			return EffectHookDisabling
+		}
+		if hooksConfigRe.MatchString(a) {
+			return EffectHookDisabling
+		}
+	}
+	if historySubRe.MatchString(sub) {
+		return EffectGitHistoryWrite
+	}
+	// rest is the arguments AFTER the subcommand: the subcommand token
+	// itself (and any `-C dir` value before it) is not a form argument, so a
+	// form walk starts after it. (The reset case below reuses it.)
+	rest := args
+	if i := indexOf(rest, sub); i >= 0 {
+		rest = rest[i+1:]
+	}
+	// `git stash` and every mutating `git stash <sub>` form — push records
+	// work away, pop/apply/branch write it back, drop/clear discard it —
+	// risk the working tree: a conflicting pop can lose uncommitted work
+	// (issue #201). A bare `git stash` (no sub) is the push form. The
+	// read-only forms `git stash show` and `git stash list` are NOT in the
+	// class.
+	if sub == "stash" {
+		if len(rest) == 0 {
+			return EffectGitStash
+		}
+		if next, ok := firstSubcommand(rest); ok && next != "show" && next != "list" {
+			return EffectGitStash
+		}
+	}
+	// update-ref and reset are git subcommands (bin is "git" above).
+	switch sub {
+	case "update-ref":
+		// update-ref writes refs. With no arguments it is a no-op, but the
+		// class is about the subcommand's capability, not one call's args.
+		return EffectGitHistoryWrite
+	case "reset":
+		// rest is already the arguments AFTER the subcommand (see the stash
+		// block above): the subcommand token itself (and any `-C dir` value
+		// before it) is not a form argument, so the walk starts after it.
+		seenCommit := false
+		inPathspec := false
+		for _, a := range rest {
+			if inPathspec {
+				continue
+			}
+			if a == "--" {
+				inPathspec = true
+				continue
+			}
+			if strings.HasPrefix(a, "-") {
+				switch a {
+				case "--soft", "--mixed", "--hard", "--merge", "--keep":
+					seenCommit = true
+				}
+				continue
+			}
+			seenCommit = true
+			break
+		}
+		// `git reset -- <path>`: unstage form, no HEAD move. Out of the class.
+		if inPathspec && !seenCommit {
+			return ""
+		}
+		// `git reset` with no form arguments at all: deliberately KEPT in the
+		// class — over-approximation. `git reset HEAD~1` moves HEAD; the
+		// bare form's effect depends on git version and repo state, and the
+		// cost of lumping a benign `git reset` with a history-mover is one
+		// extra same-action refusal in a turn where a real reset was already
+		// blocked (pinned by TestEffectClass_GitHistoryWrite's bare-reset case).
+		if len(rest) == 0 {
+			return EffectGitHistoryWrite
+		}
+		if seenCommit {
+			return EffectGitHistoryWrite
+		}
+	}
+	return ""
+}
+
+// indexOf reports the index of s in a, or -1.
+func indexOf(a []string, s string) int {
+	for i, x := range a {
+		if x == s {
+			return i
+		}
+	}
+	return -1
 }

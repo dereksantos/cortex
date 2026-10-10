@@ -14,7 +14,8 @@ import (
 // runEdit invokes the edit_file tool with raw JSON args and returns its result.
 func runEdit(args map[string]any) (string, error) {
 	b, _ := json.Marshal(args)
-	return tools.Execute(context.Background(), tc(FunctionEditFile, string(b)), nil)
+	out, _, err := tools.Execute(context.Background(), tc(FunctionEditFile, string(b)), nil)
+	return out, err
 }
 
 func TestEditFileWhitespaceTolerant(t *testing.T) {
@@ -156,7 +157,10 @@ func TestEditFileNearMissHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected not-found error")
 	}
-	if !strings.Contains(err.Error(), "closest is line 1") {
-		t.Errorf("error %q should point at the closest line", err)
+	if !strings.Contains(err.Error(), "closest region") {
+		t.Errorf("error %q should carry the closest-region hint", err)
+	}
+	if !strings.Contains(err.Error(), "  >1: ") {
+		t.Errorf("error %q should point at line 1", err)
 	}
 }

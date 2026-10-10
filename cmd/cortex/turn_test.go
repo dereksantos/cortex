@@ -4,16 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // contextSessionEntries re-reads the just-written session transcript and
@@ -251,6 +258,127 @@ func TestTurnDemotesOldTurnsToOutline(t *testing.T) {
 	}
 }
 
+// --- Workspace note (issue #142) -------------------------------------------
+
+// TestTurnInjectsWorkspaceNote is issue #142's step-1 acceptance test: every
+// coder turn must carry a one-line workspace note in the ephemeral wire slot
+// stating the ABSOLUTE workspace root and that all tool paths are relative
+// to it — so the model stops guessing foreign absolute paths (/testbed,
+// /go/src/..., cd /Users/...) and anchoring on remembered layouts. The note
+// is injected for EVERY turn (unlike the memory index, which is gated on
+// notes existing), because a fresh session's first tool calls are exactly
+// where path guessing bites; it rides the slot alongside the memory/skills
+// indexes, LAST (the indexes are content that can change, the note is one
+// static line for the session's life).
+func TestTurnInjectsWorkspaceNote(t *testing.T) {
+	root := t.TempDir() // the workspace root
+	cwd := t.TempDir()  // the CWD — deliberately DIFFERENT from the root, so a
+	// Root-vs-CWD precedence mix-up would state the wrong root.
+	t.Chdir(cwd)
+
+	// The wire check records whether SOME request carried the note (the
+	// per-subtest assertions below pin WHICH root it states). The canned
+	// response is written on EVERY call — success included — so the turn
+	// runs against a realistic model reply, not an empty body.
+	var sawNote atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []Message `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		for _, m := range req.Messages {
+			if strings.Contains(m.Content, "Workspace: ") {
+				sawNote.Store(true)
+				break
+			}
+		}
+		w.Write([]byte(`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}` + "\n" +
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n" +
+			`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}` + "\n"))
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name      string
+		workspace *Workspace
+		wantRoot  string
+	}{
+		{
+			name:      "explicit workspace root takes precedence over the CWD",
+			workspace: &Workspace{Root: root, Explicit: true},
+			wantRoot:  root,
+		},
+		{
+			name:      "CWD-derived workspace states the CWD root",
+			workspace: &Workspace{Root: cwd},
+			wantRoot:  cwd,
+		},
+		{
+			name:      "no workspace falls back to the CWD",
+			workspace: nil,
+			wantRoot:  cwd,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			quickRetries(t)
+			sawNote.Store(false)
+			cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+				Messages: []Message{{Role: RoleSystem, Content: "s"}}},
+				workspace: tt.workspace}
+			if _, err := cs.Turn(context.Background(), "hi"); err != nil {
+				t.Fatalf("turn: %v", err)
+			}
+			// The wire check above (the server saw the note in a request) is
+			// the proof it was present while the loop ran — the turn clears
+			// the slot afterwards.
+			if !sawNote.Load() {
+				t.Fatalf("no request carried a workspace note; want one stating %q", tt.wantRoot)
+			}
+			if cs.Request.EphemeralSystem != "" {
+				t.Errorf("EphemeralSystem = %q after the turn, want cleared", cs.Request.EphemeralSystem)
+			}
+			if cs.workspaceNote() == "" {
+				t.Errorf("workspaceNote() = %q, want a note for root %q", cs.workspaceNote(), tt.wantRoot)
+			}
+			if !strings.Contains(cs.workspaceNote(), "Workspace: "+tt.wantRoot) {
+				t.Errorf("workspaceNote() = %q, want it to state the absolute root %q", cs.workspaceNote(), tt.wantRoot)
+			}
+			if !strings.Contains(cs.workspaceNote(), "relative to it") {
+				t.Errorf("workspaceNote() = %q, want it to say tool paths are relative to the root", cs.workspaceNote())
+			}
+		})
+	}
+}
+
+// TestWorkspaceNoteNotLeakedToSubagent is the coder-only guarantee for the
+// workspace note: subagent requests (Study/Learn/Agent) are built from their
+// own static System + seed and must never carry the coder's ephemeral-slot
+// notes — the note must not leak into a subagent's context the way the
+// memory/skills indexes already don't (TestStudySubagentSeedExcludesSkillsIndex).
+func TestWorkspaceNoteNotLeakedToSubagent(t *testing.T) {
+	root := t.TempDir()
+	cs := &CortexSession{
+		workspace: &Workspace{Root: root, Explicit: true},
+		Study:     ModelSpec{Model: "study-m", Endpoint: "http://study.example"},
+	}
+	// Sanity: the coder-side note would see the root.
+	if note := cs.workspaceNote(); !strings.Contains(note, "Workspace: "+root) {
+		t.Fatalf("sanity check failed: workspaceNote() = %q, want it to contain the root", note)
+	}
+	req := cs.subagentRequest(tools.Study, "study seed text")
+	if req.EphemeralSystem != "" {
+		t.Errorf("subagent request EphemeralSystem = %q, want \"\" (subagents never get the wire injection slot)", req.EphemeralSystem)
+	}
+	for _, m := range req.Messages {
+		if strings.Contains(m.Content, "Workspace: "+root) {
+			t.Errorf("subagent request message (role %s) leaked the workspace note: %q", m.Role, m.Content)
+		}
+	}
+}
+
 // The inner loop must break when the model re-issues the byte-identical
 // tool-call batch, rather than spinning to maxToolIterations. The model in the
 // 2026-06-14 transcript made the same grep 68 times before the cap.
@@ -335,9 +463,10 @@ func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
 }
 
 // TestTurnEmptyUnsalvageableReturnsEmptyNotStale: round 1 carries tool_calls
-// plus throwaway prose; every later round (the natural finish AND the salvage
-// re-ask) comes back empty. The reply must be empty — not round 1's stale
-// pre-tool prose — and the stop reason must say the turn ended empty.
+// plus throwaway prose; every later round (the natural finish, the one
+// reasoning-off retry of issue #149, and the salvage re-ask) comes back
+// empty. The reply must be empty — not round 1's stale pre-tool prose — and
+// the stop reason must say the turn ended empty.
 func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
@@ -372,9 +501,744 @@ func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	if res.StopReason != "empty-finalize" {
 		t.Errorf("StopReason = %q, want empty-finalize", res.StopReason)
 	}
-	if calls != 3 {
-		t.Errorf("model calls = %d, want 3 (tool round, empty finish, one salvage)", calls)
+	if calls != 4 {
+		t.Errorf("model calls = %d, want 4 (tool round, empty finish, one reasoning-off retry, one salvage)", calls)
 	}
+}
+
+// TestTurnReasoningFallbackWritesReceipt: the issue #149 end-to-end receipt —
+// the natural finish comes back empty (the model's reasoning consumed the
+// whole completion), the one-shot reasoning-off retry recovers an answer, and
+// the turn persists a recovery.reasoning_fallback entry under
+// .cortex/journal/recovery/. The fake backend answers the effort-off send
+// with a non-empty reply and nothing else.
+func TestTurnReasoningFallbackWritesReceipt(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			// Natural finish: no tool_calls, empty content, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		// The reasoning-off retry: the answer.
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "recovered answer" {
+		t.Errorf("Reply = %q, want recovered answer", res.Reply)
+	}
+	if calls != 2 {
+		t.Errorf("model calls = %d, want 2 (empty finish, one reasoning-off retry)", calls)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "recovery"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var p *journal.ReasoningFallbackPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p2, perr := journal.ParseReasoningFallback(e); perr == nil {
+			if p != nil {
+				t.Fatalf("more than one recovery.reasoning_fallback entry")
+			}
+			p = p2
+		}
+	}
+	if p == nil {
+		t.Fatal("no recovery.reasoning_fallback entry under .cortex/journal/recovery/")
+	}
+	if p.Model != "m" || p.Role != "code" || p.Path != "natural" {
+		t.Errorf("receipt = %+v, want model=m role=code path=natural", p)
+	}
+}
+
+// TestTurnReasoningFallbackToolRoundReceipt: the issue #149 receipt's
+// tool-calls variant. The empty natural finish is recovered by the
+// reasoning-off retry's tool call (dispatched like an ordinary round; the
+// following round answers), so the turn persists exactly ONE
+// recovery.reasoning_fallback entry — attributed "tool-round" (the receipt's
+// own stop-reason attribution, distinct from the run's final stop reason),
+// outcome "tool_calls". This is the case the loop-level unit test pins at
+// engine level and the doc-comment in internal/journal/recovery.go names.
+func TestTurnReasoningFallbackToolRoundReceipt(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Natural finish: empty content, no tool_calls, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		case 2:
+			// The reasoning-off retry: a tool call, not prose.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		default:
+			// The round after the tool result: the answer.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"final answer"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	res, err := cs.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "final answer" {
+		t.Errorf("Reply = %q, want final answer (the loop continued after the retry's tool round)", res.Reply)
+	}
+	if calls != 3 {
+		t.Errorf("model calls = %d, want 3 (empty finish, off-retry with a tool call, final round)", calls)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "recovery"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var p *journal.ReasoningFallbackPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p2, perr := journal.ParseReasoningFallback(e); perr == nil {
+			if p != nil {
+				t.Fatalf("more than one recovery.reasoning_fallback entry")
+			}
+			p = p2
+		}
+	}
+	if p == nil {
+		t.Fatal("no recovery.reasoning_fallback entry under .cortex/journal/recovery/")
+	}
+	if p.Model != "m" || p.Role != "code" || p.Path != "natural" {
+		t.Errorf("receipt = %+v, want model=m role=code path=natural", p)
+	}
+	if p.Outcome != journal.OutcomeToolCalls {
+		t.Errorf("receipt outcome = %q, want %q (the retry recovered the round with a tool call)",
+			p.Outcome, journal.OutcomeToolCalls)
+	}
+	if p.StopReason != "tool-round" {
+		t.Errorf("receipt stop_reason = %q, want tool-round (the receipt's own attribution; the run ended clean-finalize)",
+			p.StopReason)
+	}
+}
+
+// TestTurnRecoverableErrorJournalsAndRedacts is the issue #117 end-to-end
+// receipt: a mid-turn send fails AFTER progress (first round 200-with-tool-call,
+// second round HTTP 500), the loop recovers (StopReason error-recovered) and
+// the turn SUCCEEDS — so err is nil and the provider's 500 + body would
+// otherwise vanish behind the finalize answer. The fix records them in two
+// places, both secrets-redacted:
+//
+//   - exactly one model.recovered_error entry under .cortex/journal/model/
+//     with the HTTP status (503) and a detail that carries the body's message
+//     — a DISTINCT type from model.failure (the unrecovered kind the healing
+//     ladder journals), so the recovered turn is never reported as "FAILED
+//     unrecovered";
+//   - a one-line "backend error: 503 …" on the stdlib logger (the REPL
+//     diverts that to .cortex/cortex.log; headless keeps it on stderr).
+//
+// The fake backend echoes the request's Authorization header in the 500 body
+// (the 400-rejection leak class #117 names), so the test proves the key never
+// survives to the entry OR the log line.
+func TestTurnRecoverableErrorJournalsAndRedacts(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	const key = "sk-or-v1-1234567890abcdef"
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// First round: 200 with a tool call (progress made — the loop
+			// has gathered context, so a later failure is recoverable).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		if calls == 2 {
+			// Second round (after the tool result): HTTP 500 echoing the
+			// request's Authorization header in the body — the leak the
+			// redaction must catch. The SSE error path (wrapServerError)
+			// surfaces this as "<name> (500): server error: <body>".
+			body := fmt.Sprintf(`{"error":{"message":"boom: auth %s leaked"}}`, r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, body)
+			return
+		}
+		// Third round: the tools-withheld finalize (the recovery) succeeds.
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	// Capture the stdlib logger's output (the "cortex.log" surface) so the
+	// test asserts the key never reaches it. Restore the real output after.
+	logBuf := &strings.Builder{}
+	oldLogOut := log.Writer()
+	log.SetOutput(logBuf)
+	t.Cleanup(func() { log.SetOutput(oldLogOut) })
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL, APIKey: key,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	res, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr != nil {
+		t.Fatalf("turn should SUCCEED (recovered), not error: %v", turnErr)
+	}
+	if res.StopReason != "error-recovered" {
+		t.Fatalf("StopReason = %q, want error-recovered (the mid-turn 500 was recovered)", res.StopReason)
+	}
+	if res.LastError == nil {
+		t.Fatal("LastError = nil, want the recovered send's error carried on the result")
+	}
+	if calls != 3 {
+		t.Errorf("model calls = %d, want 3 (tool-call, 500, finalize)", calls)
+	}
+
+	// Exactly one model.recovered_error entry under .cortex/journal/model/,
+	// with the status and a detail carrying the body's message — but NEVER
+	// the key.
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "model"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var recovered []*journal.ModelRecoveredErrorPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p, perr := journal.ParseModelRecoveredError(e); perr == nil {
+			recovered = append(recovered, p)
+		}
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("got %d model.recovered_error entries, want exactly 1 (got %+v)", len(recovered), recovered)
+	}
+	p := recovered[0]
+	if p.Status != http.StatusServiceUnavailable {
+		t.Errorf("entry status = %d, want 503 (the recovered send's HTTP status)", p.Status)
+	}
+	// The Model is the one whose send FIRST failed ("m" — the ladder's
+	// send-scoped receipt names it). The ladder rebound the request to its
+	// last tried candidate before giving up, so a record written from the
+	// rebound request model would read "b/coder:free", not "m".
+	if p.Role != roleCode || p.Model != "m" {
+		t.Errorf("entry role/model = %q/%q, want %s/m (the model whose send first failed, per the ladder receipt)", p.Role, p.Model, roleCode)
+	}
+	if !strings.Contains(p.Detail, "boom") {
+		t.Errorf("entry detail %q does not carry the 500 body's message", p.Detail)
+	}
+	if strings.Contains(p.Detail, key) {
+		t.Errorf("entry detail %q leaked the API key — redaction failed", p.Detail)
+	}
+
+	// The stdlib-logger surface ("cortex.log"): one "backend error: …" line
+	// carrying the redacted message (which includes the streaming path's
+	// "stream (503)" status prefix), key never present.
+	logText := logBuf.String()
+	if n := strings.Count(logText, "backend error:"); n != 1 {
+		t.Errorf("log has %d \"backend error:\" lines, want exactly 1\nlog:\n%s", n, logText)
+	}
+	if !strings.Contains(logText, "boom") {
+		t.Errorf("log line %q does not carry the body's message", logText)
+	}
+	if !strings.Contains(logText, "stream (503)") {
+		t.Errorf("log line %q does not carry the HTTP status the streaming path bakes into the message", logText)
+	}
+	if strings.Contains(logText, key) {
+		t.Errorf("log %q leaked the API key — redaction failed", logText)
+	}
+}
+
+// TestTurnHealedRecoveryJournalsRecoveredError is the issue #117 review round
+// 3 pin for the MAIN production path: an OpenRouter backend with self-heal on,
+// and a healable failure class (5xx). The healing ladder walks FIRST (the
+// common case) — its candidates are all served but every one fails — so the
+// ladder's own receipt (the old model.failure + failureJournaled) used to be
+// the only record left, and the turn's model.recovered_error entry was skipped.
+// The mislabel that resulted: a turn that SUCCEEDED showing as "FAILED
+// unrecovered" on `cortex model` (renderRecentModelEvents' model.failure
+// branch).
+//
+// The fix settles exactly ONE journal record per failed send, the KIND
+// following the OUTCOME: a recovered turn produces exactly one
+// model.recovered_error entry and NO model.failure. The fake server returns a
+// tool call (progress), then 503 on the mid-turn send AND on every
+// healing-ladder candidate send (all fail, so the ladder reports the failure
+// to the loop), and 200 on the tools-withheld finalize (the recovery
+// succeeds). The loop recovers (error-recovered).
+func TestTurnHealedRecoveryJournalsRecoveredError(t *testing.T) {
+	quickRetries(t)
+	// Force the blocking send path: in a non-TTY test session, cs.send would
+	// stream (and report streamed=true), which makes healingSender skip the
+	// ladder (a streamed partial isn't re-sent). The blocking path reports
+	// streamed=false, so the 503 reaches the ladder.
+	t.Setenv("CORTEX_LOOP_STREAM", "0")
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	var calls int
+	// Blocking JSON responses (CORTEX_LOOP_STREAM=0 forces the blocking path):
+	// the SSE shape would be ignored by the blocking transport, so the
+	// tool-call and finalize rounds must return chat-completions JSON, not SSE.
+	toolCallJSON := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	answerJSON := `{"choices":[{"message":{"role":"assistant","content":"recovered answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// First round: 200 with a tool call (progress made — the loop has
+			// gathered context, so a later failure is recoverable).
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, toolCallJSON)
+			return
+		case 2, 3, 4:
+			// The mid-turn send (call 2) AND every healing-ladder candidate
+			// (calls 3, 4): HTTP 503 — the healable class that makes the
+			// ladder walk.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"backend down"}}`)
+			return
+		default:
+			// The tools-withheld finalize (call 5, the recovery): 200 with the
+			// answer.
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, answerJSON)
+			return
+		}
+	}))
+	defer srv.Close()
+
+	// The OpenRouter Config with self-heal on and a healList stub that
+	// advertises two :free candidates (both served, both fail — so the ladder
+	// walks to its cap and reports the failure to the loop).
+	selfHeal := true
+	cfg := &Config{Backend: Backend{Type: "openrouter"}, Network: NetworkConfig{SelfHeal: &selfHeal}}
+	cs := &CortexSession{workspace: ws, Config: cfg,
+		Request: &AgentRequest{Model: "m", BaseURL: srv.URL, MaxAttempts: 1,
+			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
+		return []llm.OpenRouterModel{{ID: "a/coder:free", ContextLength: 32768}, {ID: "b/coder:free", ContextLength: 16384}}, nil
+	}
+
+	// Run the turn: the mid-turn send is 503 (one attempt, MaxAttempts=1 so the
+	// transport doesn't retry internally), the ladder walks (both candidates
+	// also 503), the loop recovers on the finalize (200). The turn SUCCEEDS.
+	res, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr != nil {
+		t.Fatalf("turn should SUCCEED (recovered), not error: %v", turnErr)
+	}
+	if res.StopReason != "error-recovered" {
+		t.Fatalf("StopReason = %q, want error-recovered (the mid-turn 503 was recovered)", res.StopReason)
+	}
+
+	// The journal records under .cortex/journal/model/ are:
+	//   - one model.substitution per candidate the ladder switched to (the
+	//     production behavior — each switch is journaled, like preflight's
+	//     startup substitutions),
+	//   - exactly ONE model.recovered_error for the recovered turn.
+	// No model.failure: a recovered turn must NOT be recorded as a failure.
+	// The ladder walked two candidates (a/coder:free, b/coder:free), so there
+	// are 2 substitutions + 1 recovered_error = 3 records.
+	all := modelJournalTypes(t, cs)
+	if len(all) != 3 {
+		t.Fatalf("got %d journal records under .cortex/journal/model/, want 3 (2 substitution + 1 recovered_error): %v", len(all), all)
+	}
+	var subCount, recoveredCount, failureCount int
+	for _, typ := range all {
+		switch typ {
+		case journal.TypeModelSubstitution:
+			subCount++
+		case journal.TypeModelRecoveredError:
+			recoveredCount++
+		case journal.TypeModelFailure:
+			failureCount++
+		}
+	}
+	if subCount != 2 {
+		t.Errorf("got %d model.substitution records, want 2 (one per ladder candidate): %v", subCount, all)
+	}
+	if recoveredCount != 1 {
+		t.Errorf("got %d model.recovered_error records, want 1: %v", recoveredCount, all)
+	}
+	if failureCount != 0 {
+		t.Errorf("got %d model.failure records, want 0 (a recovered turn must NOT be recorded as model.failure): %v", failureCount, all)
+	}
+}
+
+// TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery is the issue #117
+// review round 3 pin for the suppression scope: a STUDY subagent's own
+// healed-then-failed send (the study subagent goes through healingSender, so
+// it walks the ladder too) must NOT suppress the coder's own later recovered
+// error in the same turn. The old session-wide failureJournaled flag let any
+// healingSender in the turn (including the study subagent's) set it, which hid
+// the coder's own recovered error — the silent loss #117 is about.
+//
+// The receipt now rides the send-scoped marker on the error (heal.go's
+// pendingFailure, via healJournaledError), so a subagent's healed-then-failed
+// send carries its own marker and can't clobber the coder's. The test drives
+// the coder turn with a study tool call (the production path through the
+// tool dispatcher → RunSubagent → healingSender); the study subagent's send
+// 503s (its ladder walks, fails, study errors), and the coder's own later
+// send also 503s (its ladder walks, fails, loop recovers). The coder's
+// recovered error must still be recorded.
+func TestTurnHealedStudyFailureDoesNotSuppressCoderRecovery(t *testing.T) {
+	quickRetries(t)
+	// Force the blocking send path (same reason as
+	// TestTurnHealedRecoveryJournalsRecoveredError): a streamed partial skips
+	// the ladder, so the 503 must reach it via the blocking path.
+	t.Setenv("CORTEX_LOOP_STREAM", "0")
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	var calls int
+	// Blocking JSON responses (CORTEX_LOOP_STREAM=0 forces the blocking path):
+	// the SSE shape would be ignored by the blocking transport, so the
+	// tool-call and finalize rounds must return chat-completions JSON, not SSE.
+	studyCallJSON := `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"study","arguments":"{\"path\":\".\",\"goal\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	answerJSON := `{"choices":[{"message":{"role":"assistant","content":"recovered answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	// The call sequence (MaxAttempts=1 for the coder; MaxSendAttempts=1 for the
+	// study role — both ensure no internal retries):
+	//   1: coder round 1 → 200, study tool call
+	//   2: study subagent send → 503 (study's own failure)
+	//   3: study ladder candidate (s/coder:free) → 503 (session-dead)
+	//   4: study ladder candidate (a/coder:free) → 503 (session-dead)
+	//   5: study ladder candidate (t/coder:free) → 503 (session-dead; the
+	//      study's ladder walks healMaxCandidates=3, then errors)
+	//   6: coder round 2 mid-turn send → 503 (the coder's own failure; its
+	//      ladder skips the three session-dead picks)
+	//   7: coder ladder candidate (b/coder:free) → 503 (ladder reports failure
+	//      to the loop)
+	//   8: tools-withheld finalize → 200 (the recovery)
+	// The ladders share the session deadModels map: the study's walk
+	// (s, a, t) poisons s/a/t, so the coder's walk takes only b/coder:free —
+	// nextHealCandidate's discovery heuristic (coder-named :free, then largest
+	// context) over the alive candidates. The distinct model names (study-m
+	// vs m) only prevent the study's rebind from clobbering the coder's
+	// Request.Model.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			fmt.Fprint(w, studyCallJSON)
+			return
+		}
+		if calls == 8 {
+			fmt.Fprint(w, answerJSON)
+			return
+		}
+		// Calls 2-7 (study subagent, its ladder, coder round 2, coder's ladder):
+		// all 503.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"message":"backend down"}}`)
+	}))
+	defer srv.Close()
+
+	selfHeal := true
+	cfg := &Config{Backend: Backend{Type: "openrouter"}, Network: NetworkConfig{SelfHeal: &selfHeal}}
+	cs := &CortexSession{workspace: ws, Config: cfg,
+		Request: &AgentRequest{Model: "m", BaseURL: srv.URL, MaxAttempts: 1,
+			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet},
+		Study: ModelSpec{Model: "study-m", Endpoint: srv.URL, MaxSendAttempts: 1}}
+	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
+		// All four ids are :free with "coder" in the name, so the curated
+		// ladder never matches and nextHealCandidate always falls through to
+		// the discovery heuristic: coder-named :free, then largest context —
+		// s (32768) beats a (32768, later in the sort) and both beat t
+		// (16384), leaving b (16384) last. The study's walk consumes s, a, t
+		// (they become session-dead), so the coder's walk finds only b left.
+		return []llm.OpenRouterModel{
+			{ID: "s/coder:free", ContextLength: 32768},
+			{ID: "t/coder:free", ContextLength: 16384},
+			{ID: "a/coder:free", ContextLength: 32768},
+			{ID: "b/coder:free", ContextLength: 16384},
+		}, nil
+	}
+
+	// Run the coder turn: round 1 returns a study tool call (the loop dispatches
+	// it — the study subagent's send 503s, the ladder walks, fails, study
+	// errors), round 2's send is 503 (the coder's own failure — the ladder
+	// finds both candidates session-dead, reports the failure to the loop), and
+	// the tools-withheld finalize is 200 (the recovery succeeds). The turn
+	// SUCCEEDS with error-recovered.
+	res, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr != nil {
+		t.Fatalf("turn should SUCCEED (recovered), not error: %v", turnErr)
+	}
+	if res.StopReason != "error-recovered" {
+		t.Fatalf("StopReason = %q, want error-recovered (the coder's mid-turn 503 was recovered)", res.StopReason)
+	}
+
+	// The coder's own recovered error must still be recorded — a
+	// model.recovered_error entry with role=code. The study subagent's
+	// healed-then-failed send (which also went through healingSender) must NOT
+	// have suppressed it (the old session-wide flag's bug).
+	recovered := modelRecoveredErrorPayloads(t, cs)
+	if len(recovered) < 1 {
+		t.Fatalf("got %d model.recovered_error entries, want at least 1 (the coder's own recovered error was suppressed by the study subagent's healed failure)", len(recovered))
+	}
+	var foundCode bool
+	for _, p := range recovered {
+		if p.Role == roleCode {
+			foundCode = true
+			break
+		}
+	}
+	if !foundCode {
+		t.Errorf("no model.recovered_error entry with role=%s — the coder's own recovered error is missing: %+v", roleCode, recovered)
+	}
+	// The coder's entry must carry the model whose send FIRST failed ("m",
+	// per the ladder's send-scoped receipt) — not "m" rebound to the last
+	// candidate tried (b/coder:free), which the request model would show.
+	for _, p := range recovered {
+		if p.Role == roleCode && p.Model != "m" {
+			t.Errorf("coder model.recovered_error entry model = %q, want m (the model whose send first failed): %+v", p.Model, p)
+		}
+	}
+}
+
+// TestTurnHealedExhaustionJournalsUnrecoveredFailure is the issue #117 review
+// round pin for the UNRECOVERED side of the one-record-per-failed-send rule
+// (the half that moved from heal.go into turn.go when the ladder stopped
+// journaling model.failure on the fly): a FIRST-round send failure (no
+// progress yet) with the self-heal ladder exhausted makes runLoop return the
+// error — and exactly ONE journal record must come out of it: one
+// model.failure, zero model.recovered_error. The send-scoped receipt on the
+// error (healJournaledError) is what settles that record here; with nothing
+// recovered, the recovery record would be the wrong kind (and a double
+// record would be the old session-wide-flag bug resurfacing).
+func TestTurnHealedExhaustionJournalsUnrecoveredFailure(t *testing.T) {
+	quickRetries(t)
+	// Force the blocking send path (same reason as
+	// TestTurnHealedRecoveryJournalsRecoveredError): a streamed partial skips
+	// the ladder, so the 503 must reach it via the blocking path.
+	t.Setenv("CORTEX_LOOP_STREAM", "0")
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	var calls int
+	// Every request 503s starting with the first coder send: no progress is
+	// ever made, so the loop cannot finalize from what it has — the first-
+	// round failure path returns the error straight to the caller.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"message":"backend down"}}`)
+	}))
+	defer srv.Close()
+
+	selfHeal := true
+	cfg := &Config{Backend: Backend{Type: "openrouter"}, Network: NetworkConfig{SelfHeal: &selfHeal}}
+	cs := &CortexSession{workspace: ws, Config: cfg,
+		Request: &AgentRequest{Model: "m", BaseURL: srv.URL, MaxAttempts: 1,
+			Messages: []Message{{Role: RoleSystem, Content: "s"}}, Tools: toolSet}}
+	cs.healList = func(context.Context) ([]llm.OpenRouterModel, error) {
+		return []llm.OpenRouterModel{{ID: "a/coder:free", ContextLength: 32768}, {ID: "b/coder:free", ContextLength: 16384}}, nil
+	}
+
+	// First-round send: 503; the ladder walks a then b (both 503, both
+	// session-dead); runLoop returns the unrecovered error.
+	_, turnErr := cs.Turn(context.Background(), "hi")
+	if turnErr == nil {
+		t.Fatalf("turn should FAIL (unrecovered: first-round 503 with the ladder exhausted)")
+	}
+
+	// The model journal records are: one model.substitution per candidate the
+	// ladder switched to (production behavior), and exactly ONE
+	// model.failure — settled here in turn from the send-scoped receipt.
+	// Zero model.recovered_error: nothing recovered.
+	all := modelJournalTypes(t, cs)
+	var subCount, recoveredCount, failureCount int
+	for _, typ := range all {
+		switch typ {
+		case journal.TypeModelSubstitution:
+			subCount++
+		case journal.TypeModelRecoveredError:
+			recoveredCount++
+		case journal.TypeModelFailure:
+			failureCount++
+		}
+	}
+	if subCount != 2 {
+		t.Errorf("got %d model.substitution records, want 2 (one per ladder candidate): %v", subCount, all)
+	}
+	if recoveredCount != 0 {
+		t.Errorf("got %d model.recovered_error records, want 0 (nothing recovered): %v", recoveredCount, all)
+	}
+	if failureCount != 1 {
+		t.Errorf("got %d model.failure records, want exactly 1 (the unrecovered first-round send): %v", failureCount, all)
+	}
+}
+
+// TestErrorTurnStillAdvancesTurnCounter pins the turn bookkeeping against a
+// regression (issue #117 review): the #117 change once moved cs.turns++ and
+// the token/cost accounting BELOW the err-return, so an errored turn (a
+// cancelled ctx, an unrecovered 503) would not advance the turn counter —
+// its messages are already stamped cs.turns+1 and added to cs.ws as their own
+// span, so the NEXT turn would reuse the same stamp and replayWorkingSet would
+// merge the two turns on resume (snapshot restore failing), and the tokens
+// and cost the provider actually billed for the failed turn would be dropped
+// from the session totals. The counter and totals must settle for EVERY turn,
+// errored or not.
+func TestErrorTurnStillAdvancesTurnCounter(t *testing.T) {
+	t.Chdir(t.TempDir())
+	backend := newContextEvalBackend(t) // usage: 10 prompt / 3 completion per reply
+	cs := newContextEvalSession(t, backend, 4000)
+
+	// The first turn's send is canceled (ctx canceled) — the interrupted
+	// path: runLoop returns the error without progress. The second turn
+	// succeeds.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // turn 1's send is canceled before it happens
+	if _, err := cs.Turn(ctx, "one"); err == nil {
+		t.Fatalf("turn 1 should fail (canceled ctx)")
+	}
+
+	if _, err := cs.Turn(context.Background(), "two"); err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+
+	if cs.turns != 2 {
+		t.Fatalf("cs.turns = %d, want 2 (an errored turn still advances the counter — its messages are stamped cs.turns+1 and spanned in cs.ws, so a collision on the next turn would merge the two on resume)", cs.turns)
+	}
+	if cs.tokensIn != 10 {
+		t.Errorf("cs.tokensIn = %d, want 10 (turn 2's billed usage — an errored turn that bills tokens must count them here too)", cs.tokensIn)
+	}
+	if cs.tokensOut != 3 {
+		t.Errorf("cs.tokensOut = %d, want 3", cs.tokensOut)
+	}
+	// The session state snapshot (resume) must agree with the live session:
+	// the replayed working set has one span per turn, so 2 turns — including
+	// the canceled one's span — and the turn counter matches it.
+	if cs.ws == nil {
+		t.Fatalf("cs.ws is nil")
+	}
+	if got := cs.ws.TotalTurns(); got != 2 {
+		t.Errorf("cs.ws.TotalTurns() = %d, want 2 (the canceled turn's span is in the working set, so the counter must agree)", got)
+	}
+}
+
+// modelJournalTypes reads every entry under .cortex/journal/model/ and returns
+// their types (so a test can assert the EXACT set of record kinds a turn
+// produced — e.g. one model.recovered_error and no model.failure).
+func modelJournalTypes(t *testing.T, cs *CortexSession) []string {
+	t.Helper()
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "model"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var got []string
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		got = append(got, e.Type)
+	}
+	return got
+}
+
+// modelRecoveredErrorPayloads reads every model.recovered_error entry under
+// .cortex/journal/model/ and returns their parsed payloads (empty slice when
+// there are none).
+func modelRecoveredErrorPayloads(t *testing.T, cs *CortexSession) []*journal.ModelRecoveredErrorPayload {
+	t.Helper()
+	r, err := journal.NewReader(filepath.Join(cs.ContextDir(), "journal", "model"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var got []*journal.ModelRecoveredErrorPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p, perr := journal.ParseModelRecoveredError(e); perr == nil {
+			got = append(got, p)
+		}
+	}
+	return got
 }
 
 func TestEmitSessionMetrics(t *testing.T) {
@@ -702,6 +1566,107 @@ func TestStartStopActivitySetsPhase(t *testing.T) {
 	}
 }
 
+// TestStatusStatsAssembles pins statusStats()'s mapping of session state to the
+// status row's figures (issue #109): the model name, the ctx% math
+// (LastPromptTokens over the window), the turn's in/out tokens, the cost-only-
+// when-reported rule, the turn start, and the session totals.
+func TestStatusStatsAssembles(t *testing.T) {
+	start := time.Now().Add(-3 * time.Second)
+	cs := &CortexSession{
+		Request:          &AgentRequest{Model: "anthropic/claude-sonnet-4.5"},
+		Window:           100000,
+		LastPromptTokens: 42000,
+		LastOutputTokens: 1100,
+		costUSD:          0.013,
+		tokensIn:         100000,
+		tokensOut:        25000,
+		turnStart:        start,
+	}
+	got := cs.statusStats()
+	if got.Model != "anthropic/claude-sonnet-4.5" {
+		t.Errorf("Model = %q, want the coding model's name", got.Model)
+	}
+	// ctx% is LastPromptTokens over the window: 42000/100000 = 0.42 → "42%".
+	if got.Ctx <= 0 || got.Ctx >= 0.43 || got.Ctx < 0.419 {
+		t.Errorf("Ctx = %v, want ~0.42 (42000/100000)", got.Ctx)
+	}
+	if got.InTokens != 42000 {
+		t.Errorf("InTokens = %d, want the last prompt's billed size 42000", got.InTokens)
+	}
+	if got.OutTokens != 1100 {
+		t.Errorf("OutTokens = %d, want the last response's billed size 1100", got.OutTokens)
+	}
+	if got.CostUSD != 0.013 {
+		t.Errorf("CostUSD = %v, want the session's cumulative cost 0.013", got.CostUSD)
+	}
+	if got.SessionIn != 100000 || got.SessionOut != 25000 {
+		t.Errorf("session totals = %d/%d, want 100000/25000", got.SessionIn, got.SessionOut)
+	}
+	if !got.TurnStart.Equal(start) {
+		t.Errorf("TurnStart = %v, want the stamped turn start %v", got.TurnStart, start)
+	}
+
+	// Cost hidden at zero: when the backend never reported a cost, the figure
+	// must be 0 so the row omits the segment entirely — never estimated.
+	cs.costUSD = 0
+	if got := cs.statusStats(); got.CostUSD != 0 {
+		t.Errorf("CostUSD with no reported cost = %v, want 0 (hidden)", got.CostUSD)
+	}
+
+	// Before any request: ctx is 0 (LastPromptTokens 0) and the turn in/out
+	// tokens are 0 — the row's ctx and token segments hide themselves.
+	fresh := &CortexSession{Request: &AgentRequest{Model: "m"}, Window: 100000}
+	if got := fresh.statusStats(); got.Ctx != 0 || got.InTokens != 0 || got.OutTokens != 0 {
+		t.Errorf("fresh statusStats = %+v, want Ctx/InTokens/OutTokens all 0", got)
+	}
+}
+
+// TestTurnLastOutputTokensIsLastNotPeak (issue #109 review): LastOutputTokens
+// is the last request's billed completion — the status row's "out" figure,
+// mirroring LastPromptTokens for the "in" side — NOT the turn's peak. A
+// scripted backend whose two requests return different completion sizes
+// (300 then 50) drives the real turn path through the senderOverride seam:
+// the live row sees 50 (the last request) after the turn, not 300 (the peak),
+// and in/out describe the same request (500/50), not two different turns.
+func TestTurnLastOutputTokensIsLastNotPeak(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{
+		Window:  128000,
+		Request: &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "system"}}},
+	}
+	cs.Config = &Config{}
+	cs.senderOverride = multiTurnScriptedSender([]*AgentResponse{
+		{
+			Choices: []Choice{{Index: 0, Message: Message{Role: "assistant", ToolCalls: []ToolCall{
+				{Function: FunctionCall{Name: FunctionReadFile, Arguments: `{"path":"a.txt"}`}},
+			}}, FinishReason: "tool_calls"}},
+			Usage: Usage{PromptTokens: 100, CompletionTokens: 300},
+		},
+		{
+			Choices: []Choice{{Index: 0, Message: Message{Role: "assistant", Content: "done"}, FinishReason: "stop"}},
+			Usage:   Usage{PromptTokens: 500, CompletionTokens: 50},
+		},
+	})
+
+	if _, err := cs.Turn(context.Background(), "test"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	// The "in" side is the last request's billed prompt size — 500, not 100.
+	if cs.LastPromptTokens != 500 {
+		t.Errorf("LastPromptTokens = %d, want 500 (the last request's billed prompt)", cs.LastPromptTokens)
+	}
+	// The "out" side must be the LAST request's billed completion — 50 — not
+	// the turn's peak (300): in/out pair the same request.
+	if cs.LastOutputTokens != 50 {
+		t.Errorf("LastOutputTokens = %d, want 50 (the last response's billed completion, not the turn's peak of 300)", cs.LastOutputTokens)
+	}
+	// The live row's figures mirror the session's settled fields.
+	got := cs.statusStats()
+	if got.InTokens != 500 || got.OutTokens != 50 {
+		t.Errorf("statusStats in/out = %d/%d, want 500/50 (the last request's billed usage)", got.InTokens, got.OutTokens)
+	}
+}
+
 // TestTurnPhaseIdleAfterCompletion guards turn()'s own phase bookkeeping: it
 // should enter phaseThinking at the start and — via its deferred setPhase —
 // land back on phaseIdle once the turn (including a mid-turn tool call) fully
@@ -729,5 +1694,487 @@ func TestTurnPhaseIdleAfterCompletion(t *testing.T) {
 	}
 	if cs.phase != phaseIdle {
 		t.Errorf("phase after Turn() = %v, want phaseIdle", cs.phase)
+	}
+}
+
+// fallbackTranscriptEntries re-reads the session JSONL on disk and returns the
+// raw entries whose kind matches want ("" for the default message entries).
+func fallbackTranscriptEntries(t *testing.T, cs *CortexSession, want string) []sessionEntry {
+	t.Helper()
+	path := filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading transcript: %v", err)
+	}
+	var out []sessionEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad transcript line %q: %v", line, err)
+		}
+		if e.Kind == want {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestTurnReasoningFallbackKeepsTranscriptConsistent: the issue #149
+// off-retry recovers an empty finish with a tool call. The dropped empty
+// assistant message must NOT outlive the retry in the resumable session
+// log: reload with loadSession and assert there is no "assistant, then
+// assistant" shape (and no mid-conversation system note) — the transcript is
+// consistent with the wire conversation (assistant(tool_calls) → tool →
+// assistant).
+func TestTurnReasoningFallbackKeepsTranscriptConsistent(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Natural finish: empty, no tool calls (reasoning consumed the turn).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		case 2:
+			// The reasoning-off retry: a tool call (the work the deliberation hid).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		default:
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	if _, err := cs.Turn(context.Background(), "fix the build"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// Reload the resumable log exactly as `cortex resume` does.
+	msgs, _, _, err := loadSession(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	// No mid-conversation system message (the transcript note is kindNote,
+	// which loadSession skips).
+	for i, m := range msgs {
+		if m.Role == RoleSystem && i != 0 {
+			t.Errorf("loaded message %d is a non-leading system message: %+v (the note must not be resumable)", i, m)
+		}
+	}
+	// No "assistant followed by assistant" shape, and no empty assistant at
+	// all — the dropped empty finish did not survive in the log.
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 {
+			t.Errorf("loaded message %d is an empty assistant with no tool calls: the dropped empty finish survived in the log", i)
+		}
+		if i > 0 && msgs[i-1].Role == "assistant" {
+			t.Errorf("loaded message %d is an assistant message directly after another assistant: the transcript is not consistent with the wire conversation", i)
+		}
+	}
+}
+
+// TestTurnReasoningFallbackNoteIsNotResumable: the issue #149 transcript note
+// must be written under a distinct kindNote entry so `cortex resume`
+// (loadSession) never loads it back as a message. It is visible in the JSONL
+// (human-readable) but absent from the resumed wire conversation.
+func TestTurnReasoningFallbackNoteIsNotResumable(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	if _, err := cs.Turn(context.Background(), "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// The note is present in the JSONL under kindNote (human-readable).
+	notes := fallbackTranscriptEntries(t, cs, kindNote)
+	if len(notes) != 1 {
+		t.Fatalf("got %d kindNote entries, want 1 (the fallback transcript note)", len(notes))
+	}
+	if !strings.Contains(notes[0].Content, "re-sent once with reasoning disabled") {
+		t.Errorf("kindNote content = %q, want the reasoning-fallback note", notes[0].Content)
+	}
+
+	// And it is NOT loaded back as a message on resume.
+	msgs, _, _, err := loadSession(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "re-sent once with reasoning disabled") {
+			t.Errorf("loadSession returned the transcript note as a message: %+v", m)
+		}
+	}
+}
+
+// TestTurnRedactsTranscriptOnly (issue #103) drives the REAL turn path with a
+// scripted model that runs a bash tool whose result (tool message) and whose
+// own assistant answer both carry a secret. It asserts the three-way split the
+// issue demands:
+//
+//   - the on-disk transcript is REDACTED (the secret never hits disk),
+//   - the live in-memory Request.Messages stay VERBATIM (the model can still
+//     use the value this turn),
+//   - TurnResult.Reply is VERBATIM (the answer the user sees this turn),
+//   - TurnResult.Redactions > 0 (the per-turn count is carried).
+func TestTurnRedactsTranscriptOnly(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	// Build the SSE chunks with json.Marshal so the nested quoting is exact
+	// (hand-escaped backtick strings are brittle here).
+	toolArgs, _ := json.Marshal(map[string]string{"command": "echo " + secret})
+	bodyToolCall := fmt.Sprintf(
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":%s}}]}}]}`, string(toolArgs))
+	bodyFinishTC := `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`
+	bodyFinishStop := `{"choices":[{"delta":{},"finish_reason":"stop"}]}`
+	bodyAnswer := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":"the key is %s"}}]}`, secret)
+	bodyUsage := `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// First finish: a tool call whose arguments carry the secret.
+			w.Write([]byte(sseBody(bodyToolCall, bodyFinishTC, bodyUsage)))
+		case 2:
+			// Tool result (an assistant answer) carries the secret again.
+			w.Write([]byte(sseBody(bodyAnswer, bodyFinishStop, bodyUsage)))
+		default:
+			w.Write([]byte(sseBody(bodyAnswer, bodyFinishStop, bodyUsage)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+
+	res, err := cs.Turn(context.Background(), "print my key")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// 1) The on-disk transcript is redacted: the secret must NOT appear in any
+	//    persisted message entry, and at least one marker must.
+	transcript := fallbackTranscriptEntries(t, cs, kindMessage)
+	secretSeen, markerSeen := false, false
+	for _, e := range transcript {
+		if e.Content != "" {
+			if strings.Contains(e.Content, secret) {
+				secretSeen = true
+			}
+			if strings.Contains(e.Content, "[REDACTED:") {
+				markerSeen = true
+			}
+		}
+		for _, tc := range e.ToolCalls {
+			if strings.Contains(tc.Function.Arguments, secret) {
+				secretSeen = true
+			}
+			if strings.Contains(tc.Function.Arguments, "[REDACTED:") {
+				markerSeen = true
+			}
+		}
+	}
+	if secretSeen {
+		t.Errorf("on-disk transcript still contains the secret verbatim — issue #103 requires it redacted before persisting")
+	}
+	if !markerSeen {
+		t.Errorf("on-disk transcript has no [REDACTED:...] marker, want at least one (the secret was seen this turn)")
+	}
+
+	// 2) The live in-memory Request.Messages stay VERBATIM: the model can still
+	//    use the value this turn, so some in-memory message must still hold it.
+	liveHasSecret := false
+	for _, m := range cs.Request.Messages {
+		if strings.Contains(m.Content, secret) {
+			liveHasSecret = true
+			break
+		}
+		for _, tc := range m.ToolCalls {
+			if strings.Contains(tc.Function.Arguments, secret) {
+				liveHasSecret = true
+				break
+			}
+		}
+		if liveHasSecret {
+			break
+		}
+	}
+	if !liveHasSecret {
+		t.Errorf("live in-memory Request.Messages lost the secret — the current turn's context must stay unredacted")
+	}
+
+	// 3) TurnResult.Reply is VERBATIM (the user sees the answer this turn).
+	if !strings.Contains(res.Reply, secret) {
+		t.Errorf("TurnResult.Reply = %q, want it to still contain the verbatim secret this turn", res.Reply)
+	}
+
+	// 4) The per-turn count is carried on the result.
+	if res.Redactions <= 0 {
+		t.Errorf("TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried a secret)", res.Redactions)
+	}
+}
+
+// TestTurnRedactionCountRecordedAndReported (issue #103): the per-turn
+// redaction count that rides TurnResult.Redactions must ALSO be recorded on
+// the turn's journal capture (the "redactions" metadata) and surface where the
+// session reports the turn — the session summary (cs.redactionsTotal, the
+// session-cumulative total). It drives the real turn path (a scripted model
+// that runs a bash tool whose arguments carry a secret, then answers with it
+// again) so every persistence surface — transcript (writeTranscript), journal
+// (captureTurn) — actually masks it, exactly as the transcript test does, but
+// here we check the RECORDING and REPORTING of the count, not the masking.
+//
+// The turn is run TWICE (same secret, so both turns mask it): the session
+// total (cs.redactionsTotal) must equal the SUM of the per-turn
+// TurnResult.Redactions figures — the journal metadata's counts (captureTurn
+// folds its own masking counts into cs.redactions) must reach the session
+// total too (docs/journal.md's invariant: the summary records the same count
+// the capture does).
+func TestTurnRedactionCountRecordedAndReported(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	// Build the SSE chunks with json.Marshal so the nested quoting is exact.
+	toolArgs, _ := json.Marshal(map[string]string{"command": "echo " + secret})
+	bodyToolCall := fmt.Sprintf(
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":%s}}]}}]}`, string(toolArgs))
+	bodyFinishTC := `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`
+	bodyFinishStop := `{"choices":[{"delta":{},"finish_reason":"stop"}]}`
+	bodyAnswer := fmt.Sprintf(`{"choices":[{"delta":{"role":"assistant","content":"the key is %s"}}]}`, secret)
+	bodyUsage := `{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			w.Write([]byte(sseBody(bodyToolCall, bodyFinishTC, bodyUsage)))
+		case 2, 3:
+			w.Write([]byte(sseBody(bodyAnswer, bodyFinishStop, bodyUsage)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	// captureTurn reads the answer-excerpt cap from cs.Config (cmd/cortex's
+	// Config; nil returns the default) and persists through cs.capturer, which
+	// capture.New wires to a config.Config's ContextDir — the journal the
+	// count is recorded on.
+	cs.Config = &Config{}
+	cs.capturer = capture.New(&config.Config{ContextDir: filepath.Join(root, ".cortex")})
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+
+	res, err := cs.Turn(context.Background(), "print my key")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	turnRedactions := res.Redactions
+
+	// A second turn with the SAME secret: the per-turn counter resets at
+	// turn start, so turn 2's TurnResult.Redactions is turn 2's own figure
+	// (not a running total), and the session-cumulative total must fold it
+	// in too — the sum of the per-turn figures.
+	res2, err := cs.Turn(context.Background(), "print my key again")
+	if err != nil {
+		t.Fatalf("Turn 2: %v", err)
+	}
+	if res2.Redactions <= 0 {
+		t.Fatalf("turn 2 TurnResult.Redactions = %d, want > 0 (the second turn's persisted messages carried the same secret)", res2.Redactions)
+	}
+	if res2.Redactions != turnRedactions {
+		t.Fatalf("turn 2 TurnResult.Redactions = %d, want %d (the per-turn count resets each turn — same secret, same count)", res2.Redactions, turnRedactions)
+	}
+
+	// 1) The per-turn count is carried on the result (the same fact the other
+	//    surfaces record/report) and is non-zero (the turn saw a secret).
+	if turnRedactions <= 0 {
+		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the turn's persisted messages carried a secret)", turnRedactions)
+	}
+
+	// 2) The session-cumulative total equals the SUM of the per-turn
+	//    TurnResult.Redactions figures (both turns' counts folded in — the
+	//    capture's own masking counts included, since the fold runs after
+	//    captureTurn, which adds them to cs.redactions).
+	wantTotal := turnRedactions + res2.Redactions
+	if cs.redactionsTotal != wantTotal {
+		t.Errorf("cs.redactionsTotal = %d, want %d (the sum of the per-turn TurnResult.Redactions figures: %d + %d)", cs.redactionsTotal, wantTotal, turnRedactions, res2.Redactions)
+	}
+
+	// 3) The session summary (the "where the session reports the turn" surface)
+	//    surfaces the cumulative total.
+	if !strings.Contains(cs.sessionSummary(), "secrets redacted") {
+		t.Errorf("sessionSummary = %q, want the cumulative redaction total surfaced", cs.sessionSummary())
+	}
+
+	// 4) The turn's journal capture records the per-turn count in its
+	//    metadata ("redactions"), so a review of the capture can account for
+	//    the [REDACTED:…] markers in its own text.
+	entries, _, err := scanCaptureWindow(cs)
+	if err != nil {
+		t.Fatalf("scanCaptureWindow: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no capture entries on disk")
+	}
+	// Read the raw capture.event JSONL to inspect the metadata that
+	// scanCaptureWindow reduces away (it projects to Prompt/Result only).
+	matches, _ := filepath.Glob(filepath.Join(cs.ContextDir(), "journal", "capture", "*.jsonl"))
+	var sawRedactions bool
+	for _, path := range matches {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading capture journal %s: %v", path, err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if line == "" {
+				continue
+			}
+			var e struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				continue
+			}
+			if e.Type != "capture.event" {
+				continue
+			}
+			var ev events.Event
+			if err := json.Unmarshal(e.Payload, &ev); err != nil {
+				continue
+			}
+			if v, ok := ev.Metadata["redactions"].(float64); ok && (int(v) == turnRedactions || int(v) == res2.Redactions) {
+				sawRedactions = true
+			}
+		}
+	}
+	if !sawRedactions {
+		t.Errorf("the turn's journal capture does not record redactions=%d in its metadata — the count must ride the capture", turnRedactions)
+	}
+}
+
+// TestFailedTurnRedactionsFoldedIntoSessionTotal (issue #103, review fix 3): a
+// turn that FAILS after its redacted messages were already persisted to the
+// transcript must still fold its per-turn count (TurnResult.Redactions) into
+// the session-cumulative total (cs.redactionsTotal) — the fold's move to the
+// success path (after captureTurn) must not have dropped it from the error
+// path. The turn is driven through the real path with the test-only
+// senderOverride seam: the user's message (carrying a secret) is persisted —
+// and masked — at append time, before the first send, and the scripted
+// sender's first send fails, so runLoop returns the unrecovered error and
+// turn's err != nil branch runs. No transcript is opened (as in a test
+// without StartTranscript), so only that user message is counted —
+// cs.redactions at the error return is exactly the user message's masking.
+func TestFailedTurnRedactionsFoldedIntoSessionTotal(t *testing.T) {
+	const secret = "sk-or-v1-0123456789abcdef0123456789abcdef"
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m",
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.Config = &Config{}
+	cs.senderOverride = SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		return nil, false, fmt.Errorf("backend down (503)")
+	})
+
+	res, turnErr := cs.Turn(context.Background(), "print my key "+secret)
+	if turnErr == nil {
+		t.Fatal("turn should fail (the scripted first send errors and nothing is recovered)")
+	}
+	if res.Redactions <= 0 {
+		t.Fatalf("TurnResult.Redactions = %d, want > 0 (the user message carried the secret and was persisted before the failure)", res.Redactions)
+	}
+	// The session total must include the failed turn's redactions: on this
+	// single-turn session it equals the turn's own per-turn count.
+	if cs.redactionsTotal != res.Redactions {
+		t.Errorf("cs.redactionsTotal = %d, want %d (the failed turn's TurnResult.Redactions — a failed turn's persisted messages still count)", cs.redactionsTotal, res.Redactions)
+	}
+	// And the session summary (the user-facing surface for the total)
+	// reflects it.
+	if !strings.Contains(cs.sessionSummary(), fmt.Sprintf("%d secrets redacted", res.Redactions)) {
+		t.Errorf("sessionSummary = %q, want the failed turn's redaction total surfaced", cs.sessionSummary())
 	}
 }

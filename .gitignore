@@ -201,6 +201,8 @@ tmp/
 # Cortex runtime artifacts at repo root
 /cortex
 /cortex-*
+# local builds of the cortex binary from inside its package dir
+/cmd/cortex/cortex
 daemon_state.json
 session.json
 /db/

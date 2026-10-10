@@ -117,3 +117,32 @@ func TestRenderRecentModelEventsShowsFailures(t *testing.T) {
 		t.Errorf("failure line malformed: %q", got)
 	}
 }
+
+// TestRenderRecentModelEventsRecoveredErrorNotUnrecovered is the issue #117
+// review round 3 pin: a model.recovered_error entry (the turn SUCCEEDED — it
+// finalized from what it had after a mid-turn send failed) must render as
+// "turn recovered", never as "FAILED unrecovered". The previous dedup let the
+// healing ladder's model.failure entry win over the turn's
+// model.recovered_error entry (the wrong record), so a recovered turn showed
+// as "FAILED unrecovered" — the mislabel this test guards against.
+func TestRenderRecentModelEventsRecoveredErrorNotUnrecovered(t *testing.T) {
+	dir := t.TempDir()
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: dir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	rec, _ := journal.NewModelRecoveredErrorEntry(journal.ModelRecoveredErrorPayload{
+		Role: "code", Model: "b/y", Class: "server", Status: 503})
+	if _, err := w.Append(rec); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	w.Close()
+
+	got := renderRecentModelEvents(dir)
+	if !strings.Contains(got, "turn recovered") {
+		t.Errorf("recovered-error line missing 'turn recovered': %q", got)
+	}
+	if strings.Contains(got, "FAILED unrecovered") {
+		t.Errorf("a recovered turn must not render as 'FAILED unrecovered': %q", got)
+	}
+}

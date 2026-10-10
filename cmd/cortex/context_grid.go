@@ -1,11 +1,12 @@
 // context_grid.go — the /context report's square glyph grid: a fixed
 // 128-cell (8 rows × 16 cols) spatial map of the whole model window, one
 // glyph per component (system prompt, outline, memory index, skills index,
-// hydrated tail, free space). Unlike the prompt row's renderContextBar
-// (contextbar.go), which rescales its fill to whatever width the caller
-// asks for, this frame never changes shape: only cell size (window/128)
-// moves as the window does, so the grid always reads as "the whole window,
-// to scale" rather than "however much is currently used."
+// workspace note, hydrated tail, free space). Unlike the prompt row's
+// renderContextBar (contextbar.go), which rescales its fill to whatever
+// width the caller asks for, this frame never changes shape: only cell
+// size (window/128) moves as the window does, so the grid always reads as
+// "the whole window, to scale" rather than "however much is currently
+// used."
 //
 // Split the same way contextbar.go splits pure computation from color: the
 // placement/row arithmetic below is pure and unit-testable without ANSI;
@@ -29,18 +30,21 @@ const (
 // free space. Colors are assigned alongside these in context_cmd.go's
 // contextGridCellColor, not here — this file stays plain-glyph pure.
 const (
-	glyphSystem  = '█'
-	glyphOutline = '▓'
-	glyphMemory  = '▒'
-	glyphSkills  = '░'
-	glyphTail    = '■'
-	glyphFree    = '·'
+	glyphSystem    = '█'
+	glyphOutline   = '▓'
+	glyphMemory    = '▒'
+	glyphSkills    = '░'
+	glyphWorkspace = '▔'
+	glyphImages    = '▕'
+	glyphTail      = '■'
+	glyphFree      = '·'
 )
 
 // gridComponent is one wire-order piece of zone A (the stable prefix) sized
-// in tokens: system prompt, session outline, memory index, skills index, in
-// that order. Tail and free are handled separately by computeContextGrid
-// since they need watermark-aware treatment the head components don't.
+// in tokens: system prompt, session outline, memory index, skills index,
+// workspace note, in that order. Tail and free are handled separately by
+// computeContextGrid since they need watermark-aware treatment the head
+// components don't.
 type gridComponent struct {
 	glyph  rune
 	tokens int
@@ -87,8 +91,8 @@ type contextGridPlacement struct {
 }
 
 // computeContextGrid assigns glyphs to the fixed 128-cell frame in wire
-// order: components (system, outline, memory, skills — whatever order the
-// caller passes, expected to be that one), then tail, then free.
+// order: components (system, outline, memory, skills, workspace — whatever
+// order the caller passes, expected to be that one), then tail, then free.
 //
 // Each component gets gridCellsFor(tokens, cellSize) cells, clamped to
 // whatever room remains in the 128-cell frame. Free is never itself

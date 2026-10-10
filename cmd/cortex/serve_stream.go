@@ -84,9 +84,12 @@ func handleTurnStream(mgr *SessionManager) http.HandlerFunc {
 		}
 		mgr.Touch(id) // M4.7: a live request resets the idle-eviction clock
 
-		var body turnRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+		// Shared with handleTurn: same body shape, same attachment rules, same
+		// 400s — and resolved before the SSE headers are written, so a rejected
+		// attachment is a real HTTP error and not an event-stream that starts
+		// with a failure (serve_turn.go's decodeTurnRequest).
+		body, images, ok := decodeTurnRequest(w, r, ms.cs)
+		if !ok {
 			return
 		}
 
@@ -120,7 +123,7 @@ func handleTurnStream(mgr *SessionManager) http.HandlerFunc {
 		}
 		defer func() { ms.cs.onThinking = nil }()
 
-		result, err := ms.cs.TurnWithProgress(r.Context(), body.Input, progress)
+		result, err := ms.cs.TurnWithProgressAndAttachments(r.Context(), body.Input, progress, images...)
 		if err != nil {
 			_ = sseEvent(w, flusher, "error", map[string]string{"error": err.Error()})
 			return

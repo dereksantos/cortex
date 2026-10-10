@@ -66,12 +66,12 @@ func TestServeCreatedSessionHasMemoryAndCapturesATurn(t *testing.T) {
 	// Memory tools are functionally available on this session, not just
 	// non-nil fields — round-trip a note the way memory_e2e_test.go proves
 	// for the REPL/headless drivers.
-	if _, err := tools.Execute(context.Background(), memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, _, err := tools.Execute(context.Background(), memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "web-ui-note", "content": "written through a serve-created session",
 	}), ms.cs); err != nil {
 		t.Fatalf("memory_write on a serve-created session: %v", err)
 	}
-	if _, err := tools.Execute(context.Background(), memCall(tools.FunctionMemoryRead, map[string]any{
+	if _, _, err := tools.Execute(context.Background(), memCall(tools.FunctionMemoryRead, map[string]any{
 		"name": "web-ui-note",
 	}), ms.cs); err != nil {
 		t.Fatalf("memory_read on a serve-created session: %v", err)

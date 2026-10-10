@@ -130,9 +130,11 @@ repo and its token secret exist.
 The journal (`.cortex/journal/`) is local-only by design — nothing in it
 leaves the machine as part of normal operation. `journal.AssertLocalOnly`
 exists as a code-review tripwire: if you add a code path that sends
-journal data outbound, expect it to be flagged. `.cortex/` is gitignored;
-don't check in session transcripts, journal segments, or config containing
-keys.
+journal data outbound, expect it to be flagged. `.cortex/` is gitignored —
+in a git workspace the first session writes a self-contained
+`.cortex/.gitignore` (a lone `*`) rather than editing your `.gitignore`
+(#119); don't check in session transcripts, journal segments, or config
+containing keys.
 
 ## Reporting bugs and requesting features
 

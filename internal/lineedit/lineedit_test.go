@@ -22,6 +22,13 @@ func (s *sliceSource) next() (byte, error) {
 	return b, nil
 }
 
+// firstByte satisfies pollSource (a no-idle variant of the inspector's
+// scriptSource): the byte, with the idle flag always false.
+func (s *sliceSource) firstByte() (byte, bool, error) {
+	b, err := s.next()
+	return b, false, err
+}
+
 // decodeAll drives decodeKey until EOF, returning every event.
 func decodeAll(t *testing.T, in string) []keyEvent {
 	t.Helper()
@@ -208,5 +215,40 @@ func TestAcceptedLineRewritesTheRow(t *testing.T) {
 	}
 	if !strings.HasSuffix(out.String(), "\r\033[K14:02:11  hello\r\n") {
 		t.Errorf("accepted row not rewritten: %q", out.String())
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		w        int
+		want     string
+		wantCols int // visible width of want, when the cut shortens
+	}{
+		{"fits", "abcdef", 8, "abcdef", 0},
+		{"plain cut", "abcdefghij", 6, "abcde…", 6},
+		{"dim cut", dim("abcdefghij"), 6, ansiDim + "abcde…" + ansiReset, 6},
+		{"wide cut", "abcdefghij", 1, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncate(tt.in, tt.w)
+			if got != tt.want {
+				t.Errorf("truncate(%q, %d) = %q, want %q", tt.in, tt.w, got, tt.want)
+			}
+			if tt.wantCols > 0 && displayWidth(got) != tt.wantCols {
+				t.Errorf("displayWidth(truncate) = %d, want %d", displayWidth(got), tt.wantCols)
+			}
+			if tt.wantCols > 0 {
+				wantEnd := "…"
+				if strings.Contains(tt.in, "\x1b") {
+					wantEnd += ansiReset // a clipped styled cut must close the styling
+				}
+				if !strings.HasSuffix(got, wantEnd) {
+					t.Errorf("clipped output must end with %q: %q", wantEnd, got)
+				}
+			}
+		})
 	}
 }

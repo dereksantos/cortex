@@ -83,6 +83,195 @@ func TestListSessionsLimit(t *testing.T) {
 	}
 }
 
+// TestListSessionsTurnsAndModel covers the two fields issue #110's picker
+// needs: the turn count (distinct non-zero turn ordinals) and the model, read
+// from the state snapshot when it has one and from a raw scan otherwise.
+func TestListSessionsTurnsAndModel(t *testing.T) {
+	dir := t.TempDir()
+	// A session with three turns' worth of messages, two of them sharing one
+	// ordinal (a turn's user message plus its assistant reply), plus a zero-
+	// ordinal message that must not open a turn of its own.
+	writeTestSession(t, dir, "20260101-000001",
+		`{"kind":"message","turn":1,"role":"user","content":"one"}`,
+		`{"kind":"message","turn":1,"role":"assistant","content":"r1"}`,
+		`{"kind":"message","turn":2,"role":"user","content":"two"}`,
+		`{"kind":"message","turn":3,"role":"user","content":"three"}`,
+		`{"kind":"message","role":"assistant","content":"no span"}`,
+	)
+	// Stamped state snapshot: authoritative, even though no message says so.
+	writeTestSession(t, dir, "20260101-000002",
+		`{"kind":"message","turn":1,"role":"user","content":"hi"}`,
+		`{"kind":"state","state":{"version":1,"model":"stamped-m"}}`,
+	)
+	// An older transcript with no state snapshot at all: nothing to recover, so
+	// the model is empty rather than invented.
+	writeTestSession(t, dir, "20260101-000003",
+		`{"kind":"message","role":"user","content":"legacy"}`,
+	)
+
+	infos, err := listSessions(dir, 0)
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+	byID := map[string]sessionInfo{}
+	for _, s := range infos {
+		byID[s.ID] = s
+	}
+	tests := []struct {
+		id        string
+		wantTurns int
+		wantModel string
+	}{
+		{"20260101-000001", 3, ""},
+		{"20260101-000002", 1, "stamped-m"},
+		// Ordinal-less messages are one conversation, not zero: the count must
+		// never read "0 turns" for a session that plainly has prompts.
+		{"20260101-000003", 1, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.id, func(t *testing.T) {
+			s, ok := byID[tc.id]
+			if !ok {
+				t.Fatalf("session %s missing from listing", tc.id)
+			}
+			if s.Turns != tc.wantTurns {
+				t.Errorf("Turns = %d, want %d", s.Turns, tc.wantTurns)
+			}
+			if s.Model != tc.wantModel {
+				t.Errorf("Model = %q, want %q", s.Model, tc.wantModel)
+			}
+		})
+	}
+}
+
+func TestCountTurns(t *testing.T) {
+	tests := []struct {
+		name  string
+		turns []int
+		want  int
+	}{
+		{"no messages is no turns", nil, 0},
+		{"all-zero ordinals is one conversation", []int{0, 0, 0}, 1},
+		{"distinct ordinals counted once each", []int{1, 1, 2, 3, 3}, 3},
+		{"zeros do not open a turn beside real ones", []int{0, 1, 1}, 1},
+		{"a single turn", []int{7}, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := countTurns(tc.turns); got != tc.want {
+				t.Errorf("countTurns(%v) = %d, want %d", tc.turns, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTranscriptModelPrefersTheStateStamp(t *testing.T) {
+	tests := []struct {
+		name    string
+		state   *sessionState
+		scanned string
+		want    string
+	}{
+		{"no state falls back to the scan", nil, "scanned-m", "scanned-m"},
+		{"a stamped state wins", &sessionState{Model: "stamped-m"}, "scanned-m", "stamped-m"},
+		// A state snapshot written before the Model field existed parses with it
+		// empty, so the scan must still be able to answer.
+		{"an empty stamp defers to the scan", &sessionState{Version: 1}, "scanned-m", "scanned-m"},
+		{"nothing anywhere is empty", &sessionState{Version: 1}, "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := transcriptModel(tc.state, tc.scanned); got != tc.want {
+				t.Errorf("transcriptModel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLastTranscriptModelTakesTheLastStatement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	writeTestSession(t, dir, "s",
+		`{"kind":"message","role":"user","content":"hi"}`,
+		`{"kind":"state","state":{"version":1,"model":"first-m"}}`,
+		`{"kind":"state","state":{"version":1,"model":"latest-m"}}`,
+	)
+	if got := lastTranscriptModel(path); got != "latest-m" {
+		t.Errorf("lastTranscriptModel = %q, want the newest stamp", got)
+	}
+	// An unreadable file is "the transcript never said", not an error: the
+	// listing must still render a row.
+	if got := lastTranscriptModel(filepath.Join(dir, "missing.jsonl")); got != "" {
+		t.Errorf("missing file = %q, want empty", got)
+	}
+	writeTestSession(t, dir, "nomodel", `{"kind":"message","role":"user","content":"hi"}`)
+	if got := lastTranscriptModel(filepath.Join(dir, "nomodel.jsonl")); got != "" {
+		t.Errorf("no model in file = %q, want empty", got)
+	}
+}
+
+func TestSessionRowIsTheOneRowFormatter(t *testing.T) {
+	// A zero ModTime renders as "?" through relTime, which keeps the expected
+	// rows independent of the wall clock the test runs under.
+	stamp := time.Time{}
+	tests := []struct {
+		name   string
+		info   sessionInfo
+		marker string
+		color  bool
+		want   string
+	}{
+		{
+			name:   "a plain row",
+			info:   sessionInfo{ID: "20260101-000000", ModTime: stamp, Messages: 4, Turns: 2, First: "fix the bug", Model: "m-coder"},
+			marker: "  ",
+			color:  false,
+			want:   "  20260101-000000  ?          4 msgs   2 turns  m-coder  fix the bug",
+		},
+		{
+			// An unknown model reads as a dash so the columns never drift apart,
+			// and a session with no prompt says so rather than showing nothing.
+			name:   "unknown model and no prompt are filled in",
+			info:   sessionInfo{ID: "x", ModTime: stamp, Messages: 1},
+			marker: "  ",
+			color:  false,
+			want:   "  x  ?          1 msgs   0 turns  -  (no prompt)",
+		},
+		{
+			// The preview is trimmed by runes, not bytes, so a multi-byte prompt
+			// cannot be cut mid-character.
+			name:   "a long preview is trimmed to 60 runes",
+			info:   sessionInfo{ID: "x", ModTime: stamp, First: strings.Repeat("é", 70)},
+			marker: "  ",
+			color:  false,
+			want:   "  x  ?          0 msgs   0 turns  -  " + strings.Repeat("é", 60) + "…",
+		},
+		{
+			name:   "a color row keeps the marker given to it",
+			info:   sessionInfo{ID: "x", ModTime: stamp, Messages: 1, First: "hi", Model: "m"},
+			marker: "> ",
+			color:  true,
+			want:   "\x1b[32m> \x1b[0mx  ?          1 msgs   0 turns  \x1b[90mm\x1b[0m  hi",
+		},
+		{
+			// color=false must not colorize even when handed a marker that looks
+			// like the current-session one — the plain form is byte-for-byte plain.
+			name:   "no color means no escapes",
+			info:   sessionInfo{ID: "x", ModTime: stamp, Messages: 1, First: "hi", Model: "m"},
+			marker: "> ",
+			color:  false,
+			want:   "  x  ?          1 msgs   0 turns  m  hi",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sessionRow(tc.info, tc.marker, tc.color); got != tc.want {
+				t.Errorf("sessionRow =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestListSessionsNoDir(t *testing.T) {
 	if _, err := listSessions(filepath.Join(t.TempDir(), "missing"), 0); err == nil {
 		t.Fatal("expected error for missing sessions dir")
@@ -462,6 +651,9 @@ func TestClearResetsSession(t *testing.T) {
 	}
 	if cs.Request.Model != "switched-model" || cs.Request.BaseURL != "http://somewhere:1234" {
 		t.Error("clear must preserve the model binding")
+	}
+	if cs.Request.Vision {
+		t.Error("clear must not assert vision for a model whose verdict was never set")
 	}
 	if cs.LastPromptTokens != 0 {
 		t.Error("clear must reset the gauge")

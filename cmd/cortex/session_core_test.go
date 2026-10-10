@@ -76,7 +76,7 @@ func TestFilterEnabledTools(t *testing.T) {
 			// Most gates (IsToolEnabled) refuse via a plain observation string;
 			// remove_path's separate DeleteGate refuses via an error — both are
 			// "the call did not go through", so accept either shape.
-			obs, err := tools.Execute(context.Background(), tc(c.toolName, c.args), c.off)
+			obs, _, err := tools.Execute(context.Background(), tc(c.toolName, c.args), c.off)
 			refusal := obs
 			if err != nil {
 				refusal = err.Error()

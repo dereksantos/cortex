@@ -118,7 +118,22 @@ type OpenAICompatClient struct {
 	// chatTemplateKwargs, when non-nil, rides on every request — see
 	// EndpointConfig.ChatTemplateKwargs.
 	chatTemplateKwargs map[string]any
+
+	// vision declares whether the current model accepts image content
+	// parts (#216). Default false: image parts are refused until the
+	// caller (cmd/cortex, from `models.<role>.vision` or an endpoint
+	// label/advert) says the model takes them.
+	vision bool
 }
+
+// SetVision declares whether this client's model accepts image content
+// parts (issue #216's vision gate). Text-only requests are unaffected
+// either way; an image-bearing request to a non-vision client fails with
+// ErrModelNoVision instead of being silently dropped.
+func (c *OpenAICompatClient) SetVision(v bool) { c.vision = v }
+
+// Vision reports whether image parts are currently permitted on this client.
+func (c *OpenAICompatClient) Vision() bool { return c.vision }
 
 // SetSwapTracker wires a shared tracker so this client reports its
 // model-per-endpoint usage. Nil clears the wiring.

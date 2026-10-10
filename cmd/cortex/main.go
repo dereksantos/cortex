@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -235,9 +235,12 @@ var helpLines = []string{
 	"/help              show this list",
 	"/context           open the current session's context-window map (q to close)",
 	"/compact           distill the session via study, freeing context",
+	"/plan <task>       plan-then-execute: one planning turn, then each step as its own turn",
 	"/clear             reset the conversation and start a fresh session",
-	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
+	"/undo [N]          revert the Nth-most-recent turn's file changes (default 1)",
+	"/sessions          pick a saved session to resume (plain list when not a TTY)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
+	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
 }
 
@@ -256,14 +259,15 @@ func printHelp() {
 // without pinning the prose.
 var usageLines = []string{
 	"cortex                                    interactive REPL (default)",
-	"cortex resume [id]                        resume a prior session (default: latest)",
-	"cortex turn [--session id] [--json] ...   headless single turn; session id to stderr",
+	"cortex resume [id]                        resume a prior session (no id: pick one on a TTY, else latest)",
+	"cortex turn [--session id] [--plan] [--json] ...   headless turn; --plan runs plan-then-execute; session id to stderr",
 	"cortex study <path> [goal...]             one-off study; prints the digest",
 	"cortex learn [--project <name>]           background learning pass over the journal",
 	"cortex change <start|commit|status>       git change lifecycle (local git only)",
 	"cortex serve [--port <n>]                 local HTTP/SSE adapter for the web UI",
 	"cortex scan [--json] [--root <path>]      scan configured roots for projects",
 	"cortex project <add|list|remove>          manage the project registry",
+	"cortex project trust <add|remove|list>    manage the per-workspace trust list (the post-edit hook's only gate)",
 	"cortex discord                            Discord adapter (DISCORD_BOT_TOKEN)",
 	"cortex model [--json]                     show model role bindings and what's served",
 	"cortex study-eval                         study acceptance test",
@@ -458,6 +462,19 @@ func main() {
 		if len(rest) >= 1 {
 			id = rest[0]
 		}
+		// `cortex resume` with no id picks interactively (issue #110) rather than
+		// silently taking the latest: the user sees what they are resuming. An
+		// explicit id is never second-guessed. The gate is the same one /sessions
+		// uses (interactive stdin, rich-render stdout), and first-run bootstrap is
+		// excluded because a user who has not configured a backend yet has no
+		// sessions worth picking — that path must reach the setup flow. Leaving the
+		// picker without choosing (ESC, or a harness failure) falls through to
+		// today's latest-session resume; "cancel" is not "quit".
+		if id == "" && resumePickerUsable() {
+			if picked, ok := pickSessionAtStartup(session); ok {
+				id = picked
+			}
+		}
 		if err := session.ResumeTranscript(id); err != nil {
 			fmt.Printf("resume: %v - starting fresh\n", err)
 			session.StartTranscript()
@@ -506,15 +523,18 @@ func main() {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
 			editor.SetAcceptedLine(session.acceptedLine)
+			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
-			// Risky-command confirmation reads a y/N line from the editor. Tool
-			// calls run synchronously on this goroutine between ReadLine calls,
-			// so there's no concurrent reader to fight. Headless/piped sessions
-			// leave this nil and the gate blocks risky commands instead.
-			session.confirmRisky = func(question string) bool {
+			// Risky-command confirmation reads the answer through the anchor's
+			// key loop (issue #107: y once / n / a always this command / p
+			// always this command prefix). Tool calls run synchronously on
+			// this goroutine between ReadLine calls, so there's no
+			// concurrent reader to fight. Headless/piped sessions leave this
+			// nil and the gate blocks risky commands instead.
+			session.confirmRisky = func(question string) lineedit.ConfirmChoice {
 				// During an anchored turn the Anchor's key loop owns the terminal;
 				// a second reader (editor.ReadLine) fights it for the keystroke and
-				// the y/N never lands — the user can't approve and resorts to Ctrl-C.
+				// the answer never lands — the user can't approve and resorts to Ctrl-C.
 				// Route the confirm through the anchor, which serves it from the same
 				// loop. Fall back to a direct read only when no turn is pinned.
 				if a := session.live; a != nil {
@@ -522,13 +542,17 @@ func main() {
 				}
 				ans, err := editor.ReadLine(question)
 				if err != nil {
-					return false
+					return lineedit.ConfirmNo
 				}
 				switch strings.ToLower(strings.TrimSpace(ans)) {
 				case "y", "yes":
-					return true
+					return lineedit.ConfirmYes
+				case "a", "always":
+					return lineedit.ConfirmAlwaysExact
+				case "p", "prefix":
+					return lineedit.ConfirmAlwaysPrefix
 				default:
-					return false
+					return lineedit.ConfirmNo
 				}
 			}
 			// Stray stdlib-logger output (any subsystem that calls log.Printf)
@@ -587,7 +611,9 @@ func main() {
 		}
 
 		// Record for ↑/↓ and Ctrl-R recall — but not the session-enders, so a
-		// fresh prompt's first ↑ lands on real work, not "/quit".
+		// fresh prompt's first ↑ lands on real work, not "/quit". The history
+		// gets the line EXACTLY as typed: mention processing (below) only
+		// rewrites the copy handed to the model, never what the user recalls.
 		if editor != nil && input != "/quit" && input != "/exit" {
 			editor.AddHistory(input)
 		}
@@ -609,9 +635,129 @@ func main() {
 			continue
 		}
 
+		// /undo [N] reverts the Nth-most-recent turn's file changes to the
+		// working tree (issue #111): restore the snapshot, report the files
+		// changed, and record the transcript note so the model learns its
+		// edits were reverted. Not in a git repo or nothing to undo prints a
+		// one-line message.
+		if input == "/undo" || strings.HasPrefix(input, "/undo ") {
+			arg := strings.TrimSpace(strings.TrimPrefix(input, "/undo"))
+			n := 1
+			if arg != "" {
+				if v, err := strconv.Atoi(arg); err == nil && v > 0 {
+					n = v
+				} else {
+					fmt.Println(style.Paint("usage: /undo [N]  (N is a positive integer, default 1)", style.Dim))
+					continue
+				}
+			}
+			session.undo(n)
+			continue
+		}
+
+		// Issue #108: @path mentions are attached to the turn through the same
+		// size rules as read_file (small files inline, large files as an
+		// outline with a pointer to study). The attachment is prepended to
+		// what the model sees; the mentions in the input are replaced by short
+		// markers. This runs only on the two paths that hand the line to the
+		// model (a normal turn, and /plan's task) — slash commands and prose
+		// the user never sends to the model are left untouched.
+		//
+		// Issue #218: an @mention naming an IMAGE (a workspace path or an
+		// http(s) address) is not inlined text — it comes back in
+		// mentionImages as a content part for the turn itself. Parsing happens
+		// here, at the one place that knows whether this line goes to the
+		// model at all; the bytes reach the model in step with the turn that
+		// carries them.
+		var mentionAttachment string
+		var mentionImages []TurnImage
+		var mentionImageRefusals []MentionRefusal
+		process := func() {
+			// context.Background(): mention resolution runs while the REPL is
+			// between turns, where the turn's own context does not exist yet —
+			// and a URL mention's download is bounded by the fetch client's
+			// own timeout, so there is nothing here left unbounded.
+			input, mentionAttachment, mentionImages, mentionImageRefusals = processMentions(context.Background(), session.root(), input, session)
+		}
+
+		// /plan <task> runs the plan-then-execute path (#150): one planning
+		// turn, then each step as its own turn with the project's checks in
+		// between. The task is the rest of the line; a bare /plan with no
+		// task prints the usage hint. The per-step report is printed to the
+		// REPL exactly as the headless `cortex turn --plan` prints it.
+		//
+		// The run goes through the SAME context choice and post-turn safety
+		// net as a normal turn (runUnderAnchor / Interruptible for the cancel
+		// and type-ahead, afterTurn for the compaction / diagnose / learnWindow
+		// handling) — a plan is up to planStepCap turns in a row, the place
+		// context grows most, so it must reach the compaction safety net too.
+		if input == "/plan" || strings.HasPrefix(input, "/plan ") {
+			task := strings.TrimSpace(strings.TrimPrefix(input, "/plan"))
+			if task == "" {
+				fmt.Println(style.Paint("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", style.Dim))
+				continue
+			}
+			process()
+			// Issue #218: /plan has no image seam — TurnWithPlan builds each
+			// step's turn itself — so an @mentioned image cannot ride a plan
+			// run. Saying so beats the alternative: process() already replaced
+			// the mention with "[@x.png attached]", and leaving that unpaired
+			// would tell the human a screenshot went to the model when it did
+			// not. A plan over an image is a normal turn with the mention, then.
+			if len(mentionImages) > 0 || len(mentionImageRefusals) > 0 {
+				printMentionImages(nil, nil, []string{
+					"/plan does not carry image attachments — run the task as a normal turn (or ask about the image there) so the model can see it",
+				})
+			}
+			var plan PlanRunResult
+			var planErr error
+			switch {
+			case editor != nil && anchoredInput():
+				typeAhead, planErr = runUnderAnchor(session, editor, typeAhead, func(ctx context.Context) error {
+					var runErr error
+					plan, runErr = session.TurnWithPlan(ctx, task, mentionAttachment)
+					return runErr
+				})
+			case editor != nil:
+				ctx, stop := editor.Interruptible(context.Background())
+				plan, planErr = session.TurnWithPlan(ctx, task, mentionAttachment)
+				typeAhead = stop()
+			default:
+				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+				plan, planErr = session.TurnWithPlan(ctx, task, mentionAttachment)
+				cancel()
+			}
+			if plan.Reply != "" {
+				fmt.Println(plan.Reply)
+			}
+			// Issue #141: each step is its own turn with its own "tests
+			// changed" receipt; the plan run carries them (TurnWithPlan) so
+			// a /plan run reports test loss exactly like a single turn.
+			printTestReceipt(plan.TestReceipt)
+			printLintReceipt(plan.LintReceipt)
+			printTurnReceipt(plan.Receipt)
+			afterTurn(session, planErr)
+			continue
+		}
+
 		// /sessions lists saved sessions so their ids are discoverable from
-		// inside the REPL (resuming still happens at startup).
+		// inside the REPL. On an interactive TTY it opens the picker instead
+		// (issue #110): typing filters, Enter resumes, ESC leaves the listing
+		// alone. Piped stdout, NO_COLOR, or CORTEX_LOOP_RENDER=0 keep the plain
+		// list, and so does a harness failure — see session_picker.go. Resuming
+		// is deferred until after the picker closes, so a failed resume cannot
+		// strand the user inside a full-screen view; a resume that fails reopens
+		// the session the user was on rather than copying it into a new one.
 		if input == "/sessions" {
+			if sessionsInspectable(editor) {
+				picker := NewSessionPicker(listSessionsOrEmpty(session.SessionsDir()))
+				if err := inspectSession(editor, picker); err == nil && picker.Accepted() {
+					if id := picker.SelectedID(); id != "" {
+						resumeFromSessionPicker(session, id)
+					}
+				}
+				continue
+			}
 			session.printSessions()
 			continue
 		}
@@ -657,6 +803,29 @@ func main() {
 			continue
 		}
 
+		// /hook off|format|all turns the post-edit hook down or off for the
+		// current session (issue #129 piece 2). A bare /hook prints the
+		// current (effective) mode; a valid value lowers the session's mode
+		// in place (SetMode is monotone-down, and the process ceiling is
+		// folded in at read time, so nothing here can raise it above the
+		// configured mode, and trust is never affected). An UNRECOGNIZED
+		// value prints usage and the current mode and lowers nothing:
+		// ParseHookMode maps unknown values to off, and a typo must never
+		// silently disable the operator's hook.
+		if input == "/hook" || strings.HasPrefix(input, "/hook ") {
+			val := strings.TrimSpace(strings.TrimPrefix(input, "/hook"))
+			switch val {
+			case "":
+				fmt.Println("post-edit hook: " + session.hookModeName())
+			case "off", "format", "all":
+				session.SetHookMode(tools.ParseHookMode(val))
+				fmt.Println("post-edit hook -> " + session.hookModeName())
+			default:
+				fmt.Printf("usage: /hook off|format|all (post-edit hook: %s)\n", session.hookModeName())
+			}
+			continue
+		}
+
 		// M1.7: if a first-run greeting just asked where the user's code
 		// lives, this is that answer — capture and persist it before running
 		// the turn normally (the reply still gets an ordinary response too).
@@ -672,48 +841,76 @@ func main() {
 		//   - capture: ESC/Ctrl-C cancel and mid-turn keystrokes are captured
 		//     silently to seed the next prompt (interactive, raw streaming);
 		//   - signal: piped input falls back to SIGINT for cancel.
+		// The reply itself is printed by the coder sender (printCoderProse /
+		// the live stream), not here — the REPL owns only the turn-boundary
+		// receipt, display, and compaction.
+		process()
+		// Issue #108: prepend the mention attachment (if any) to the turn's
+		// input so the model sees the file content (or outline) in context.
+		turnInput := input
+		if mentionAttachment != "" {
+			turnInput = mentionAttachment + "\n" + input
+		}
 		// The turn opens with one blank line under the input it answers
 		// (docs/tui-polish.md, track 2: a turn reads as one block).
 		fmt.Println()
-		var err error
+		var (
+			err error
+			res TurnResult
+		)
+		// Issue #218: the @mentioned images resolved above ride THIS turn, as
+		// content parts on its user message (attachTurnImages owns what that
+		// means per vision verdict). Passing them at the call rather than
+		// prepending anything to turnInput is the point: an image is never text.
 		switch {
 		case editor != nil && anchoredInput():
-			typeAhead, err = runAnchoredTurn(session, editor, input, typeAhead)
+			// runAnchoredTurn runs its own Turn and returns its result, so the
+			// turn-boundary receipt below surfaces in this mode too.
+			typeAhead, res, err = runAnchoredTurn(session, editor, turnInput, typeAhead, mentionImages...)
 		case editor != nil:
 			ctx, stop := editor.Interruptible(context.Background())
-			_, err = session.Turn(ctx, input)
+			res, err = session.TurnWithAttachments(ctx, turnInput, mentionImages...)
 			typeAhead = stop()
 		default:
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-			_, err = session.Turn(ctx, input)
+			res, err = session.TurnWithAttachments(ctx, turnInput, mentionImages...)
 			cancel()
 		}
-		switch {
-		case err == nil:
+		// Issue #218: one line per image the human attached, printed after
+		// submitting — the attachments that reached the model, and the ones
+		// that did not with the reason. An image that silently vanished would
+		// be indistinguishable from a typo'd mention, so silence is not an
+		// option for either case.
+		printMentionImages(mentionImages, mentionImageRefusals, res.ImageNotes)
+		// Issue #141: surface the "tests changed" receipt to the user before
+		// the shared post-turn safety net (afterTurn). The model has already
+		// been told (via the finalize hook) and the journal carries it; the
+		// human gets it here, in the terminal, on the turn that produced it —
+		// the loss is reported where a reviewer would look.
+		printTestReceipt(res.TestReceipt)
+		// Issue #129 piece 3: the turn-end lint receipt rides the same
+		// turn-boundary surface — the findings the model saw in the finalize
+		// round reach the human in the terminal too.
+		printLintReceipt(res.LintReceipt)
+		// Issue #219: the measurement-only turn receipt — what the turn
+		// actually left in the workspace (the git diff --stat block, the
+		// project's own test/build exit codes, the format hook's knowledge) —
+		// rides the same turn-boundary surface, measured, not claimed.
+		printTurnReceipt(res.Receipt)
+		// Issue #117: a turn that recovered from a mid-turn provider failure
+		// SUCCEEDED (err is nil), so the backend's status/body was otherwise
+		// lost behind the reply — one dim line, secrets redacted. afterTurn is
+		// the safety net for the UNRECOVERED case (err != nil), already
+		// handled there; this is the recovered case, its sibling.
+		printBackendError(res.LastError)
+		// Issue #103: a turn whose persisted messages carried a secret reports
+		// how much was masked (dim provenance, not an alarm) — the same
+		// per-turn count the journal capture's metadata and TurnResult carry.
+		printRedactions(os.Stdout, res.Redactions)
+		if err == nil {
 			session.printTurnFooter()
-			// Red gauge: compact at the turn boundary, before the window
-			// actually overflows. The boundary is the only safe point —
-			// mid-turn compaction would orphan tool_call sequences.
-			if session.contextRatio() >= compactThreshold {
-				compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
-			}
-		case errors.Is(err, context.Canceled):
-			fmt.Println(style.Paint("interrupted", style.Warn))
-		default:
-			fmt.Printf("turn error: %v\n", err)
-			if d := diagnoseModelError(err); d != "" {
-				fmt.Println(style.Paint(d, style.Warn))
-			}
-			// An overflow error names the code model's real window: learn it
-			// (the gauge and read_file guard self-correct, C2) and compact so
-			// the next request fits. The failed request is in the digest; the
-			// user re-asks.
-			if real := parseCtxSize(err.Error()); real > 0 {
-				session.learnWindow(real)
-				compactNow(session, "context overflowed")
-				fmt.Println("please re-send your request")
-			}
 		}
+		afterTurn(session, err)
 	}
 
 	// Report and record the session. emitSessionMetrics rides the eval journal class.

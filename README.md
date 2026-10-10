@@ -258,6 +258,12 @@ Sessions persist to `.cortex/sessions/<id>.jsonl` and can be resumed later:
 ./bin/cortex resume
 ```
 
+With no id on an interactive terminal, `resume` opens a picker: type to filter
+by prompt, session id, or model, press Enter to resume that session, or ESC to
+leave it alone and resume the latest one as before. An explicit id is resumed
+directly, and a piped or non-color terminal (`NO_COLOR`, `CORTEX_LOOP_RENDER=0`)
+resumes the latest session without opening anything.
+
 ### Let Cortex introduce itself
 
 Yes—the README can be an input surface for Cortex. Once a backend is configured,
@@ -350,9 +356,9 @@ per-call `model` argument pins another. See
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. |
+| `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. An image (png/jpeg/gif/webp) read whole attaches as an image part for vision models (refused, naming the file type, for a text-only model, over the size cap, or inside a subagent). |
 | `write_file` | Create or overwrite a file. |
-| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. |
+| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. Failures carry the match line numbers (ambiguous) or a closest-region snippet (not found); successes include the current changed region. |
 | `study` | Produce a goal-curated digest of a large file or directory. |
 | `agent` | Hand off one bounded implementation task (read, edit, verify via `bash`) to a subagent; unlike `study`, it can write files and run commands. |
 | `outline` | Map project/file structure without reading all contents. |
@@ -379,9 +385,20 @@ per-call `model` argument pins another. See
 ```text
 cortex                            interactive REPL
 cortex --version | cortex version   print the version and exit
-cortex resume [id]                  resume a session; defaults to latest
-cortex turn [--session id] [--json] <input...>
-                                  run one headless turn
+cortex resume [id]                  resume a session; with no id, pick one
+                                  interactively on a TTY (else latest)
+                                  (its resume banner goes to stderr)
+cortex turn [--session id] [--plan] [--json] <input...>
+                                  run one headless turn; --plan runs plan-then-execute (one planning turn, then each step as its own turn); the
+                                  verify-before-fix principle rides in the base system prompt (so every turn sees it) and is restated in the planning and
+                                  step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence (lead the
+                                  reply with "Not reproduced:" + the evidence), and that note is carried into the later steps' prompts and the per-step
+                                  report (issue #178); the review-feedback principle likewise rides in the base system prompt
+                                  (so every turn sees it) and is restated in each step prompt (issue #162) — account for every
+                                  review finding as addressed, deferred with a reason, or disputed; pick one offered
+                                  alternative and say which; fix the class behind a reviewer's example instances; put
+                                  things where the reviewer asked; the spec-test principle (issue #225) and test-target principle also ride in the base system prompt and are restated in the planning and step prompts — a failing test written from the issue's acceptance criteria is a spec, so making it green by editing the test instead of the behavior the criterion names is a deviation owed a report, and a criterion is verified only through the user-facing surface it describes, not a lower-level helper; --session's resume banner
+                                  and the session id go to stderr — stdout is the answer only
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex learn [--project <name>]     run one background learning pass over the journal
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
@@ -389,6 +406,12 @@ cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopb
 cortex scan [--json] [--root <path>] [--register]
                                   scan configured roots and list discovered projects
 cortex project <add|list|remove>    manage the project registry
+cortex project trust <add|remove|list>
+                                  manage the per-workspace trust list (the
+                                  post-edit hook's only gate; user config only)
+cortex project commands [--json] [--project <name>]
+                                  show the resolved format/lint/test/build
+                                  commands (discovery + declarations)
 cortex discord                      run the Discord adapter
 cortex study-eval                   run the Study acceptance gate
 cortex model [--json]                catalog code/study role bindings + what
@@ -407,10 +430,21 @@ helper, and writing table-driven tests):
 | `/help` | List the slash commands. |
 | `/context` | Show the current session's context-window map — the stable prefix vs. hydrated tail, plus the last request's prompt/cache usage. |
 | `/compact` | Summarize the conversation now as a safety net. |
+| `/plan <task>` | Plan-then-execute: one planning turn, then each step as its own turn (the `cortex turn --plan` path). The verify-before-fix principle rides in the base system prompt (so every turn sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence (lead the reply with "Not reproduced:" + the evidence), and that note is carried into the later steps' prompts and the per-step report (issue #178). The review-feedback principle (issue #162) also rides in the base system prompt and is restated in each step prompt: account for every review finding as addressed, deferred with a reason, or disputed; pick one offered alternative and say which; fix the class behind a reviewer's example instances; put things where the reviewer asked. The spec-test principle (issue #225) and test-target principle also ride in the base system prompt and are restated in the planning and step prompts: a failing test written from the issue's acceptance criteria is a spec — making it green by editing the test instead of the behavior the criterion names is a deviation owed a report, and a criterion is verified only through the user-facing surface it describes, not a lower-level helper. |
 | `/clear` | Start a fresh session. |
-| `/sessions` | List persisted session IDs. |
+| `/undo [N]` | Revert the Nth-most-recent turn's file changes to the working tree (default 1): restore the per-turn checkpoint (a `git stash create` snapshot, issue #111), print the files changed, and record a transcript note so the model learns its edits were reverted. |
+| `/sessions` | Pick a saved session to resume: a full-screen list you can filter by prompt, id, or model (Enter resumes, ESC leaves the session alone). Prints the plain list when stdout isn't a TTY. |
 | `/model [name]` | Show role bindings or switch the coding model for this session. |
+| `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
+
+Tab completes slash commands, `/model` ids, and `@path` file mentions in the
+interactive REPL. A submitted `@path` mention attaches the file to the turn —
+small files inline, large files as a structural outline (same rules as the
+`read_file` tool); the mention becomes an `[@path attached]` marker in what
+the model sees. Only an `@` starting a whitespace-delimited word counts (an
+email or an `@types/node`-style name is prose), and a mention that does not
+resolve to a readable file is left as typed.
 
 Durable memory is model-driven rather than a slash command. Ask naturally to
 remember or forget something and the agent will use the `memory_*` tools.
@@ -450,7 +484,10 @@ across this file, `CLAUDE.md`, and itself.
 
 Cortex is local-first, not local-only: using a hosted model sends prompts and
 selected tool results to that provider. Runtime state remains inspectable under
-`.cortex/` and is excluded from git by default.
+`.cortex/` and is excluded from git: in a git workspace, the first session
+writes a self-contained `.cortex/.gitignore` (a lone `*`) so transcripts,
+journal segments, and memory are never swept up by `git add -A` — without
+touching the user's own `.gitignore` (#119).
 
 - Shell commands are classified as **Safe**, **Risky**, or **Blocked**. Risky
   commands require interactive approval and are refused in headless sessions.

@@ -69,14 +69,53 @@ func WorkspaceFromCWD() *Workspace {
 // resolve today).
 func (w *Workspace) ContextDir() string { return filepath.Join(w.Root, ".cortex") }
 
+// SetWorkspace is the single seam every workspace (re-)assignment goes
+// through: it stores ws and then self-ignores the workspace's .cortex/ in
+// git (issue #119, ensureSelfGitignore — gitignore_self.go), so a workspace
+// can never be live on a session without the guard having run for its root.
+// Production paths are exactly two: NewCortexSession (session_core.go,
+// first workspace) and applyProjectByName (project_workspace.go, the
+// --project / serve / loop-firing re-target). Hand-built test sessions that
+// assign cs.workspace directly are covered by the StartTranscript /
+// ResumeTranscript call sites instead. Best-effort: the guard never fails
+// the assignment.
+func (cs *CortexSession) SetWorkspace(ws *Workspace) {
+	cs.workspace = ws
+	cs.ensureSelfGitignore()
+}
+
 // SessionsDir is the workspace's session transcript directory.
 func (w *Workspace) SessionsDir() string { return filepath.Join(w.ContextDir(), "sessions") }
 
-// Instructions reads and returns the workspace's AGENTS.md content
-// (trimmed, truncated at maxInstructionBytes), or "" if absent/unreadable —
-// identical contract to the existing projectInstructions().
-func (w *Workspace) Instructions() string {
-	return readInstructions(filepath.Join(w.Root, "AGENTS.md"))
+// Instructions resolves and returns the workspace's project instructions:
+// the first entry of agentInstructionFiles present at w.Root (AGENTS.md
+// first, then CLAUDE.md, then .github/copilot-instructions.md — no
+// concatenation), trimmed and truncated at the instruction cap with a
+// marker naming the file. It returns the resolved file's path ("" when none
+// exists) alongside its body — the identical contract to
+// projectInstructions(), which resolves the same file at the CWD-implicit
+// root — so the caller can name the loaded file (systemPromptContent's
+// label, #147).
+func (w *Workspace) Instructions() (path, instructions string) {
+	return workspaceInstructions(w.Root)
+}
+
+// workspaceInstructions resolves an explicit root's instruction file the
+// same way #152's instruction-file resolution does: the FIRST entry of
+// agentInstructionFiles present at root (AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md — no concatenation), read with the same
+// instructionBytesCap (readInstructions) the system prompt's seed uses. It
+// returns the resolved file's path ("") and its body, so both legs —
+// Workspace.Instructions (explicit root) and the root-direct reads the
+// `## Commands` declaration takes (session_core.go's
+// resolveProjectCommands) — label and parse the SAME file a system prompt
+// would load from that root.
+func workspaceInstructions(root string) (path, instructions string) {
+	p := resolveInstructionFile(root)
+	if p == "" {
+		return "", ""
+	}
+	return p, readInstructions(p)
 }
 
 // ConfinePath vets a tool call's path argument against this workspace's

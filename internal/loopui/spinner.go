@@ -22,10 +22,16 @@ type Spinner struct {
 	doneChan chan struct{}
 	mu       sync.Mutex // serializes all stdout writes + guards label
 	label    string     // status text (already colored), e.g. "thinking... 3s"
+
+	// tickInterval is the repaint cadence (90ms in production). Unexported
+	// and defaulted in NewSpinner; the golden test in this package overrides
+	// it to drive ticks deterministically instead of racing a real 90ms
+	// timer (issue #112's reviewer: a timing-based capture flakes under load).
+	tickInterval time.Duration
 }
 
 // NewSpinner returns an idle spinner.
-func NewSpinner() *Spinner { return &Spinner{} }
+func NewSpinner() *Spinner { return &Spinner{tickInterval: 90 * time.Millisecond} }
 
 // defaultLabel is shown while no caller-supplied label is set — e.g. the
 // blocking (non-streaming) send path, which never calls SetLabel at all.
@@ -49,7 +55,7 @@ func (s *Spinner) Start() {
 	s.doneChan = make(chan struct{})
 	go func() {
 		defer close(s.doneChan)
-		ticker := time.NewTicker(90 * time.Millisecond)
+		ticker := time.NewTicker(s.tickInterval)
 		defer ticker.Stop()
 		for {
 			select {
