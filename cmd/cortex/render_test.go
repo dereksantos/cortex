@@ -642,3 +642,52 @@ func TestPromptCache(t *testing.T) {
 		}
 	})
 }
+
+func TestWrapRendered(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		width int
+		want  string
+	}{
+		{"fits", "short line", 20, "short line"},
+		{"prose wraps at spaces", "the report struct already carried json tags", 20,
+			"the report struct\nalready carried json\ntags"},
+		{"list item hangs under its text", "•  a list item long enough to wrap twice", 20,
+			"•  a list item long\n   enough to wrap\n   twice"},
+		{"numbered item hangs too", "1. first step that wraps", 14, "1. first step\n   that wraps"},
+		{"color survives", "\033[36mcyan words that wrap here\033[0m", 12, ""},
+		{"no width leaves it", "a b c", 0, "a b c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapRendered(tt.in, tt.width)
+			for _, l := range strings.Split(got, "\n") {
+				if tt.width > 0 && style.Width(l) > tt.width {
+					t.Errorf("line %q is wider than %d", l, tt.width)
+				}
+			}
+			if tt.want == "" {
+				if style.Strip(got) == got {
+					t.Errorf("color was lost: %q", got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("wrapRendered = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMarkdownRenderNeverWrapsCode(t *testing.T) {
+	md := newMarkdownRenderer(30)
+	if md == nil {
+		t.Fatal("renderer build failed")
+	}
+	code := "func a() { return reallyLongIdentifierNameThatMustNotWrap() }"
+	got := style.Strip(md.render("```go\n" + code + "\n```\n"))
+	if !strings.Contains(got, code) {
+		t.Errorf("code line was wrapped or altered:\n%s", got)
+	}
+}

@@ -142,6 +142,7 @@ func (cs *CortexSession) markdown() *markdownRenderer {
 	} else if !renderEnabled() {
 		return nil
 	}
+	w = answerWrapWidth(w)
 	if cs.md == nil || cs.mdWidth != w {
 		cs.md, cs.mdWidth = newMarkdownRenderer(w), w
 	}

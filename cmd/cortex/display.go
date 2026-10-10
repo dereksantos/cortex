@@ -18,6 +18,33 @@ import (
 // row of role-coded tags.
 func gutterPrefix(ts time.Time) string { return tools.Gutter(ts) }
 
+// gutterIndent is a blank gutter: continuation lines (an answer's wrapped
+// prose, its later blocks) start here so the timestamps read as one column.
+var gutterIndent = strings.Repeat(" ", len("15:04:05  "))
+
+// answerWrapWidth is the width an answer's prose wraps to on a terminal of
+// width w: the content width (capped at style.MaxContentWidth) less the
+// gutter it sits behind.
+func answerWrapWidth(w int) int {
+	if w <= 0 || w > style.MaxContentWidth {
+		w = min(max(w, 80), style.MaxContentWidth)
+	}
+	return max(w-len(gutterIndent), 20)
+}
+
+// indentUnderGutter prefixes each line of s with the blank gutter, skipping
+// the first when it joins a gutter already printed. Blank lines stay empty.
+func indentUnderGutter(s string, skipFirst bool) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if (i == 0 && skipFirst) || strings.TrimSpace(style.Strip(l)) == "" {
+			continue
+		}
+		lines[i] = gutterIndent + l
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Message) render(ts time.Time) string {
 	return gutterPrefix(ts) + m.Content
 }

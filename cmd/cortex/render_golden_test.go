@@ -91,3 +91,39 @@ func TestRenderGoldenMessageLine(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderGoldenAnswer pins how a streamed markdown answer lays out: the
+// timestamp on its first line, every later line indented under that gutter,
+// prose wrapped to the content width less the gutter (answerWrapWidth).
+// Compared with color stripped — glamour's styling is its own concern; the
+// layout is ours.
+func TestRenderGoldenAnswer(t *testing.T) {
+	prevNow := tools.Now
+	tools.Now = func() time.Time { return time.Date(2026, 10, 9, 14, 2, 31, 0, time.UTC) }
+	defer func() { tools.Now = prevNow }()
+
+	answer := "Added `--json` to `cortex learn`. The report struct already carried json tags, " +
+		"so the flag only switches the printer between the text and JSON encoders.\n\n" +
+		"- `learn.go`: new `--json` flag\n- `learn_test.go`: covers both printers\n\n" +
+		"Tests pass.\n"
+	tests := []struct {
+		name  string
+		width int
+		want  string
+	}{
+		{"80 cols", 80, "\n14:02:31  Added  --json  to  cortex learn . The report struct already carried\n          json tags, so the flag only switches the printer between the text and\n          JSON encoders.\n\n          •  learn.go : new  --json  flag\n          •  learn_test.go : covers both printers\n\n          Tests pass.\n\n"},
+		{"140 cols caps", 140, "\n14:02:31  Added  --json  to  cortex learn . The report struct already carried json tags, so the flag\n          only switches the printer between the text and JSON encoders.\n\n          •  learn.go : new  --json  flag\n          •  learn_test.go : covers both printers\n\n          Tests pass.\n\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			p := &streamPrinter{out: &buf, md: newMarkdownRenderer(answerWrapWidth(tt.width))}
+			p.onContent(answer)
+			p.finish()
+			got := style.Strip(buf.String())
+			if got != tt.want {
+				t.Errorf("answer layout changed (width %d). got:\n%s\nwant:\n%s\n(quoted: %q)", tt.width, got, tt.want, got)
+			}
+		})
+	}
+}

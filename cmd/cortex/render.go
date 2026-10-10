@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/style"
 )
@@ -47,7 +48,8 @@ func terminalWidth() int {
 // Glamour runs fenced code through chroma, so headings/lists/tables AND syntax
 // highlighting come from one Render call.
 type markdownRenderer struct {
-	tr *glamour.TermRenderer
+	tr    *glamour.TermRenderer
+	width int // the column prose wraps at (wrapRendered)
 }
 
 // headingStyle is glamour's built-in dark style with the literal "## "/"### "
@@ -61,8 +63,15 @@ type markdownRenderer struct {
 // line embedded inside the heading's own output — writeBlock (streaming.go)
 // now adds heading padding explicitly and deterministically, so this
 // glamour-internal one would only double it up.
+//
+// The document margin is zeroed too: the answer's text column is set by the
+// timestamp gutter instead (writeBlock indents continuation lines under it,
+// docs/tui-polish.md track 2), so glamour's own two-space margin would only
+// push it off that column.
 var headingStyle = func() ansi.StyleConfig {
 	s := styles.DarkStyleConfig
+	noMargin := uint(0)
+	s.Document.Margin = &noMargin
 	s.Heading.BlockSuffix = ""
 	s.H2.Prefix = ""
 	s.H3.Prefix = ""
@@ -72,8 +81,12 @@ var headingStyle = func() ansi.StyleConfig {
 	return s
 }()
 
-// newMarkdownRenderer builds a renderer word-wrapped to width. Returns nil on
-// failure so callers degrade to plain text. Uses headingStyle (dark, minus
+// newMarkdownRenderer builds a renderer whose prose wraps at width. Glamour
+// itself renders unwrapped and render() wraps the styled result
+// (wrapRendered): glamour's own wrapping measures a line before inline
+// styling pads it, so a full line overflows and its last word is hard-wrapped
+// onto a line of its own. Returns nil on failure so callers degrade to plain
+// text. Uses headingStyle (dark, minus
 // hashmark prefixes) via WithStyles — never WithAutoStyle, which emits OSC
 // 10/11 escape queries the cbreak input reader would swallow (see
 // internal/repltui for the same caveat).
@@ -83,22 +96,92 @@ func newMarkdownRenderer(width int) *markdownRenderer {
 	}
 	tr, err := glamour.NewTermRenderer(
 		glamour.WithStyles(headingStyle),
-		glamour.WithWordWrap(width),
+		glamour.WithWordWrap(0),
 	)
 	if err != nil {
 		return nil
 	}
-	return &markdownRenderer{tr: tr}
+	return &markdownRenderer{tr: tr, width: width}
 }
 
 // render styles one block; on any error it returns the block stripped of
-// trailing newlines so nothing is ever lost.
+// trailing newlines so nothing is ever lost. Leading and trailing blank lines
+// are dropped — the caller owns the spacing between blocks. Prose wraps at
+// m.width; code blocks and tables never wrap (a wrapped line of code or a
+// table row is a different line).
 func (m *markdownRenderer) render(block string) string {
 	out, err := m.tr.Render(block)
 	if err != nil {
 		return strings.TrimRight(block, "\n")
 	}
-	return trimBlockPadding(strings.Trim(out, "\n"))
+	out = trimBlankEdges(trimBlockPadding(strings.Trim(out, "\n")))
+	if isFencedBlock(block) || isTableBlock(block) {
+		return out
+	}
+	return wrapRendered(out, m.width)
+}
+
+// trimBlankEdges drops leading and trailing lines that are blank once ANSI is
+// stripped.
+func trimBlankEdges(s string) string {
+	lines := strings.Split(s, "\n")
+	start, end := 0, len(lines)
+	for start < end && strings.TrimSpace(style.Strip(lines[start])) == "" {
+		start++
+	}
+	for end > start && strings.TrimSpace(style.Strip(lines[end-1])) == "" {
+		end--
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func isFencedBlock(b string) bool {
+	t := strings.TrimSpace(b)
+	return strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~")
+}
+
+func isTableBlock(b string) bool {
+	for _, l := range strings.Split(b, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "|") {
+			return true
+		}
+	}
+	return false
+}
+
+// hangPattern matches a rendered line's hanging indent: leading space plus an
+// optional list marker (glamour's "•", or "1."), so a wrapped list item's
+// continuation lines sit under its text, not under its bullet.
+var hangPattern = regexp.MustCompile(`^\s*(?:(?:[•*+-]|\d+\.)\s+)?`)
+
+// wrapRendered word-wraps each styled line wider than width, ANSI-aware,
+// continuing at the line's hanging indent. Words longer than the room are
+// broken rather than left to overflow.
+func wrapRendered(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if xansi.StringWidth(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		hang := xansi.StringWidth(hangPattern.FindString(style.Strip(line)))
+		if hang > width/2 {
+			hang = 0
+		}
+		head := xansi.Cut(line, 0, hang)
+		rest := xansi.Cut(line, hang, xansi.StringWidth(line))
+		for i, w := range strings.Split(xansi.Wrap(rest, width-hang, ""), "\n") {
+			if i == 0 {
+				out = append(out, head+w)
+				continue
+			}
+			out = append(out, strings.Repeat(" ", hang)+w)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // ansiSuffix matches an ANSI SGR code at the end of a string.
