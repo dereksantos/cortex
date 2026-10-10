@@ -10,7 +10,7 @@ toolchain go1.27.2
 require (
 	charm.land/glamour/v2 v2.0.1
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/charmbracelet/x/ansi v0.11.8
+	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/viterin/vek v0.4.3
 	golang.org/x/net v0.60.0
