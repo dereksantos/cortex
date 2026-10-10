@@ -296,15 +296,20 @@ func (p *streamPrinter) writeBlock(b string) {
 	}
 	p.begin()
 	heading := isHeadingBlock(b)
-	if heading && p.printedAny && !p.blankAfter {
+	// Markdown separates blocks with a blank line; so does the answer, exactly
+	// one, whatever kind the blocks are (blankAfter keeps a heading's trailing
+	// blank from doubling up).
+	if p.printedAny && !p.blankAfter {
 		fmt.Fprintln(p.writer())
 		p.blankAfter = true
 	}
 	out := p.md.render(b)
-	if p.gutterOpen {
+	joins := p.gutterOpen
+	if joins {
 		out = trimLeadingIndent(out)
 		p.gutterOpen = false
 	}
+	out = indentUnderGutter(out, joins)
 	fmt.Fprintln(p.writer(), out)
 	p.printedAny = true
 	p.blankAfter = false
@@ -553,6 +558,11 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 	realStdout := os.Stdout
 	os.Stdout = w
 	session.live = anchor
+	// stdout is a pipe now, so it reports no width; lay lines out to the
+	// anchor's real terminal instead (tool lines right-align and clip to it).
+	realWidth := style.TermWidth
+	style.TermWidth = anchor.Width
+	defer func() { style.TermWidth = realWidth }()
 
 	drained := make(chan struct{})
 	go func() {
