@@ -124,9 +124,14 @@ Memory is model-driven — ask in natural language ("remember that …" /
 capture/retract pipeline.
 
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
-❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
-actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s
-`printToolAction`); role lines are colored by their timestamp instead of a
+❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Every
+tool call prints ONE line when it finishes — `HH:MM:SS  verb     target …
+result`, verb in a fixed column, result (diff `+9 -2`, a summary, elapsed
+past 1s) right-aligned at the content width (terminal capped at 100) —
+laid out by `internal/tools/toolline.go`'s `formatToolLine`; while it runs
+the live status row names it. Subagent calls (`study`/`agent`) are the
+exception: their line prints before they run so their nested calls land
+under it. Role lines are colored by their timestamp instead of a
 per-role icon (`cmd/cortex/display.go`'s `gutter`); the "thinking" indicator
 is a static label with only its elapsed-seconds tick moving (no animated
 spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and

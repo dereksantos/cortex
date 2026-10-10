@@ -306,7 +306,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			}
 		})
 		got := strip(out)
-		for _, want := range []string{"tool: edit_file(", "4 -     return 1", "4 +     return 2"} {
+		for _, want := range []string{"edit     ", "+1 -1", "4 -     return 1", "4 +     return 2"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q in:\n%s", want, got)
 			}
@@ -381,7 +381,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			}
 		})
 		got := strip(out)
-		if !strings.Contains(got, "tool: write_file(") {
+		if !strings.Contains(got, "write    ") {
 			t.Errorf("the action line must survive the escape hatch:\n%s", got)
 		}
 		if strings.Contains(got, "+ hello") {

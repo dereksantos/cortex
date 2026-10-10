@@ -93,6 +93,21 @@ var TermWidth = func() int {
 	return 0
 }
 
+// MaxContentWidth caps how wide the REPL lays out its own lines — prose wraps
+// and tool results right-align at this column even on a wider terminal, so
+// the eye never travels a 200-column line to find a result.
+const MaxContentWidth = 100
+
+// ContentWidth is the column the REPL lays its lines out to: the terminal
+// width capped at MaxContentWidth, or 0 when there is no terminal.
+func ContentWidth() int {
+	w := TermWidth()
+	if w > MaxContentWidth {
+		return MaxContentWidth
+	}
+	return w
+}
+
 // Strip removes CSI escape sequences (ESC [ … final byte) so width math
 // counts only visible cells.
 func Strip(s string) string {
