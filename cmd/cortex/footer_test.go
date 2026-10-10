@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 func TestSummarizeTurn(t *testing.T) {
@@ -53,5 +54,19 @@ func TestRenderFooterGolden(t *testing.T) {
 				t.Errorf("footer changed.\n got: %q\nwant: %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRiskyQuestionLayout(t *testing.T) {
+	defer style.ForceColor(false)()
+	prev := tools.Now
+	tools.Now = func() time.Time { return time.Date(2026, 10, 9, 14, 5, 2, 0, time.UTC) }
+	defer func() { tools.Now = prev }()
+	got := riskyQuestion("git reset --hard HEAD~1", "discards uncommitted changes and the last commit", "git reset*")
+	want := "\n14:05:02  bash     git reset --hard HEAD~1\n" +
+		"          risky: discards uncommitted changes and the last commit\n" +
+		`run it?  y once · a this command · p always "git reset*" · n `
+	if got != want {
+		t.Errorf("riskyQuestion =\n%q\nwant\n%q", got, want)
 	}
 }

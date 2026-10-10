@@ -17,6 +17,7 @@ import (
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/redact"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -825,7 +826,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			// ReadLine fallback with the SAME question — plain text, the
 			// pre-change path unchanged.
 			prefix := commandPrefixPattern(command)
-			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y once | a this command | p always %q | n] ", reason, command, prefix)
+			q := riskyQuestion(command, reason, prefix)
 			choice := cs.confirmRisky(q)
 			switch choice {
 			case lineedit.ConfirmAlwaysExact:
@@ -930,4 +931,16 @@ func (cs *CortexSession) recordSameActionBlock(command string) {
 	for _, cls := range classes {
 		cs.sameActionBlocked[cls] = true
 	}
+}
+
+// riskyQuestion is the confirm a Risky command asks, laid out like the tool
+// lines (docs/tui-polish.md, track 5): the command on a gutter line with the
+// bash verb in the warning color, the classifier's reason under it, then the
+// ask with its keys — y once, a this exact command for the session, p this
+// command's prefix for the session (the derived pattern, shown), n no. The
+// body lines scroll; the ask sits on the anchored status row (splitConfirm).
+func riskyQuestion(command, reason, prefix string) string {
+	return "\n" + gutterPrefix(tools.Now()) + style.Paint("bash", style.Warn) + "     " + command + "\n" +
+		gutterIndent + style.Paint("risky: "+reason, style.Warn) + "\n" +
+		fmt.Sprintf("run it?  y once · a this command · p always %q · n ", prefix)
 }

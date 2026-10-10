@@ -82,3 +82,33 @@ func TestCtrlOOpensDetailFromTheMainPromptOnly(t *testing.T) {
 		t.Errorf("a plain read (a y/N answer) must not open it, opened %d", opened)
 	}
 }
+
+func TestQuestionMarkShowsKeyHints(t *testing.T) {
+	run := func(data string, echo bool) (string, string) {
+		var out bytes.Buffer
+		term := &Terminal{out: &out}
+		term.SetKeyHints("tab complete · ctrl-o last turn")
+		var accepted func(string, int) string
+		if echo {
+			accepted = func(l string, _ int) string { return l }
+		}
+		line, err := term.readLineWith("> ", "", &sliceSource{data: []byte(data)}, accepted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return line, out.String()
+	}
+	line, out := run("?\r", true)
+	if line != "?" {
+		t.Errorf("the ? is still typed: line = %q", line)
+	}
+	if !strings.Contains(out, "tab complete · ctrl-o last turn") {
+		t.Errorf("hints not shown: %q", out)
+	}
+	if _, out := run("a?\r", true); strings.Contains(out, "tab complete") {
+		t.Errorf("hints only for a leading ?: %q", out)
+	}
+	if _, out := run("?\r", false); strings.Contains(out, "tab complete") {
+		t.Errorf("a plain read must not show hints: %q", out)
+	}
+}

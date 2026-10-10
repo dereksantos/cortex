@@ -40,6 +40,8 @@ type Terminal struct {
 	accepted func(line string, width int) string
 	// detail is the Ctrl-O action (SetDetail).
 	detail func()
+	// keyHints is the "?" key reference (SetKeyHints).
+	keyHints string
 }
 
 // SetAcceptedLine sets how a line submitted through ReadLineEcho is left in
@@ -50,6 +52,10 @@ type Terminal struct {
 // the row as typed. Plain ReadLine/ReadLinePrefilled (a y/N answer, say)
 // never use it.
 func (t *Terminal) SetAcceptedLine(f func(line string, width int) string) { t.accepted = f }
+
+// SetKeyHints sets the one-row key reference shown under the input when "?"
+// is typed first at the REPL's main prompt (ReadLineEcho). "" disables it.
+func (t *Terminal) SetKeyHints(s string) { t.keyHints = s }
 
 // SetDetail wires Ctrl-O at the prompt: f runs synchronously (typically opening
 // an inspector over the terminal) and the prompt redraws when it returns. Nil
@@ -405,6 +411,16 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 			return "", ErrInterrupted
 		case keyRune:
 			buf.insert(ev.r)
+			// "?" as the first character of the REPL's main input shows the
+			// key hints on the row below (cleared by the next key). The "?" is
+			// still typed — a message may start with one.
+			if ev.r == '?' && accepted != nil && t.keyHints != "" && buf.string() == "?" {
+				if completion != nil {
+					completion.Change()
+				}
+				redraw(t.keyHints)
+				continue
+			}
 		case keyPaste:
 			buf.insert([]rune(ev.paste)...)
 		case keyBackspace:
