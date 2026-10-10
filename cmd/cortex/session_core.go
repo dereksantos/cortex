@@ -130,6 +130,10 @@ type CortexSession struct {
 	live    *lineedit.Anchor
 
 	phase turnPhase // one-char state light at the far left of Prompt(); see display.go
+
+	// lastTurn is the most recent completed turn's footer facts (footer.go);
+	// nil until one completes, and after a failed or interrupted turn.
+	lastTurn *turnSummary
 }
 
 func (cs *CortexSession) markdown() *markdownRenderer {
