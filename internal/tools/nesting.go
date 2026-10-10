@@ -138,7 +138,7 @@ func captureAction(action string) {
 	// risky confirm, a summarizer banner): flush it now, unless this call
 	// may join it.
 	var run []foldEntry
-	if prev != nil || !(top && foldable(action)) {
+	if prev != nil || !top || !foldable(action) {
 		run = takeFold()
 	}
 	nest.mu.Unlock()
