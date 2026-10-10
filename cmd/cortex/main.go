@@ -240,6 +240,7 @@ var helpLines = []string{
 	"/clear             reset the conversation and start a fresh session",
 	"/undo [N]          revert the Nth-most-recent turn's file changes (default 1)",
 	"/sessions          pick a saved session to resume (plain list when not a TTY)",
+	"/last              every tool call of the last turn, unabridged (Ctrl-O)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
 	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
@@ -548,6 +549,8 @@ func main() {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
 			editor.SetAcceptedLine(session.acceptedLine)
+			// Ctrl-O at the prompt opens the last turn's calls, unabridged.
+			editor.SetDetail(func() { openLastTurn(editor, session) })
 			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
 			// Risky-command confirmation reads the answer through the anchor's
@@ -792,6 +795,19 @@ func main() {
 		// well as a debugging one — see contextReport's doc comment).
 		if input == "/help" {
 			printHelp()
+			continue
+		}
+		// /last opens the last turn's tool calls, unabridged — what the
+		// scrollback folded or capped (docs/tui-polish.md, track 4). Ctrl-O at
+		// the prompt opens the same view. Piped sessions get a plain listing.
+		if input == "/last" {
+			if sessionsInspectable(editor) {
+				openLastTurn(editor, session)
+			} else {
+				for _, l := range (lastTurnView{calls: session.lastTurnCalls}).Lines(0) {
+					fmt.Println(l)
+				}
+			}
 			continue
 		}
 		if input == "/context" {

@@ -434,12 +434,16 @@ helper, and writing table-driven tests):
 | `/clear` | Start a fresh session. |
 | `/undo [N]` | Revert the Nth-most-recent turn's file changes to the working tree (default 1): restore the per-turn checkpoint (a `git stash create` snapshot, issue #111), print the files changed, and record a transcript note so the model learns its edits were reverted. |
 | `/sessions` | Pick a saved session to resume: a full-screen list you can filter by prompt, id, or model (Enter resumes, ESC leaves the session alone). Prints the plain list when stdout isn't a TTY. |
-| `/model [name]` | Show role bindings or switch the coding model for this session. |
+| `/last` | Every tool call of the last turn, unabridged — the calls the scrollback folded or capped, each with its diff and the head of its output. Ctrl-O at the prompt opens the same view. |
+| `/model [name]` | Switch the coding model: bare `/model` opens a filterable picker over the session's models on a TTY (Enter switches); `/model <name>` switches directly; piped sessions print the role bindings. |
 | `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
 
 Tab completes slash commands, `/model` ids, and `@path` file mentions in the
-interactive REPL. A submitted `@path` mention attaches the file to the turn —
+interactive REPL; while a `/command` is typed and only one still matches, its
+remainder and description preview dimly after the cursor. Alt-Enter inserts a
+newline (a multi-line draft edits one line at a time, Up/Down move between
+its lines). A submitted `@path` mention attaches the file to the turn —
 small files inline, large files as a structural outline (same rules as the
 `read_file` tool); the mention becomes an `[@path attached]` marker in what
 the model sees. Only an `@` starting a whitespace-delimited word counts (an

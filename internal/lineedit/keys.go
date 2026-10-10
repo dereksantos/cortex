@@ -33,6 +33,7 @@ const (
 	keyTab           // Tab (completion, issue #108)
 	keyPaste         // bracketed paste (text in keyEvent.paste)
 	keyNewline       // Alt-Enter: a newline inside the input instead of submitting
+	keyDetail        // Ctrl-O: open the caller's detail view (SetDetail)
 	keyUnknown
 )
 
@@ -88,6 +89,8 @@ func decodeKeyByte(b byte, src byteSource) (keyEvent, error) {
 		return keyEvent{kind: keyReverseSearch}, nil // Ctrl-R
 	case 0x07:
 		return keyEvent{kind: keyAbort}, nil // Ctrl-G
+	case 0x0f:
+		return keyEvent{kind: keyDetail}, nil // Ctrl-O
 	case 0x03:
 		return keyEvent{kind: keyInterrupt}, nil // Ctrl-C
 	case 0x04:

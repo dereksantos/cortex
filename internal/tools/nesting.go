@@ -189,6 +189,9 @@ func finishCall(d time.Duration, out string, err error) {
 	nest.mu.Lock()
 	p := nest.pending
 	nest.pending = nil
+	if p != nil {
+		recordCall(p, len(nest.frames), callResult(p, d, out, err), out, err)
+	}
 	over := false
 	if n := len(nest.frames); n > 0 {
 		f := nest.frames[n-1]

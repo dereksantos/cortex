@@ -1,6 +1,7 @@
 package lineedit
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,26 @@ func TestMultilineDraftShowsTheCursorLine(t *testing.T) {
 	}
 	if !strings.HasSuffix(out, "\r\033[5C") { // "> " + "sec" → column 5
 		t.Errorf("cursor not parked in the line: %q", out)
+	}
+}
+
+func TestCtrlOOpensDetailFromTheMainPromptOnly(t *testing.T) {
+	opened := 0
+	var out bytes.Buffer
+	term := &Terminal{out: &out}
+	term.SetDetail(func() { opened++ })
+	echo := func(line string, _ int) string { return line }
+
+	if _, err := term.readLineWith("> ", "", &sliceSource{data: []byte("\x0f\r")}, echo); err != nil {
+		t.Fatal(err)
+	}
+	if opened != 1 {
+		t.Errorf("Ctrl-O at the main prompt should open the detail view once, opened %d", opened)
+	}
+	if _, err := term.readLineWith("> ", "", &sliceSource{data: []byte("\x0f\r")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if opened != 1 {
+		t.Errorf("a plain read (a y/N answer) must not open it, opened %d", opened)
 	}
 }

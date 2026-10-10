@@ -434,6 +434,9 @@ type CortexSession struct {
 	turnStep int
 	// turnThought is the turn's latest "thought Ns" (footer.go's noteThought).
 	turnThought string
+	// lastTurnCalls is the last turn's unabridged tool-call record
+	// (tools.TurnLog) for /last and Ctrl-O (last_turn_view.go).
+	lastTurnCalls []tools.CallRecord
 }
 
 func (cs *CortexSession) markdown() *markdownRenderer {

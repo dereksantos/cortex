@@ -14,6 +14,7 @@ package tools
 
 import (
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/style"
 )
@@ -86,6 +87,13 @@ func ShortAction(action string) string {
 // paints the verb and result as an error. Width 0 (piped, CI) clips nothing
 // and joins the result with two spaces.
 func formatToolLine(indent, action, result string, failed bool) string {
+	return formatToolLineAt(Now(), style.ContentWidth(), indent, action, result, failed)
+}
+
+// formatToolLineAt is formatToolLine for a given time and content width — the
+// last-turn detail view renders recorded calls with their own timestamps at
+// the inspector's width.
+func formatToolLineAt(ts time.Time, width int, indent, action, result string, failed bool) string {
 	verb, target := splitAction(action)
 	pad := ""
 	if target != "" {
@@ -97,7 +105,6 @@ func formatToolLine(indent, action, result string, failed bool) string {
 		verbRole, resultRole = style.Err, style.Err
 	}
 
-	width := style.ContentWidth()
 	if width > 0 {
 		avail := width - len(gutterPad) - style.Width(indent+verb+pad)
 		// The target names the call, so it outranks the summary: the result
@@ -117,11 +124,20 @@ func formatToolLine(indent, action, result string, failed bool) string {
 
 	left := indent + style.Paint(verb, verbRole) + pad + target
 	if result == "" {
-		return TimestampPrefix() + left
+		return Gutter(ts) + left
 	}
 	painted := style.Paint(result, resultRole)
 	if width <= 0 {
-		return TimestampPrefix() + left + "  " + painted
+		return Gutter(ts) + left + "  " + painted
 	}
-	return TimestampPrefix() + style.Justify(left, painted, width-len(gutterPad), 2)
+	return Gutter(ts) + style.Justify(left, painted, width-len(gutterPad), 2)
 }
+
+// FormatCallLine renders a recorded call as the line the scrollback showed for
+// it, at width (0 = unclipped).
+func FormatCallLine(c CallRecord, width int) string {
+	return formatToolLineAt(c.At, width, strings.Repeat("  ", c.Depth), c.Action, c.Result, c.Failed)
+}
+
+// GutterPad is the blank stand-in for the timestamp gutter.
+const GutterPad = gutterPad
