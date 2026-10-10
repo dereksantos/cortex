@@ -505,6 +505,7 @@ func main() {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
+			editor.SetAcceptedLine(session.acceptedLine)
 			defer editor.Close()
 			// Risky-command confirmation reads a y/N line from the editor. Tool
 			// calls run synchronously on this goroutine between ReadLine calls,
@@ -558,7 +559,7 @@ func main() {
 		}
 		var input string
 		if editor != nil {
-			line, err := editor.ReadLinePrefilled(session.Prompt(), typeAhead)
+			line, err := editor.ReadLineStatus(session.Prompt(), session.PromptStatus(), typeAhead)
 			typeAhead = ""
 			if err == io.EOF {
 				break

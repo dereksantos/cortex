@@ -16,12 +16,28 @@ import (
 // math. Two cases: a normal line scrolls horizontally to keep the cursor in
 // view; a multi-line paste collapses to a summary (you send it, you don't
 // in-line edit a pasted block).
-func renderLine(prompt string, buf *buffer, width int) string {
+//
+// right is an optional status flushed to the content edge (the terminal width
+// capped at style.MaxContentWidth — the column tool results align to). It
+// shows only while the whole input fits beside it with a two-cell gap; once
+// the input grows into it, it steps aside and the input gets the full row.
+func renderLine(prompt, right string, buf *buffer, width int) string {
 	if width < 1 {
 		width = 80
 	}
 	if buf.hasNewline() {
 		return renderSummary(prompt, buf, width)
+	}
+	if right != "" {
+		edge := min(width, style.MaxContentWidth)
+		used := displayWidth(prompt) + widthOf(buf.runes)
+		if gap := edge - used - displayWidth(right); gap >= 2 {
+			out := "\r\033[K" + prompt + string(buf.runes) + strings.Repeat(" ", gap) + right + "\r"
+			if col := displayWidth(prompt) + widthOf(buf.runes[:buf.pos]); col > 0 {
+				out += fmt.Sprintf("\033[%dC", col)
+			}
+			return out
+		}
 	}
 	return renderScroll(prompt, buf, width)
 }

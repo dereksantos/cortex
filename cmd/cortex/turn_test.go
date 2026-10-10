@@ -654,16 +654,16 @@ func TestTurnContextGaugeUpdatesMidTurn(t *testing.T) {
 	// contextbar_test.go.
 	// Zone A/divider/zone B are each colored separately (coloredGauge), so
 	// an ANSI reset sits between them — strip color before matching the text.
-	prompt := cs.Prompt()
+	prompt := cs.PromptStatus()
 	wantZones := humanK(cs.headTokens()) + zoneDivider + humanK(cs.ws.TailTokens())
 	if !strings.Contains(stripANSI(prompt), wantZones) {
-		t.Errorf("Prompt() = %q, expected the two-zone gauge %q", prompt, wantZones)
+		t.Errorf("PromptStatus() = %q, expected the two-zone gauge %q", prompt, wantZones)
 	}
 
 	// repl.gauge = "blocks" still renders the fixed-spatial bracket bar.
 	cs.Config = &Config{Repl: ReplConfig{Gauge: "blocks"}}
-	if bar := cs.Prompt(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
-		t.Errorf("Prompt() with repl.gauge=blocks = %q, expected the bar structure ([head|tail...])", bar)
+	if bar := cs.PromptStatus(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
+		t.Errorf("PromptStatus() with repl.gauge=blocks = %q, expected the bar structure ([head|tail...])", bar)
 	}
 
 	// repl.gauge = "numeric" still renders a scalar "used/window" form, now
@@ -674,8 +674,8 @@ func TestTurnContextGaugeUpdatesMidTurn(t *testing.T) {
 	// shows verbatim, unchanged, from real usage.
 	cs.Config = &Config{Repl: ReplConfig{Gauge: "numeric"}}
 	want := humanK(cs.headTokens()+cs.ws.TailTokens()) + "/" + humanK(cs.windowSize())
-	if numeric := cs.Prompt(); !strings.Contains(numeric, want) {
-		t.Errorf("Prompt() with repl.gauge=numeric = %q, want to contain %q", numeric, want)
+	if numeric := cs.PromptStatus(); !strings.Contains(numeric, want) {
+		t.Errorf("PromptStatus() with repl.gauge=numeric = %q, want to contain %q", numeric, want)
 	}
 }
 
