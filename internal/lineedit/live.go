@@ -30,7 +30,6 @@ type Anchor struct {
 
 	mu     sync.Mutex
 	prompt string
-	right  string // status at the input row's right edge (renderLine)
 	buf    *buffer
 	status string // rendered status row; "" hides it
 	rows   int    // rows the pinned block currently occupies on screen (0,1,2)
@@ -301,18 +300,6 @@ func (a *Anchor) SetActivity(label string) {
 	a.refreshStatusLocked()
 }
 
-// SetRight updates the status shown at the input row's right edge and redraws.
-// Safe from any goroutine.
-func (a *Anchor) SetRight(right string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.right == right {
-		return
-	}
-	a.right = right
-	a.refreshInputLocked()
-}
-
 // SetPrompt updates the prompt text and redraws the anchor. This allows the
 // prompt to reflect live changes, such as an updated context gauge.
 // Safe from any goroutine.
@@ -538,7 +525,7 @@ func (a *Anchor) drawLocked() {
 		b.WriteString("\r\n")
 		rows = 2
 	}
-	b.WriteString(renderLine(a.prompt, a.right, a.buf, width))
+	b.WriteString(renderLine(a.prompt, a.buf, width))
 	io.WriteString(a.out, b.String())
 	a.rows = rows
 }

@@ -124,7 +124,9 @@ Memory is model-driven — ask in natural language ("remember that …" /
 capture/retract pipeline.
 
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
-❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Every
+◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept — with
+one exception Derek made 2026-10-09: the prompt marker is `❯`
+(`tools.PromptGlyph`). Every
 tool call prints ONE line when it finishes — `HH:MM:SS  verb     target …
 result`, verb in a fixed column, result (diff `+9 -2`, a summary, elapsed
 past 1s) right-aligned at the content width (terminal capped at 100) —
@@ -135,10 +137,12 @@ under it. A run of the coder's read-only calls (read/grep/outline/recall/
 memory reads) folds into one dim line — `read 3 files · grep 2 searches` —
 printed when the run ends (`internal/tools/fold.go`; cmd/cortex calls
 `tools.FlushFold()` before its own mid-turn output). The input row is
-cursor-first (`. > `) with the model + gauge at its right edge
-(`PromptStatus`); on Enter the row is rewritten as a timestamped echo of the
-input (`lineedit.Terminal.SetAcceptedLine`). Answers sit under the gutter and
-end with a one-line footer (`cmd/cortex/footer.go`). Every line carries the
+status first, cursor last — `qwen3.8-27b  1k|22k  . ❯ ` (`Prompt`/
+`PromptStatus`); on Enter the row is rewritten as a timestamped echo of the
+input (`lineedit.Terminal.SetAcceptedLine`, via `ReadLineEcho`). Answers sit
+under the gutter, rendered with a quieted glamour theme (accent inline code,
+no chips, plain bold headings, `-` bullets), and end with a one-line footer
+(`cmd/cortex/footer.go`: elapsed · thought · tools · files · cost). Every line carries the
 same dim `HH:MM:SS` gutter instead of a per-role icon (`cmd/cortex/display.go`'s
 `gutterPrefix`); the "thinking" indicator
 is a static label with only its elapsed-seconds tick moving (no animated

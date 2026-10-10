@@ -13,6 +13,7 @@ import (
 // only by the interactive REPL.
 type turnSummary struct {
 	Elapsed      time.Duration
+	Thought      string // "thought 38s" when the answer step deliberated (thoughtStat)
 	Tools        int
 	FilesChanged int
 	Cost         float64
@@ -39,24 +40,32 @@ func summarizeTurn(msgs []Message, elapsed time.Duration, cost float64) turnSumm
 }
 
 // renderFooter is the one dim line under an answer, indented under the
-// gutter: "20s · 7 tools · 1 file changed · 24k|131k · $0.004". gauge is the
-// prompt bar's gauge (pre-colored); zero counts are left out.
-func renderFooter(s turnSummary, gauge string) string {
+// gutter: "1m12s · thought 38s · 7 tools · 1 file changed · $0.004". Zero
+// counts are left out; the gauge isn't repeated — the prompt row right below
+// carries it.
+func renderFooter(s turnSummary) string {
 	parts := []string{fmtTurnElapsed(s.Elapsed)}
+	if s.Thought != "" {
+		parts = append(parts, s.Thought)
+	}
 	if s.Tools > 0 {
 		parts = append(parts, tools.CountNoun(s.Tools, "tool"))
 	}
 	if s.FilesChanged > 0 {
 		parts = append(parts, tools.CountNoun(s.FilesChanged, "file")+" changed")
 	}
-	line := style.Paint(joinDot(parts...), style.Dim)
-	if gauge != "" {
-		line += style.Paint(" · ", style.Dim) + gauge
-	}
 	if s.Cost > 0 {
-		line += style.Paint(" · "+humanCost(s.Cost), style.Dim)
+		parts = append(parts, humanCost(s.Cost))
 	}
-	return gutterIndent + line
+	return gutterIndent + style.Paint(joinDot(parts...), style.Dim)
+}
+
+// noteThought keeps the latest step's thought stat for the footer; "" (a step
+// that didn't deliberate) leaves an earlier one in place.
+func (cs *CortexSession) noteThought(s string) {
+	if s != "" {
+		cs.turnThought = s
+	}
 }
 
 // fmtTurnElapsed renders a turn's wall time at the precision a person reads
@@ -78,5 +87,5 @@ func (cs *CortexSession) printTurnFooter() {
 	if cs.quiet || cs.lastTurn == nil {
 		return
 	}
-	fmt.Println(renderFooter(*cs.lastTurn, cs.coloredGauge(promptGaugeCells, cs.windowSize())))
+	fmt.Println(renderFooter(*cs.lastTurn))
 }

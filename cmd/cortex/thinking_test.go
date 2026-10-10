@@ -124,7 +124,7 @@ func TestThoughtStat(t *testing.T) {
 				Usage:   Usage{CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 1500}},
 			},
 			wantPrinted: true,
-			wantSubstr:  "1.5k tok",
+			wantSubstr:  "thought 3s",
 		},
 		{
 			name:        "token threshold met alone (elapsed under 2s)",
@@ -132,7 +132,7 @@ func TestThoughtStat(t *testing.T) {
 			elapsed:     1 * time.Second,
 			res:         resWithoutToolsThinking(),
 			wantPrinted: true,
-			wantSubstr:  "1k tok",
+			wantSubstr:  "thought 1s",
 		},
 	}
 	for _, tt := range tests {
@@ -140,23 +140,19 @@ func TestThoughtStat(t *testing.T) {
 			var buf strings.Builder
 			p := &streamPrinter{out: &buf, start: time.Now().Add(-tt.elapsed)}
 			p.reason.WriteString(tt.reasoning)
-			p.thoughtStat(tt.res)
+			got := p.thoughtStat(tt.res)
 
-			out := buf.String()
-			if tt.wantPrinted && out == "" {
-				t.Fatalf("expected a thought-stat line, got nothing")
+			if buf.String() != "" {
+				t.Errorf("thoughtStat must not print (the footer carries it), wrote %q", buf.String())
 			}
-			if !tt.wantPrinted && out != "" {
-				t.Fatalf("expected no thought-stat line, got %q", out)
+			if tt.wantPrinted && got == "" {
+				t.Fatalf("expected a thought stat, got none")
 			}
-			if tt.wantPrinted {
-				plain := stripANSI(out)
-				if !strings.Contains(plain, tt.wantSubstr) {
-					t.Errorf("thought-stat = %q, want substring %q", plain, tt.wantSubstr)
-				}
-				if strings.Count(plain, "\n") != 1 {
-					t.Errorf("thought-stat must be exactly one line, got %q", plain)
-				}
+			if !tt.wantPrinted && got != "" {
+				t.Fatalf("expected no thought stat, got %q", got)
+			}
+			if tt.wantPrinted && !strings.Contains(got, tt.wantSubstr) {
+				t.Errorf("thought stat = %q, want substring %q", got, tt.wantSubstr)
 			}
 		})
 	}
@@ -175,11 +171,8 @@ func TestThoughtStatSkippedWhenBreadcrumbPrinted(t *testing.T) {
 	if !p.crumbed {
 		t.Fatalf("breadcrumb should have printed for a silent tool step")
 	}
-	before := buf.String()
-	p.thoughtStat(res)
-	if buf.String() != before {
-		t.Errorf("thoughtStat should have been skipped after breadcrumb printed; added %q",
-			strings.TrimPrefix(buf.String(), before))
+	if got := p.thoughtStat(res); got != "" {
+		t.Errorf("thoughtStat should be empty after breadcrumb printed, got %q", got)
 	}
 }
 

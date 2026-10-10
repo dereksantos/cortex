@@ -11,12 +11,11 @@ import (
 	"github.com/dereksantos/cortex/internal/style"
 )
 
-// PromptGlyph is the input affordance at the end of the status line and the
-// REPL's plain marker for a user-originated line. The REPL is glyph-free by
-// decision (2026-07-19): ANSI color carries the role distinction that the
-// old icon set (❯◆▸✻) used to carry, so only this single ASCII marker
-// remains.
-const PromptGlyph = ">"
+// PromptGlyph is the input affordance at the end of the prompt row. The REPL
+// dropped its icon set on 2026-07-19 (ANSI color carries role distinctions),
+// but Derek brought this one mark back on 2026-10-09 — the ASCII ">" read as
+// unfinished — so the prompt is the one glyph the REPL keeps.
+const PromptGlyph = "❯"
 
 // richRenderDisabled honors the same CORTEX_LOOP_RENDER=0 escape hatch
 // cmd/cortex's renderEnabled reads: with it set, the terminal falls back to

@@ -10,12 +10,17 @@
 > printed on completion (`internal/tools/toolline.go`); read-only runs folded
 > (`fold.go`, printed when the run ends — open question 1); answers indented
 > under the gutter and wrapped by us, not glamour (`render.go`'s
-> `wrapRendered`); the turn footer (`cmd/cortex/footer.go`); the cursor-first
-> prompt row with the model + gauge on the right and a timestamped echo of the
-> input left in scrollback (cost moved to the footer — open question 3); the
-> live status row names a running call with the same short verb
-> (`tools.ShortAction`). Visual mock of the proposed turn, startup, input,
-> picker and confirm surfaces:
+> `wrapRendered`); the turn footer (`cmd/cortex/footer.go`); the prompt row
+> (revised after Derek tried it 2026-10-09: status first, cursor last —
+> `qwen3.8-27b  1k|22k  . ❯ `, the `❯` marker his call, an exception to the
+> plain-text rule) with a timestamped echo of the input left in scrollback
+> (cost moved to the footer, which also carries the thought time; the gauge is
+> not repeated there); a quieted glamour theme (accent inline code, no chips,
+> plain bold headings, `-` bullets); the live status row names a running call
+> with the same short verb (`tools.ShortAction`). NEXT: Derek is leaning
+> toward a full-screen TUI (control + animating context management) — this
+> reverses the 2026-08-06 hybrid decision and needs its own scope. Visual mock
+> of the proposed turn, startup, input, picker and confirm surfaces:
 > <https://claude.ai/artifact/5a9HJ1ZEqhEc3yhvedRD4Q> (hand-written lines, not
 > real output).
 
@@ -32,7 +37,8 @@ prose runs the full terminal width, and input has no completion.
   gutter. Polish works around the gutter, not by removing it.
 
 - **Plain text** (2026-07-19, reconfirmed 2026-08-06): no icon set, no
-  decorative sigils, no spinner frames, no box-drawing. Information-bearing
+  decorative sigils, no spinner frames, no box-drawing. One exception
+  (2026-10-09, Derek): the prompt marker is `❯`. Information-bearing
   character cells (the `/context` grid) are allowed. Polish comes from color,
   spacing and alignment.
 - **Hybrid TUI** (2026-08-06): the REPL stays scrollback-native (copy, paste,

@@ -559,7 +559,7 @@ func main() {
 		}
 		var input string
 		if editor != nil {
-			line, err := editor.ReadLineStatus(session.Prompt(), session.PromptStatus(), typeAhead)
+			line, err := editor.ReadLineEcho(session.Prompt(), typeAhead)
 			typeAhead = ""
 			if err == io.EOF {
 				break

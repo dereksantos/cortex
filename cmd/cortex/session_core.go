@@ -137,6 +137,8 @@ type CortexSession struct {
 	// turnStep counts this turn's model calls (send); the first step's prose
 	// needs no leading blank line — the turn already opened with one.
 	turnStep int
+	// turnThought is the turn's latest "thought Ns" (footer.go's noteThought).
+	turnThought string
 }
 
 func (cs *CortexSession) markdown() *markdownRenderer {
