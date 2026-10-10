@@ -42,6 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
@@ -413,7 +414,14 @@ func modelIDsImpl(session *CortexSession) []string {
 	}
 	add(session.Request.Model)
 	add(session.Study.Model)
+	// The fleet is a map: sort it so Tab cycling and the /model picker list
+	// the same order every time.
+	fleet := make([]string, 0, len(session.Fleet))
 	for id := range session.Fleet {
+		fleet = append(fleet, id)
+	}
+	sort.Strings(fleet)
+	for _, id := range fleet {
 		add(id)
 	}
 	return out

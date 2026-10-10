@@ -817,6 +817,19 @@ func main() {
 		// /model [name] shows the role bindings, or switches the coding model.
 		if input == "/model" || strings.HasPrefix(input, "/model ") {
 			name := strings.TrimSpace(strings.TrimPrefix(input, "/model"))
+			// A bare /model on an interactive terminal opens a picker over the
+			// models this session knows (docs/tui-polish.md, track 4); Enter
+			// switches the coder. Piped/plain sessions keep the printout.
+			if name == "" && sessionsInspectable(editor) {
+				picker := newModelPicker(session)
+				if err := inspectSession(editor, picker); err == nil && picker.Accepted() {
+					if id := picker.SelectedID(); id != "" && id != session.Request.Model {
+						session.SetModel(id)
+						fmt.Println(style.Paint("code model -> "+id, style.Dim))
+					}
+				}
+				continue
+			}
 			if name == "" {
 				fmt.Printf("code:  %s @ %s\nstudy: %s @ %s\n",
 					session.Request.Model, session.Request.BaseURL,
