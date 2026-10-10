@@ -241,6 +241,7 @@ var helpLines = []string{
 	"/undo [N]          revert the Nth-most-recent turn's file changes (default 1)",
 	"/sessions          pick a saved session to resume (plain list when not a TTY)",
 	"/last              every tool call of the last turn, unabridged (Ctrl-O)",
+	"/memory            browse saved memory notes, read-only (the agent writes them)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
 	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
@@ -795,6 +796,37 @@ func main() {
 		// well as a debugging one — see contextReport's doc comment).
 		if input == "/help" {
 			printHelp()
+			continue
+		}
+		// /memory browses the saved notes, read-only — writing and forgetting
+		// stay model-driven (docs/memory-tools.md). On a TTY: a picker over
+		// both tiers; Enter opens a note, leaving it returns to the list.
+		if input == "/memory" {
+			if len(newMemoryPicker(session).items) == 0 {
+				fmt.Println(style.Paint("no memory notes yet — ask the agent to remember something", style.Dim))
+				continue
+			}
+			if !sessionsInspectable(editor) {
+				for _, l := range newMemoryPicker(session).Lines(0) {
+					fmt.Println(strings.TrimPrefix(strings.TrimPrefix(l, "> "), "  "))
+				}
+				continue
+			}
+			cursor := 0
+			for {
+				picker := newMemoryPicker(session)
+				picker.SetCursor(cursor)
+				if err := inspectSession(editor, picker); err != nil || !picker.Accepted() || picker.SelectedID() == "" {
+					break
+				}
+				cursor = picker.Selected()
+				id := picker.SelectedID()
+				body, err := readMemoryNote(session, id)
+				if err != nil {
+					body = "could not read " + id + ": " + err.Error()
+				}
+				_ = inspectSession(editor, noteView{id: id, body: body})
+			}
 			continue
 		}
 		// /last opens the last turn's tool calls, unabridged — what the
