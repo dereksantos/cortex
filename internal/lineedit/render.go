@@ -17,14 +17,33 @@ import (
 // math. Two cases: a normal line scrolls horizontally to keep the cursor in
 // view; a multi-line paste collapses to a summary (you send it, you don't
 // in-line edit a pasted block).
-func renderLine(prompt string, buf *buffer, width int) string {
+//
+// ghost is an optional dim hint drawn after the input (a completion preview);
+// it shows only when the input isn't scrolled and it fits, and never moves
+// the cursor.
+func renderLine(prompt string, buf *buffer, width int, ghost string) string {
 	if width < 1 {
 		width = 80
 	}
 	if buf.hasNewline() {
 		return renderSummary(prompt, buf, width)
 	}
-	return renderScroll(prompt, buf, width)
+	out := renderScroll(prompt, buf, width)
+	if ghost == "" {
+		return out
+	}
+	used := displayWidth(prompt) + widthOf(buf.runes)
+	if used >= width-1 {
+		return out
+	}
+	hint := truncate(ghost, width-1-used)
+	if hint == "" {
+		return out
+	}
+	// renderScroll ends by parking the cursor; draw the hint right after the
+	// input, then re-park with the same tail.
+	park := out[strings.LastIndex(out, "\r"):]
+	return out[:strings.LastIndex(out, "\r")] + dim(hint) + park
 }
 
 func renderScroll(prompt string, buf *buffer, width int) string {

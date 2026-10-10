@@ -255,17 +255,35 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 	if t.completers != nil {
 		completion = NewCompletions()
 	}
+	// rowShown is whether a candidate row sits on the line below the input.
+	rowShown := false
 	redraw := func(row string) {
-		io.WriteString(t.out, renderLine(prompt, buf, t.width()))
 		// The candidate row renders below the input row as a plain-text row
-		// (no popup box). renderLine parks the cursor at the end of the input
-		// row, so the row text lands on the next line, and a fresh input-row
-		// redraw (\r\033[K) clears it because the candidate row never exceeds
-		// the terminal width. A multi-line buffer collapses to a summary
-		// (renderSummary), which is itself a single row, so the invariant
-		// holds there too.
+		// (no popup box), with the cursor kept on the input row. Every redraw
+		// first clears from the input row down (\033[J) when a row is showing,
+		// so the row never outlives the state that drew it — before, the next
+		// keystroke repainted the input over the row line and left a stale
+		// copy of the line above it.
+		lead := ""
+		if rowShown {
+			lead = "\r\033[J"
+			rowShown = false
+		}
 		if row != "" {
-			io.WriteString(t.out, "\r\n"+truncate(row, t.width()))
+			// Make room first: a newline at the bottom of the screen scrolls,
+			// and the cursor comes back up with the content.
+			lead += "\n\033[1A"
+		}
+		ghost := ""
+		if row == "" {
+			ghost = t.ghostHint(buf)
+		}
+		io.WriteString(t.out, lead+renderLine(prompt, buf, t.width(), ghost))
+		if row != "" {
+			// Save the cursor (parked at the edit column), draw the row on the
+			// line below, and restore it.
+			io.WriteString(t.out, "\0337\r\n\033[K"+truncate(row, t.width())+"\0338")
+			rowShown = true
 		}
 	}
 	redraw("")
@@ -285,6 +303,9 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 		}
 		switch ev.kind {
 		case keyEnter:
+			if rowShown {
+				redraw("") // clear the candidate row before the line is left behind
+			}
 			line := buf.string()
 			if accepted != nil {
 				io.WriteString(t.out, "\r\033[K"+accepted(line, t.width()))
@@ -305,6 +326,11 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 			filled, pos, row := completion.Tab(buf.string(), buf.pos, func(l string, c int) []string {
 				return cands
 			})
+			if c, ok := completion.focused(); ok {
+				if d := t.describe(c); d != "" {
+					row += "  " + dim(d) // one candidate in focus: say what it does
+				}
+			}
 			setBuffer(buf, filled)
 			buf.pos = pos
 			redraw(row)
@@ -388,6 +414,44 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 		}
 		redraw("")
 	}
+}
+
+// describe asks the wired completers for a one-line description of a
+// candidate ("" when none offers one).
+func (t *Terminal) describe(cand string) string {
+	for _, name := range []string{"slash", "model", "path"} {
+		if d, ok := t.completers[name].(Describer); ok {
+			if s := d.Describe(cand); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// ghostHint is the dim remainder shown after the cursor while a /command is
+// being typed and only one command still matches — "/co" previews "mpact" and
+// what it does. Tab accepts it (the single-match fill). "" whenever the hint
+// would be a guess: the cursor isn't at the end, the word isn't a /command,
+// or more than one command matches.
+func (t *Terminal) ghostHint(buf *buffer) string {
+	c, ok := t.completers["slash"]
+	if !ok || buf.pos != len(buf.runes) || buf.hasNewline() {
+		return ""
+	}
+	line := buf.string()
+	if !strings.HasPrefix(line, "/") || strings.ContainsAny(line, " \t") {
+		return ""
+	}
+	cands := c.Candidates(line, buf.pos)
+	if len(cands) != 1 || !strings.HasPrefix(cands[0], line) {
+		return ""
+	}
+	hint := cands[0][len(line):]
+	if d := t.describe(cands[0]); d != "" {
+		hint += "   " + d
+	}
+	return hint
 }
 
 // completionCandidates merges every wired completer's candidates for the
