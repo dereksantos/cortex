@@ -1,7 +1,7 @@
 # REPL Polish — Scope
 
-> **Status. Tracks 1–2 BUILT (2026-10-09, branch
-> `feat/repl-polish-foundation`); tracks 3–5 PROPOSED.** Track 1 landed as:
+> **Status. Tracks 1–5 BUILT (2026-10-09, branch
+> `feat/repl-polish-foundation`, PR #253).** Track 1 landed as:
 > `internal/style` (roles, NO_COLOR, `Width`/`Clip`/`Justify`/`Wrap`,
 > `ContentWidth`); literal-string render goldens in
 > `internal/tools/render_golden_test.go` and
@@ -17,10 +17,18 @@
 > (cost moved to the footer, which also carries the thought time; the gauge is
 > not repeated there); a quieted glamour theme (accent inline code, no chips,
 > plain bold headings, `-` bullets); the live status row names a running call
-> with the same short verb (`tools.ShortAction`). NEXT: Derek is leaning
-> toward a full-screen TUI (control + animating context management) — this
-> reverses the 2026-08-06 hybrid decision and needs its own scope. Visual mock
-> of the proposed turn, startup, input, picker and confirm surfaces:
+> with the same short verb (`tools.ShortAction`). Tracks 3–5 landed on top of
+> upstream's #108 completion and #110 picker: a dim one-match preview +
+> descriptions for /commands (vocabulary parsed from /help), a fix for the
+> stale line Tab used to leave, Alt-Enter multi-line drafts edited a line at a
+> time (`[line 2/3]`, Up/Down between lines; pastes land in the same view — no
+> separate chip), a `/model` picker and a read-only `/memory` browser
+> (`list_picker.go`), `/last` + Ctrl-O for the last turn's calls unabridged
+> (`tools.TurnLog`), the risky confirm laid out like a tool line, and `?` key
+> hints. NEXT: a full-screen TUI is planned (Derek, 2026-10-09: "TUI is
+> planned but not yet") (control + animating context management); it reverses
+> the 2026-08-06 hybrid decision and needs its own scope. Visual mock of the
+> proposed turn, startup, input, picker and confirm surfaces:
 > <https://claude.ai/artifact/5a9HJ1ZEqhEc3yhvedRD4Q> (hand-written lines, not
 > real output).
 
@@ -169,9 +177,8 @@ golden updates.
 
 1. ~~Fold timing~~ — decided 2026-10-09: the folded line prints when the run
    ends; while it runs, the live status row names the current call.
-2. Does `@path` attach file content to the turn, or just name the path for
-   the model to read with its own tools? The second keeps context
-   model-driven, consistent with `docs/memory-tools.md`.
+2. ~~`@path` attach or name~~ — settled upstream (#108): a submitted
+   `@path` attaches the file (or its outline) to the turn.
 3. ~~Footer vs prompt-bar status~~ — decided 2026-10-09: the prompt row
    keeps model + gauge; version moved to the startup header, cost to the
    footer.
