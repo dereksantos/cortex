@@ -32,6 +32,7 @@ const (
 	keyAbort         // Ctrl-G
 	keyTab           // Tab (completion, issue #108)
 	keyPaste         // bracketed paste (text in keyEvent.paste)
+	keyNewline       // Alt-Enter: a newline inside the input instead of submitting
 	keyUnknown
 )
 
@@ -156,6 +157,8 @@ func decodeEscape(src byteSource) (keyEvent, error) {
 			return keyEvent{kind: keyLeft}, nil
 		}
 		return keyEvent{kind: keyUnknown}, nil
+	case '\r', '\n':
+		return keyEvent{kind: keyNewline}, nil // Alt-Enter
 	case 'b':
 		return keyEvent{kind: keyWordLeft}, nil // Alt-b
 	case 'f':

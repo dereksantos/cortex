@@ -79,24 +79,17 @@ func renderScroll(prompt string, buf *buffer, width int) string {
 	return out
 }
 
-// renderSummary shows a one-line digest of a multi-line buffer (a paste):
-// the first line, truncated, plus a count of the rest.
+// renderSummary shows a multi-line buffer (a paste, or Alt-Enter newlines)
+// on its single row as the line holding the cursor — scrolled and editable
+// like any other line — with a dim "[line 2/3]" tag, so a multi-line draft
+// stays editable instead of collapsing to a frozen digest.
 func renderSummary(prompt string, buf *buffer, width int) string {
-	text := buf.string()
-	first := text
-	if i := strings.IndexByte(text, '\n'); i >= 0 {
-		first = text[:i]
-	}
-	extra := strings.Count(text, "\n")
-	tag := fmt.Sprintf("  [+%d lines, %d chars]", extra, len([]rune(text)))
-
-	promptW := displayWidth(prompt)
-	avail := width - promptW - displayWidth(tag)
-	if avail < 0 {
-		avail = 0
-	}
-	first = truncate(first, avail)
-	return "\r\033[K" + prompt + first + tag
+	start, end, line, lines := buf.lineBounds()
+	cur := &buffer{runes: buf.runes[start:end], pos: buf.pos - start}
+	tag := fmt.Sprintf("  [line %d/%d]", line, lines)
+	out := renderScroll(prompt, cur, width-displayWidth(tag))
+	cut := strings.LastIndex(out, "\r")
+	return out[:cut] + dim(tag) + out[cut:]
 }
 
 // truncate cuts s to at most w display columns, appending "…" if shortened.
