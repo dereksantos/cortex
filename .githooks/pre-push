@@ -10,6 +10,11 @@
 # What it runs:
 #   1. golangci-lint run --timeout=5m  (if installed)
 #   2. go test ./...                   (5-30s depending on cache)
+#   3. hug hook pre-push               (only in a clone `hug setup` ran in)
+#      Reports the pushed commits to githug so they show as verified.
+#      `hug setup` can't install its own pre-push hook here because this
+#      file already exists, so this hook calls it. A failed attest only
+#      warns; the push goes ahead with commits shown as "consistent".
 #
 # Bypass for a single push (when you know what you're doing):
 #   git push --no-verify
@@ -68,6 +73,15 @@ if ! env "${env_unset_args[@]}" go test ./... </dev/null >"$test_log" 2>&1; then
   echo "✖ pre-push: tests failing. Tail of output:" >&2
   tail -40 "$test_log" >&2
   exit 1
+fi
+
+# githug attest: only where hug is installed AND `hug setup` configured
+# this clone (it sets githug.repo), so other clones skip it silently.
+if command -v hug >/dev/null 2>&1 && [ -n "$(git config --get githug.repo || true)" ]; then
+  echo "→ hug attest ..."
+  if ! hug hook pre-push "$@" <"$push_input"; then
+    echo "⚠ hug attest failed — pushing anyway; commits will show as consistent, not verified." >&2
+  fi
 fi
 
 echo "✓ pre-push checks passed"
