@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
 )
@@ -79,6 +80,8 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
+	began := time.Now()
+	cs.lastTurn = nil
 
 	turnStart := len(cs.Request.Messages)
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
@@ -193,6 +196,8 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
+	summary := summarizeTurn(turnMsgs, time.Since(began), stats.Cost)
+	cs.lastTurn = &summary
 
 	return TurnResult{Reply: content, StopReason: stats.StopReason}, nil
 }

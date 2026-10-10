@@ -686,6 +686,7 @@ func main() {
 		}
 		switch {
 		case err == nil:
+			session.printTurnFooter()
 			// Red gauge: compact at the turn boundary, before the window
 			// actually overflows. The boundary is the only safe point —
 			// mid-turn compaction would orphan tool_call sequences.
