@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Locate-before-writing accountability (#224): a new built-in principle
+  (`locateBeforeWritingPrinciple` in `cmd/cortex/prompt.go`) tells the model
+  that before writing code naming a helper, constant, type or path it has not
+  seen this session, it must grep or outline for it and use what exists —
+  never invent identifiers, type shapes, or file paths — and that before
+  adding a new package-level name (a test helper, a const, a fixture) it must
+  grep the package, including its other `_test.go` files, so the name exists
+  where it is called and does not collide with one already declared. It is
+  the writing half of the locate-first principle (#142), which until now was
+  applied to reading but not to writing: the self-dev loop's tick
+  20261006T074738Z reviews (PRs #222/#223) found sessions writing test files
+  against guessed identifiers (seven undefined at once), carrying a
+  type-shape compile error from one session into the next, and duplicating a
+  package-level const — each guess costing a build-and-fix round. It rides in
+  the base system prompt right after `locateFirstPrinciple` (so every turn
+  sees it, including the self-dev loop's ordinary step turns) and is restated
+  in each plan step prompt, where new files actually get written and
+  turn-boundary demotion can otherwise fold the locate work out of view.
+  Mirrored verbatim in `CLAUDE.md`'s "The agent's tools" section, and pinned
+  by content, position, plan-step-carry, and mirror tests.
+  The same issue's mechanical backstop rides with it: after a `.go`
+  `write_file`/`edit_file` lands, a stdlib-only pass
+  (`internal/tools/writesanity.go`) parses the written file's PACKAGE —
+  same-package `_test.go` siblings included, siblings excluded by build
+  constraints (`_windows.go` filename suffixes and `//go:build` lines this
+  process cannot judge are left out, so a legal platform twin pair never
+  reports a collision) — and appends ONE note listing every duplicate
+  package-level declaration and every bare name undefined anywhere in the
+  package, so a session fixes a batch of compile errors in one round instead
+  of one per build. The note never vetoes the write and is silent for non-Go
+  files, unparseable files, and clean packages.
+- Review-feedback accountability (#162): a new built-in principle
+  (`reviewFeedbackPrinciple` in `cmd/cortex/prompt.go`) tells the model that
+  every finding a review raises is owed an explicit disposition — addressed,
+  deferred with a reason, or disputed — so a dropped finding is visible instead
+  of silently vanishing; that several options offered as *alternatives* mean
+  picking one and saying which, never applying them all; that listed example
+  instances stand for an underlying class to fix, not the only instances to
+  patch; and that something goes where the reviewer said it should, not in a
+  nearby file. It rides in the base system prompt (so every turn sees it,
+  including the self-dev loop's ordinary step turns) and is restated in each
+  plan step prompt, where a review round's findings are actually applied and
+  turn-boundary demotion can otherwise fold the review out of view. It answers
+  the self-dev loop's reviews of PRs #158, #145, and #143, where review asks
+  survived several rounds unfixed, notes asked to be kept were dropped, both
+  offered alternatives were applied (printing one summary twice), and each
+  round patched one more example instead of closing the class. Mirrored
+  verbatim in `CLAUDE.md`'s "Constraints" section, restated in each
+  plan step prompt, and pinned by content, position, and mirror tests.
+- Journaled commit attribution (#146): a new machine-level `attribution`
+  writer-class (`attribution.commit`, `~/.cortex/journal/attribution/`) records
+  every `git commit` the harness sees and whether it carried the attribution
+  trailer — the `bash` tool's backstop, `cortex change commit`, and the Discord
+  WIP checkpoint. Each commit gets an intent event naming what the backstop
+  decided (`added`, `already_present`, `skipped_unparseable`, `skipped_amend`,
+  `skipped_stdin`, `disabled`) and, once the commit lands, a verified event with
+  its SHA and whether `git log -1` actually finds the trailer, so compliance is
+  measured rather than assumed. Writes are local and best-effort.
+- Self-ignoring `.cortex/` in git workspaces (#119): the first session in a
+  workspace that is inside a git repository writes a self-contained
+  `.cortex/.gitignore` (a lone `*`) so session transcripts, journal segments,
+  history, and memory are excluded from git without editing the user's own
+  `.gitignore`. A one-line `note:` to stderr announces the write; a repeat
+  session, a non-git workspace, an already-ignored `.cortex/`, or a missing
+  git binary is a silent no-op. This closes the leak where a routine
+  `git add -A && git commit` published transcripts that could carry secrets
+  captured from tool output (#103).
+
 ## [0.3.0] - 2026-08-07 — the Cortex slimdown
 
 First published release: the earlier `0.1.0` and `0.2.0-alpha` sections

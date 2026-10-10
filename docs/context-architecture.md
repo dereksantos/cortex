@@ -129,6 +129,8 @@ with a permanent per-turn break from the index fold.
 │ │   t3 · …            ◀── grows ONLY at its own tail        │ │
 │ ├───────────────────────────────────────────────────────────┤ │
 │ │ [user]    MEMORY INDEX          changes on memory_write   │ │
+│ ├───────────────────────────────────────────────────────────┤ │
+│ │ [user]    SKILLS INDEX + WORKSPACE NOTE                   │ │
 │ └───────────────────────────────────────────────────────────┘ │
 ├───────────────────────────────────────────────────────────────┤
 │ ZONE B — HYDRATED TAIL (volatile, low-wm ≈ W/3 … high ≈ W/2)  │
@@ -142,7 +144,11 @@ with a permanent per-turn break from the index fold.
 
 - **Zone A only ever grows at its own tail.** Steady state, the LCP covers the
   system prompt, the entire outline so far, and the index — the bulk of a long
-  session.
+  session. The zone-A tail also carries the skills index and, on every turn,
+  the one-line **workspace note** (the absolute workspace root,
+  `workspaceNote` in `cmd/cortex/tool_deps.go` — issue #142's "stop guessing
+  foreign paths" line): static for the session's life, so it never breaks the
+  prefix cache by itself.
 - **Zone B is the working set** in `working-memory.md`'s sense: the last n
   turns the model actually needs verbatim, bounded by a token budget. It
   re-prefills only when zone A grew (a demotion batch or a memory write) —
@@ -254,6 +260,9 @@ output     MaxTokens (existing reserve)
         write a `demote` event so the decision is journaled/auditable)
 2. outline > cap?  → schedule a fold (may run via Summarize before send, or deferred)
 3. send; runLoop appends as today — within-turn requests are pure prefix extension
+   (within a turn, before EACH send: in-turn demotion may swap the previous
+    turn's and the current turn's oldest tool results for recall-citable stubs
+    in the wire copy only — see "In-turn demotion"; the transcript is never touched)
 ```
 
 No scoring model, no triage LLM on the hot path. `working-memory.md`'s
@@ -264,6 +273,62 @@ triage node was going to make is deferred to the model itself at recall time —
 the same pivot `memory-tools.md` made for durable memory, applied to the
 window.
 
+## In-turn demotion (message-granular, before each send)
+
+The flow above demotes at **turn granularity, when a turn ends**. Within one
+turn, `runLoop` appends every assistant message and tool result to the wire set
+and nothing shrinks until the turn ends — so a single long turn (many large
+tool results) can overflow the window before the next request is built and the
+next send fails (issue #171: a self-dev run grew to ~131k prompt tokens against
+a 131072 window). **In-turn demotion** fixes the same problem at **message
+granularity, inside the turn**.
+
+Before each main-loop send, if the **whole prompt** (wire prefix + hydrated
+tail + current turn) has outgrown the **high watermark** (the same W/2
+the turn-end path uses), the **oldest** stubbable tool results are swapped, in
+the wire copy only, for one-line stubs that carry a **recall citation** into
+the session transcript — draining until at or under the **low watermark** (W/3)
+or nothing stubbable remains. The current turn's candidates are drained first
+(oldest first, keepRecent stay verbatim); when they are exhausted and the
+prompt is still over the low watermark, the drain continues into the hydrated
+tail (`[FrontierMsg(), turnStart)`, which may span several turns — the tail's
+spans are the ones DemoteBatch never demotes). This is what issue #180 adds: a
+resumed session with a large verbatim tail now triggers in-turn demotion even
+when the current turn alone is small. Under the high watermark the request
+goes out byte-for-byte as today.
+
+**What stays verbatim (never stubbed):** the turn's first and any
+harness-injected user messages; all assistant text and tool calls (the model's
+own reasoning); and the most recent `context.in_turn_keep_recent` (default 6)
+tool results of the current turn — the newest few are what the model is
+actively working from. The hydrated tail's results are stubbable candidates
+(oldest first) but are only touched after the current turn's candidates are
+exhausted, with the keepRecent carve-out applying to the tail as a whole (its
+newest `keepRecent` results stay verbatim, independently of the current
+turn's).
+
+**Stub format** — one line, recall-citable:
+
+```
+[demoted: <tool>(<short args>) → <N> lines, <ok|error><: first error line, if any>. recall @session/<id>#m<i>-<i+1> for the full output]
+```
+
+`<i>` is the message's index in the session transcript (the same half-open
+single-message coordinate turn-outline citations use, `demote.go`). `ToolCallID`
+and `Role` are preserved on the wire message, so the tool result still pairs
+with its assistant tool call (a broken pairing would be rejected by the
+provider).
+
+**The transcript stays canonical.** Only the wire copy (`cs.Request.Messages`)
+is mutated — `writeTranscript` already recorded each tool result's original
+content before it was ever stubbed, so the transcript (the lossless record)
+keeps every original. `recall(<stub's citation>)` therefore returns the
+original verbatim, and resume replays the full record. Turn-end demotion still
+works from the transcript, so the outline entry is built from the **original**
+messages, not the stubs. Config: `context.in_turn_demotion` (default on; absent
+= enabled — an availability kill-switch) and `context.in_turn_keep_recent`
+(default 6) — `docs/configuration.md`.
+
 ## What changes where
 
 | Piece | Home | Status |
@@ -272,6 +337,7 @@ window.
 | Turn assembly calls demote-then-send; `wireMessages` emits the two zones | `cmd/cortex` (`Turn`, `transport.go`) | **change** |
 | Memory index → fixed prefix slot | `cmd/cortex/turn.go` / `transport.go` | **change** (small, cache-positive on its own) |
 | Outline entry renderer | reuse `captureTurn`'s distillation | **reuse** |
+| In-turn demotion: message-granular stub policy (pure) + the `BeforeSend` wire seam + session adapter | pure policy `internal/cache/indemote.go`; seam `cmd/cortex/loop.go` (`Toolset.BeforeSend`); adapter `cmd/cortex/indemote.go` (wired by `turn.go`) | **new** |
 | `recall(citation)` | `internal/tools` + a `ToolDeps` method | **new (trivial)** |
 | Outline fold | existing `Summarize` | **reuse** |
 | `Compact` | kept as-is, unreachable in normal operation post-P2 (`/compact` still calls the original chunk-and-fold `Compact`, `cmd/cortex/session.go:466`, not the mechanical demote/fold path) | **keep (safety net)** |

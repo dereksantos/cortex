@@ -43,8 +43,30 @@ always-on, no model call.
 
 ## System-prompt guidance (principles, not recipes)
 
+The base prompt always carries one short line:
+
 ```
-You have a memory: named notes you've written, listed in the index below.
+You have a persistent memory: named notes you've written in earlier sessions,
+managed through tools.
+```
+
+When there's something to use it on — a note index exists, or the session
+outline has demoted turns — the full guidance section rides on top for that
+turn, provided the session's base prompt is the built-in one. The decision
+is a pure per-request helper (`memorySectionFor` in `cmd/cortex/prompt.go`;
+called from `turn.go`), and the section is delivered through the same
+ephemeral wire slot as the memory index — it never touches the stored system
+message, which stays byte-stable for the whole session so the prompt cache
+survives.
+
+A `prompt.file` replacement suppresses the section: the file REPLACES the
+built-in base prompt (see `docs/configuration.md`), so a custom prompt owns
+its own memory guidance rather than having the built-in section ride on top
+of it — the memory INDEX note still injects either way.
+
+```
+When notes exist, their index is appended to the turn so you can see what you
+can recall.
 - Read the notes relevant to the task before answering.
 - Saving is rare; most turns produce nothing worth a note. The journal already
   records every turn mechanically, and the code and git history record
@@ -56,6 +78,13 @@ You have a memory: named notes you've written, listed in the index below.
   rather than trusting it.
 - For detail a note only points at, study the journal.
 ```
+
+Plus the outline/recall paragraph for long sessions (demoted turns appear as
+`@session/…` citations; recall the citation before answering).
+
+This conditional split keeps the base prompt small for small local models —
+the full section (the `memoryPromptSection` const, ~329 tokens at the
+chars/4 estimate) is injected only on turns where it can act on something.
 
 (Tuned 2026-07-10: the original affirmative "when you learn something, save
 it" read as a per-turn duty and produced hoarding. The default is now

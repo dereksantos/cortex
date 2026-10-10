@@ -15,10 +15,10 @@ package main
 //
 //	CORTEX_LIVE_FLEET=1 go test ./cmd/cortex/ -run ContextEval_Live -v -timeout 1800s
 //
-// Tunables (defaults target the fleet's 80b qwen):
+// Tunables (defaults target the fleet's default coder):
 //
 //	CORTEX_CTX_EVAL_ENDPOINT  backend base URL   (default http://localhost:4000)
-//	CORTEX_CTX_EVAL_MODEL     coder model tag    (default qwen3-coder-q3)
+//	CORTEX_CTX_EVAL_MODEL     coder model tag    (default qwen3.8-27b)
 //	CORTEX_CTX_EVAL_STUDY     summarizer tag     (default glm-4.7-flash)
 //	CORTEX_CTX_EVAL_WINDOW    session window     (default 4096; smaller = faster)
 //	CORTEX_CTX_EVAL_TURNS     filler turns       (default 6)
@@ -53,6 +53,23 @@ func liveEnv(name, def string) string {
 		return v
 	}
 	return def
+}
+
+// liveDefaultCoderModel is the default coder binding for the live evals
+// (context eval, pivot eval, learn-user eval) — chatterbox's default coder
+// as of the 2026-09-28 fleet change. Shared by cmd/cortex/*_live_test.go so
+// a fleet swap edits one line.
+const liveDefaultCoderModel = "qwen3.8-27b"
+
+// TestLiveDefaultCoderModel pins the shared live-eval default to the current
+// live-fleet default coder. The exact match — not a "not one of the retired
+// names" check — rules out every dead model at once, so a fleet-change sweep
+// that forgets the live evals fails here instead of pointing them at
+// endpoints that no longer exist.
+func TestLiveDefaultCoderModel(t *testing.T) {
+	if liveDefaultCoderModel != "qwen3.8-27b" {
+		t.Errorf("liveDefaultCoderModel = %q, want qwen3.8-27b (current live-fleet default coder)", liveDefaultCoderModel)
+	}
 }
 
 func liveEnvInt(name string, def int) int {
@@ -216,7 +233,7 @@ func TestContextEval_Live(t *testing.T) {
 		t.Skip("set CORTEX_LIVE_FLEET=1 to run the live context eval")
 	}
 	endpoint := liveEnv("CORTEX_CTX_EVAL_ENDPOINT", "http://localhost:4000")
-	model := liveEnv("CORTEX_CTX_EVAL_MODEL", "qwen3-coder-q3")
+	model := liveEnv("CORTEX_CTX_EVAL_MODEL", liveDefaultCoderModel)
 	study := liveEnv("CORTEX_CTX_EVAL_STUDY", "glm-4.7-flash")
 	// Defaults sized so the first demotion batch (~4 outline entries) fits the
 	// outline cap (W/8) with room to spare: the graded probe must land while

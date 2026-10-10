@@ -50,11 +50,11 @@ func TestRenderGoldenPromptBar(t *testing.T) {
 		wantLeft   string
 		wantStatus string
 	}{
-		{"idle", phaseIdle, false, "qwen3-coder-q3  10k|60k  . ❯ ", "qwen3-coder-q3  10k|60k"},
-		{"thinking", phaseThinking, false, "qwen3-coder-q3  10k|60k  * ❯ ", "qwen3-coder-q3  10k|60k"},
-		{"streaming", phaseStreaming, false, "qwen3-coder-q3  10k|60k  ~ ❯ ", "qwen3-coder-q3  10k|60k"},
-		{"idle colored", phaseIdle, true, "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>  <90>.</> <36>❯</> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
-		{"thinking colored", phaseThinking, true, "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>  <96>*</> <36>❯</> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
+		{"idle", phaseIdle, false, "qwen3-coder-q3  10.1k|60k  . ❯ ", "qwen3-coder-q3  10.1k|60k"},
+		{"thinking", phaseThinking, false, "qwen3-coder-q3  10.1k|60k  * ❯ ", "qwen3-coder-q3  10.1k|60k"},
+		{"streaming", phaseStreaming, false, "qwen3-coder-q3  10.1k|60k  ~ ❯ ", "qwen3-coder-q3  10.1k|60k"},
+		{"idle colored", phaseIdle, true, "<90>qwen3-coder-q3</>  <90>10.1k</><90>|</><33>60k</>  <90>.</> <36>❯</> ", "<90>qwen3-coder-q3</>  <90>10.1k</><90>|</><33>60k</>"},
+		{"thinking colored", phaseThinking, true, "<90>qwen3-coder-q3</>  <90>10.1k</><90>|</><33>60k</>  <96>*</> <36>❯</> ", "<90>qwen3-coder-q3</>  <90>10.1k</><90>|</><33>60k</>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

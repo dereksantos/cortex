@@ -18,7 +18,8 @@ func TestRemovePathTool(t *testing.T) {
 	cs := &CortexSession{allowDelete: true, deleteRoot: root}
 	call := func(p string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": p})
-		return tools.Execute(context.Background(), tc(FunctionRemove, string(args)), cs)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionRemove, string(args)), cs)
+		return out, err
 	}
 
 	t.Run("deletes a file in the workspace", func(t *testing.T) {
@@ -61,7 +62,7 @@ func TestRemovePathTool(t *testing.T) {
 	t.Run("disabled session refuses", func(t *testing.T) {
 		off := &CortexSession{allowDelete: false, deleteRoot: root}
 		args, _ := json.Marshal(map[string]string{"path": "x"})
-		if _, err := tools.Execute(context.Background(), tc(FunctionRemove, string(args)), off); err == nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionRemove, string(args)), off); err == nil {
 			t.Error("disabled remove_path should error")
 		}
 	})

@@ -104,7 +104,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("reads existing file", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": path})
-		got, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -115,7 +115,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("missing file errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": filepath.Join(dir, "nope.txt")})
-		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil); err == nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil); err == nil {
 			t.Fatal("expected error reading missing file")
 		}
 	})
@@ -126,7 +126,7 @@ func TestWriteFileTool(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	args, _ := json.Marshal(map[string]string{"path": path, "content": "written by cortex"})
 
-	got, err := tools.Execute(context.Background(), tc(FunctionWriteFile, string(args)), nil)
+	got, _, err := tools.Execute(context.Background(), tc(FunctionWriteFile, string(args)), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +146,8 @@ func TestWriteFileTool(t *testing.T) {
 func TestEditFileTool(t *testing.T) {
 	edit := func(path, oldS, newS string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": path, "old_string": oldS, "new_string": newS})
-		return tools.Execute(context.Background(), tc(FunctionEditFile, string(args)), nil)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionEditFile, string(args)), nil)
+		return out, err
 	}
 
 	t.Run("unique match is replaced", func(t *testing.T) {
@@ -212,7 +213,7 @@ func TestEditFileTool(t *testing.T) {
 func TestBashTool(t *testing.T) {
 	t.Run("allowlisted command runs", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "echo hello"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -227,7 +228,7 @@ func TestBashTool(t *testing.T) {
 		// blocked and reported back (as a result, not an error) so the model
 		// can adapt.
 		args, _ := json.Marshal(map[string]string{"command": "curl http://example.com"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("gating should not error: %v", err)
 		}
@@ -239,7 +240,7 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("empty command errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "   "})
-		if _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil); err == nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil); err == nil {
 			t.Fatal("expected error for empty command")
 		}
 	})
@@ -250,7 +251,7 @@ func TestBashTool(t *testing.T) {
 		// session the study path is unavailable; the old truncation
 		// behavior must hold.
 		args, _ := json.Marshal(map[string]string{"command": "head -c 20000 /dev/zero"})
-		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
+		got, _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -268,7 +269,7 @@ func TestBashTool(t *testing.T) {
 // (unexported) helpers they cover.
 
 func TestExecuteUnknownTool(t *testing.T) {
-	if _, err := tools.Execute(context.Background(), tc("frobnicate", `{}`), nil); err == nil {
+	if _, _, err := tools.Execute(context.Background(), tc("frobnicate", `{}`), nil); err == nil {
 		t.Fatal("expected error for unknown tool name")
 	}
 }
@@ -339,6 +340,99 @@ func TestProjectInstructionsInjection(t *testing.T) {
 		}
 	})
 
+	t.Run("CLAUDE.md is found in a parent directory", func(t *testing.T) {
+		// No AGENTS.md anywhere: the ancestor walk resolves CLAUDE.md the
+		// same way it resolves AGENTS.md, and the header names the file.
+		root := t.TempDir()
+		os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("root claude\n"), 0644)
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		t.Chdir(child)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "root claude") {
+			t.Error("CLAUDE.md in an ancestor directory should be found")
+		}
+		if !strings.Contains(sys, agentsMarkerPrefix+"CLAUDE.md)\n\nroot claude") {
+			t.Error("CLAUDE.md body must follow the project-instructions separator naming CLAUDE.md")
+		}
+	})
+
+	t.Run("deeper dir's CLAUDE.md beats an ancestor's AGENTS.md", func(t *testing.T) {
+		// The walk is nearest-wins: with AGENTS.md at the root and CLAUDE.md
+		// one level down, running from below the CLAUDE.md directory loads
+		// the deeper CLAUDE.md — the ancestor's AGENTS.md never wins once a
+		// nearer directory carries any candidate file.
+		root := t.TempDir()
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("root agents\n"), 0644)
+		os.WriteFile(filepath.Join(root, "a", "CLAUDE.md"), []byte("deeper claude\n"), 0644)
+		t.Chdir(child)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "deeper claude") {
+			t.Error("the deeper dir's CLAUDE.md body should be seeded (nearest wins)")
+		}
+		if !strings.Contains(sys, agentsMarkerPrefix+"CLAUDE.md)\n\ndeeper claude") {
+			t.Error("the header must name CLAUDE.md")
+		}
+		if strings.Contains(sys, "root agents") {
+			t.Error("the ancestor's AGENTS.md body must not appear (no concatenation, nearest dir wins)")
+		}
+	})
+
+	t.Run("found at the .cortex-anchored root from a nested directory", func(t *testing.T) {
+		// A .cortex dir anchors the project root (findUp(".cortex")); the file
+		// at that root is reached from a nested subdirectory too.
+		root := t.TempDir()
+		os.MkdirAll(filepath.Join(root, ".cortex"), 0755)
+		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("from the root"), 0644)
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		t.Chdir(child)
+
+		if sys := (CortexArgs{}).Request().Messages[0].Content; !strings.Contains(sys, "from the root") {
+			t.Error("AGENTS.md at the .cortex-anchored project root should be found from a subdirectory")
+		}
+	})
+
+	t.Run("CLAUDE.md is appended when AGENTS.md is absent", func(t *testing.T) {
+		// The .cortex dir anchors WorkspaceFromCWD (findUp(".cortex")) at
+		// THIS dir, so fileLabel labels the loaded file relative to it —
+		// without it the walk would reach the test runner's own tree.
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, ".cortex"), 0755)
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("CLAUDE conventions\n"), 0644)
+		t.Chdir(dir)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "CLAUDE conventions") {
+			t.Error("CLAUDE.md body should be seeded when AGENTS.md is absent")
+		}
+		// The seeded body must follow the shared agentsMarker separator —
+		// the same structural contract the AGENTS.md subtest above checks,
+		// and the header must name the loaded file (#147).
+		if !strings.Contains(sys, agentsMarkerPrefix+"CLAUDE.md)\n\nCLAUDE conventions") {
+			t.Error("CLAUDE.md body must follow the project-instructions separator naming CLAUDE.md")
+		}
+	})
+
+	t.Run("AGENTS.md beats CLAUDE.md — no concatenation", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("agents wins\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("claude loses\n"), 0644)
+		t.Chdir(dir)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "agents wins") {
+			t.Error("AGENTS.md body should be seeded")
+		}
+		if strings.Contains(sys, "claude loses") {
+			t.Error("CLAUDE.md body must not appear when AGENTS.md wins — no concatenation")
+		}
+	})
+
 	t.Run("oversized file is truncated", func(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(strings.Repeat("x", maxInstructionBytes+100)), 0644)
@@ -368,7 +462,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		size := (curationBudgetTokens + 1000) * 4
 		os.WriteFile(big, make([]byte, size), 0644) // over the budget
 		args, _ := json.Marshal(map[string]string{"path": big})
-		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
 		if err != nil {
 			t.Fatalf("oversized non-Go file should get a skeleton, not an error: %v", err)
 		}
@@ -388,7 +482,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 			strings.Repeat("x", (curationBudgetTokens+1000)*4) + "\n"
 		os.WriteFile(bigGo, []byte(src), 0644)
 		args, _ := json.Marshal(map[string]string{"path": bigGo})
-		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
+		out, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
 		if err != nil {
 			t.Fatalf("Go skeleton path should not error: %v", err)
 		}
@@ -407,7 +501,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		small := filepath.Join(dir, "small.go")
 		os.WriteFile(small, make([]byte, 8000), 0644) // ~2k tokens, well under the budget
 		args, _ := json.Marshal(map[string]string{"path": small})
-		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs); err != nil {
+		if _, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs); err != nil {
 			t.Fatalf("under-budget read should succeed: %v", err)
 		}
 	})
@@ -420,7 +514,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		size := (curationBudgetTokens + 1000) * 4
 		os.WriteFile(big, make([]byte, size), 0644)
 		args, _ := json.Marshal(map[string]string{"path": big})
-		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000})
+		out, _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000})
 		if err != nil {
 			t.Fatalf("a huge window must not turn curation into an error path: %v", err)
 		}
@@ -494,7 +588,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 	t.Run("parsed call executes through the normal path", func(t *testing.T) {
 		content := "<function=bash>\n<parameter=command>\necho hi\n</parameter>\n</function>"
 		calls := parseXMLToolCalls(content)
-		out, err := tools.Execute(context.Background(), calls[0], nil)
+		out, _, err := tools.Execute(context.Background(), calls[0], nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -26,9 +26,12 @@ import (
 	"github.com/dereksantos/cortex/internal/style"
 )
 
-// agentsMarker is the exact separator systemPromptContent (session_core.go)
-// inserts between the base SystemPrompt and an injected AGENTS.md body.
-const agentsMarker = "\n\n# Project instructions (AGENTS.md)\n\n"
+// agentsMarkerPrefix is the exact prefix of the separator systemPromptContent
+// (session_core.go) inserts before the loaded instruction file's body —
+// "# Project instructions (<file>)" (#147). The full marker is
+// agentsMarkerPrefix + <file> + "\n\n"; the /context legend parses it (the
+// header's filename and the legend's detail name the same file).
+const agentsMarkerPrefix = "\n\n# Project instructions ("
 
 // cacheHitGreenPct / cacheHitYellowPct: the prefix-cache headline's hit-rate
 // color thresholds — green at/above cacheHitGreenPct, yellow at/above
@@ -54,15 +57,9 @@ func (cs *CortexSession) contextReport() string {
 // report byte for byte: the trailing-blank trim below stands in for the
 // TrimRight the builder form ended with.
 func (cs *CortexSession) contextReportLines() []string {
-	lines := []string{
-		cs.contextHeaderLine(),
-		"",
-		cs.cacheHeadlineLine(),
-		"",
-	}
-
 	win := cs.windowSize()
 	placement := computeContextGrid(cs.gridComponents(), cs.tailTokens(), win)
+	lines := append([]string{}, cs.contextHeaderLine(), "", cs.cacheHeadlineLine(), "")
 	lines = append(lines, coloredContextGridLines(placement, win, cs.gridHighWatermark())...)
 	lines = append(lines, "")
 
@@ -76,13 +73,24 @@ func (cs *CortexSession) contextReportLines() []string {
 
 // contextHeaderLine renders "context — <model> · <window>k window · turn
 // <N>", gray. N is the working set's total tracked turn count (0 before the
-// first turn completes — cs.ws is nil then).
+// first turn completes — cs.ws is nil then). When the session has used the
+// model (tokensIn > 0), a compact cumulative-totals suffix follows the turn
+// count: "· <in> in / <out> out" plus "· $<cost>" only when the backend
+// reported one (costUSD > 0 — never estimated, mirroring the status row). A
+// zero-cost session with tokens still shows the token figure without a cost.
 func (cs *CortexSession) contextHeaderLine() string {
 	turn := 0
 	if cs.ws != nil {
 		turn = cs.ws.TotalTurns()
 	}
-	return style.Paint(fmt.Sprintf("context — %s · %s window · turn %d", cs.Request.Model, humanK(cs.windowSize()), turn), style.Dim)
+	line := fmt.Sprintf("context — %s · %s window · turn %d", cs.Request.Model, humanK(cs.windowSize()), turn)
+	if cs.tokensIn > 0 {
+		line += " · " + humanK(cs.tokensIn) + " in / " + humanK(cs.tokensOut) + " out"
+		if cs.costUSD > 0 {
+			line += " · " + humanCost(cs.costUSD)
+		}
+	}
+	return style.Paint(line, style.Dim)
 }
 
 // cacheHeadlineLine renders the prefix-cache health line. Once a request
@@ -114,17 +122,18 @@ func (cs *CortexSession) cacheHeadlineLine() string {
 		style.Paint(fmt.Sprintf(" hit last turn · %s evaluated of %s prompt", humanK(evaluated), humanK(cs.LastPromptTokens)), style.Dim)
 }
 
-// gridComponents returns zone A's four pieces in wire order — the same
+// gridComponents returns zone A's five pieces in wire order — the same
 // order they're actually assembled into the prompt (system prompt, session
-// outline, memory index, skills index) — sized by the token-counting
-// helpers below, which the grid and the legend both call so neither
-// recomputes the arithmetic independently.
+// outline, memory index, skills index, workspace note) — sized by the
+// token-counting helpers below, which the grid and the legend both call so
+// neither recomputes the arithmetic independently.
 func (cs *CortexSession) gridComponents() []gridComponent {
 	return []gridComponent{
 		{glyphSystem, cs.systemPromptTokens()},
 		{glyphOutline, cs.outlineTokens()},
 		{glyphMemory, cs.memoryIndexTokens()},
 		{glyphSkills, cs.skillsIndexTokens()},
+		{glyphWorkspace, cs.workspaceTokens()},
 	}
 }
 
@@ -139,9 +148,9 @@ func (cs *CortexSession) gridHighWatermark() int {
 }
 
 // contextGridCellColor picks the ANSI color for one grid cell by its glyph
-// (system/outline/memory/skills/free are fixed colors; tail alone depends
-// on position — green before the demote watermark, red at/after it, per
-// context_grid.go's tailCellPastWatermark). System renders in the
+// (system/outline/memory/skills/workspace/free are fixed colors; tail alone
+// depends on position — green before the demote watermark, red at/after it,
+// per context_grid.go's tailCellPastWatermark). System renders in the
 // terminal's own default color (no wrap) — "bright/default" per the design.
 func contextGridCellColor(glyph rune, idx, window, hiWatermark int) style.Role {
 	switch glyph {
@@ -151,6 +160,8 @@ func contextGridCellColor(glyph rune, idx, window, hiWatermark int) style.Role {
 		return style.HueMagenta
 	case glyphSkills:
 		return style.HueYellow
+	case glyphWorkspace:
+		return style.HueCyan
 	case glyphTail:
 		if tailCellPastWatermark(idx, window, hiWatermark) {
 			return style.HueRed
@@ -221,16 +232,16 @@ func gridTokenLabel(tokens int) string {
 }
 
 // gridLegendLines renders one row per non-empty grid-order component —
-// system, outline, memory, skills, tail (folding the old separate
-// watermarks row into this one), free — reusing the same token-counting
-// helpers the grid itself sizes cells from. A component with zero tokens is
-// omitted entirely (matching the pre-redesign *Line functions' "omit,
-// don't invent" behavior).
+// system, outline, memory, skills, workspace, tail (folding the old
+// separate watermarks row into this one), free — reusing the same
+// token-counting helpers the grid itself sizes cells from. A component with
+// zero tokens is omitted entirely (matching the pre-redesign *Line
+// functions' "omit, don't invent" behavior).
 func (cs *CortexSession) gridLegendLines() []string {
 	var lines []string
 
 	if t := cs.systemPromptTokens(); t > 0 {
-		lines = append(lines, gridLegendRow(glyphSystem, "", "system", t, ""))
+		lines = append(lines, gridLegendRow(glyphSystem, "", "system", t, cs.systemLegendDetail()))
 	}
 	if t := cs.outlineTokens(); t > 0 {
 		lines = append(lines, gridLegendRow(glyphOutline, style.HueBlue, "outline", t, cs.outlineLegendDetail()))
@@ -239,8 +250,19 @@ func (cs *CortexSession) gridLegendLines() []string {
 		lines = append(lines, gridLegendRow(glyphMemory, style.HueMagenta, "memory", t, cs.memoryLegendDetail()))
 	}
 	if t := cs.skillsIndexTokens(); t > 0 {
-		count := len(skills.Discover(cs.skillsDirs()))
-		lines = append(lines, gridLegendRow(glyphSkills, style.HueYellow, "skills", t, fmt.Sprintf("%d skills", count)))
+		lines = append(lines, gridLegendRow(glyphSkills, style.HueYellow, "skills", t, fmt.Sprintf("%d skills", len(skills.Discover(cs.skillsDirs())))))
+	}
+	if t := cs.workspaceTokens(); t > 0 {
+		lines = append(lines, gridLegendRow(glyphWorkspace, style.HueCyan, "workspace", t, cs.workspaceLegendDetail()))
+	}
+	// Image parts in the hydrated tail (#217): the documented per-image
+	// estimate (bytes/3), summed over the images still sent verbatim. The
+	// grid itself stays the documented 128-cell frame of the zone-A
+	// components + tail; images ride the tail's space, so the legend is
+	// where their share becomes visible — a row appears only when images
+	// are actually in the window.
+	if t := cs.hydratedImageTokens(); t > 0 {
+		lines = append(lines, gridLegendRow(glyphImages, style.HueMagenta, "images", t, cs.imagesLegendDetail()))
 	}
 	if cs.ws != nil && cs.ws.TotalTurns() > 0 {
 		lines = append(lines, gridLegendRow(glyphTail, style.HueGreen, "tail", cs.ws.TailTokens(), cs.tailLegendDetail()))
@@ -250,6 +272,73 @@ func (cs *CortexSession) gridLegendLines() []string {
 	}
 
 	return lines
+}
+
+// hydratedImageTokens is the image share of the hydrated tail: the
+// documented per-image estimate over every image part in messages at or
+// after the demotion frontier. A resumed marker-only result (no Parts)
+// contributes nothing — no image is in the prompt for it (#217). Demoted
+// images are NOT counted here — their outline entry replaced them —
+// matching how the tail figure itself works.
+func (cs *CortexSession) hydratedImageTokens() int {
+	if cs.Request == nil || cs.ws == nil {
+		return 0
+	}
+	msgs := cs.Request.Messages
+	from := cs.ws.FrontierMsg()
+	if from < 0 || from > len(msgs) {
+		return 0
+	}
+	return imageTokensOf(msgs[from:])
+}
+
+// imagesLegendDetail names how many images are in the window.
+func (cs *CortexSession) imagesLegendDetail() string {
+	if cs.Request == nil || cs.ws == nil {
+		return ""
+	}
+	msgs := cs.Request.Messages
+	from := cs.ws.FrontierMsg()
+	if from < 0 || from > len(msgs) {
+		return ""
+	}
+	n := 0
+	for _, m := range msgs[from:] {
+		if hasImageContent(m) {
+			n++
+		}
+	}
+	return fmt.Sprintf("%d image%s in the tail", n, pluralS(n))
+}
+
+// pluralS renders the English plural suffix for a count.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// systemLegendDetail reports which instruction file the seeded system
+// message carries (#147): the filename parsed out of the
+// "# Project instructions (<file>)" header systemPromptContent inserted
+// (agentsMarkerPrefix). "" when the system message carries no instructions
+// section (the row renders bare, as it did before #147).
+func (cs *CortexSession) systemLegendDetail() string {
+	if cs.Request == nil || len(cs.Request.Messages) == 0 {
+		return ""
+	}
+	content := cs.Request.Messages[0].Content
+	i := strings.Index(content, agentsMarkerPrefix)
+	if i < 0 {
+		return ""
+	}
+	rest := content[i+len(agentsMarkerPrefix):]
+	j := strings.IndexByte(rest, ')')
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
 }
 
 // outlineLegendDetail reports the demoted-turn outline's entry count plus a
@@ -342,17 +431,26 @@ func (cs *CortexSession) outlineTokens() int {
 	return cache.TokensOf(len(cs.renderOutlineBlock()))
 }
 
-// memoryIndexTokens returns the injected memory-index note's token size, 0
-// when memory isn't wired for this session or has no notes yet.
+// memoryIndexTokens returns the memory component's total token size on the
+// wire: the injected memory-index note plus the full memory section
+// (memoryPromptSection) that rides the same ephemeral slot. The section is
+// present whenever there's something to use it on — notes exist or a demoted
+// outline is visible (live entries or the folded digest) — and the base
+// prompt is the built-in one (a prompt.file replacement owns its own memory
+// guidance, and its section never rides) — mirroring turn.go's per-turn
+// decision exactly, so /context counts what the turn actually sends: an
+// outline-only turn counts the section alone, notes add the index on top,
+// and neither gives 0. There is no early return for an unwired store
+// (cs.memory == nil): turn.go sends the section and user-tier notes without
+// a project store, and memoryIndexNote already handles nil tiers, so the
+// count must too (a nil store with an outline present still counts the
+// section, exactly as the turn sends it).
 func (cs *CortexSession) memoryIndexTokens() int {
-	if cs.memory == nil {
-		return 0
-	}
-	notes, err := cs.memory.List()
-	if err != nil || len(notes) == 0 {
-		return 0
-	}
-	return cache.TokensOf(len(cs.memoryIndexNote()))
+	memIndex := cs.memoryIndexNote()
+	outlinePresent := len(cs.outline) > 0 || cs.outlineFolded != ""
+	tokens := cache.TokensOf(len(memorySectionFor(memIndex, outlinePresent, promptBase == SystemPrompt)))
+	tokens += cache.TokensOf(len(memIndex))
+	return tokens
 }
 
 // skillsIndexTokens returns the injected skills-index note's token size, 0
@@ -362,12 +460,29 @@ func (cs *CortexSession) skillsIndexTokens() int {
 	return cache.TokensOf(len(cs.skillsIndexNote()))
 }
 
+// workspaceLegendDetail reports the workspace root the one-line workspace
+// note states (issue #142) — the same root turn.go injects (shared
+// workspaceRootForNote resolution), so the legend and the wire never
+// disagree. "" when no workspace is resolvable (the row is omitted by the
+// t > 0 caller check).
+func (cs *CortexSession) workspaceLegendDetail() string {
+	return cs.workspaceRootForNote()
+}
+
 // headTokens sums zone A's stable-prefix token cost — system prompt +
-// session outline + memory index + skills index — the same components
-// gridComponents breaks out cell-by-cell for the grid. Also the context
-// gauge bar's (contextbar.go) left (head) segment size, so both consumers
-// share this one sum instead of each recomputing the cache.TokensOf
-// arithmetic.
+// session outline + memory index + skills index + workspace note — the same
+// components gridComponents breaks out cell-by-cell for the grid. Also the
+// context gauge bar's (contextbar.go) left (head) segment size, so both
+// consumers share this one sum instead of each recomputing the
+// cache.TokensOf arithmetic.
 func (cs *CortexSession) headTokens() int {
-	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens() + cs.skillsIndexTokens()
+	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens() + cs.skillsIndexTokens() + cs.workspaceTokens()
+}
+
+// workspaceTokens returns the workspace note's token size (issue #142: the
+// one-line workspace-root note turn.go injects into the ephemeral slot,
+// every turn — the grid and legend count it exactly as the turn sends it).
+// 0 only when no workspace is resolvable (workspaceNote's "" case).
+func (cs *CortexSession) workspaceTokens() int {
+	return cache.TokensOf(len(cs.workspaceNote()))
 }

@@ -84,6 +84,18 @@ type AgentRequest struct {
 	Dialect llm.Dialect `json:"-"`
 	Effort  llm.Effort  `json:"-"`
 
+	// Vision (json:"-") is this request's vision-capability verdict
+	// (issue #216): true only when the target model is known to accept
+	// image content parts, resolved by one precedence everywhere
+	// (resolveBinding / visionForModel): the explicit
+	// `models.<role>.vision` flag, then the OpenRouter catalog's declared
+	// input modalities, then the model id's capability tags. Stamped at
+	// request construction and re-derived on /model switches; Send refuses
+	// any wire message carrying image parts while it is false — a
+	// text-only model gets a clear error naming the model, never a silent
+	// drop.
+	Vision bool `json:"-"`
+
 	// Timeout / MaxAttempts / Backoff (all json:"-") are the P1
 	// timeout-unification transport knobs: the per-request HTTP deadline,
 	// retry-attempt ceiling, and linear-backoff base. Zero means "use the
@@ -142,8 +154,15 @@ type streamOptions struct {
 //     is what the outline stands in for
 //
 // The stored Messages are never mutated, so nothing accumulates and the transcript stays clean.
-// Returns r.Messages unchanged if there's nothing to insert or demote.
+// The result is passed through wireSafe, so every message on the wire is one a
+// strict provider accepts.
 func (r *AgentRequest) wireMessages() []Message {
+	return wireSafe(r.composeWire())
+}
+
+// composeWire assembles the two-zone layout wireMessages describes. Returns
+// r.Messages unchanged if there's nothing to insert or demote.
+func (r *AgentRequest) composeWire() []Message {
 	if len(r.Messages) == 0 {
 		return r.Messages
 	}
@@ -185,6 +204,81 @@ func (r *AgentRequest) wireMessages() []Message {
 	return out
 }
 
+// checkVision enforces the vision capability gate (#216) on the assembled
+// wire messages: image-bearing content parts may only go to a model whose
+// Vision verdict is true. Text-only requests (no message carries Parts)
+// pass through untouched, byte for byte.
+func (r *AgentRequest) checkVision(msgs []Message) error {
+	for _, m := range msgs {
+		if !llm.HasImageParts(m.Parts) {
+			continue
+		}
+		if err := llm.ValidateContentParts(m.Parts); err != nil {
+			return err
+		}
+		if !r.Vision {
+			return llm.NewVisionUnsupportedError(r.Model)
+		}
+	}
+	return nil
+}
+
+// emptyToolResult stands in for a tool result with no output text.
+const emptyToolResult = "(no output)"
+
+// wireSafe returns msgs with the two shapes strict providers reject repaired,
+// copying on write so the stored transcript (the lossless record) is untouched:
+//
+//   - a role=tool message with empty content. Cohere via OpenRouter 400s the
+//     whole request ("all elements in tool_results must have the 'outputs'
+//     property specified"), so a silent command like `true` ended the turn as
+//     a false backend error (#115).
+//   - tool-call arguments that are not a JSON object. The model's malformed
+//     emission already got its parse error back as the tool result; replaying
+//     the raw string 400s every later request ("tool arguments must be a
+//     stringified JSON object"), poisoning the session for good (#116).
+//     Repairing on the wire, not in the transcript, also heals sessions that
+//     are already poisoned.
+func wireSafe(msgs []Message) []Message {
+	out := msgs
+	copied := false
+	for i := range msgs {
+		m := msgs[i]
+		changed := false
+		if m.Role == RoleTool && strings.TrimSpace(m.Content) == "" {
+			m.Content = emptyToolResult
+			changed = true
+		}
+		callsCopied := false
+		for j, tc := range m.ToolCalls {
+			if isJSONObject(tc.Function.Arguments) {
+				continue
+			}
+			if !callsCopied {
+				m.ToolCalls = append([]ToolCall(nil), m.ToolCalls...)
+				callsCopied = true
+			}
+			m.ToolCalls[j].Function.Arguments = "{}"
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if !copied {
+			out = append([]Message(nil), msgs...)
+			copied = true
+		}
+		out[i] = m
+	}
+	return out
+}
+
+// isJSONObject reports whether s parses as a JSON object.
+func isJSONObject(s string) bool {
+	var v map[string]json.RawMessage
+	return json.Unmarshal([]byte(s), &v) == nil && v != nil
+}
+
 // applyPromptCache marks Anthropic prompt-cache breakpoints on the wire messages
 // so the stable prefix is billed at ~10% on a hit.
 func applyPromptCache(msgs []Message, model string) {
@@ -217,6 +311,9 @@ var httpClient = &http.Client{}
 func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
+	if err := r.checkVision(payload.Messages); err != nil {
+		return nil, err
+	}
 	applyPromptCache(payload.Messages, r.Model)
 	b, err := json.Marshal(&payload)
 	if err != nil {
@@ -306,6 +403,9 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning func(string)) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
+	if err := r.checkVision(payload.Messages); err != nil {
+		return nil, err
+	}
 	applyPromptCache(payload.Messages, r.Model)
 	payload.Stream = true
 	payload.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -539,6 +639,18 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 
+	// Parts is the structured OpenAI content-parts form of Content
+	// (issue #216): text + image_url parts. When non-empty it replaces the
+	// string Content on the wire (MarshalJSON below); Content stays the
+	// default shape, so text-only messages serialize byte for byte as
+	// before. Image parts require AgentRequest.Vision — Send refuses them
+	// otherwise. Wire-only in practice: Parts is skipped by the JSON codec
+	// (json:"-"), so session transcripts and redaction keep seeing the
+	// string Content — for an image tool result that string is read_file's
+	// short `[image: …]` marker observation, and the demotion/token math
+	// books the image itself through imageTokensOf (#217).
+	Parts []llm.ContentPart `json:"-"`
+
 	cache *cacheControl
 }
 
@@ -547,28 +659,52 @@ type cacheControl struct {
 	Type string `json:"type"`
 }
 
-// contentPart is the structured content form Anthropic requires.
-type contentPart struct {
-	Type         string        `json:"type"`
-	Text         string        `json:"text"`
-	CacheControl *cacheControl `json:"cache_control,omitempty"`
-}
-
-// MarshalJSON emits normal string-content messages unless a cache breakpoint is
-// set, then emits Anthropic's structured content part shape.
+// MarshalJSON emits normal string-content messages unless a cache breakpoint
+// or structured content parts (issue #216) change the shape; with neither,
+// the alias path emits exactly what it emitted before. A cache breakpoint
+// keeps Anthropic's content-parts form (the breakpoint rides on the text
+// part); parts + breakpoint put the breakpoint on the LAST part, where
+// Anthropic reads it.
 func (m *Message) MarshalJSON() ([]byte, error) {
-	if m.cache == nil {
+	if m.cache == nil && len(m.Parts) == 0 {
 		type alias Message
 		return json.Marshal(alias(*m))
 	}
+	type part struct {
+		Type         string        `json:"type"`
+		Text         string        `json:"text,omitempty"`
+		ImageURL     any           `json:"image_url,omitempty"`
+		CacheControl *cacheControl `json:"cache_control,omitempty"`
+	}
+	var parts []part
+	switch {
+	case len(m.Parts) > 0:
+		parts = make([]part, 0, len(m.Parts))
+		for _, p := range m.Parts {
+			if p.HasImage() {
+				image := map[string]any{"url": p.ImageURL}
+				if p.Detail != "" {
+					image["detail"] = p.Detail
+				}
+				parts = append(parts, part{Type: llm.ContentTypeImageURL, ImageURL: image})
+				continue
+			}
+			parts = append(parts, part{Type: llm.ContentTypeText, Text: p.Text})
+		}
+		if m.cache != nil {
+			parts[len(parts)-1].CacheControl = m.cache
+		}
+	default:
+		parts = []part{{Type: llm.ContentTypeText, Text: m.Content, CacheControl: m.cache}}
+	}
 	return json.Marshal(struct {
-		Role       string        `json:"role"`
-		Content    []contentPart `json:"content"`
-		ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
-		ToolCallID string        `json:"tool_call_id,omitempty"`
+		Role       string     `json:"role"`
+		Content    []part     `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
 	}{
 		Role:       m.Role,
-		Content:    []contentPart{{Type: "text", Text: m.Content, CacheControl: m.cache}},
+		Content:    parts,
 		ToolCalls:  m.ToolCalls,
 		ToolCallID: m.ToolCallID,
 	})

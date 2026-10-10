@@ -39,7 +39,7 @@ func TestWriteFileResolvesAgainstWorkdir(t *testing.T) {
 	wd := t.TempDir()
 	t.Chdir(cwd)
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "note.txt", "content": "hello"}), wdDeps{wd: wd})
 	if err != nil {
 		t.Fatalf("write_file: %v", err)
@@ -64,7 +64,7 @@ func TestEditFileResolvesAgainstWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Execute(context.Background(), callArgs(t, FunctionEditFile,
+	if _, _, err := Execute(context.Background(), callArgs(t, FunctionEditFile,
 		map[string]any{"path": "a.txt", "old_string": "old", "new_string": "new"}), wdDeps{wd: wd}); err != nil {
 		t.Fatalf("edit_file: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestReadFileResolvesAgainstWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionReadFile,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionReadFile,
 		map[string]any{"path": "r.txt"}), wdDeps{wd: wd})
 	if err != nil {
 		t.Fatalf("read_file: %v", err)
@@ -103,7 +103,7 @@ func TestGrepDefaultPathResolvesAgainstWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionGrep,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionGrep,
 		map[string]any{"pattern": "needle-xyzzy"}), wdDeps{wd: wd})
 	if err != nil {
 		t.Fatalf("grep: %v", err)
@@ -122,7 +122,7 @@ func TestOutlineResolvesAgainstWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionOutline,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionOutline,
 		map[string]any{"path": "o.go"}), wdDeps{wd: wd})
 	if err != nil {
 		t.Fatalf("outline: %v", err)
@@ -137,7 +137,7 @@ func TestBashRunsInWorkdir(t *testing.T) {
 	wd := t.TempDir()
 	t.Chdir(cwd)
 
-	out, err := Execute(context.Background(), callArgs(t, FunctionBash,
+	out, _, err := Execute(context.Background(), callArgs(t, FunctionBash,
 		map[string]any{"command": "pwd"}), wdDeps{wd: wd})
 	if err != nil {
 		t.Fatalf("bash: %v", err)
@@ -155,7 +155,7 @@ func TestNoWorkdirKeepsCWDResolution(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 
-	if _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	if _, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": "plain.txt", "content": "x"}), wdDeps{wd: ""}); err != nil {
 		t.Fatalf("write_file: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestAbsolutePathIgnoresWorkdir(t *testing.T) {
 	t.Chdir(cwd)
 	abs := filepath.Join(other, "abs.txt")
 
-	if _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
+	if _, _, err := Execute(context.Background(), callArgs(t, FunctionWriteFile,
 		map[string]any{"path": abs, "content": "x"}), wdDeps{wd: wd}); err != nil {
 		t.Fatalf("write_file: %v", err)
 	}

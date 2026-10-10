@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -27,9 +28,47 @@ import (
 // worst case at a handful of extra round-trips, never an unbounded walk.
 const healMaxCandidates = 3
 
-// healDetailCap bounds the error text carried into a model.failure journal
+// healDetailCap bounds the error text carried into a model failure journal
 // event.
 const healDetailCap = 300
+
+// pendingFailure is the failure receipt the healing ladder settles for one
+// failed SEND (heal.go): the role binding whose call failed, the model whose
+// call failed (the one the ladder marked dead), and the classified class.
+// It rides the returned error (healJournaledError) rather than any
+// session-scoped flag, so the receipt is scoped to the exact send that
+// failed — a later subagent's healed-then-failed send can neither consume
+// nor clobber the coder's own receipt (issue #117 review round 3).
+type pendingFailure struct {
+	role  string
+	model string
+	class modelErrClass
+}
+
+// healJournaledError wraps the original provider error of one failed send
+// that the healing ladder walked and could not recover, tagging it with the
+// receipt to settle for that send. runLoop passes the error it got through
+// the Sender seam untouched into stats.LastError (the error-recovered break)
+// and returns it to the caller (the unrecovered "error" stop), so a
+// single marker at the seam scopes the receipt to the send.
+type healJournaledError struct {
+	pendingFailure
+	cause error
+}
+
+func (e *healJournaledError) Error() string { return e.cause.Error() }
+func (e *healJournaledError) Unwrap() error { return e.cause }
+
+// pendingFailureOf extracts the receipt a failed send carried (healJournaledError),
+// or nil when the send failed without the ladder walking it (a non-healable
+// class, the gate off, a streamed partial, …).
+func pendingFailureOf(err error) *pendingFailure {
+	var hje *healJournaledError
+	if errors.As(err, &hje) {
+		return &hje.pendingFailure
+	}
+	return nil
+}
 
 // healingSender decorates inner with the self-healing ladder. role labels
 // the binding for notices and journal events ("code", "study", a subagent
@@ -42,8 +81,12 @@ func (cs *CortexSession) healingSender(role string, inner Sender) Sender {
 		if err == nil || streamed {
 			return res, streamed, err
 		}
-		if hres, hstreamed, ok := cs.tryHeal(ctx, role, req, inner, err); ok {
+		hres, hstreamed, ok, pf := cs.tryHeal(ctx, role, req, inner, err)
+		if ok {
 			return hres, hstreamed, nil
+		}
+		if pf != nil {
+			return res, streamed, &healJournaledError{pendingFailure: *pf, cause: err}
 		}
 		return res, streamed, err
 	})
@@ -54,21 +97,28 @@ func (cs *CortexSession) healingSender(role string, inner Sender) Sender {
 // not apply (gate off, non-OpenRouter backend, non-healable class, user
 // cancel), the live catalog is unreachable (the endpoint is the problem;
 // thrashing models would not help), or every candidate also failed.
-func (cs *CortexSession) tryHeal(ctx context.Context, role string, req *AgentRequest, inner Sender, cause error) (*AgentResponse, bool, bool) {
+//
+// ok=false with a non-nil pendingFailure (pf) means the ladder walked but
+// could not recover: the caller (healingSender) stashes that receipt on the
+// returned error, and the turn layer settles it for the send — see
+// pendingFailure's doc. ok=false with pf nil means healing does not apply at
+// all; the error passes through with no receipt attached.
+func (cs *CortexSession) tryHeal(ctx context.Context, role string, req *AgentRequest, inner Sender, cause error) (*AgentResponse, bool, bool, *pendingFailure) {
 	if cs.Config == nil || !cs.Config.isOpenRouter() || !cs.Config.selfHealEnabled() {
-		return nil, false, false
+		return nil, false, false, nil
 	}
 	if ctx.Err() != nil {
-		return nil, false, false
+		return nil, false, false, nil
 	}
 	class := classifyModelError(cause)
 	if !class.healable() {
-		return nil, false, false
+		return nil, false, false, nil
 	}
 
 	failed := req.Model
 	cs.markModelDead(failed, class)
 
+	pf := &pendingFailure{role: role, model: failed, class: class}
 	listModels := cs.healList
 	if listModels == nil {
 		listModels = liveOpenRouterListModels
@@ -77,8 +127,16 @@ func (cs *CortexSession) tryHeal(ctx context.Context, role string, req *AgentReq
 	served, err := listModels(pctx)
 	cancel()
 	if err != nil {
-		cs.journalModelFailure(role, failed, class, cause)
-		return nil, false, false
+		// The catalog itself is down: the original error surfaces to the
+		// loop, which recovers (error-recovered) when the turn has made
+		// progress. The receipt for this send rides the returned error
+		// (healJournaledError) — the turn layer settles it as
+		// model.recovered_error on a recovered turn, as model.failure only
+		// when nothing recovers — so one failed send yields exactly one
+		// journal record, scoped to THIS send (a subagent's own ladder walk
+		// carries its own marker and can't suppress the coder's receipt).
+		// The stderr notice still tells the user what failed.
+		return nil, false, false, pf
 	}
 
 	servedSet := make(map[string]bool, len(served))
@@ -97,20 +155,30 @@ func (cs *CortexSession) tryHeal(ctx context.Context, role string, req *AgentReq
 		}
 		old := req.Model
 		cs.rebindAfterHeal(req, old, id, window)
+		// The replacement's vision verdict comes from this listing's declared
+		// input modalities (#216), exactly as at startup — and the listing
+		// stays on the session so a later /model switch reads the freshest
+		// catalog it has. No-op for an explicit `models.code.vision`.
+		cs.applyVisionCatalog(served)
 		reportHeal(role, old, id, class, why, cs.healJournalDir())
 
 		res, streamed, err := inner.Send(ctx, req)
 		if err == nil {
-			return res, streamed, true
+			return res, streamed, true, nil
 		}
 		if ctx.Err() != nil {
-			return nil, false, false
+			return nil, false, false, nil
 		}
 		cs.markModelDead(id, classifyModelError(err))
 	}
 
-	cs.journalModelFailure(role, failed, class, cause)
-	return nil, false, false
+	// Every candidate failed. The receipt for THIS send rides back on the
+	// pendingFailure (the caller wraps it into the returned error); the turn
+	// layer or the subagent path settles it — model.recovered_error when the
+	// run recovers, model.failure when nothing does — so one failed send
+	// yields exactly one journal record and a recovered turn is never
+	// reported as "FAILED unrecovered".
+	return nil, false, false, pf
 }
 
 // markModelDead records a model as unusable for the remainder of this
@@ -198,10 +266,13 @@ func (cs *CortexSession) healJournalDir() string {
 	return modelSubstitutionJournalDir(cs.workspace.ContextDir())
 }
 
-// journalModelFailure appends one model.failure receipt — best-effort, same
-// posture as the substitution write.
-func (cs *CortexSession) journalModelFailure(role, model string, class modelErrClass, cause error) {
-	if cs.healJournalDir() == "" {
+// journalModelFailure appends one model.failure receipt for a send nothing
+// recovered (the unrecovered case the healing ladder walked) — best-effort,
+// same posture as the substitution write. The recovered case's receipt is
+// model.recovered_error (turn.go's reportRecoverableError): the distinct
+// types keep a recovered turn from being reported as "FAILED unrecovered".
+func (cs *CortexSession) journalModelFailure(pf *pendingFailure, cause error) {
+	if pf == nil || cs.healJournalDir() == "" {
 		return
 	}
 	detail := ""
@@ -212,9 +283,9 @@ func (cs *CortexSession) journalModelFailure(role, model string, class modelErrC
 		}
 	}
 	entry, err := journal.NewModelFailureEntry(journal.ModelFailurePayload{
-		Role:   role,
-		Model:  model,
-		Class:  string(class),
+		Role:   pf.role,
+		Model:  pf.model,
+		Class:  string(pf.class),
 		Status: errStatus(cause),
 		Detail: detail,
 	})

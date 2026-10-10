@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -473,6 +474,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	// the anchor's pipe). Always streaming here (anchored mode requires it).
 	if cs.live != nil {
 		cs.live.SetThinking(true, "")
+		cs.live.SetStatus(cs.statusStats()) // issue #109: publish the row's figures before the first send
 		// Wrap the anchor's own SetThinking so the state light tracks the same
 		// on/off transition: on -> thinking (reasoning), off -> streaming (the
 		// answer has started). This fires on every tick and reasoning chunk;
@@ -546,21 +548,42 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 }
 
 // runAnchoredTurn runs one turn with the prompt pinned to the bottom row and
-// every byte of turn output funneled above it. os.Stdout is redirected through
-// a pipe whose lines feed the anchor (so ad-hoc fmt.Print output, tool-action
-// lines, and the streamed answer all land above the prompt); the anchor draws
-// the input and "thinking" status straight to the real terminal. Keystrokes
-// typed during the turn edit the pinned line live and are returned to seed the
-// next prompt. ESC/Ctrl-C cancels via the anchor's context.
-func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
+// every byte of turn output funneled above it — the single-turn case of
+// runUnderAnchor. The turn's TurnResult is returned (from the pipe-failure
+// fallback too, since fn runs on both paths) so the caller can surface the
+// turn-boundary receipt (issue #141's "tests changed:" line) — printed AFTER
+// the anchor is stopped and stdout restored, so it lands in the terminal's
+// scrollback like every other turn-boundary line.
+func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string, images ...TurnImage) (string, TurnResult, error) {
+	var res TurnResult
+	seedOut, err := runUnderAnchor(session, editor, seed, func(ctx context.Context) error {
+		var turnErr error
+		// Variadic pass-through: with no images this is exactly session.Turn.
+		res, turnErr = session.TurnWithAttachments(ctx, input, images...)
+		return turnErr
+	})
+	return seedOut, res, err
+}
+
+// runUnderAnchor runs fn inside a pinned anchor (interactive + render): the
+// prompt is pinned to the bottom row and every byte of fn's output
+// (fmt.Print, tool-action lines, …) is funneled above it via a stdout pipe;
+// keystrokes typed during fn edit the pinned line live. The pinned line is
+// erased on return and its (possibly edited) text is returned to seed the
+// next prompt. ESC/Ctrl-C cancels ctx.
+//
+// It is the general form of the anchored turn path: runAnchoredTurn is its
+// single-turn specialization (fn = one session.Turn), and the /plan REPL
+// command's TurnWithPlan (#150) is a multi-turn one.
+func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed string, fn func(ctx context.Context) error) (string, error) {
 	anchor, ctx := editor.Anchor(session.Prompt(), seed)
 	r, w, err := os.Pipe()
 	if err != nil {
-		// Pipe setup failed (rare): fall back to the silent-capture path so the
-		// turn still runs and cancels cleanly.
+		// Pipe setup failed (rare): run fn WITHOUT the anchor so it still runs
+		// and cancels cleanly, mirroring runAnchoredTurn's fallback.
 		anchor.Stop()
 		c, stop := editor.Interruptible(context.Background())
-		_, e := session.Turn(c, input)
+		e := fn(c)
 		return stop(), e
 	}
 	realStdout := os.Stdout
@@ -571,6 +594,11 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 	realWidth := style.TermWidth
 	style.TermWidth = anchor.Width
 	defer func() { style.TermWidth = realWidth }()
+	// Issue #109: push the row's figures at anchor creation so the FIRST turn
+	// shows the row immediately — the turn's own startActivity/send pushes
+	// refresh it as the turn runs. This is the one cross-goroutine read of
+	// session state (the turn's goroutine hasn't started yet, so it's clean).
+	anchor.SetStatus(session.statusStats())
 
 	drained := make(chan struct{})
 	go func() {
@@ -582,7 +610,7 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 		}
 	}()
 
-	_, turnErr := session.Turn(ctx, input)
+	turnErr := fn(ctx)
 
 	// Restore stdout, then close the write end so the drain goroutine sees EOF
 	// and flushes the last line before we erase the pinned block.
@@ -592,4 +620,112 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 	<-drained
 	r.Close()
 	return anchor.Stop(), turnErr
+}
+
+// printTestReceipt prints a turn's (or plan run's) "tests changed" receipt
+// (issue #141) to the REPL at the turn boundary — after the anchor is stopped
+// and stdout restored — so a removed or shrunk test is reported where the
+// person reviewing the turn looks. A no-op for the empty receipt (no test
+// file lost anything).
+func printTestReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(style.Paint(receipt, style.Warn))
+	}
+}
+
+// printLintReceipt prints a turn's "lint: …" receipt (issue #129 piece 3,
+// the turn-end lint pass) to the REPL at the turn boundary — the turn's
+// lint findings, the same fact the model saw in the finalize round and the
+// journal carries. A no-op for the empty receipt (a clean turn: no findings
+// and no extra round, by the pass's contract).
+func printLintReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(style.Paint(receipt, style.Warn))
+	}
+}
+
+// printTurnReceipt prints a turn's measurement-only receipt (issue #219)
+// to the REPL at the turn boundary — after the anchor is stopped and stdout
+// restored — so what the turn actually left in the workspace (the git diff
+// --stat block, the project's own test/build exit codes, the format hook's
+// knowledge) is reported where the person reviewing the turn looks. A no-op
+// for the empty receipt (a turn that ran no tools or measured nothing has
+// nothing to measure).
+func printTurnReceipt(receipt string) {
+	if receipt != "" {
+		fmt.Println(style.Paint(receipt, style.Dim))
+	}
+}
+
+// printBackendError prints a turn's recovered provider-error notice (issue
+// #117) to the REPL at the turn boundary — after the anchor is stopped and
+// stdout restored — so a mid-turn 500 the loop recovered from is reported where
+// the person reviewing the turn looks, dim (a recovery note, not an error: the
+// turn SUCCEEDED). No-op for a nil err (a clean or unrecovered turn — the
+// latter already printed by afterTurn).
+func printBackendError(err error) {
+	if line := backendErrorLine(err); line != "" {
+		fmt.Println(style.Paint(line, style.Dim))
+	}
+}
+
+// printRedactions prints a turn's secret-redaction count (issue #103) to w at
+// the turn boundary — the number of secret patterns masked while the turn's
+// messages hit the transcript/journal/memory, carried on
+// TurnResult.Redactions. It is a dim, non-alarm note (not a warning): the turn
+// SUCCEEDED, this is just provenance that a secret the agent read did not reach
+// disk. No-op for a zero count (the common case: nothing persisted a secret).
+// The caller picks the sink: the REPL passes stdout (a turn-boundary note
+// belongs in the scrollback with every other one), the headless `cortex turn`
+// driver passes stderr — issue #118's contract that headless stdout is the
+// answer only (TestTurnCLIStdoutContractWithRedactions locks the stderr
+// routing for the redaction notice specifically).
+func printRedactions(w io.Writer, n int) {
+	if n > 0 {
+		fmt.Fprintln(w, style.Paint(fmt.Sprintf("%d secret pattern(s) redacted from the transcript, journal, and memory this turn", n), style.Dim))
+	}
+}
+
+// afterTurn is the REPL's post-turn safety net, shared by the normal single
+// turn and the /plan (multi-turn) path so the two stay in sync. It reacts to
+// the error of a just-completed turn (or plan run):
+//
+//   - clean: compact at the turn boundary when the context gauge is red —
+//     the boundary is the only safe point (mid-turn compaction orphans
+//     tool_call sequences);
+//   - interrupted (context.Canceled): print "interrupted";
+//   - otherwise: print the error, diagnose a model error, and — if the error
+//     names a real context-window overflow — learn the window (the gauge and
+//     read_file guard self-correct, C2), compact, and ask the user to
+//     re-send.
+//
+// A plan run is up to planStepCap turns in a row — the place context grows
+// most — so it must reach this same safety net; without it the /plan path was
+// the only multi-turn path that never checked the compaction threshold.
+func afterTurn(session *CortexSession, err error) {
+	switch {
+	case err == nil:
+		// Red gauge: compact at the turn boundary, before the window actually
+		// overflows. The boundary is the only safe point — mid-turn
+		// compaction would orphan tool_call sequences.
+		if session.contextRatio() >= compactThreshold {
+			compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
+		}
+	case errors.Is(err, context.Canceled):
+		fmt.Println(style.Paint("interrupted", style.Warn))
+	default:
+		fmt.Printf("turn error: %v\n", err)
+		if d := diagnoseModelError(err); d != "" {
+			fmt.Println(style.Paint(d, style.Warn))
+		}
+		// An overflow error names the code model's real window: learn it
+		// (the gauge and read_file guard self-correct, C2) and compact so the
+		// next request fits. The failed request is in the digest; the user
+		// re-asks.
+		if real := parseCtxSize(err.Error()); real > 0 {
+			session.learnWindow(real)
+			compactNow(session, "context overflowed")
+			fmt.Println("please re-send your request")
+		}
+	}
 }

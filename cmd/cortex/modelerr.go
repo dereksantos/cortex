@@ -12,6 +12,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -136,12 +138,45 @@ func classifyModelError(err error) modelErrClass {
 	return classUnknown
 }
 
-// errStatus extracts the HTTP status carried by a typed model-call error, or
-// 0 when the error never got one (transport-level failures, stream shapes).
+// streamStatusRe matches the status the streaming path bakes into its error
+// text. pkg/llm/stream.go has two shapes:
+//
+//   - the JSON-error path: wrapServerError("stream (500)", body) →
+//     "…: server error: …" where the prefix is the literal "stream (500)";
+//   - the raw-body fallback: "stream status 500: …".
+//
+// The streaming path returns a PLAIN error (not a typed *modelCallError), so
+// the status only lives in the message; this is how errStatus recovers it for
+// the model.failure receipt (issue #117's "status and body" requirement on a
+// recovered turn). The pattern matches both the paren-wrapped and the bare
+// "stream status N" shapes.
+var streamStatusRe = regexp.MustCompile(`stream (?:\((\d{3})\)|status (\d{3}))`)
+
+// errStatus extracts the HTTP status carried by a model-call error: the typed
+// *modelCallError first (the blocking Send path), then the streaming path's
+// message-baked "stream (<status>)" shape (stream.go returns a plain error, so
+// its status only lives in the text). 0 when the error never got one
+// (transport-level failures, context overflow — the latter's status is its own
+// concern, handled by the overflow handler, not the failure receipt).
 func errStatus(err error) int {
+	if err == nil {
+		return 0
+	}
 	var mce *modelCallError
 	if errors.As(err, &mce) {
 		return mce.Status
+	}
+	if m := streamStatusRe.FindStringSubmatch(err.Error()); m != nil {
+		// Two alternations, one capture each: "stream (N)" → m[1],
+		// "stream status N" → m[2]. The unmatched one is "".
+		for _, g := range m[1:3] {
+			if g == "" {
+				continue
+			}
+			if n, perr := strconv.Atoi(g); perr == nil {
+				return n
+			}
+		}
 	}
 	return 0
 }

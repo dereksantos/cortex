@@ -1,0 +1,8 @@
+            @@ -4,5 +4,6 @@
+            4       if a {
+            5           return 1
+            6       }
+            7 -     return 2
+            7 +     return 3
+            8   }
+            9 + var extra = 0

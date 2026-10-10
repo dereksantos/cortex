@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
@@ -162,6 +163,13 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 			style.Paint(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), style.Action))
 	}
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
+	// Issue #149 receipt: same hook as the coder turn (turn.go) — the subagent's
+	// own request is the model that needed the fallback; the role is the
+	// subagent's ("study").
+	ts.OnReasoningFallback = func(stats loopStats) {
+		cs.appendReasoningFallback(sa.Role, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.ReasoningFallbackOutcome, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.transcriptNote(reasoningFallbackNote())
+	}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	bounds := sa.Bounds
 	bounds.EscalateEffort = cs.Config.effortEscalationEnabled()
@@ -172,6 +180,34 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	cs.tokensOut += stats.OutputTokens
 	cs.reasoningTokens += stats.ReasoningTokens
 	cs.costUSD += stats.Cost
+	// Issue #117: settle exactly ONE journal record per failed send, scoped to
+	// the send — the receipt rides the send-scoped marker on the error
+	// (heal.go's pendingFailure, via healJournaledError), NOT a session-wide
+	// flag, so a subagent's healed-then-failed send can neither consume nor
+	// clobber the coder's own receipt (a later recovered coder error in the
+	// same turn still gets its model.recovered_error entry). Two outcomes,
+	// same rule as the coder turn (turn.go):
+	//
+	//   - error-recovered (stats.LastError != nil, err == nil): the subagent
+	//     finalized from what it had, so the record is model.recovered_error —
+	//     the same receipt the coder turn settles, with the subagent's role.
+	//   - a real error (err != nil, unrecovered): the record is model.failure
+	//     — settled HERE from the send-scoped receipt, the healing ladder no
+	//     longer journals it on the fly (heal.go no longer writes it directly).
+	if stats.StopReason == "error-recovered" && stats.LastError != nil {
+		// req.Model is the model the subagent's own request ran on — NOT
+		// cs.Request.Model (the CODER's model, which a subagent call never
+		// touches — the old code's misattribution). reportRecoverableError
+		// refines it to the model whose send FIRST failed via the send-scoped
+		// receipt when one is present (a failed ladder walk leaves req.Model
+		// at the last candidate tried).
+		cs.reportRecoverableError(sa.Role, req.Model, stats.LastError)
+	}
+	if err != nil {
+		if pf := pendingFailureOf(err); pf != nil {
+			cs.journalModelFailure(pf, err)
+		}
+	}
 	return digest, stats, err
 }
 
@@ -208,7 +244,19 @@ func (cs *CortexSession) dispatcherFor(sa tools.Subagent) AgentDispatcher {
 		if refusal != "" {
 			return refusal
 		}
-		out, err := tools.Execute(ctx, call, cs)
+		// Issue #129 piece 3: the subagent's own writes are the TURN's edits —
+		// the turn-end lint pass must see them (pre-piece-3, the per-edit
+		// hook ran for these very edits, so a subagent edit going unlinted
+		// would be a regression). The Agent profile is the only one with
+		// write_file/edit_file; the path is already ConfinePath'd, so it is
+		// workdir-resolvable (lintTouchedPath drops anything outside the
+		// workspace, and RunTurnEndLint skips files that no longer exist).
+		if call.Function.Name == tools.FunctionWriteFile || call.Function.Name == tools.FunctionEditFile {
+			if p, err := call.StringArg("path"); err == nil {
+				cs.lintTouchedPath(p)
+			}
+		}
+		out, _, err := tools.Execute(ctx, call, cs)
 		if err != nil {
 			return "Error: " + err.Error()
 		}

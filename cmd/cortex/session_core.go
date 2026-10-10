@@ -13,18 +13,53 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/testguard"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
+// resolveProjectCommands computes a workspace's resolved command set
+// (issue #129): discovery from the root's manifests, with the config's
+// project.commands declarations and the root's RESOLVED instruction
+// file's `## Commands` section overriding it field-by-field (config >
+// instruction file > discovery). The instruction file is resolved the
+// same way the system prompt's project-instructions seed resolves it
+// (#152): the first of AGENTS.md, CLAUDE.md, .github/copilot-instructions.md
+// present at the root (no concatenation), read with the same size cap
+// (readInstructions) — so a repo whose instructions live in CLAUDE.md
+// still has its declared commands picked up. It is the ONE parsing path
+// for the `## Commands` declaration: read from the workspace root
+// directly, so the hook works for a CWD-implicit project with no config
+// file. It never fails: an undetectable root or unreadable manifest
+// degrades to an empty set, which the post-edit hook treats as "no hook".
+func resolveProjectCommands(root string, cfg *Config) projectcmd.Commands {
+	discovered, err := projectcmd.Discover(root)
+	if err != nil {
+		return projectcmd.Commands{}
+	}
+	declared := projectcmd.Declared{}
+	if cfg != nil {
+		declared = cfg.DeclaredProjectCommands()
+	}
+	// The `## Commands` section is read from the RESOLVED instruction file
+	// (workspaceInstructions, #152's resolution); the file's name becomes
+	// the Source label for any declaration that wins, so the report shows
+	// where it came from. No file → no declarations (Resolve gets "").
+	agentsPath, instructions := workspaceInstructions(root)
+	agents := projectcmd.ParseAgentsCommands(instructions)
+	return projectcmd.Resolve(discovered, declared, agents, fileLabel(root, agentsPath))
+}
+
 type CortexArgs []string
 
 func (a CortexArgs) Request() *AgentRequest {
+	path, instructions := projectInstructions()
 	return &AgentRequest{
 		Model:       defaultModel,
-		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(projectInstructions())}},
+		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(fileLabel(WorkspaceFromCWD().Root, path), instructions)}},
 		Temperature: defaultTemperature,
 		Tools:       toolSet,
 		MaxTokens:   codeMaxOutputTokens,
@@ -33,19 +68,29 @@ func (a CortexArgs) Request() *AgentRequest {
 
 // systemPromptContent builds the system message content: the base prompt
 // (built-in SystemPrompt, or prompt.file's replacement — promptBase, set by
-// configurePrompt), then any prompt.append text, then an optional
-// "# Project instructions (AGENTS.md)" section when instructions is
-// non-empty. Shared by CortexArgs.Request() (CWD-implicit, via
-// projectInstructions()) and applyProjectByName (project_workspace.go,
-// M3.5's --project, via Workspace.Instructions()) so the two stay provably
-// identical modulo their instructions source.
-func systemPromptContent(instructions string) string {
+// configurePrompt), then the attribution line when attribution is on
+// (promptAttribution, set by configureAttributionPrompt), then any
+// prompt.append text, then an optional "# Project instructions (<file>)"
+// section when instructions is non-empty — <file> (label) names which
+// instruction file was loaded (AGENTS.md, CLAUDE.md, .github/
+// copilot-instructions.md, #147) so the seed shows its own provenance. The
+// content is byte-stable for the life of the session — the per-turn memory
+// section never rides here, it is delivered through the ephemeral wire slot
+// (turn.go's memorySectionFor) — so the append-stable prefix and the prompt
+// cache built on it survive every turn. Shared by CortexArgs.Request()
+// (CWD-implicit, via projectInstructions()) and applyProjectByName
+// (project_workspace.go, M3.5's --project, via Workspace.Instructions()) so
+// the two stay provably identical modulo their instructions source.
+func systemPromptContent(label, instructions string) string {
 	content := promptBase
+	if promptAttribution != "" {
+		content += "\n\n" + promptAttribution
+	}
 	if promptAppend != "" {
 		content += "\n\n# Additional instructions\n\n" + promptAppend
 	}
 	if instructions != "" {
-		content += "\n\n# Project instructions (AGENTS.md)\n\n" + instructions
+		content += "\n\n# Project instructions (" + label + ")\n\n" + instructions
 	}
 	return content
 }
@@ -55,6 +100,11 @@ type CortexSession struct {
 	Request          *AgentRequest
 	LastPromptTokens int
 	LastCachedTokens int
+	// LastOutputTokens is the last response's billed completion tokens — the
+	// status row's "out" figure (issue #109), mirroring LastPromptTokens for
+	// the "in" side. Updated per request in turn()'s onStatusUpdate and
+	// settled to the turn's final request in turn() after the run.
+	LastOutputTokens int
 	Window           int
 	Study            ModelSpec
 	Fleet            Fleet
@@ -64,13 +114,33 @@ type CortexSession struct {
 	deadModels map[string]modelErrClass
 	// healList is the healing ladder's catalog fetch, injectable for tests;
 	// nil means liveOpenRouterListModels (the production default).
-	healList      listModelsFn
-	Config        *Config
-	workspace     *Workspace
+	healList listModelsFn
+	// catalog is the OpenRouter listing this session holds, if any: the
+	// startup fetch the preflight made, kept so a /model switch can read a
+	// model's declared input modalities for the vision verdict (#216)
+	// without refetching. nil (a non-OpenRouter backend, or a failed fetch)
+	// means the switch falls back to the config flag / name heuristic.
+	catalog   []llm.OpenRouterModel
+	Config    *Config
+	workspace *Workspace
+	// projectCommands is the resolved project command set (issue #129) —
+	// discovery from the workspace's manifests, overridden by the config's
+	// project.commands declarations and the resolved instruction file's
+	// `## Commands` section. Computed once at session construction /
+	// project targeting; nil-safety means an empty value (no manifest, no
+	// declarations) is a no-op hook.
+	projectCommands projectcmd.Commands
+	// hookState is the session-scoped state of the post-edit hook
+	// (issue #129): the "workspace not trusted" note fires once per
+	// session, and the session is the unit that owns that flag AND the
+	// current mode (tools.PostEditHookState; a REPL /hook command lowers
+	// it in place via SetMode — it never raises above the process
+	// ceiling installed below from the resolved config).
+	hookState     *tools.PostEditHookState
 	deleteRoot    string
 	allowDelete   bool
 	quiet         bool
-	confirmRisky  func(question string) bool
+	confirmRisky  func(question string) lineedit.ConfirmChoice
 	classifyShell shellrisk.ClassifyFn
 	turnIntent    string
 	// onThinking, when set, is invoked with active=true on the first
@@ -93,10 +163,53 @@ type CortexSession struct {
 	// default, including every REPL/serve session) leaves gateShell's
 	// existing headless-Blocked fallback untouched.
 	approveRisky func(ctx context.Context, reason, command string) (approved, timedOut bool)
-	SessionID    string
-	transcript   *os.File
-	capturer     *capture.Capture
-	memory       *memory.Store // project-tier notes (.cortex/memory)
+
+	// shellApprovals is the session-scoped bash approval list (issue #107):
+	// the records the user chose "always this session" for at the
+	// risky-command prompt — an exact command (chosen "a") or a derived
+	// prefix (chosen "p", the program plus one subcommand + "*", e.g.
+	// "make test*" for "make test ./pkg/..."). The kind rides with each
+	// record on purpose: an exact approval of a command that ends in "*"
+	// (e.g. "rm -f build/*") must keep comparing byte for byte — it must
+	// never be re-read as a prefix by the pattern string alone. It is
+	// memory-only by design: a fresh session starts with an empty list, and
+	// persisting it to the config (a `tools.shell_allow` list) is a
+	// separate decision. gateShell checks it for Risky verdicts only —
+	// after classification, never before — so an approval can never
+	// override a Blocked command.
+	shellApprovals []shellApproval
+
+	// pendingImage is the image attachment read_file just recorded on
+	// THIS session via the ImageSink seam (#217): a per-session field, so
+	// concurrent sessions (serve, discord) can never take each other's
+	// image. spliceImageResult consumes it onto the tool-result message.
+	// pendingImageSet distinguishes "an image is parked" from the zero
+	// value. pendingSideCar is the same part parked one step further —
+	// from the splice until the engine's append-time side-car write
+	// (writeImageSideCarAt) consumes it. Tool dispatch within a session
+	// is sequential (one tool batch at a time), so no lock is needed.
+	pendingImage      tools.ImagePart
+	pendingImageSet   bool
+	pendingSideCar    tools.ImagePart
+	pendingSideCarSet bool
+	// pendingTurnSideCars are the image parts a HUMAN attached to the turn
+	// (#218), parked by attachTurnImages for writeTurnImageSideCars to persist
+	// at the transcript index the turn's user message lands at. A slice
+	// because one turn can carry several @mentioned images, and unlike the
+	// read_file slot above it is never keyed to a tool observation — the user
+	// message is appended once per turn, so this is set and consumed within
+	// the same turn (cleared unconditionally, so an early return cannot leak
+	// an image onto a later message).
+	pendingTurnSideCars []tools.ImagePart
+	// pendingTurnSideCarRefs are the references (an @mention path, a URL) the
+	// parked images above came from, index-aligned with them, so the manifest
+	// written beside the bytes can name what the human attached.
+	pendingTurnSideCarRefs []string
+
+	SessionID  string
+	transcript *os.File
+	capturer   *capture.Capture
+	memory     *memory.Store // project-tier notes (.cortex/memory)
 	// userMemory is the cross-project tier (~/.cortex/memory, via
 	// internal/userhome) — the SAME internal/memory.Store type as memory,
 	// pointed at the user's home instead of the project's .cortex dir
@@ -107,6 +220,121 @@ type CortexSession struct {
 	ws            *cache.WorkingSet
 	outline       []cache.OutlineEntry
 	outlineFolded string // digest of previously folded outline entries (P4); rides the front of the outline zone
+	// testwatch is this turn's before-snapshot of the files its
+	// write_file/edit_file/remove_path calls will touch (testwatch.go, issue
+	// #141). Armed by touchFile before each mutating call (coderDispatcher);
+	// drained into the "tests changed:" receipt (testwatchReceipt) at the
+	// clean-finalize point and at turn end (captureTurn), and cleared at the
+	// START of every turn (turn.go's testwatchDrop) so a turn that errors or
+	// is interrupted before captureTurn can't leak a stale before-side into
+	// the next one. Nil outside a turn.
+	testwatch map[string]*testwatchSnapshot
+
+	// testwatchBash / testwatchBashArmed are the BASH arm of the turn's
+	// testwatch receipt (issue #141): a separate budget of compact
+	// per-file baselines (testguard.Baseline) for the workspace's
+	// test-named files, armed ONCE per turn by the first bash call
+	// (armTestwatch). A separate store so the bash arm can't starve the
+	// named-tool arm's 32-file / 1 MiB content budget — a turn that runs
+	// `go test` before a write_file on a test file must still get a
+	// receipt for the write_file. Nil / false outside a turn.
+	testwatchBash      map[string]testguard.Baseline
+	testwatchBashArmed bool
+
+	// inTurnOriginals records, per absolute message index, the ORIGINAL
+	// content of every tool result applyInTurnDemotion stubbed on the wire
+	// copy (indemote.go). Turn-end consumers — the turn-end
+	// outline entry (turnOutlineEntry) and the journal capture (captureTurn)
+	// — read through turnOriginalSpan instead of the mutated wire copy, so
+	// they see the original result (an [err] label, the true content for
+	// web_search/fetch_url artifacts), never the one-line stub (issue #171
+	// item 5). Entries live until their OWNING turn is demoted — turn.go
+	// deletes a span's entries when it builds that span's outline entry,
+	// because DemoteBatch usually drains a turn several turns after it ran,
+	// not at the next turn's start — and the map is cleared wholesale
+	// wherever the message log is rewritten (Compact, /clear, ResumeTranscript),
+	// because the absolute indices shift there. The transcript already holds
+	// every original losslessly; this is the in-session in-memory half.
+	// Pure in-memory cache: never written to session state, so nothing
+	// persists it.
+	inTurnOriginals map[int]string
+	// senderOverride, when non-nil, replaces the coder's round-trip sender
+	// (the network-backed coderSender) inside the healing ladder — a TEST-ONLY
+	// seam (no production code sets it) that lets a test drive the REAL turn
+	// path with a scripted model and zero network (the same pattern healList
+	// is injectable for tests).
+	senderOverride Sender
+	// coderDispatcherOverride, when non-nil, replaces coderDispatcher() (loop.go)
+	// — the tool-call dispatcher the coder's Toolset is built with (turn.go).
+	// TEST-ONLY seam (no production code sets it) for the same class of test
+	// as senderOverride: drive the REAL turn path with scripted tool results
+	// instead of real file access. Both are nil in every production session.
+	coderDispatcherOverride func() AgentDispatcher
+	// subagentSenderOverride, when non-nil, replaces the subagent's model
+	// round-trip sender (the blockingSender a subagent's runLoop uses) for the
+	// named subagent role — a TEST-ONLY seam (no production code sets it) for
+	// the same class of test as senderOverride: drive the REAL subagent run
+	// (runSubagentStats → runLoop over the real dispatcher) with a scripted
+	// model and zero network. A subagent's model REPLIES (its tool-call and
+	// final-answer rounds) are produced by the sender, not the request, so
+	// scripting them goes through this seam, not through the request. nil in
+	// every production session.
+	subagentSenderOverride map[string]Sender
+
+	// testwatchScratchBefore is the leftover-debug arm's (issue #154)
+	// PRE-bash baseline of scratch-named paths: the set of workdir-relative
+	// scratch-named files that EXISTED before this turn's first bash call.
+	// Armed by the same armTestwatch walk as the test-file baselines (before
+	// the command runs); sweepScratchFiles then records only scratch files
+	// NEW since this baseline — a pre-existing scratch file (testdata/foo.bak,
+	// scripts/tmp_setup.sh, ...) is already in the baseline, so it is not
+	// snapshotted and never gets a false "scratch file left behind" receipt
+	// on every turn that runs bash. Dropped with the snapshot (testwatchDrop).
+	testwatchScratchBefore map[string]bool
+
+	// turnLinter is the turn-end lint pass's (issue #129 piece 3) per-turn
+	// state: the DISTINCT files this turn's write_file/edit_file calls
+	// touched (workdir-resolved paths, first-touch order — the same keys
+	// touchFile uses, normalized), and the turn's total lint budget
+	// (project.turn_lint_budget_sec, 0 = the default 60s) as a deadline.
+	// Armed by lintTouchedPath (the coder dispatcher, before each mutating
+	// call), read by turnLintAtFinalize at the clean-finalize point (the
+	// turn's FinalizeHook, alongside the #141 test-loss receipt), and
+	// dropped with the snapshot (testwatchDrop). Lint moved off the per-
+	// edit hook because clippy/eslint are slow and noisy: format stays
+	// per-edit, lint runs once per turn over the distinct touched files.
+	// Nil outside a turn; budgetSec 0 means "not armed by NewCortexSession"
+	// (hand-built test sessions use the default budget).
+	turnLinter struct {
+		touched   []string
+		budgetSec int
+	}
+	// lintReceipt is this turn's "lint: …" receipt (issue #129 piece 3):
+	// computed at the clean-finalize point by turnLintAtFinalize (stored
+	// there because the pass must run BEFORE the model's final answer, so
+	// the model can fix findings) and read by turn.go into
+	// TurnResult.LintReceipt (the REPL / `cortex turn` print it) and by
+	// captureTurn (the journal record shows it). "" between turns (dropped
+	// with the snapshot).
+	lintReceipt string
+
+	// turnReceipt state (issue #219, step 1 — measurement-only receipt,
+	// turn_receipt.go): the per-turn measurements the receipt assembles
+	// from. receiptModelBash is the bash recorder — the model's own
+	// test/build runs (commands recognized against the project's own
+	// test/build command set) recorded by coderDispatcher's
+	// receiptBash/receiptBashOutcome, in run order; receiptUnformatted
+	// holds the files the post-edit format hook reported a problem with
+	// this turn (the per-turn wrapper FormatHook records the hook's
+	// outcome alongside the model-facing note); receipt is the receipt
+	// computed at turn end (turn.go, for a turn that ran tools —
+	// turnUsedTools). Dropped at the START of every turn (receiptDrop,
+	// turn.go) — an error or interrupt path that returns before turn end
+	// must not leak its measurements into the next turn (testwatchDrop's
+	// lifecycle).
+	receiptModelBash   []receiptModelBashRun
+	receiptUnformatted []string
+	receipt            turnReceipt
 
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to
@@ -114,7 +342,55 @@ type CortexSession struct {
 	// answer to "where does your code live" and persists it.
 	awaitingScanRootsReply bool
 
+	// sameActionBlocked is the per-turn same-action ledger (issue #169):
+	// the set of effect classes (shellrisk.EffectClass) that were Blocked
+	// in the current turn, keyed by cs.turnNo so it resets automatically
+	// when the turn advances. A later command in the same class is
+	// refused before it is even classified — a mechanical block against
+	// routing around an earlier block with a same-effect variant. Nil
+	// outside a turn.
+	sameActionBlocked map[string]bool
+
+	// checkpoints is the per-turn undo stack (issue #111): the snapshot
+	// (tree hash + untracked baseline) of each turn that changed the working
+	// tree, in turn order. A snapshot is recorded at the START of every turn
+	// (recordCheckpoint) but committed to this stack only at the turn's END,
+	// and only if the turn actually changed the working tree — commitCheckpoint
+	// re-snapshots the tracked state and the untracked set and compares them
+	// with the pending entry, keeping the checkpoint iff the tree hash differs
+	// or the untracked set differs (so a read-only turn's recorded ref is
+	// dropped instead) — and the stack's depth N always maps to the
+	// Nth-most-recent turn that changed files (the issue's spec). Scoped to
+	// cs.root(), keyed by session id, pruned to the newest maxCheckpointRefs on
+	// append, cleared on /clear and session end (clearCheckpoints). Nil until
+	// the first mutating turn. The turn never fails because of a checkpoint —
+	// recordCheckpoint and commitCheckpoint swallow git errors.
+	checkpoints *checkpointStack
+
+	// pending is the snapshot recordCheckpoint took at the start of the
+	// in-flight turn, not yet on the undo stack: commitCheckpoint at the
+	// turn's end re-snapshots the working tree and commits it (and keeps its
+	// ref) iff the turn changed the tree, else drops the ref. Zero between
+	// turns.
+	pending checkpointEntry
+
+	// taint is the per-turn untrusted-content taint (issue #102): set when
+	// attacker-controllable web content (a fetch_url / web_search result,
+	// detected by its framing marker in coderDispatcher, loop.go) enters the
+	// conversation. While the turn is tainted, gateShell raises the bar for
+	// Risky shell commands: an interactive approver is asked with the taint
+	// reason appended (the intent judge's Safe verdict no longer waves a
+	// Risky command through — see tool_deps.go), and with no approver
+	// reachable (headless, subagent, timeout) the command is blocked with
+	// shellrisk.TaintBlockedMessage. Same lifecycle as sameActionBlocked
+	// (issue #169): inert outside a turn (turnNo == 0 — record drops, the
+	// gate never consults it), explicitly cleared at the START of every
+	// turn in turn.go so a turn that errored or was interrupted before its
+	// end cannot leak the taint into the next one. Nil between turns.
+	taint *untrustedTaint
+
 	sessionStart    time.Time
+	turnStart       time.Time // in-flight turn's start (issue #109: the status row's elapsed clock); zero between turns
 	turns           int
 	turnNo          int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
 	tokensIn        int
@@ -124,6 +400,25 @@ type CortexSession struct {
 	injectedChars   int
 	captures        int
 	injections      int
+	// redactions is the running count of secret patterns masked for the
+	// CURRENT turn as they were persisted (issue #103): writeTranscript
+	// redacts each outgoing message (content + tool-call args + tool results)
+	// on the way to the on-disk transcript, so a secret the agent read is never
+	// stored. The live in-memory Request.Messages stays verbatim (the model
+	// still uses the value this turn); only what hits disk is masked. The
+	// counter is reset at the START of every turn (turn.go) so it always
+	// counts exactly the in-flight turn, and carried on TurnResult so a
+	// caller can see it.
+	redactions int
+	// redactionsTotal is the CUMULATIVE session count of secret patterns
+	// masked while the session's messages were persisted (issue #103): every
+	// turn's per-turn redactions (cs.redactions, reset at turn start) is
+	// folded in here once the turn ends, so the session summary and the eval
+	// journal can report the session-wide total — distinct from the per-turn
+	// cs.redactions that rides TurnResult. It is a session-lifetime metric in
+	// the same sense as cs.captures / cs.tokensIn (the summary reports the
+	// session's whole lifetime, not just the current post-/clear conversation).
+	redactionsTotal int
 
 	md      *markdownRenderer
 	mdWidth int
@@ -184,7 +479,32 @@ func (cs *CortexSession) SetModel(model string) {
 		window = info.MaxInput
 	}
 	applyEffort(cs.Request, dialect, effort)
+	// #216: a /model switch re-derives the vision verdict with the SAME
+	// precedence the role binding used (visionForModel): the code role's
+	// explicit config flag when the new model is that role's configured
+	// model, then the catalog's declared input modalities for an
+	// OpenRouter model this session's listing knows, then the id's
+	// capability tags, then false — unknown means the gate refuses images,
+	// never drops them silently.
+	cs.Request.Vision = visionForModel(cs.Config, cs.catalog, model)
 	cs.Window = window
+}
+
+// applyVisionCatalog adopts a freshly fetched OpenRouter listing as this
+// session's vision source (#216) and re-derives the in-flight request's
+// verdict from it. Explicit `models.code.vision` is never overridden —
+// visionForModel consults it first. Called from the healing ladder, whose
+// substitution changes the model under a running session; startup does its
+// equivalent inside preflightCuratedModels, where the study binding is
+// still a local ModelSpec rather than session state.
+func (cs *CortexSession) applyVisionCatalog(catalog []llm.OpenRouterModel) {
+	if len(catalog) == 0 || cs.Config == nil || !cs.Config.isOpenRouter() {
+		return
+	}
+	cs.catalog = catalog
+	if cs.Request != nil {
+		cs.Request.Vision = visionForModel(cs.Config, catalog, cs.Request.Model)
+	}
 }
 
 // windowSize resolves the code model's context window: learned (from an
@@ -239,12 +559,12 @@ func NewCortexSession() *CortexSession {
 	instructionBytesCap = cfg.instructionBytesCap()
 	configurePrompt(cfg)
 	tools.Configure(cfg.toolLimits())
+	tools.SetHookCeiling(cfg.postEditHookMode())
 	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 	openRouterPreflightTimeout = cfg.preflightTimeout()
 	labelTickInterval = cfg.tickerInterval()
 
 	args := CortexArgs(os.Args)
-	req := args.Request()
 	workspace := WorkspaceFromCWD()
 
 	var fleet Fleet
@@ -261,14 +581,27 @@ func NewCortexSession() *CortexSession {
 	// OpenRouter pick against the live catalog — cheap (one bounded
 	// ListModels call), and only on the openrouter+curated path. A model
 	// that's been retired since the curated table was written is swapped
-	// for this process only; the config file is never touched.
-	code, study = preflightCuratedModels(context.Background(), cfg, code, study,
+	// for this process only; the config file is never touched. The listing
+	// itself is returned and kept on the session (#216): it is the primary
+	// source of the vision verdict, for these bindings and for any later
+	// /model switch.
+	code, study, startupCatalog := preflightCuratedModels(context.Background(), cfg, code, study,
 		modelSubstitutionJournalDir(workspace.ContextDir()), liveOpenRouterListModels)
+	// #216: the preflight settled verdicts from the live catalog where it
+	// had one; anything it left nil (no fetch, an unlisted id) falls to the
+	// name heuristic here — LAST, so the heuristic can never mask a verdict
+	// the catalog stated for these bindings.
+	applyHeuristicVision(cfg, &code, &study)
 
 	if g := sharedSwapGroup(fleet, code, study); g != "" {
 		printStartupWarning(os.Stderr, fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g))
 	}
 
+	// The attribution line names the resolved code model in its trailer, so
+	// it is configured only now — after resolution, before args.Request()
+	// builds the system message.
+	configureAttributionPrompt(cfg, code.Model)
+	req := args.Request()
 	req.Model = code.Model
 	req.BaseURL = code.Endpoint
 	req.APIKey = resolveKey(code)
@@ -282,6 +615,7 @@ func NewCortexSession() *CortexSession {
 	req.Timeout = code.timeout(requestTimeout)
 	req.MaxAttempts = code.maxAttempts(maxSendAttempts)
 	req.Backoff = code.backoff(retryBackoff)
+	req.Vision = code.VisionEnabled()
 
 	// network.compat_timeout_sec is the config surface for the existing
 	// CORTEX_COMPAT_TIMEOUT_SEC env var's fallback default (pkg/llm's
@@ -309,17 +643,29 @@ func NewCortexSession() *CortexSession {
 	}
 
 	cs := &CortexSession{
-		Args:         &args,
-		Request:      req,
-		Config:       cfg,
-		workspace:    workspace,
-		Window:       code.Window,
-		Study:        study,
-		Fleet:        fleet,
-		deleteRoot:   deleteRoot,
-		allowDelete:  allowDelete,
-		sessionStart: time.Now(),
+		Args:            &args,
+		Request:         req,
+		Config:          cfg,
+		workspace:       workspace,
+		Window:          code.Window,
+		Study:           study,
+		Fleet:           fleet,
+		catalog:         startupCatalog,
+		deleteRoot:      deleteRoot,
+		allowDelete:     allowDelete,
+		projectCommands: resolveProjectCommands(workspace.Root, cfg),
+		hookState:       &tools.PostEditHookState{},
+		sessionStart:    time.Now(),
 	}
+	// Issue #119: the workspace is now resolved and every command that goes
+	// through this constructor (REPL, turn, study, learn, serve, discord,
+	// loop, study-eval) will write under its .cortex/ — journal, memory, the
+	// learn cursor — often without ever opening a transcript (study/learn
+	// never call StartTranscript). Self-ignore the dir now, before the first
+	// write could leak it; a later re-target (--project / serve / loop
+	// firings, via applyProjectByName) runs the same guard for its (possibly
+	// different) root. See gitignore_self.go.
+	cs.SetWorkspace(workspace)
 	cs.ws = cs.newWorkingSet(1)
 	// Strip declarations for every IsToolEnabled-gated tool that config
 	// disabled — scan_landscape, web_search/fetch_url, agent, context_* — so
@@ -330,6 +676,33 @@ func NewCortexSession() *CortexSession {
 	// its own check as defense-in-depth against a hallucinated tool name.
 	cs.Request.Tools = filterEnabledTools(cs.Request.Tools, cs.IsToolEnabled)
 	return cs
+}
+
+// SetHookMode lowers the session's post-edit hook mode in place (issue #129
+// piece 2): a REPL /hook command is its sole caller. It is monotone-down;
+// the process ceiling (SetHookCeiling, installed at session construction
+// from the resolved config) is folded in at read time by EffectiveHookMode,
+// so a session can never operate in a mode more permissive than the one
+// the operator configured; the agent has no setter at all.
+func (cs *CortexSession) SetHookMode(m tools.HookMode) {
+	if cs.hookState != nil {
+		cs.hookState.SetMode(m)
+	}
+}
+
+// hookModeName renders the session's current EFFECTIVE hook mode (the
+// /hook command's current-value display; the more-restrictive of the
+// session mode and the process ceiling, where larger is more restrictive —
+// off > format > all).
+func (cs *CortexSession) hookModeName() string {
+	switch tools.EffectiveHookMode(cs.hookState) {
+	case tools.HookModeOff:
+		return "off"
+	case tools.HookModeFormat:
+		return "format"
+	default:
+		return "all"
+	}
 }
 
 // IsToolEnabled reports whether a context window tool is enabled via config.
@@ -356,9 +729,52 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	return true // unknown tools enabled by default
 }
 
+// AttributionProvider implementation for *CortexSession. The session resolves
+// the model itself — cs.Request.Model is the code role's binding
+// NewCortexSession resolved for the Turn — so the trailer always names the
+// model that actually authored the commit (never a literal "<model>"). A nil
+// Config still yields the default-enabled trailer (Config.attributionCommit
+// is nil-safe).
+func (cs *CortexSession) AttributionCommit() string {
+	model := ""
+	if cs != nil && cs.Request != nil {
+		model = cs.Request.Model
+	}
+	return cs.Config.attributionCommit(model)
+}
+
+// AttributionJournaler implementation for *CortexSession (issue #146): the
+// coordinate pair an attribution.commit receipt carries. The bash tool cannot
+// reach a session's turn ordinal or workspace root, and cmd/cortex cannot own
+// the write path (internal/tools classifies the commit), so the session
+// supplies the coordinates and internal/tools appends the event — the same
+// split Workdirer uses. turn is cs.turnNo, the 1-based in-flight turn (0
+// between turns), matching the "turn" field captureTurn records.
+func (cs *CortexSession) AttributionSession() (string, int) {
+	if cs == nil {
+		return "", 0
+	}
+	return cs.SessionID, cs.turnNo
+}
+
+// AttributionProject returns the receipt's workspace root ("" when the session
+// has none — a bare test construction, where the event still records the
+// command it observed).
+func (cs *CortexSession) AttributionProject() string {
+	if cs == nil || cs.workspace == nil {
+		return ""
+	}
+	return cs.workspace.Root
+}
+
 // ValidateToolCall provides dynamic validation for tool calls beyond config.
 // Returns (true, "") if valid, (false, message) if invalid.
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
+	// Issue #102's taint rules live at the tools themselves, not here:
+	// write_file / edit_file / remove_path each confine their path with
+	// tools.ConfineWrites before touching the filesystem, and RunSubagent
+	// hands this session to the child as its ToolDeps — so the in-tool check
+	// covers the subagent leg too, and bash pushes are gateShell's floor.
 	switch tc.Function.Name {
 	case "context_adjust_watermarks":
 		// Validate watermarks are within bounds (±highWM/2 — mirrors

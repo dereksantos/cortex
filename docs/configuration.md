@@ -3,7 +3,8 @@
 The one page for configuring `cortex`: where config lives, what a minimal
 setup looks like, what the zero-config default does, every `tools.*` gate
 and numeric cap, every `models.<role>`/`subagents`/`limits`/`network`/
-`serve`/`repl`/`discord`/`skills` field, and every environment variable that
+`serve`/`repl`/`discord`/`skills`/`project` field, and every environment
+variable that
 changes behavior. Everything below is verified against `cmd/cortex/config.go` and
 the code that reads each setting — no aspirational fields. Every field on
 this page is optional; a config that never mentions a section behaves
@@ -227,6 +228,7 @@ default to today's hardcoded value.
 | `read.default_range_lines` | 200 | `read_file`'s window when `start` is given without `end`. |
 | `read.max_range_lines` | 800 | Cap on a single ranged `read_file`. |
 | `read.max_read_bytes` | 24000 | Per-read byte ceiling (bounds very-long-line spans the line cap alone can't). |
+| `read.image_max_bytes` | 1500000 | Cap on an image `read_file` may attach as an image content part (issue #217); a larger file is refused with the byte size and cap named. Images count toward the window at a documented per-image estimate (decoded bytes ÷ 3). |
 | `grep.max_hits` | 100 | Cap on `grep` match count. |
 | `grep.line_cap` | 1200 | Window width for a long matching line (centered on the match). |
 | `grep.max_output_bytes` | 6000 | Total-output ceiling for one `grep` call. |
@@ -246,7 +248,8 @@ default to today's hardcoded value.
 | `max_tokens` | Per-request output-token cap. Defaults: 16384 (code), 8192 (study). |
 | `temperature` | Overrides `backend`/global temperature for this role. |
 | `key_env` / `key_service` | Per-role auth override (see Auth above). |
-| `thinking` | Reasoning-effort intent — `false`/`true` (legacy bool), a level string (`"off"`/`"on"`/`"low"`/`"medium"`/`"high"`), or `{"budget": N}`. See `docs/thinking-models.md`. Both live roles default to `"on"`. |
+| `thinking` | Reasoning-effort intent — `false`/`true` (legacy bool), a level string (`"off"`/`"on"`/`"omit"`/`"low"`/`"medium"`/`"high"`), or `{"budget": N}`. See `docs/thinking-models.md`. Both live roles default to `"on"`. `"omit"` is the explicit send-nothing state: it sends no reasoning field at all, and the catalog/fleet cannot override it (unlike every other ask) — use it for providers or models that reject the reasoning parameter (an endpoint with parameter checks enabled 404s on it). It differs from leaving `thinking` unset, which still applies the role's default (`"on"`). |
+| `vision` | Whether this role's model accepts **image input** (issue #216). A request carrying image content parts is only sent when the resolved verdict is true; a text-only model gets a clear error naming it, never a silent drop. Precedence: explicit `true`/`false` always wins; else, on an OpenRouter backend, the live model catalog's declared input modalities for the bound id (the startup `ListModels` the preflight already makes — an entry listing `image` input is accepted, one that doesn't is refused); else, still OpenRouter-only, the model id's capability tags (a `vision`-tagged id, e.g. one containing `vision`, `-vl-`, or `llava`); anywhere else, unset means false. The same ordering decides a `/model` switch (from the listing the session holds), so the switch and the role binding can't disagree. |
 | `request_timeout_sec` | Per-request HTTP timeout for this role's model calls. Precedence: this field → `CORTEX_COMPAT_TIMEOUT_SEC` (env) → the historical default (10 min for the coder/subagent transport path, `models.study`'s summarizer/shell-risk sub-calls included). |
 | `max_send_attempts` | Retry ceiling for a transient failure (transport error, 429/5xx) on this role's calls. Default 3. |
 | `retry_backoff_ms` | Base linear-backoff delay between retries (`attempt × retry_backoff_ms`). Default 500ms. |
@@ -281,8 +284,8 @@ default to today's hardcoded value.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. |
-| `max_instruction_bytes` | 16384 | `AGENTS.md` truncation cap. |
+| `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. When the cap is above 10, the model gets one wrap-up note 10 tool-call rounds before the cap (counting the in-flight batch, so the count names exactly the rounds it still gets), and after a bound-forced finalize the turn gets one more tools-withheld round appending the leftover-debug / test-loss and turn-end-lint accounting to the answer (issue #161). |
+| `max_instruction_bytes` | 16384 | Truncation cap on the seeded project-instructions file (the first present, in priority order, of `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` — see "Project instructions" below). An over-cap file is cut at this size and marked `...[<file> truncated]`. |
 | `memory_index_cap_chars` | 4000 | Truncation cap on the injected PROJECT-tier memory-note index. |
 | `user_memory_index_cap_chars` | 1500 | Truncation cap on the injected USER-tier memory-note index (`~/.cortex/memory`, shared across every project on the machine) — independent of `memory_index_cap_chars`; the user tier renders first, above it, in the turn-start injection. See `docs/cross-source-learning.md` piece 1. |
 | `capture_excerpt_cap_chars` | 280 | Truncation cap on the final-answer excerpt the journal capture records. |
@@ -325,8 +328,40 @@ config gate — every session with memory enabled gets both tiers. See
 
 | Field | Default | Meaning |
 |---|---|---|
-| `file` | (unset) | Path to a file that replaces the built-in base system prompt. `~` expands; a relative path resolves upward from CWD (the AGENTS.md rule, so `.cortex/prompt.md` works from any subdirectory); truncated at the instruction cap. An unreadable or whitespace-only file warns on stderr and keeps the built-in — a broken path degrades to a working agent, never a silent empty prompt. |
-| `append` | (unset) | Text appended after the base prompt (and before any AGENTS.md section), whether the base is built-in or file-replaced. |
+| `file` | (unset) | Path to a file that replaces the built-in base system prompt. `~` expands; a relative path resolves upward from CWD (the AGENTS.md rule, so `.cortex/prompt.md` works from any subdirectory); truncated at the instruction cap. An unreadable or whitespace-only file warns on stderr and keeps the built-in — a broken path degrades to a working agent, never a silent empty prompt. A file-replaced base owns its own memory guidance: the built-in per-turn memory section (`memoryPromptSection`) is NOT injected on top of it — the memory INDEX note still injects either way (see `docs/memory-tools.md`). |
+| `append` | (unset) | Text appended after the base prompt and the `attribution.*` line when one is on (and before any project-instructions section), whether the base is built-in or file-replaced. |
+
+## Project instructions (seeded from the repo)
+
+At session construction, Cortex seeds the system prompt with the repo's own
+agent-instruction file. Resolution is **priority-ordered, first match wins —
+no concatenation**: the first file present, in this order, is the one loaded
+(`agentInstructionFiles`, `cmd/cortex/config.go`):
+
+1. `AGENTS.md` — the cross-harness convention; stays first.
+2. `CLAUDE.md`
+3. `.github/copilot-instructions.md`
+
+The list is deliberately short and documented in the code: every entry is a
+file a real repo ships, and the order encodes intent (a repo with several
+still loads exactly one).
+
+Search rule: the walk starts at the working directory and goes up to the
+filesystem root — the nearest directory from the CWD upward that contains any
+candidate file wins, and within that directory the first file in the
+priority order above is the one loaded (findUp semantics with the list
+applied per level — a deeper directory's `CLAUDE.md` beats an ancestor's
+`AGENTS.md`). The loaded file is trimmed, truncated at
+`limits.max_instruction_bytes` (with a marker naming the file), and appended
+to the system prompt as a
+`# Project instructions (<file>)` section — the header names the file, and
+`/context`'s system legend row shows it, so the seed always says where it came
+from. When no candidate file exists anywhere up the chain, no section is
+added (behavior identical to the old AGENTS.md-only rule).
+
+The explicit-root leg (`--project`, serve) resolves the same list at the
+project root via `Workspace.Instructions()`; the two legs are provably
+identical for the same resolved file (`TestProjectInstructionsEquivalence`).
 
 ## `repl.*` — interactive REPL tunables
 
@@ -363,7 +398,9 @@ read per-session from the live `*CortexSession`'s config.
   "context": {
     "tail_high_fraction": 0.5,
     "tail_drain_fraction": 0.333,
-    "outline_fraction": 0.125
+    "outline_fraction": 0.125,
+    "in_turn_demotion": true,
+    "in_turn_keep_recent": 6
   }
 }
 ```
@@ -373,6 +410,8 @@ read per-session from the live `*CortexSession`'s config.
 | `tail_high_fraction` | 0.5 (W/2) | Fraction of the window at which the hydrated tail (zone B) triggers demotion — `docs/context-architecture.md`'s high watermark. |
 | `tail_drain_fraction` | 1/3 ≈ 0.333 (W/3) | Fraction of the window demotion drains the tail down to — the low watermark. Also gates `recall`'s output size (`tool_deps.go`). |
 | `outline_fraction` | 0.125 (W/8) | Fraction of the window the demoted-turn outline (zone A) may grow to before it folds via the summarizer. |
+| `in_turn_demotion` | `true` | Gate for **in-turn demotion** (issue #171): before each main-loop send, if the current turn's accumulated tool results have outgrown the high watermark, the oldest are swapped for one-line recall-citable stubs in the wire copy only. **Absent/`null` means enabled** — an availability kill-switch, matching the `tools.enable_context_*`/`enable_web` precedent that an absent key must not disable a shipped capability. `false` turns the whole in-turn path off (byte-for-byte today's behavior). |
+| `in_turn_keep_recent` | 6 | How many of the turn's most-recent tool results always stay verbatim under in-turn demotion — even over budget, the newest few are what the model is actively working from. An explicit value `<= 0` is rejected at load; absent/`null` means the default (6). |
 
 **These are eval-verified defaults** — `cmd/cortex/context_eval_test.go`'s
 deterministic Δ suite and the live fleet eval
@@ -394,7 +433,7 @@ value exactly" is the whole point of the defaults above. Float math (
 configured (`cmd/cortex/config.go`'s `tailHighWatermark`/
 `tailDrainWatermark`/`outlineBudget`).
 
-**The safety inequality**, enforced at load time whenever ANY field in this
+**The safety inequality**, enforced at load time whenever ANY fraction in this
 section is explicitly set (an absent `context` section skips validation
 entirely):
 
@@ -407,7 +446,8 @@ entirely):
   (`compactThreshold`, `main.go`; Derek's option-2 decision keeps it out of
   this config group). `0.16` (`contextPrefixHeadroom`, `config.go`) is a
   conservative constant standing in for the two zone-A pieces this section
-  doesn't configure — the system prompt (+ AGENTS.md, capped by
+  doesn't configure — the system prompt (+ the seeded project-instructions
+  file, capped by
   `limits.max_instruction_bytes`) and the memory index (capped by
   `limits.memory_index_cap_chars`) — sized against the smallest window these
   caps would plausibly still run against (`fallbackWindow`, 32768) so a
@@ -422,6 +462,14 @@ skipped check. A rejection names the inequality and the offending numbers,
 e.g. `context: tail_high_fraction (0.7000) + outline_fraction (0.2000) +
 prefix_headroom (0.1600, system prompt + memory index slack) = 1.0600
 exceeds the compact trigger (0.8000) — …`.
+
+The two in-turn demotion fields are **independent** of the fraction group:
+`in_turn_demotion` is a plain availability flag (no range to validate), and
+`in_turn_keep_recent` is validated on its own — an explicit value `<= 0` is
+rejected at load with `context.in_turn_keep_recent must be a positive
+integer (…)` — even when no fraction in the section is set (a config that
+names only `in_turn_keep_recent` is still checked). Behavior is documented in
+`docs/context-architecture.md`'s in-turn demotion section.
 
 ## `skills.*` — Agent Skills discovery
 
@@ -470,6 +518,281 @@ The rendered index is injected at turn start alongside the memory index
 Study/Learn/Agent subagent profiles are seeded from their own static system
 prompt and never see it. `/context` surfaces it as a `skills` row (░ glyph)
 in the grid legend when non-empty.
+
+## `attribution.*` — commit and PR attribution markers
+
+Marks work Cortex authors: a trailer on commits, and a footer the agent is
+asked to put on pull request bodies. On by default.
+
+```json
+{
+  "attribution": {
+    "enabled": true,
+    "commit": "Co-Authored-By: Cortex (<model>)",
+    "pr": "Generated with Cortex",
+    "include_model": true
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` turns attribution off entirely: no trailer is added anywhere and the system prompt carries no attribution line. |
+| `commit` | `Co-Authored-By: Cortex (<model>)` | The commit trailer line. `<model>` is replaced with the code model's name. An explicit `""` turns off commit attribution only (and survives the user→project merge). |
+| `pr` | `Generated with Cortex` | The line the system prompt asks the agent to end pull request bodies with. No `<model>` substitution. An explicit `""` turns off PR attribution only. |
+| `include_model` | `true` | `false` removes the model from the trailer: ` (<model>)` is stripped (and any other `<model>` token). The same happens when no code model is known. |
+
+The default trailer has no email address. GitHub only credits a
+`Co-Authored-By` trailer in its contributor UI when it has the form
+`Name <email>`, so set `commit` to include one if you want that.
+
+### Where it applies
+
+- **System prompt (every coder session).** When attribution is on, one line
+  is added to the coder's system prompt, after the base prompt and before
+  `prompt.append` and the project-instructions section (AGENTS.md, or the
+  fallback files — see "Project instructions" above). It names the trailer (with the code model
+  resolved at session start) and the PR footer verbatim, e.g. *Attribution:
+  end every git commit message you author with the trailer line
+  "Co-Authored-By: Cortex (qwen3-coder)", and end every pull request body you
+  write with the line "Generated with Cortex".* A surface set to `""` is left
+  out of the line. This covers the REPL, `cortex turn`, `cortex serve`,
+  `cortex discord` and loop firings, which all build their session the same
+  way. It is fixed for the session's lifetime (it is part of the cached
+  prefix), and a resumed session keeps the system prompt stored in its
+  transcript.
+- **PR footer: prompt only.** Cortex never creates a pull request itself, so
+  the footer has no mechanical backstop; whether a PR body ends with it is up
+  to the model following the line above.
+- **`cortex change commit`, loop-firing commits, Discord WIP checkpoints.**
+  These commit mechanically through `git interpret-trailers --if-exists
+  addIfDifferent --trailer <trailer>`: a message that already carries the
+  identical trailer is not given a second copy, and a different trailer (a
+  human `Co-Authored-By`, say) is kept alongside it. The model comes from
+  `models.code` in config (no fleet discovery); without one, the model part
+  is dropped. `cortex change commit` and the Discord checkpoint load config
+  from the current directory; a loop firing uses its session's config.
+- **`git commit` run by the agent through the `bash` tool.** Before the
+  shell-risk gate classifies the command, the tool splices
+  `--trailer='<trailer>'` in directly after `commit` (so it lands before any
+  `--` and pathspecs), single-quoted so `$`, backticks and quotes in the
+  template are never expanded. The gate and any confirmation prompt see the
+  rewritten command. The trailer names the session's current code model. It
+  is only applied when the whole command is one simple `git commit …`
+  invocation that doesn't already contain the trailer text. Pipelines,
+  `&&`/`||`/`;` chains, redirections or heredocs, subshells and command
+  substitution, `git` options before `commit` (`git -C dir commit`),
+  `--amend`, and `-F -`/`--file=-` are left exactly as written. When a
+  command left alone this way still contains `git commit` and couldn't be
+  parsed as one simple command, or reads its message from stdin (and isn't
+  an `--amend`), the tool result gets a note naming the trailer the message
+  should end with.
+
+### What is recorded
+
+Every commit Cortex makes is journaled, so compliance is measured rather than
+assumed. Two records cover it:
+
+- **`loop.run`'s `attributed` field** — the loop firing's own view: did the
+  commit this firing landed carry the trailer (omitted when false, or when the
+  firing made no commit at all).
+- **`attribution.commit`** (machine-level journal,
+  `~/.cortex/journal/attribution/`) — one event per commit the harness sees,
+  from whichever path made it: the `bash` tool's backstop, `cortex change
+  commit`, or the Discord WIP checkpoint (which shares that function). It
+  carries the session and turn where there is one, the project, the command,
+  and an `outcome` naming what the backstop decided: `added`,
+  `already_present`, `skipped_unparseable`, `skipped_amend`, `skipped_stdin`,
+  or `disabled` (attribution off — recorded too, so the off periods are
+  visible).
+
+Each `attribution.commit` event is written twice over a commit's life, told
+apart by `verified`. The intent write goes down before the command runs, so a
+commit that never happened (a refused command) still records why it was left
+alone. After a run that succeeded, a second event carries `sha` and
+`trailer_present` — the resulting commit's hash and whether `git log -1`
+actually finds the trailer in its message. That second line is the fact; the
+first is only the intent, and the two can disagree in the direction that
+matters: a pipeline the backstop refused to rewrite (`skipped_unparseable`)
+may commit anyway, and the verified event then reports `trailer_present:
+false`. Loop firings therefore write both records for the same commit and
+never contradict each other. A commit that was refused outright — not on a
+change branch, nothing to commit — writes no `attribution.commit` at all: the
+reason already reaches the caller, and an entry naming a SHA the repository
+doesn't have would be worse than no entry.
+
+Reading the stream back is `journal.LatestAttributionCommits`, or plain `jq`
+over the segments. See [`docs/journal.md`](journal.md) for the class.
+
+## Project commands, post-edit hook and workspace trust
+
+Cortex discovers each project's own `format`/`lint`/`test`/`build` commands
+from its manifests, and runs them after edits — but only in a workspace you
+have trusted. This section is the single reference for that whole feature:
+how the commands are found, when each runs, the trust gate, the mode switch,
+and the budgets. The config keys involved live under `project`:
+
+```json
+{
+  "project": {
+    "commands": {
+      "format": "custom-fmt -w {file}",
+      "test": "go test -race ./..."
+    },
+    "trusted": ["/home/u/real-repo"]
+  }
+}
+```
+
+`commands`: keys are the four command roles `format`, `lint`, `test`,
+`build`; each value is the shell command line for that role. Unknown
+keys and blank values are ignored.
+
+`trusted`: the workspace trust list (documented with the post-edit hook
+below) — USER config only, managed with `cortex project trust`.
+
+A command carrying the `{file}` placeholder is per-file: the post-edit hook
+(below) substitutes the file just written. A command carrying `{dir}` is
+per-package: the hook substitutes the file's `"./"`-prefixed package
+directory, relative to the project root (`"./"` for a root-level file) —
+the correct unit for cross-file tools (`go vet` type-checks a whole
+package, so `go vet {dir}` never reports spurious `undefined:` for a symbol
+defined in a sibling file). Commands without either placeholder apply to the
+whole project and are reported but never auto-run per edit.
+
+The same keys can be declared under a `## Commands` section of the
+RESOLVED instruction file — the same file, resolved the same way, as the
+system prompt's [Project instructions](#project-instructions-seeded-from-the-repo)
+section: priority-ordered, first match wins (`AGENTS.md`, then
+`CLAUDE.md`, then `.github/copilot-instructions.md`), capped at
+`limits.max_instruction_bytes`.
+
+```markdown
+## Commands
+
+- format: custom-fmt -w {file}
+- lint: golangci-lint run
+```
+
+Only list items shaped `- <role>: <command>` in the LAST `## Commands`
+section are read (roles case-insensitive, limited to the four roles);
+the rest of the file is untouched. Precedence is field-by-field:
+**config.json beats the instruction file, which beats discovery** — the
+manifests
+(`go.mod` → `gofmt -w {file}` / `go vet {dir}` / `go test ./...` /
+`go build ./...`; `package.json` scripts — reported as their runnable npm
+form, `npm run <script>` (or the bare `npm test` for the test script),
+because a script body like `tsc -p tsconfig.json` only runs inside npm,
+which puts node_modules/.bin on PATH and runs pre/post hooks — or
+prettier/eslint deps; `pyproject.toml`'s `[tool.ruff]`/`[tool.black]` +
+pytest; `Cargo.toml`; make targets named format/lint/test/build). Resolution happens once per
+session in `resolveProjectCommands` (`cmd/cortex/session_core.go`), which
+reads the resolved instruction file at the workspace root directly — the
+single parsing path for that section — and labels the source with the
+file's name (e.g. `CLAUDE.md`). A user-level `project.commands` entry
+beats an instruction-file declaration for the same role, like every other
+field-by-field merge.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `command_timeout_sec` | 10 | Per-command budget (seconds) for each hook run: the per-edit format and each turn-end lint run (capped at the time left in `turn_lint_budget_sec`). A slow formatter or linter is cut off here and the note/receipt reports the elapsed time. |
+| `turn_lint_budget_sec` | 60 | TOTAL wall-clock budget (seconds) for the turn-end lint pass. It caps the whole pass at once: a lint run that has not started when the budget is spent is not run, and a run in progress is cut off at the budget (the deadline travels into the run). A slow linter is reported as a budget hit in the receipt, not as a per-file timeout. |
+
+**The post-edit hook.** After `write_file`/`edit_file` lands, the session
+runs the project's format command on the file just touched, so an
+unformatted file never reaches review. It is FORMAT-ONLY: lint is slow and
+noisy per edit (clippy, eslint), so it is not run per edit. Instead, on a
+TRUSTED workspace in `"all"` mode, lint runs ONCE at the turn end, over the
+distinct files the turn touched (the `write_file`/`edit_file` paths,
+including the `agent` subagent's, minus any the turn deleted since) —
+one run per file for a `{file}` lint, one run per distinct package dir for
+a `{dir}` lint. Findings reach the model in one more tools-withheld
+(finalize) round, and appear in the REPL, in `cortex turn`'s stderr and its
+`lint` JSON field, and in the turn's journal capture. A turn that ran
+tools emits a measurement-only receipt on stderr and under the `receipt`
+JSON key, listing files changed (`git diff --stat` plus untracked files),
+the exit codes of the model's own runs of the project's test/build
+commands (`not run:` when the run was refused or blocked), and the files
+the format hook failed on; it is saved as a transcript note and never
+shown to the model (issue #219).
+
+**The mode switch.** `tools.post_edit_hook` controls how much the hook
+does: `"off"` (nothing runs), `"format"` (only the per-file format command
+per edit — lint is skipped), or `"all"` (default: the per-file format
+command per edit, plus the turn-end lint pass over the turn's touched
+files). Precedence: the
+`CORTEX_POST_EDIT_HOOK` env var (same values), then the project config's
+`tools.post_edit_hook`, then the user config's, then the default `"all"`.
+An operator can lower it (the REPL's `/hook` command, the per-call
+`hook: "skip"` argument on `write_file`/`edit_file`) but nothing RAISES it
+above the configured ceiling — an agent can skip one call, never enable a
+mode. Trust is never affected by the mode.
+
+**Workspace trust is the ONLY gate.** Trust is a persisted,
+per-workspace, USER-level decision: the user config's `project.trusted`
+list (below), set with `cortex project trust`. It is read ONLY from the
+user-level config — the repository's own `.cortex/config.json` is never
+on the read path, so a repo can never mark itself trusted (the merge
+drops the project-level `project.trusted` copy; `mergeProject`).
+Default: no entry, untrusted. On an UNTRUSTED workspace the hook runs
+NOTHING: a trusted repo may use repo-local binaries
+(`./node_modules/.bin/eslint`, `./bin/fmt`) of any language, so there is
+no per-tool allowlist to run — the trust decision authorizes running
+what the repo configures. The first edit of a session on an untrusted
+workspace gets a one-line "post-edit hook inactive" note (later edits
+stay silent); a trusted workspace gets no note.
+
+On a TRUSTED workspace, the per-edit format command runs when it applies:
+the command must be per-file (a whole-project format has no argument to
+substitute per edit) and applicable to the file's extension (a manifest-set
+like gofmt's `.go`; a declaration or script with no recognized toolchain
+applies to all files). It runs as a plain argv — the template is split once
+and `{file}`/`{dir}` are each substituted as a single argument AFTER the
+split, exec'd directly with no shell, so a path is always one inert
+argument. A template containing shell syntax (pipe, chain, redirect,
+command substitution, subshell, or newline) cannot run without a shell and
+is skipped with a note — its intent is unexpressible, not dangerous. The
+format command gets the per-command budget (default 10s); a timeout or a
+non-zero exit is folded into the tool result as a note (capped at 2000 bytes
+of output), appended after the tool's own observations about the change
+(`edit_file`'s line delta and removal warning, and the large-deletion note
+either tool adds). The hook never fails the edit — the result of the write
+stands regardless.
+
+**`project.trusted` — the workspace trust list.** A list of workspace
+root directories the operator has decided are trusted — the only gate
+for the post-edit hook (above). Lives in the USER config only; managed
+with:
+
+```
+cortex project trust add <root>     # trust a workspace root (idempotent)
+cortex project trust remove <root>  # untrust it (errors if not listed)
+cortex project trust list           # show the trusted roots
+```
+
+Editing round-trips the whole user config, so a trust edit never
+clobbers other settings (unknown top-level keys are preserved). Absent
+or empty means no workspace is trusted — the safe default.
+
+**Inspecting the resolved set.** `cortex project commands` prints the
+resolved format/lint/test/build commands, one per line (or a JSON document
+with `--json`), each carrying `role`, `command`, `source` — the manifest
+name when discovered, `config.json` when declared in `project.commands`, or
+the instruction file's name (`AGENTS.md`, `CLAUDE.md`,
+`.github/copilot-instructions.md`) when declared in its `## Commands`
+section — and `when`: when the post-edit hook runs this command NOW, for
+this workspace and session. `when` is one of: `per-edit` (a per-file
+format command, trusted workspace, hook mode format or all), `turn-end`
+(a lint with `{file}`/`{dir}`, trusted workspace, hook mode all), `never`
+(the test and build roles, or a whole-project format/lint — the hook never
+auto-runs those), `inactive: workspace untrusted` (nothing runs on an
+untrusted workspace), or `inactive: hook mode <mode>` (a trusted workspace
+whose hook mode would not run this role now). `when` is computed from the
+user-config trust list and the effective hook mode (the `CORTEX_POST_EDIT_HOOK`
+env var, then the config's `tools.post_edit_hook`, then the default `all`).
+`--project <name>` targets a registered project (from the registry) instead
+of the CWD-derived workspace root — the same pair the hook uses in a
+session.
 
 ## Validation
 
@@ -522,3 +845,5 @@ runner, not a working knob.
   the `limits.*` memory-index caps and the `scope` arg govern.
 - [`docs/cross-source-learning.md`](cross-source-learning.md) — the user
   memory tier, its shadowing rules, and the cross-project promotion design.
+- [`docs/journal.md`](journal.md) — the `attribution` writer-class the
+  `attribution.*` receipts are written to, and its entry schema.

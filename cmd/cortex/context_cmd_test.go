@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +39,7 @@ func seededContextSession(t *testing.T) *CortexSession {
 		Request: &AgentRequest{
 			Model: "context-report-test-model",
 			Messages: []Message{
-				{Role: RoleSystem, Content: base + agentsMarker + agentsBody},
+				{Role: RoleSystem, Content: base + agentsMarkerPrefix + "AGENTS.md)\n\n" + agentsBody},
 			},
 		},
 		memory:           mem,
@@ -181,6 +183,82 @@ func TestContextReportOmitsUntrackedSections(t *testing.T) {
 	}
 }
 
+// TestContextReportShowsLoadedInstructionFile is #147's seed-surfacing
+// check: /context's system legend row must say WHICH file the project
+// instructions came from — here CLAUDE.md (the source when no AGENTS.md
+// exists), not just "system <tokens>". The legend's detail is parsed out
+// of the same "# Project instructions (<file>)" header that names the file
+// in the system message, so the two name the same file by construction.
+func TestContextReportShowsLoadedInstructionFile(t *testing.T) {
+	cs := &CortexSession{
+		Window: 4000,
+		Request: &AgentRequest{
+			Model: "context-report-instructions-model",
+			Messages: []Message{
+				{Role: RoleSystem, Content: "You are a test agent." + agentsMarkerPrefix + "CLAUDE.md)\n\nFollow these repo rules exactly."},
+			},
+		},
+	}
+	got := stripANSI(cs.contextReport())
+
+	if !strings.Contains(got, "system") {
+		t.Fatalf("contextReport() missing the system legend row; got:\n%s", got)
+	}
+	if !strings.Contains(got, "CLAUDE.md") {
+		t.Errorf("contextReport() must name the loaded instruction file (CLAUDE.md) on the system legend row; got:\n%s", got)
+	}
+	// The system legend detail is parsed from the header, so a session
+	// whose system message carries no instructions section shows no detail
+	// (the row renders bare, as it did before #147).
+	bare := &CortexSession{
+		Window: 4000,
+		Request: &AgentRequest{
+			Model:    "bare-model",
+			Messages: []Message{{Role: RoleSystem, Content: "just a system prompt"}},
+		},
+	}
+	if detail := bare.systemLegendDetail(); detail != "" {
+		t.Errorf("systemLegendDetail() on a section-less system message = %q, want \"\"", detail)
+	}
+}
+
+// TestSystemLegendDetailCoversEveryCandidateFile pins that the legend
+// parser round-trips each candidate filename through the header
+// systemPromptContent builds — the label and the legend detail always name
+// the same file for every agentInstructionFiles entry. The CWD is the root
+// (no .cortex anywhere up the temp tree, so WorkspaceFromCWD falls back to
+// the CWD): a file AT the root labels by its basename, and the
+// .github/copilot-instructions.md labels by its root-relative path.
+func TestSystemLegendDetailCoversEveryCandidateFile(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if found := findUp(".cortex"); found != "" {
+		t.Skipf("test environment has a .cortex dir up the tree (%q) — root fallback unobservable", found)
+	}
+	for _, rel := range agentInstructionFiles {
+		t.Run(rel, func(t *testing.T) {
+			label := fileLabel(root, filepath.Join(root, rel))
+			wantLabel := filepath.Base(rel)
+			if strings.Contains(rel, string(os.PathSeparator)) {
+				wantLabel = rel // a file UNDER the root labels by its relative path
+			}
+			if label != wantLabel {
+				t.Fatalf("fileLabel(%q) = %q, want %q", rel, label, wantLabel)
+			}
+			cs := &CortexSession{
+				Window: 4000,
+				Request: &AgentRequest{
+					Model:    "m",
+					Messages: []Message{{Role: RoleSystem, Content: "base" + agentsMarkerPrefix + label + ")\n\nbody"}},
+				},
+			}
+			if got := cs.systemLegendDetail(); got != label {
+				t.Errorf("systemLegendDetail() = %q, want %q", got, label)
+			}
+		})
+	}
+}
+
 func TestContextHeaderLine(t *testing.T) {
 	cs := seededContextSession(t)
 	got := stripANSI(cs.contextHeaderLine())
@@ -198,6 +276,55 @@ func TestContextHeaderLineNoWorkingSetYet(t *testing.T) {
 	got := stripANSI(cs.contextHeaderLine())
 	if !strings.HasSuffix(got, "turn 0") {
 		t.Errorf("contextHeaderLine() = %q, want a trailing turn 0 (no working set yet)", got)
+	}
+}
+
+// TestContextHeaderLineSessionTotals pins the cumulative session totals
+// suffix (issue #109's "/context" acceptance item): once the session has used
+// the model, the header carries "· <in> in / <out> out" after the turn count,
+// with the "· $<cost>" figure appended only when the backend reported one.
+func TestContextHeaderLineSessionTotals(t *testing.T) {
+	cs := &CortexSession{
+		Window:    4000,
+		Request:   &AgentRequest{Model: "m"},
+		tokensIn:  12000,
+		tokensOut: 3000,
+		costUSD:   0.013,
+	}
+	got := stripANSI(cs.contextHeaderLine())
+	// The base header must still read first; the totals follow the turn count.
+	if !strings.HasPrefix(got, "context — m · "+humanK(4000)+" window · turn 0") {
+		t.Errorf("contextHeaderLine() = %q, want the base header before the totals", got)
+	}
+	if !strings.HasSuffix(got, "· "+humanK(12000)+" in / "+humanK(3000)+" out · "+humanCost(0.013)) {
+		t.Errorf("contextHeaderLine() = %q, want the totals suffix '· %s in / %s out · %s'", got, humanK(12000), humanK(3000), humanCost(0.013))
+	}
+	// Tokens alone (no reported cost): the cost figure must be absent, not an
+	// estimated "· $0.000".
+	cs.costUSD = 0
+	got = stripANSI(cs.contextHeaderLine())
+	if !strings.HasSuffix(got, "· "+humanK(12000)+" in / "+humanK(3000)+" out") {
+		t.Errorf("contextHeaderLine() with no cost = %q, want the token totals without a cost figure", got)
+	}
+	if strings.Contains(got, "$") {
+		t.Errorf("contextHeaderLine() with no reported cost must not show a $ figure: %q", got)
+	}
+}
+
+// TestContextHeaderLineNoTotalsOnFreshSession pins the absence of the totals
+// suffix on a session that has never used the model — a zero-cost, zero-token
+// session reads exactly the base header (no dangling "·").
+func TestContextHeaderLineNoTotalsOnFreshSession(t *testing.T) {
+	cs := &CortexSession{
+		Window:  4000,
+		Request: &AgentRequest{Model: "m"},
+	}
+	got := stripANSI(cs.contextHeaderLine())
+	if got != "context — m · "+humanK(4000)+" window · turn 0" {
+		t.Errorf("contextHeaderLine() = %q, want exactly the base header (no totals suffix)", got)
+	}
+	if strings.Contains(got, " in / ") || strings.Contains(got, "$") {
+		t.Errorf("contextHeaderLine() on a fresh session must carry no totals: %q", got)
 	}
 }
 
@@ -240,8 +367,10 @@ func TestCacheHeadlineLineFreshSession(t *testing.T) {
 
 // TestGridLegendLinesOmitEmptyComponents covers the per-row omission rule
 // directly against gridLegendLines, independent of the full report: with
-// only a system prompt populated and the window sized to exactly match it
-// (no free space left over either), the system row is the only one shown.
+// only a system prompt and the workspace note populated (the note rides
+// every turn, issue #142) and the window sized to exactly match both (no
+// free space left over either), the system and workspace rows are the only
+// ones shown.
 func TestGridLegendLinesOmitEmptyComponents(t *testing.T) {
 	cs := &CortexSession{
 		Request: &AgentRequest{
@@ -249,14 +378,17 @@ func TestGridLegendLinesOmitEmptyComponents(t *testing.T) {
 			Messages: []Message{{Role: RoleSystem, Content: "a system prompt with some content"}},
 		},
 	}
-	cs.Window = cs.systemPromptTokens()
+	cs.Window = cs.systemPromptTokens() + cs.workspaceTokens()
 
 	lines := cs.gridLegendLines()
-	if len(lines) != 1 {
-		t.Fatalf("gridLegendLines() = %d lines, want 1 (system only); got: %v", len(lines), lines)
+	if len(lines) != 2 {
+		t.Fatalf("gridLegendLines() = %d lines, want 2 (system + workspace); got: %v", len(lines), lines)
 	}
 	if !strings.Contains(lines[0], "system") {
 		t.Errorf("gridLegendLines()[0] = %q, want the system row", lines[0])
+	}
+	if !strings.Contains(lines[1], "workspace") {
+		t.Errorf("gridLegendLines()[1] = %q, want the workspace row", lines[1])
 	}
 }
 
@@ -266,6 +398,69 @@ func TestOutlineSpanCitation(t *testing.T) {
 	want := "@session/20260701-143210#m1-20"
 	if got != want {
 		t.Errorf("outlineSpanCitation() = %q, want %q", got, want)
+	}
+}
+
+// TestMemoryIndexTokensCoversTheSection verifies /context's memory count
+// mirrors turn.go's ephemeral-slot decision: the full memory section
+// (memoryPromptSection) rides the slot whenever notes exist or a demoted
+// outline is visible, and must be counted alongside the index note — not the
+// index alone. Covers the issue #151 fix where an outline-only session was
+// under-reported as 0 tokens for memory even though the section was on the
+// wire.
+func TestMemoryIndexTokensCoversTheSection(t *testing.T) {
+	resetPrompt(t) // the section only rides with the built-in base (promptBase == SystemPrompt)
+	// Fresh store (no notes) and a store with one note.
+	freshStore, err := memory.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New: %v", err)
+	}
+	noteStore, err := memory.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("memory.New: %v", err)
+	}
+	if _, err := noteStore.Write("a-note", "note body", time.Now()); err != nil {
+		t.Fatalf("memory.Write: %v", err)
+	}
+
+	sectionTokens := cache.TokensOf(len(memorySectionFor("", true, true)))
+	// The index note's token size, computed through the same path turn.go
+	// uses so the expected value can't drift from the implementation.
+	noteSession := &CortexSession{memory: noteStore}
+	indexTokens := cache.TokensOf(len(noteSession.memoryIndexNote()))
+	if indexTokens == 0 {
+		t.Fatal("noteStore's memoryIndexNote() must be non-empty with a note written")
+	}
+
+	tests := []struct {
+		name string
+		cs   *CortexSession
+		want int
+	}{
+		{"no memory store, no outline", &CortexSession{}, 0},
+		{"no memory store, outline present (turn.go still sends the section)",
+			&CortexSession{outline: outlineFixture()},
+			sectionTokens},
+		{"memory wired, no notes, no outline", &CortexSession{memory: freshStore}, 0},
+		{"outline only, no notes",
+			&CortexSession{memory: freshStore, outline: outlineFixture()},
+			sectionTokens},
+		{"folded outline only, no notes",
+			&CortexSession{memory: freshStore, outlineFolded: "FOLDED @session/x#m1-2"},
+			sectionTokens},
+		{"notes, no outline",
+			&CortexSession{memory: noteStore},
+			sectionTokens + indexTokens},
+		{"notes AND outline",
+			&CortexSession{memory: noteStore, outline: outlineFixture()},
+			sectionTokens + indexTokens},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cs.memoryIndexTokens(); got != tt.want {
+				t.Errorf("memoryIndexTokens() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

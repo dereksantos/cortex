@@ -96,6 +96,12 @@ existing bool (accept both; bool maps to `"off"`/`"on"`):
   off).
 - `"low" | "medium" | "high"` — effort levels, for dialects that have them.
 - `{ "budget": N }` — token budget, for dialects that have that.
+- `"omit"` — the explicit send-nothing state (issue #132): it sends no
+  reasoning field at all, and the catalog/fleet cannot override it (unlike
+  every other ask — `degradeForThinkingMode` passes it through in every
+  mode). Use it for providers or models that reject the reasoning parameter
+  (an endpoint with parameter checks enabled 404s on it). It differs from
+  leaving `thinking` unset, which still applies the role's default (`"on"`).
 
 Levels degrade gracefully: a dialect with no levels treats `low/medium/high`
 as `on`; a dialect with budgets maps levels to fixed budget tiers. The spec
@@ -296,3 +302,76 @@ decisions:
    Prerequisites before enabling: fleet serving exposes
    reasoning_content/reasoning_tokens on the cuda group, and blocking-
    path reasoning accounting parity (P1 gap, now live-confirmed).
+
+## Reasoning-fallback recovery (issue #149)
+
+A reasoning-ON role can spend its whole turn deliberating and come back with
+**nothing** — no content, no tool calls. That is the budget-burn failure this
+doc's §4 names, and the B5 probe (§B5 fleet probe, verdict 3) caught it live:
+on `coder` every non-off tier hit the token cap with empty visible content.
+The engine's answer is a one-shot, role-scoped **recovery** — not a policy
+change.
+
+**The rule.** When a finish comes back empty from a role whose resolved
+effort is non-off (`req.Effort.Level != EffortOff`), the engine re-sends the
+**same request once** with reasoning pinned **off**, and uses the retry's
+answer if it is non-empty. The empty assistant turn is not appended before
+the retry, so the retry re-sends the exact request that came back empty;
+only the surviving message — the retry's, or the original empty one on
+fall-through — is appended. If the retry returns tool calls (the model had
+work to do), they are dispatched like a normal tool round — the recovery does
+not force an answer it was not given.
+
+- **Natural branch** (`salvageEmptyReasoningRetry`, `cmd/cortex/loop.go`) —
+  the empty finish is a plain mid-loop answer with no tool calls. The retry
+  pins reasoning **off**: a Qwen-style model that was mid-deliberation often
+  produces its answer once the deliberation channel is suppressed.
+
+There is deliberately **no recovery on the forced-finalize path.** §5a's
+invariant — every finalize send goes out with reasoning off — holds
+unconditionally, and the issue #149 evidence is that those reasoning-off
+finalizes always produced an answer; their empties are already covered by
+the existing prompt-based salvage chain (one terse re-ask, then the
+observation fallback). Re-enabling reasoning on a finalize would invite the
+same budget-burn empty reply the recovery exists to undo.
+
+Roles that already run with reasoning **off** never pay for it: there is no
+opposite direction to fall back to, so the recovery is skipped entirely and
+the existing prompt-based salvage chain runs unchanged.
+
+**Recovery, not policy.** The configured effort default is never touched.
+The one-shot mutation rides the same pattern as `disableEffortForSend`'s
+existing uses — pin for the one send, restore the role's configured level
+before return — so a role's `thinking` setting in config is unchanged
+afterward. This is deliberately NOT §5's escalation primitive (a standing
+per-role policy); it is a one-shot in-flight recovery of a single empty
+finish. It fires **at most once per empty finish**, enforced by construction
+(the caller invokes the recovery at most once per empty branch), so a model
+that keeps coming back empty cannot trigger a retry storm — the second empty
+fall-through goes straight to the existing prompt-based salvage
+(`salvageEmptyFinalize` / `salvageObservationFinalize`).
+
+**Journal receipt and transcript record.** Every recovery that actually
+recovers the round appends one `recovery.reasoning_fallback` entry to the
+project-scope class dir (`.cortex/journal/recovery/`) — best-effort, a
+failed write is swallowed, the recovery itself already ran — and a short
+note is written to the session transcript, so the fallback is visible in
+both run history and the session JSONL. The note is written under a distinct
+`kindNote` entry: `loadSession` (`cortex resume`) skips `kindNote`, so it is
+transcript-only by construction — it is **never** part of the wire
+conversation or the model-visible history, because a system message in the
+middle of a conversation is not part of that history and some chat templates
+reject or mishandle system messages that aren't first. The journal receipt is
+the authoritative record. The receipt records the model that needed it, the
+role (`code`/`study`), the path that fired it, how the retry recovered the
+round (`outcome`: `answer` when the retry returned prose, `tool_calls` when
+it returned calls that were dispatched), the stop reason, and the clamp
+state, so telemetry shows *which models keep needing it* per project (see
+docs/journal.md's writer-class taxonomy and `cmd/cortex/recovery_journal.go`).
+`loopStats.ReasoningFallback` (with `loopStats.ReasoningFallbackOutcome`) is
+set on the run's in-memory stats the same way, for the study-eval /
+session-metrics rows. The receipt fires when the retry recovers the round —
+as prose *or* as tool calls — and **not** when the retry also came back empty
+and fell through to the prompt-based salvage (that records
+`ReasoningFallback = false`; the salvage path's own `Salvaged`/
+`SalvagedUnclamped` attribution stands).

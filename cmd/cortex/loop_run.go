@@ -173,8 +173,13 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 
 	if startErr == nil {
 		if clean, cleanErr := gitCleanIn(proj.Root); cleanErr == nil && !clean {
-			if head, commitErr := commitChangeIn(proj.Root, fmt.Sprintf("loop: %s", spec.Name)); commitErr == nil {
+			// The commit carries the attribution trailer only when attribution
+			// is on and the trailer template resolved one — recorded on the
+			// journal event (payload.Attributed) so compliance is measured,
+			// not assumed (the issue's item 4).
+			if head, attributed, commitErr := commitChangeWithAttribution(proj.Root, fmt.Sprintf("loop: %s", spec.Name), cs.Config); commitErr == nil {
 				payload.ChangeRef = branch + "@" + head
+				payload.Attributed = attributed
 			}
 		}
 	}

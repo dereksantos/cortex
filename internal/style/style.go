@@ -53,6 +53,7 @@ const (
 // meaning. Everything else uses a Role.
 const (
 	HueBlue    Role = "\033[34m"
+	HueCyan    Role = "\033[36m"
 	HueMagenta Role = "\033[35m"
 	HueYellow  Role = "\033[33m"
 	HueGreen   Role = "\033[32m"

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/loops"
+	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/internal/userhome"
@@ -153,6 +154,17 @@ type ModelSpec struct {
 	// "high"), or {"budget": N} — see llm.Effort's UnmarshalJSON. The zero
 	// value means "unset" (JSON key absent).
 	Thinking llm.Effort `json:"thinking"`
+
+	// Vision declares that this role's model accepts image content parts
+	// (issue #216's vision gate). Explicit config always wins; when unset
+	// on an OpenRouter backend the live catalog's declared input
+	// modalities decide (stampCatalogVision, fed by the startup
+	// ListModels the preflight already makes), falling back to the
+	// model id's capability tags (llm.InferCapabilities / CapVision)
+	// when the catalog could not be fetched; anywhere else unset means
+	// false — the gate refuses images with a clear error naming the
+	// model rather than silently dropping them.
+	Vision *bool `json:"vision,omitempty"`
 
 	// RequestTimeoutSec / MaxSendAttempts / RetryBackoffMs are the P1 timeout-
 	// unification config surface (docs/configuration.md): per-role overrides
@@ -351,14 +363,150 @@ func discoverFleet(ctx context.Context, endpoint string) Fleet {
 	return f
 }
 
+// VisionEnabled resolves this binding's vision verdict (issue #216): the
+// verdict stamped on the spec — by explicit `models.<role>.vision`, by
+// applyCatalogVision from the live catalog, or by the name heuristic in
+// resolveBinding — with a nil verdict meaning "unknown", which resolves
+// to false: the gate refuses images rather than silently dropping them.
+// It never infers from the model id, so a caller that knows more about
+// the target (SetModel on a /model switch) can compose its own
+// precedence over it.
+func (s ModelSpec) VisionEnabled() bool {
+	return s.Vision != nil && *s.Vision
+}
+
+// applyCatalogVision stamps binding vision verdicts from the OpenRouter
+// catalog's declared input modalities (issue #216) onto every spec at once,
+// overwriting whatever verdict the spec carried — which is why the only
+// specs it must NOT be handed are the ones config settled explicitly
+// (`models.<role>.vision` on a role pinning that spec's model, per
+// cfgDeclaresVisionFor): the catalog wins over the name heuristic and over
+// any verdict carried over from a model the spec no longer binds, and a
+// model it lists as text-only is stamped false on the spot so the heuristic
+// can never contradict a statement the catalog made about that id.
+//
+// An empty catalog means none was fetched (network down, preflight timeout)
+// or the backend is not OpenRouter: it is a no-op, which is what keeps the
+// name heuristic as the fallback instead of silently asserting "no" for
+// every model.
+func applyCatalogVision(cfg *Config, catalog []llm.OpenRouterModel, specs ...*ModelSpec) {
+	if len(catalog) == 0 {
+		return
+	}
+	byID := make(map[string]bool, len(catalog))
+	for _, m := range catalog {
+		byID[m.ID] = m.AcceptsImages
+	}
+	for _, spec := range specs {
+		if spec == nil || spec.Model == "" {
+			continue
+		}
+		if cfgDeclaresVisionFor(cfg, "", spec.Model) {
+			continue
+		}
+		// An id the listing contains settles to its declared modalities;
+		// an id it doesn't contain settles to false — "not in the served
+		// catalog" is no statement of image support, and this is also what
+		// re-settles a substituted spec whose new id the listing carries.
+		// An unlisted id keeps falling through to the name heuristic in
+		// callers that apply it (applyHeuristicVision, visionForModel) only
+		// when the whole catalog is absent, which the early return above
+		// preserves.
+		if _, listed := byID[spec.Model]; !listed {
+			continue
+		}
+		v := byID[spec.Model]
+		spec.Vision = &v
+	}
+}
+
+// cfgDeclaresVisionFor reports whether config explicitly settled the vision
+// verdict (`models.<role>.vision`) for a role pinning exactly model. role
+// narrows the search to one role; the empty role means "any role", which is
+// what applyCatalogVision wants — a spec handed to it carries a model id but
+// not the role that configured it, and a flag declared against that pin
+// describes the id either way. A model no role configures can have no
+// declared verdict.
+//
+// substituteIfMissing uses the narrowed form (its role is known) to decide
+// whether a spec's carried verdict describes the model being replaced.
+func cfgDeclaresVisionFor(cfg *Config, role, model string) bool {
+	if cfg == nil || model == "" {
+		return false
+	}
+	if role != "" {
+		m, ok := cfg.Models[role]
+		return ok && m.Model == model && m.Vision != nil
+	}
+	for _, m := range cfg.Models {
+		if m.Model == model && m.Vision != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// visionForModel resolves the vision verdict (issue #216) for one model id
+// on a /model-style switch, in the same precedence resolveBinding uses:
+//
+//  1. the code role's explicit `models.code.vision`, when the new model IS
+//     the role's configured model — the config flag describes that pin, so
+//     switching back to it must restore its declared verdict (and its
+//     declared "false", just the same);
+//  2. the live OpenRouter catalog's declared input modalities, when this
+//     process fetched one and lists the id;
+//  3. the model id's capability tags, when the backend is OpenRouter and
+//     the catalog had nothing to say;
+//  4. false otherwise — unknown means the gate refuses images, never
+//     silently drops them.
+//
+// This is the one place that ordering lives, so a /model switch and the
+// role-binding path can never disagree. catalog is the session's fetched
+// catalog (nil when there isn't one, which simply skips step 2).
+func visionForModel(cfg *Config, catalog []llm.OpenRouterModel, model string) bool {
+	if cfg == nil || model == "" {
+		return false
+	}
+	if cfgDeclaresVisionFor(cfg, roleCode, model) {
+		return *cfg.Models[roleCode].Vision
+	}
+	if cfg.isOpenRouter() {
+		spec := ModelSpec{Model: model}
+		applyCatalogVision(cfg, catalog, &spec)
+		if spec.Vision != nil {
+			return *spec.Vision
+		}
+		return modelHasVisionTag(model)
+	}
+	return false
+}
+
+// modelHasVisionTag is the name-heuristic fallback of last resort: an id
+// whose capability tags (llm.InferCapabilities) include CapVision — a
+// `vision`-tagged id, e.g. one containing "vision", "-vl-", or "llava".
+func modelHasVisionTag(model string) bool {
+	for _, l := range llm.InferCapabilities(model) {
+		if l == llm.CapVision {
+			return true
+		}
+	}
+	return false
+}
+
 // degradeForThinkingMode refuses an effort ask a model's thinking_mode can't
 // satisfy (docs/thinking-models.md §2): "none" can't reason at all, so ANY
 // ask — including an explicit "off", which would just be a no-op kwarg — is
 // dropped to unset; "hybrid" (an on/off toggle, no real levels) degrades a
 // level or budget ask to plain "on"; "always" (can never stop reasoning)
 // degrades an explicit "off" ask to "on"; "levels" (and any unrecognized
-// mode) needs no degradation.
+// mode) needs no degradation. EffortOmit (issue #132) passes through in every
+// mode: it is the explicit send-nothing state, and the catalog has no reason
+// to second-guess a decision to send nothing (its wire translation is
+// already nothing).
 func degradeForThinkingMode(e llm.Effort, mode string) llm.Effort {
+	if e.Level == llm.EffortOmit {
+		return e
+	}
 	switch mode {
 	case "none":
 		return llm.Effort{}
@@ -472,6 +620,168 @@ type Config struct {
 	// start alongside the memory index (docs/configuration.md's `skills.*`
 	// section; see internal/skills and cmd/cortex/skills.go).
 	Skills SkillsConfig `json:"skills"`
+
+	// Attribution configures markers for commits and PRs that Cortex
+	// authors (docs/configuration.md's `attribution.*` section): a commit
+	// trailer, and a PR-body footer the system prompt asks the agent to add.
+	Attribution AttributionConfig `json:"attribution"`
+
+	// Project holds project-scoped declarations (issue #129). Commands
+	// declares the project's own format/lint/test/build commands and
+	// OVERRIDES discovery from manifest files, field by field — see
+	// internal/projectcmd.Resolve. A `## Commands` section in the repo's
+	// RESOLVED instruction file (AGENTS.md, then CLAUDE.md, then
+	// .github/copilot-instructions.md — the same file the system prompt's
+	// seed loads, #152) declares the same keys and sits below this one
+	// (config beats instruction file beats discovery).
+	Project ProjectConfig `json:"project"`
+}
+
+// AttributionConfig collects configurable attribution markers for Cortex-authored
+// commits and PRs (docs/configuration.md's `attribution.*` section).
+type AttributionConfig struct {
+	// Enabled gates attribution entirely. Nil means enabled. When false, no
+	// trailer is added and the system prompt carries no attribution line.
+	Enabled *bool `json:"enabled"`
+	// Commit is the trailer line (git "Key: value" form). The token
+	// "<model>" is replaced with the code model's name unless IncludeModel
+	// is false. Nil means the default "Co-Authored-By: Cortex (<model>)";
+	// an explicit "" disables commit attribution only.
+	Commit *string `json:"commit"`
+	// PR is the line the system prompt asks the agent to end pull request
+	// bodies with. Nil means the default "Generated with Cortex"; an
+	// explicit "" disables PR attribution only. No model substitution.
+	PR *string `json:"pr"`
+	// IncludeModel controls "<model>" substitution in the commit trailer.
+	// Nil means true; false strips " (<model>)" from the template.
+	IncludeModel *bool `json:"include_model"`
+}
+
+// ProjectConfig declares project-level command overrides (issue #129).
+// Every key optional: a field that is absent leaves that role to
+// discovery (or to the AGENTS.md declaration below it).
+type ProjectConfig struct {
+	// Commands maps role ("format", "lint", "test", "build") to the
+	// shell command line for that role. A command containing "{file}"
+	// is per-file: the caller substitutes the file it just touched; a
+	// command containing "{dir}" is per-package: the caller substitutes
+	// the file's package directory. Unknown keys are ignored.
+	Commands map[string]string `json:"commands"`
+	// Trusted is the per-workspace trust list (issue #129's trust gate):
+	// workspace root directories the OPERATOR has decided are trusted — the
+	// gate for the post-edit hook (on an untrusted workspace it runs
+	// nothing). It is a USER decision — read from the USER-level config
+	// only: this field is INERT on the merged config's read path (the
+	// accessor TrustedList always reads the user file directly), and
+	// mergeConfig ignores the project-level (over) copy, so a repository
+	// can never set trust for itself: the project's own .cortex/config.json,
+	// and anything else the repo ships (AGENTS.md has no such key), cannot
+	// put a workspace on its own trust list. Absent or empty means no
+	// workspace is trusted — the safe default.
+	Trusted []string `json:"trusted"`
+	// CommandTimeoutSec is the per-command budget for the post-edit hook's
+	// format/lint runs (issue #129 piece 2) — seconds, 0 = the historical
+	// 10s (Config.toolLimits resolves it into the tools'
+	// HookCommandBudgetSec). A slow formatter is cut off here, and
+	// the hook's note reports how long it ran ("gofmt 0.2s", "eslint timed
+	// out after 10s").
+	CommandTimeoutSec int `json:"command_timeout_sec"`
+	// TurnLintBudgetSec is the TOTAL budget for the turn-end lint pass
+	// (issue #129 piece 3) — seconds, 0 = the default 60s (Config.toolLimits
+	// resolves it into the tools' TurnLintBudgetSec). Lint runs once per
+	// turn over the turn's distinct touched files (not per edit, where
+	// clippy/eslint are slow and noisy), and the whole pass shares this
+	// budget: a slow linter is cut off at the budget and the receipt says
+	// so.
+	TurnLintBudgetSec int `json:"turn_lint_budget_sec"`
+}
+
+// DeclaredProjectCommands projects the config's declared commands onto
+// projectcmd's typed shape: unknown role keys are dropped, blank values
+// ignored, so the declaration semantics live in one place
+// (projectcmd.Declared).
+func (c *Config) DeclaredProjectCommands() projectcmd.Declared {
+	out := projectcmd.Declared{}
+	if c == nil {
+		return out
+	}
+	for key, cmd := range c.Project.Commands {
+		trimmed := strings.TrimSpace(cmd)
+		if trimmed == "" {
+			continue // a blank value is a declaration of nothing
+		}
+		if role := projectcmd.Role(strings.ToLower(strings.TrimSpace(key))); projectcmd.RoleKnown(role) {
+			out[role] = trimmed
+		}
+	}
+	return out
+}
+
+// WorkspaceTrusted reports whether the workspace rooted at root is on the
+// USER's trust list (issue #129's gate for the post-edit hook: on an
+// untrusted workspace the hook runs nothing). The authoritative source is the user-level config file read
+// DIRECTLY (trustFromUserConfig), so the repo-claim vector cannot exist in
+// the first place: a project's own .cortex/config.json is never on the read
+// path, regardless of what the merged config carries — the repo is the
+// untrusted party and cannot mark itself trusted. (The merged config's
+// Project.Trusted is the same user-level list, since mergeProject drops the
+// project-level copy.) Matching is by absolute, slash-normalized
+// path (symlinks resolved when possible, so a home directory reached via a
+// symlink still matches the entry the operator typed), with an exact
+// string compare as the last resort. An empty root or a nil/untrusted config
+// returns false — untrusted is the safe default.
+func (c *Config) WorkspaceTrusted(root string) bool {
+	if c == nil || root == "" {
+		return false
+	}
+	want := normalizeTrustPath(root)
+	for _, e := range c.TrustedList() {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if e == root { // fast path: the entry is already identical
+			return true
+		}
+		if normalizeTrustPath(e) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TrustedList returns the trust list in effect for this config: ALWAYS the
+// USER-level config file's project.trusted, read DIRECTLY
+// (trustFromUserConfig). This accessor never reads the in-memory
+// Project.Trusted field: it is authoritative for nothing, because a
+// merged config that was built from an ABSENT or MALFORMED user config
+// carries the repo's claim in that field (loadMergedConfig's fallback) —
+// and the repository is the untrusted party, so the direct user read is
+// the only source (for the absent/malformed user cases it is exactly
+// "no entries": untrusted).
+func (c *Config) TrustedList() []string {
+	return trustFromUserConfig(userConfigPath())
+}
+
+// normalizeTrustPath canonicalizes a workspace path for trust matching:
+// absolute and symlinks resolved (EvalSymlinks — /home/alias and the real
+// directory must compare equal), with a trailing slash removed (an operator
+// may type a root with a trailing slash; the workspace root is stored
+// without one). filepath.Clean is NOT used: it drops the trailing slash,
+// and an exact string compare against the entry is the first compare tried
+// anyway — Clean would make a typed trailing-slash entry never match. A
+// path that cannot be canonicalized (it doesn't exist yet, or an error
+// mid-resolution) falls back to abs + trailing-slash trim: still a fair
+// compare, just without symlink resolution.
+func normalizeTrustPath(p string) string {
+	base := strings.TrimSuffix(p, "/")
+	if abs, err := filepath.Abs(base); err == nil {
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			return real
+		}
+		return strings.TrimSuffix(abs, "/")
+	}
+	return base
 }
 
 // SkillsConfig collects Agent Skills discovery tunables
@@ -516,6 +826,16 @@ type ToolConfig struct {
 	// tools rather than a new default-off behavior.
 	EnableEffortEscalation *bool `json:"enable_effort_escalation"`
 
+	// PostEditHook is the post-edit hook's MODE (issue #129 piece 2):
+	// "off" | "format" | "all" — "" (absent) resolves to the default "all".
+	// It turns the hook down or off when formatters are slow or the run
+	// wants it quieter; an operator can LOWER it (the REPL's /hook, the
+	// per-call `hook: "skip"`) but nothing RAISES it above this, and trust
+	// is never affected. Precedence: the CORTEX_POST_EDIT_HOOK env var (same
+	// values), then the project config, then the user config — resolved once
+	// at session construction (Config.postEditHookMode).
+	PostEditHook string `json:"post_edit_hook"`
+
 	// CurationBudgetTokens / MaxToolOutput / OutlineDefaultBudget override
 	// internal/tools' same-named constants (0 = today's value).
 	CurationBudgetTokens int `json:"curation_budget_tokens"`
@@ -534,6 +854,9 @@ type ReadConfig struct {
 	DefaultRangeLines int `json:"default_range_lines"`
 	MaxRangeLines     int `json:"max_range_lines"`
 	MaxReadBytes      int `json:"max_read_bytes"`
+	// ImageMaxBytes caps an image read_file may attach as an image part
+	// (issue #217; internal/tools defaultImageMaxBytes).
+	ImageMaxBytes int `json:"image_max_bytes"`
 }
 
 // GrepConfig overrides grep's caps (internal/tools grepMaxHits/grepLineCap/
@@ -712,6 +1035,20 @@ type ContextConfig struct {
 	TailHighFraction  *float64 `json:"tail_high_fraction"`
 	TailDrainFraction *float64 `json:"tail_drain_fraction"`
 	OutlineFraction   *float64 `json:"outline_fraction"`
+	// InTurnDemotion gates in-turn demotion (issue #171): before each main-loop
+	// send, if the current turn's accumulated tool results have outgrown the
+	// high watermark, the oldest are swapped for one-line recall-citable stubs
+	// in the wire copy only (the transcript keeps the originals). Nil means
+	// ENABLED — an availability kill-switch, matching the EnableContext* and
+	// EnableWeb precedent that an absent config key must not disable a shipped
+	// capability.
+	InTurnDemotion *bool `json:"in_turn_demotion"`
+	// InTurnKeepRecent sets how many of the turn's most-recent tool results
+	// always stay verbatim under in-turn demotion (issue #171) — even over
+	// budget, the newest few are what the model is actively working from. Nil
+	// means the default (inTurnKeepRecentDefault, 6); a non-nil value ≤ 0 is
+	// rejected by validateContextConfig.
+	InTurnKeepRecent *int `json:"in_turn_keep_recent"`
 }
 
 // defaultTailHighFraction / defaultTailDrainFraction / defaultOutlineFraction
@@ -757,6 +1094,13 @@ const contextPrefixHeadroom = 0.16
 // below, so a config that sets only tail_high_fraction still gets checked
 // against the DEFAULT drain and outline fractions, not skipped.
 func validateContextConfig(c ContextConfig) error {
+	// in_turn_keep_recent is independent of the fraction group, so it is
+	// validated up front — a config that sets ONLY in_turn_keep_recent (no
+	// fractions) must still be checked, so this guard runs before the
+	// "all fractions unset → done" early return below.
+	if c.InTurnKeepRecent != nil && *c.InTurnKeepRecent <= 0 {
+		return fmt.Errorf("context.in_turn_keep_recent must be a positive integer (how many of the turn's newest tool results stay verbatim), got %d", *c.InTurnKeepRecent)
+	}
 	if c.TailHighFraction == nil && c.TailDrainFraction == nil && c.OutlineFraction == nil {
 		return nil
 	}
@@ -811,6 +1155,31 @@ func (c *Config) scanEnabled() bool {
 	return *c.Tools.EnableScan
 }
 
+// inTurnDemotionEnabled reports whether in-turn demotion (issue #171) is on.
+// Default enabled: a nil/absent context.in_turn_demotion key keeps the shipped
+// capability (the EnableContext*/EnableWeb availability-kill-switch precedent).
+func (c *Config) inTurnDemotionEnabled() bool {
+	if c == nil || c.Context.InTurnDemotion == nil {
+		return true
+	}
+	return *c.Context.InTurnDemotion
+}
+
+// inTurnKeepRecentDefault is the count of the turn's most-recent tool results
+// that always stay verbatim under in-turn demotion (issue #171) when
+// context.in_turn_keep_recent is absent.
+const inTurnKeepRecentDefault = 6
+
+// inTurnKeepRecent resolves the in-turn keep-recent count (issue #171): an
+// explicit context.in_turn_keep_recent wins, else the default (6). A nil config
+// or nil field returns the default — same posture as inTurnDemotionEnabled.
+func (c *Config) inTurnKeepRecent() int {
+	if c == nil || c.Context.InTurnKeepRecent == nil {
+		return inTurnKeepRecentDefault
+	}
+	return *c.Context.InTurnKeepRecent
+}
+
 func (c *Config) backendEndpoint() string {
 	if c != nil && c.Backend.Endpoint != "" {
 		return c.Backend.Endpoint
@@ -821,6 +1190,18 @@ func (c *Config) backendEndpoint() string {
 	return defaultEndpoint
 }
 
+// resolveBinding resolves one role's ModelSpec: role policy first, config
+// override second, and the backend's catalog (fleet) last — the catalog
+// only degrades what the role or config decided is unsendable (a level ask
+// on a hybrid toggle, any ask at all on a non-thinker; see
+// applyFleet/degradeForThinkingMode). It has no opinion of its own about
+// whether to send reasoning: a backend whose catalog is absent (a hosted
+// OpenRouter endpoint, a pinned model the fleet doesn't know) can't say
+// whether the model supports the field, so the role's "on" default is what
+// ships — and that is precisely what breaks when the model doesn't
+// support it (issue #132: every request 404'd on a provider with parameter
+// checks enabled). The escape hatch is explicit: config "thinking": "omit"
+// (llm.EffortOmit) says send nothing and survives the catalog untouched.
 func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	pol := rolePolicies[role]
 	spec := ModelSpec{Endpoint: c.backendEndpoint(), Thinking: pol.effort}
@@ -847,6 +1228,9 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 			}
 			if !m.Thinking.IsZero() {
 				spec.Thinking = m.Thinking
+			}
+			if m.Vision != nil {
+				spec.Vision = m.Vision
 			}
 		}
 		if spec.KeyEnv == "" {
@@ -884,10 +1268,44 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 		if m, ok := c.Models[role]; ok && !m.Thinking.IsZero() {
 			spec.Thinking = m.Thinking
 		}
+		// Leave the vision verdict UNSET here when config didn't set it
+		// (#216): resolveBinding has no catalog, and stamping a non-nil
+		// name-heuristic verdict here would make applyCatalogVision — which
+		// runs later, once the session's preflight fetched the live listing
+		// — skip this binding entirely, so the startup path would disagree
+		// with the /model switch path. The session settles the verdict after
+		// preflight: catalog where it has one, else applyHeuristicVision.
+		// (Config settling it here at all is what keeps a litellm binding
+		// from carrying a nil verdict out — VisionEnabled reads nil as
+		// false either way.)
 	}
 	return spec
 }
 
+// applyHeuristicVision is the name-heuristic tier of the #216 precedence,
+// applied to finished bindings AFTER the startup preflight had its chance
+// to settle verdicts from the live catalog: an OpenRouter binding whose
+// verdict is still nil — config set no flag and the catalog had nothing to
+// say (or none was fetched) — falls back to the model id's capability tags.
+// A verdict applyCatalogVision settled, or config declared, is left alone.
+// Non-OpenRouter configs are left alone entirely: the heuristic never
+// applied to them (VisionEnabled reads a nil verdict as false).
+func applyHeuristicVision(cfg *Config, specs ...*ModelSpec) {
+	if cfg == nil || !cfg.isOpenRouter() {
+		return
+	}
+	for _, spec := range specs {
+		if spec == nil || spec.Vision != nil {
+			continue
+		}
+		v := modelHasVisionTag(spec.Model)
+		spec.Vision = &v
+	}
+}
+
+// findUp walks upward from the process CWD looking for rel (a name or a
+// relative path like ".cortex/config.json") and returns the first
+// existing match, or "" when the filesystem root is reached.
 func findUp(rel string) string {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -908,6 +1326,32 @@ func findUp(rel string) string {
 
 func findConfigPath() string { return findUp(filepath.Join(".cortex", "config.json")) }
 
+// agentInstructionFiles is the priority-ordered list of agent-instruction
+// files a repo may keep its conventions in. resolveInstructionFile returns
+// the FIRST one present at a given root — no concatenation, so a repo with
+// several still loads exactly one (AGENTS.md, the cross-harness convention,
+// always wins). Keep the list short and documented: each entry is a file a
+// real repo ships, and the order encodes intent.
+var agentInstructionFiles = []string{
+	"AGENTS.md",
+	"CLAUDE.md",
+	filepath.Join(".github", "copilot-instructions.md"),
+}
+
+// resolveInstructionFile returns the path of the first entry in
+// agentInstructionFiles that exists as a regular file under root (or "" when
+// none do). root is taken as given — this is the per-root half of instruction
+// resolution: projectInstructions walks it upward from the CWD (findUp
+// semantics) and Workspace.Instructions applies it to an explicit root.
+func resolveInstructionFile(root string) string {
+	for _, rel := range agentInstructionFiles {
+		if p := filepath.Join(root, rel); regular(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 // maxInstructionBytes is the historical AGENTS.md truncation default.
 // instructionBytesCap is the LIVE value readInstructions actually uses — a
 // package var (not this const directly) so NewCortexSession can set it once
@@ -920,27 +1364,90 @@ const maxInstructionBytes = 16384
 
 var instructionBytesCap = maxInstructionBytes
 
-func projectInstructions() string {
-	path := findUp("AGENTS.md")
+// projectInstructions resolves and reads the CWD-implicit project
+// instructions: starting at the working directory and walking up to the
+// filesystem root, the NEAREST directory from the CWD upward holding any
+// entry of agentInstructionFiles (AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md) wins, and within that directory the first
+// file in priority order is read — exactly findUp semantics with the
+// priority list applied per level (a deeper dir's CLAUDE.md beats an
+// ancestor's AGENTS.md; no concatenation: exactly one file is ever
+// loaded). It returns the resolved file's path ("" when none exists) alongside
+// its body, so the caller can name the file in the system-prompt section
+// header (systemPromptContent's label) — the seed shows which file it came
+// from (#147).
+func projectInstructions() (path, instructions string) {
+	dir := wd()
+	for {
+		if p := resolveInstructionFile(dir); p != "" {
+			return p, readInstructions(p)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", ""
+		}
+		dir = parent
+	}
+}
+
+// fileLabel renders a resolved instruction file's path as the name
+// systemPromptContent's "# Project instructions (<file>)" header and the
+// /context system legend row show: the path relative to the given workspace
+// root when the file lies under one (a copilot-instructions.md at the root's
+// .github/ subdir → ".github/copilot-instructions.md"), the basename
+// otherwise ("AGENTS.md", "CLAUDE.md"). The caller passes the root the file
+// was resolved against — WorkspaceFromCWD().Root on the CWD-implicit leg,
+// ws.Root on the explicit --project leg — so both legs label the same file
+// identically ("" when no file resolved). Pure function of (root, path) —
+// never a filesystem read.
+func fileLabel(root, path string) string {
 	if path == "" {
 		return ""
 	}
-	return readInstructions(path)
+	if root != "" {
+		if rel, err := filepath.Rel(root, path); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(path)
 }
 
-// readInstructions reads and trims an AGENTS.md at an exact path (no
-// upward search), truncating at instructionBytesCap — the shared body
-// projectInstructions() (CWD-implicit, via findUp) and
-// Workspace.Instructions() (explicit root, workspace.go) both use, so the
-// two stay provably identical for the same resolved path.
+// wd is os.Getwd() or "" — a tiny seam so a failure can't propagate into
+// instruction resolution (an unreadable CWD degrades to "no CWD files").
+func wd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
+// regular reports whether path exists and is a regular file (os.Stat
+// follows symlinks, so a linked-to file counts).
+func regular(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular()
+}
+
+// readInstructions reads and trims the instruction file at an exact path (no
+// upward search), truncating at instructionBytesCap with a marker that names
+// the file (basename) it came from — so the system prompt and anything that
+// echoes the seed can say which file was loaded (#147). The shared body
+// projectInstructions() (CWD-implicit root) and Workspace.Instructions()
+// (explicit root, workspace.go) both use after resolveInstructionFile, so
+// the two stay provably identical for the same resolved path. An empty path
+// (no file resolved) or an unreadable file yields "".
 func readInstructions(path string) string {
+	if path == "" {
+		return ""
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	s := strings.TrimSpace(string(data))
 	if len(s) > instructionBytesCap {
-		s = s[:instructionBytesCap] + "\n...[AGENTS.md truncated]"
+		s = s[:instructionBytesCap] + "\n...[" + filepath.Base(path) + " truncated]"
 	}
 	return s
 }
@@ -949,6 +1456,15 @@ func LoadConfig() *Config {
 	return loadMergedConfig(userConfigPath(), findConfigPath())
 }
 
+// loadMergedConfig layers user config under project config
+// (field-by-field; a missing file is an absent layer). The instruction
+// file's `## Commands` declaration is NOT read here — it is parsed at
+// resolution time (session_core.go's resolveProjectCommands, from the
+// root's RESOLVED instruction file: AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md — the same file the system prompt's
+// project-instructions seed loads, #152), so there is exactly one parsing
+// path for it (issue #129): config commands beat instruction-file commands,
+// which beat discovery.
 func loadMergedConfig(userPath, projectPath string) *Config {
 	user := readConfigFile(userPath)
 	project := readConfigFile(projectPath)
@@ -960,6 +1476,34 @@ func loadMergedConfig(userPath, projectPath string) *Config {
 	default:
 		return mergeConfig(user, project)
 	}
+}
+
+// trustFromUserConfig reads the trust list straight from the USER-level
+// config — the layer a repository can never write (issue #129's trust
+// gate). It deliberately does NOT go through loadMergedConfig/readConfigFile:
+// those treat a malformed file as "absent" and fall back to the layer below
+// (the project's own config), and loadMergedConfig with no user config at
+// all returns the project config verbatim — either fallback would let a
+// repo shipping a .cortex/config.json with its own root in project.trusted
+// mark itself trusted. A user config that is missing or unreadable yields
+// no entries (the safe default: nothing trusted). A malformed user config
+// yields a warning and no entries: it CANNOT degrade into the repo's list,
+// and the repo list is never read — the operator who broke their user
+// config is not silently untrusted-and-then-retrusted by the repo.
+func trustFromUserConfig(userPath string) []string {
+	if userPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(userPath)
+	if err != nil {
+		return nil
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "cortex: %s: ignoring malformed config: %v\n", userPath, err)
+		return nil
+	}
+	return cfg.Project.Trusted
 }
 
 func readConfigFile(path string) *Config {
@@ -1026,6 +1570,7 @@ func validateConfig(cfg *Config) error {
 		"tools.read.default_range_lines":       cfg.Tools.Read.DefaultRangeLines,
 		"tools.read.max_range_lines":           cfg.Tools.Read.MaxRangeLines,
 		"tools.read.max_read_bytes":            cfg.Tools.Read.MaxReadBytes,
+		"tools.read.image_max_bytes":           cfg.Tools.Read.ImageMaxBytes,
 		"tools.grep.max_hits":                  cfg.Tools.Grep.MaxHits,
 		"tools.grep.line_cap":                  cfg.Tools.Grep.LineCap,
 		"tools.grep.max_output_bytes":          cfg.Tools.Grep.MaxOutputBytes,
@@ -1138,7 +1683,36 @@ func mergeConfig(base, over *Config) *Config {
 	out.Context = mergeContext(base.Context, over.Context)
 	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
 	out.Skills = mergeSkills(base.Skills, over.Skills)
+	out.Attribution = mergeAttribution(base.Attribution, over.Attribution)
+	out.Project = mergeProject(base.Project, over.Project)
 	return &out
+}
+
+// mergeProject threads project-level declarations over user-level ones,
+// field-by-field like every other section: a key the project config
+// names wins (a blank value still shadows the user-level key for that
+// role), keys it doesn't name inherit. DeclaredProjectCommands then
+// reads blanks as "not declared".
+//
+// EXCEPT project.trusted: it is a USER decision (issue #129) and the
+// project-level (over) copy is ignored — the repository is the untrusted
+// party and must not be able to mark itself trusted. Only the user-level
+// config's list survives the merge.
+func mergeProject(base, over ProjectConfig) ProjectConfig {
+	out := base
+	if len(over.Commands) > 0 {
+		cmds := map[string]string{}
+		for k, v := range base.Commands {
+			cmds[k] = v
+		}
+		for k, v := range over.Commands {
+			cmds[k] = v
+		}
+		out.Commands = cmds
+	}
+	out.CommandTimeoutSec = mergeIntField(base.CommandTimeoutSec, over.CommandTimeoutSec)
+	out.Trusted = base.Trusted
+	return out
 }
 
 // mergeIntField overrides base with over when over is non-zero — the shared
@@ -1261,6 +1835,12 @@ func mergeContext(base, over ContextConfig) ContextConfig {
 	if over.OutlineFraction != nil {
 		out.OutlineFraction = over.OutlineFraction
 	}
+	if over.InTurnDemotion != nil {
+		out.InTurnDemotion = over.InTurnDemotion
+	}
+	if over.InTurnKeepRecent != nil {
+		out.InTurnKeepRecent = over.InTurnKeepRecent
+	}
 	return out
 }
 
@@ -1280,11 +1860,35 @@ func mergeSkills(base, over SkillsConfig) SkillsConfig {
 	}
 }
 
+// mergeAttribution threads a project-level override over the user-level default,
+// field-by-field. Every field is a pointer override: a set project field
+// wins, an absent one inherits — so a project's explicit "" for Commit or PR
+// survives the merge and disables that surface.
+func mergeAttribution(base, over AttributionConfig) AttributionConfig {
+	out := base
+	if over.Enabled != nil {
+		out.Enabled = over.Enabled
+	}
+	// Overriding with a non-nil pointer (including empty string) takes precedence
+	if over.Commit != nil {
+		out.Commit = over.Commit
+	}
+	// Overriding with a non-nil pointer (including empty string) takes precedence
+	if over.PR != nil {
+		out.PR = over.PR
+	}
+	if over.IncludeModel != nil {
+		out.IncludeModel = over.IncludeModel
+	}
+	return out
+}
+
 func mergeRead(base, over ReadConfig) ReadConfig {
 	return ReadConfig{
 		DefaultRangeLines: mergeIntField(base.DefaultRangeLines, over.DefaultRangeLines),
 		MaxRangeLines:     mergeIntField(base.MaxRangeLines, over.MaxRangeLines),
 		MaxReadBytes:      mergeIntField(base.MaxReadBytes, over.MaxReadBytes),
+		ImageMaxBytes:     mergeIntField(base.ImageMaxBytes, over.ImageMaxBytes),
 	}
 }
 
@@ -1438,6 +2042,26 @@ func (c *Config) maxToolIterations() int {
 		return maxToolIterations
 	}
 	return resolveInt(c.Limits.MaxToolIterations, maxToolIterations)
+}
+
+// postEditHookMode resolves the post-edit hook's MODE (issue #129 piece 2):
+// off | format | all. Precedence: the CORTEX_POST_EDIT_HOOK env var (same
+// values) — env wins because it is per-process, the way every other
+// CORTEX_* override does — then the merged config's tools.post_edit_hook
+// (project config over user config, like every other field), then the
+// default all. An unrecognized value resolves to the SAFE off (a typo must
+// never enable a hook the operator did not name). Resolved once at session
+// construction (NewCortexSession) and installed as the process-wide
+// ceiling via tools.SetHookCeiling; a REPL /hook command may then lower the
+// session below it but never raise it above it.
+func (c *Config) postEditHookMode() tools.HookMode {
+	if v, ok := os.LookupEnv("CORTEX_POST_EDIT_HOOK"); ok && v != "" {
+		return tools.ParseHookMode(v)
+	}
+	if c == nil {
+		return tools.HookModeAll
+	}
+	return tools.ParseHookMode(c.Tools.PostEditHook)
 }
 
 func (c *Config) instructionBytesCap() int {
@@ -1597,6 +2221,7 @@ func (c *Config) toolLimits() tools.Limits {
 		DefaultRangeLines:    resolveInt(c.Tools.Read.DefaultRangeLines, def.DefaultRangeLines),
 		MaxRangeLines:        resolveInt(c.Tools.Read.MaxRangeLines, def.MaxRangeLines),
 		MaxReadBytes:         resolveInt(c.Tools.Read.MaxReadBytes, def.MaxReadBytes),
+		ImageMaxBytes:        resolveInt(c.Tools.Read.ImageMaxBytes, def.ImageMaxBytes),
 		GrepMaxHits:          resolveInt(c.Tools.Grep.MaxHits, def.GrepMaxHits),
 		GrepLineCap:          resolveInt(c.Tools.Grep.LineCap, def.GrepLineCap),
 		GrepMaxOutputBytes:   resolveInt(c.Tools.Grep.MaxOutputBytes, def.GrepMaxOutputBytes),
@@ -1605,6 +2230,8 @@ func (c *Config) toolLimits() tools.Limits {
 		FetchMaxBodyBytes:    resolveInt(c.Tools.FetchURL.MaxBodyBytes, def.FetchMaxBodyBytes),
 		DefaultSearchMax:     resolveInt(c.Tools.WebSearch.DefaultMaxResults, def.DefaultSearchMax),
 		MaximumSearchMax:     resolveInt(c.Tools.WebSearch.MaximumMaxResults, def.MaximumSearchMax),
+		HookCommandBudgetSec: resolveInt(c.Project.CommandTimeoutSec, def.HookCommandBudgetSec),
+		TurnLintBudgetSec:    resolveInt(c.Project.TurnLintBudgetSec, def.TurnLintBudgetSec),
 	}
 }
 
@@ -1712,4 +2339,70 @@ func (c *Config) skillsDirsOverride() []string {
 		return nil
 	}
 	return c.Skills.Dirs
+}
+
+// attributionEnabled reports whether attribution is on. Nil/absent means
+// enabled — an availability kill-switch, not consent.
+func (c *Config) attributionEnabled() bool {
+	if c == nil || c.Attribution.Enabled == nil {
+		return true
+	}
+	return *c.Attribution.Enabled
+}
+
+// attributionCommit returns the commit trailer, with the model name
+// substituted for the "<model>" token. It is nil-safe: a nil config behaves
+// like an empty one (attribution enabled, default template). Returns "" when
+// attribution is disabled or the commit template is explicitly "".
+func (c *Config) attributionCommit(model string) string {
+	if c == nil {
+		c = &Config{}
+	}
+	// Check if attribution is enabled (nil/absent = enabled)
+	if !c.attributionEnabled() {
+		return ""
+	}
+
+	// Use default commit template if not set
+	commit := "Co-Authored-By: Cortex (<model>)"
+	if c.Attribution.Commit != nil {
+		// An explicit "" disables commit attribution only.
+		if *c.Attribution.Commit == "" {
+			return ""
+		}
+		commit = *c.Attribution.Commit
+	}
+
+	if model != "" && (c.Attribution.IncludeModel == nil || *c.Attribution.IncludeModel) {
+		return strings.ReplaceAll(commit, "<model>", model)
+	}
+	// Model excluded (include_model=false) or unknown (zero-config fleet
+	// default): drop the placeholder — the conventional " (<model>)" form
+	// first, then any bare token — so no literal "<model>" lands in a commit.
+	commit = strings.ReplaceAll(commit, " (<model>)", "")
+	return strings.TrimSpace(strings.ReplaceAll(commit, "<model>", ""))
+}
+
+// attributionPR returns the PR footer. It is nil-safe like
+// attributionCommit. Returns "" when attribution is disabled or the PR
+// footer is explicitly ""; the default footer is "Generated with Cortex".
+func (c *Config) attributionPR() string {
+	if c == nil {
+		c = &Config{}
+	}
+	// Check if attribution is enabled (nil/absent = enabled)
+	if !c.attributionEnabled() {
+		return ""
+	}
+
+	// Use default PR footer if not set
+	pr := "Generated with Cortex"
+	if c.Attribution.PR != nil {
+		// An explicit "" disables PR attribution only.
+		if *c.Attribution.PR == "" {
+			return ""
+		}
+		pr = *c.Attribution.PR
+	}
+	return pr
 }

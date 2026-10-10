@@ -38,6 +38,12 @@ type sessionSummary struct {
 	ModTime  time.Time `json:"mod_time"`
 	Messages int       `json:"messages"`
 	First    string    `json:"first"`
+	// Turns and Model mirror sessionInfo's (issue #110): the web UI's session
+	// list shows the same two facts the REPL list and the picker do. Field-by-
+	// field assignment below (not a struct conversion) is what keeps this wire
+	// shape independent — a new sessionInfo field cannot silently join the API.
+	Turns int    `json:"turns"`
+	Model string `json:"model,omitempty"`
 }
 
 // writeJSON marshals v to w with the given status code, setting the JSON
@@ -108,7 +114,19 @@ func handleListProjectSessions(reg registry.Registry) http.HandlerFunc {
 		}
 		out := make([]sessionSummary, len(infos))
 		for i, info := range infos {
-			out[i] = sessionSummary(info)
+			// Explicit field copy, not sessionSummary(info): the two structs are
+			// deliberately kept non-identical so a sessionInfo gaining a field
+			// stays a local decision until it is also a wire one (see the type's
+			// doc). staticcheck's S1016 sees the matching prefix and suggests the
+			// conversion; the suppression is the point, not an oversight.
+			out[i] = sessionSummary{ //nolint:staticcheck // S1016: the copy is intentional, the shapes are independent
+				ID:       info.ID,
+				ModTime:  info.ModTime,
+				Messages: info.Messages,
+				First:    info.First,
+				Turns:    info.Turns,
+				Model:    info.Model,
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 	}

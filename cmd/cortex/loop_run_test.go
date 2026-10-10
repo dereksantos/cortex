@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/loops"
 	"github.com/dereksantos/cortex/internal/registry"
 	"github.com/dereksantos/cortex/internal/shellrisk"
@@ -167,7 +168,7 @@ func riskyBashTurnTestSessionFactory(t *testing.T) (sessionFactory, func() *Cort
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"could not run that command"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3}}`))
 	}))
 	t.Cleanup(srv.Close)
-	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+	stubRisky := func(_ context.Context, _, _ string) (shellrisk.Level, string, error) {
 		return shellrisk.Risky, "test: risky", nil
 	}
 	var last *CortexSession
@@ -175,9 +176,9 @@ func riskyBashTurnTestSessionFactory(t *testing.T) (sessionFactory, func() *Cort
 		cs := &CortexSession{
 			quiet:         true,
 			classifyShell: stubRisky,
-			confirmRisky: func(q string) bool {
+			confirmRisky: func(q string) lineedit.ConfirmChoice {
 				t.Fatalf("prompt surface reached in a headless loop firing: %q", q)
-				return false
+				return lineedit.ConfirmNo
 			},
 			Request: CortexArgs{}.Request(),
 		}
