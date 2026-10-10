@@ -5,6 +5,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // gutterPrefix renders the "HH:MM:SS  " shown before every printed line. The
@@ -13,8 +16,33 @@ import (
 // (2026-07-19) — every timestamp, on every line (user/assistant/tool alike),
 // is plain gray so the gutter reads as one consistent margin rather than a
 // row of role-coded tags.
-func gutterPrefix(ts time.Time) string {
-	return fmt.Sprintf("%s  ", withColor(ts.Format("15:04:05"), gray))
+func gutterPrefix(ts time.Time) string { return tools.Gutter(ts) }
+
+// gutterIndent is a blank gutter: continuation lines (an answer's wrapped
+// prose, its later blocks) start here so the timestamps read as one column.
+var gutterIndent = strings.Repeat(" ", len("15:04:05  "))
+
+// answerWrapWidth is the width an answer's prose wraps to on a terminal of
+// width w: the content width (capped at style.MaxContentWidth) less the
+// gutter it sits behind.
+func answerWrapWidth(w int) int {
+	if w <= 0 || w > style.MaxContentWidth {
+		w = min(max(w, 80), style.MaxContentWidth)
+	}
+	return max(w-len(gutterIndent), 20)
+}
+
+// indentUnderGutter prefixes each line of s with the blank gutter, skipping
+// the first when it joins a gutter already printed. Blank lines stay empty.
+func indentUnderGutter(s string, skipFirst bool) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if (i == 0 && skipFirst) || strings.TrimSpace(style.Strip(l)) == "" {
+			continue
+		}
+		lines[i] = gutterIndent + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Message) render(ts time.Time) string {
@@ -22,7 +50,7 @@ func (m Message) render(ts time.Time) string {
 }
 
 func (m Message) Print() {
-	fmt.Println(m.render(time.Now()))
+	fmt.Println(m.render(tools.Now()))
 }
 
 // turnPhase is the coder's current state relative to the model: idle
@@ -38,17 +66,6 @@ const (
 	phaseStreaming
 )
 
-// brightCyan and brightGreen are the aixterm "bright" SGR variants of the
-// palette's existing cyan and green — the same hues Prompt() already uses
-// elsewhere (cyan for the trailing promptGlyph, green for the gauge's
-// healthy state), just at higher contrast. Used only for the state light's
-// active phases, so it visibly pops against idle's already-dim gray rather
-// than introducing a color the rest of the bar doesn't.
-const (
-	brightCyan  = "\033[96m"
-	brightGreen = "\033[92m"
-)
-
 // phaseGlyph renders the state light: one static ASCII character whose shape
 // (not just its color) carries the state, so it still reads under NO_COLOR —
 // "." idle, "*" thinking (reasoning or a running tool), "~" streaming. Plain
@@ -58,11 +75,11 @@ const (
 func phaseGlyph(p turnPhase) string {
 	switch p {
 	case phaseThinking:
-		return withColor("*", brightCyan)
+		return style.Paint("*", style.Live)
 	case phaseStreaming:
-		return withColor("~", brightGreen)
+		return style.Paint("~", style.Streaming)
 	default:
-		return withColor(".", gray)
+		return style.Paint(".", style.Dim)
 	}
 }
 
@@ -77,28 +94,57 @@ func (cs *CortexSession) setPhase(p turnPhase) bool {
 		return false
 	}
 	cs.phase = p
-	if cs.live != nil {
-		cs.live.SetPrompt(cs.Prompt())
-	}
+	cs.refreshAnchor()
 	return true
 }
 
-func (cs *CortexSession) Prompt() string {
-	win := cs.windowSize()
-	status := withColor(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), gray)
-	// The gauge is the two-zone numeric form (contextbar.go's gaugeZones) by
-	// default; coloredGauge composes its per-zone coloring (gray head/gray
-	// divider/pressure-colored tail) or, for the selectable bar styles, the
-	// single ctxColor wrap that predates gaugeZones. ctxColor keys off
-	// LastPromptTokens (the last request's actual billed size, not the
-	// gauge's own head+tail estimate) — same green/yellow/red threshold
-	// semantics as before this style existed.
-	gauge := cs.coloredGauge(promptGaugeCells, win)
-	cost := ""
-	if cs.costUSD > 0 {
-		cost = withColor(" | "+humanCost(cs.costUSD), gray)
+// refreshAnchor redraws a live turn's pinned prompt with the current state
+// light and status. No-op outside an anchored turn.
+func (cs *CortexSession) refreshAnchor() {
+	if cs.live != nil {
+		cs.live.SetPrompt(cs.Prompt())
 	}
-	return fmt.Sprintf("%s %s%s%s  %s ", phaseGlyph(cs.phase), status, gauge, cost, withColor(promptGlyph, cyan))
+}
+
+// Prompt is the input row: the dim status (PromptStatus), then the state
+// light and the marker, with the cursor last — "qwen3.8-27b  1k|22k  . ❯ ".
+// Version moved to the startup header and cost to each turn's footer
+// (docs/tui-polish.md, track 2).
+func (cs *CortexSession) Prompt() string {
+	return fmt.Sprintf("%s  %s %s ", cs.PromptStatus(), phaseGlyph(cs.phase), style.Paint(promptGlyph, style.Accent))
+}
+
+// PromptStatus is the model, then the context gauge. The gauge is the
+// two-zone numeric form (contextbar.go's gaugeZones) by default; coloredGauge
+// composes its per-zone coloring (gray head/gray divider/pressure-colored
+// tail) or, for the selectable bar styles, the single ctxColor wrap that
+// predates gaugeZones. ctxColor keys off LastPromptTokens (the last request's
+// actual billed size, not the gauge's own head+tail estimate).
+func (cs *CortexSession) PromptStatus() string {
+	return style.Paint(cs.Request.Model, style.Dim) + "  " + cs.coloredGauge(promptGaugeCells, cs.windowSize())
+}
+
+// acceptedLine is what a submitted input leaves in scrollback: the timestamp
+// gutter and the input in the Strong role, so a turn opens on a line shaped
+// like every other line it prints. Long input wraps under the gutter — these
+// are the user's own words, so nothing is clipped — at the content width of a
+// terminal width columns wide. A multi-line paste shows its first line and a
+// count of the rest. Rows are joined with "\r\n": the editor is in raw mode.
+func (cs *CortexSession) acceptedLine(input string, width int) string {
+	if strings.TrimSpace(input) == "" {
+		return cs.Prompt() // nothing submitted: leave the prompt row as it was, no bare timestamp
+	}
+	first, rest, multi := strings.Cut(input, "\n")
+	tag := ""
+	if multi {
+		tag = fmt.Sprintf("  [+%d lines]", strings.Count(rest, "\n")+1)
+	}
+	rows := style.Wrap(first, answerWrapWidth(width))
+	for i, r := range rows {
+		rows[i] = style.Paint(r, style.Strong)
+	}
+	rows[len(rows)-1] += style.Paint(tag, style.Dim)
+	return gutterPrefix(tools.Now()) + strings.Join(rows, "\r\n"+gutterIndent)
 }
 
 func streamingEnabled() bool {

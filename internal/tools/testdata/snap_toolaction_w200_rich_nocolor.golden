@@ -1,1 +1,1 @@
-12:34:56  tool: read_file(/tmp/cortex-snapshot/nonexistent-seed-file.txt)
+12:34:56  read     /tmp/cortex-snapshot/nonexistent-seed-file.txt

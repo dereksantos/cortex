@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // HumanCost formats a dollar cost with precision that scales to the magnitude.
@@ -32,13 +32,13 @@ func HumanK(n int) string {
 
 // ContextColor shifts a context gauge green -> yellow -> red as the window
 // fills. Red starts at redThreshold.
-func ContextColor(used, max int, redThreshold float64) string {
+func ContextColor(used, max int, redThreshold float64) style.Role {
 	switch r := float64(used) / float64(max); {
 	case r < 0.5:
-		return tools.Green
+		return style.OK
 	case r < redThreshold:
-		return tools.Yellow
+		return style.Warn
 	default:
-		return tools.Red
+		return style.Err
 	}
 }

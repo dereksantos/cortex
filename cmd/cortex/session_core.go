@@ -15,6 +15,7 @@ import (
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/testguard"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -424,6 +425,18 @@ type CortexSession struct {
 	live    *lineedit.Anchor
 
 	phase turnPhase // one-char state light at the far left of Prompt(); see display.go
+
+	// lastTurn is the most recent completed turn's footer facts (footer.go);
+	// nil until one completes, and after a failed or interrupted turn.
+	lastTurn *turnSummary
+	// turnStep counts this turn's model calls (send); the first step's prose
+	// needs no leading blank line — the turn already opened with one.
+	turnStep int
+	// turnThought is the turn's latest "thought Ns" (footer.go's noteThought).
+	turnThought string
+	// lastTurnCalls is the last turn's unabridged tool-call record
+	// (tools.TurnLog) for /last and Ctrl-O (last_turn_view.go).
+	lastTurnCalls []tools.CallRecord
 }
 
 func (cs *CortexSession) markdown() *markdownRenderer {
@@ -436,6 +449,7 @@ func (cs *CortexSession) markdown() *markdownRenderer {
 	} else if !renderEnabled() {
 		return nil
 	}
+	w = answerWrapWidth(w)
 	if cs.md == nil || cs.mdWidth != w {
 		cs.md, cs.mdWidth = newMarkdownRenderer(w), w
 	}
@@ -534,7 +548,7 @@ func (cs *CortexSession) newWorkingSet(base int) *cache.WorkingSet {
 // os.Stderr — stdout must stay machine-clean for headless `turn --json`
 // consumers (the session id is already stderr-only for the same reason).
 func printStartupWarning(w io.Writer, msg string) {
-	fmt.Fprintln(w, withColor(msg, yellow))
+	fmt.Fprintln(w, style.Paint(msg, style.Warn))
 }
 
 func NewCortexSession() *CortexSession {

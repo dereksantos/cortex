@@ -42,10 +42,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/outline"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -296,10 +298,10 @@ func printMentionImages(images []TurnImage, refusals []MentionRefusal, turnNotes
 		return
 	}
 	for _, line := range MentionAttachmentLines(images, refusals) {
-		fmt.Println(withColor("  "+line, gray))
+		fmt.Println(style.Paint("  "+line, style.Dim))
 	}
 	for _, note := range turnNotes {
-		fmt.Println(withColor("  "+note, gray))
+		fmt.Println(style.Paint("  "+note, style.Dim))
 	}
 }
 
@@ -375,15 +377,13 @@ func outlineFile(path string) (string, error) {
 var modelIDs = modelIDsImpl
 
 func mentionCompleter(session *CortexSession) map[string]lineedit.Completer {
-	// The fixed slash-command set (the REPL's vocabulary, passed in so
-	// lineedit stays free of cmd/cortex).
-	commands := []string{
-		"/clear", "/compact", "/context", "/help", "/hook",
-		"/model", "/plan", "/quit", "/sessions",
-	}
+	// The slash-command set and its descriptions come from the /help table
+	// (helpCommands), so completion can't drift from what /help lists.
+	commands, help := helpCommands()
 	return map[string]lineedit.Completer{
 		"slash": lineedit.SlashCompleter{
 			Commands: commands,
+			Help:     help,
 			Sub: func(line string, cursor int) []string {
 				// Only /model has a continuation today.
 				if !strings.HasPrefix(line, "/model ") {
@@ -414,7 +414,14 @@ func modelIDsImpl(session *CortexSession) []string {
 	}
 	add(session.Request.Model)
 	add(session.Study.Model)
+	// The fleet is a map: sort it so Tab cycling and the /model picker list
+	// the same order every time.
+	fleet := make([]string, 0, len(session.Fleet))
 	for id := range session.Fleet {
+		fleet = append(fleet, id)
+	}
+	sort.Strings(fleet)
+	for _, id := range fleet {
 		add(id)
 	}
 	return out

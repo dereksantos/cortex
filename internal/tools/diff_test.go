@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // ansiRe matches the SGR codes Color emits. Every assertion here runs on
@@ -219,7 +222,7 @@ func TestRenderDiffColorPaths(t *testing.T) {
 		defer restoreColor(t, false)()
 		got := renderDiff("a\n", "b\n", diffOptions{})
 		joined := strings.Join(got, "\n")
-		if !strings.Contains(joined, Green) || !strings.Contains(joined, Red) {
+		if !strings.Contains(joined, string(style.OK)) || !strings.Contains(joined, string(style.Err)) {
 			t.Errorf("want green + red in colored output, got %q", joined)
 		}
 	})
@@ -237,12 +240,10 @@ func TestRenderDiffColorPaths(t *testing.T) {
 	})
 }
 
-// restoreColor pins colorDisabled for one test and restores it after.
+// restoreColor pins NO_COLOR behavior for one test and restores it after.
 func restoreColor(t *testing.T, disabled bool) func() {
 	t.Helper()
-	prev := colorDisabled
-	colorDisabled = disabled
-	return func() { colorDisabled = prev }
+	return style.ForceColor(!disabled)
 }
 
 // --- the tools that print diffs -----------------------------------------
@@ -294,6 +295,7 @@ func editCall(t *testing.T, fn string, args map[string]any) ToolCall {
 
 func TestEditFilePrintsDiff(t *testing.T) {
 	t.Run("edit_file shows the changed lines under its action line", func(t *testing.T) {
+		liveTurnForTest(t) // the REPL's live turn: the line carries the diff's counts
 		path := filepath.Join(t.TempDir(), "f.go")
 		if err := os.WriteFile(path, []byte("package main\n\nfunc f() int {\n\treturn 1\n}\n"), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -306,7 +308,7 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			}
 		})
 		got := strip(out)
-		for _, want := range []string{"tool: edit_file(", "4 -     return 1", "4 +     return 2"} {
+		for _, want := range []string{"edit     ", "+1 -1", "4 -     return 1", "4 +     return 2"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("missing %q in:\n%s", want, got)
 			}
@@ -381,11 +383,36 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			}
 		})
 		got := strip(out)
-		if !strings.Contains(got, "tool: write_file(") {
+		if !strings.Contains(got, "write    ") {
 			t.Errorf("the action line must survive the escape hatch:\n%s", got)
 		}
 		if strings.Contains(got, "+ hello") {
 			t.Errorf("no diff body expected with rendering off:\n%s", got)
 		}
 	})
+}
+
+func TestPlainModePrintsTheLineAsTheCallStarts(t *testing.T) {
+	resetNesting(t)
+	EndTurn() // no live turn: plain mode (CORTEX_LOOP_RENDER=0, piped, one-off study)
+	defer style.ForceColor(false)()
+	path := filepath.Join(t.TempDir(), "f.txt")
+	out := captureStdout(t, func() {
+		printToolAction(loud{}, "bash(sleep 600)")
+		// The line must already be out while the call runs.
+	})
+	if !strings.Contains(out, "bash     sleep 600") {
+		t.Fatalf("plain mode must announce the call before it runs, got %q", out)
+	}
+	out = captureStdout(t, func() {
+		finishCall(10*time.Minute, "done", nil)
+		printToolAction(loud{}, "read_file("+path+")")
+		finishCall(time.Millisecond, "x", nil)
+		printToolAction(loud{}, "read_file("+path+")")
+		finishCall(time.Millisecond, "x", nil)
+		FlushFold()
+	})
+	if strings.Contains(out, "done") || strings.Count(out, "read ") != 2 {
+		t.Errorf("plain mode: no result line after the fact and no folding, got %q", out)
+	}
 }

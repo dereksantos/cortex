@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // toolMarker is Qwen's native tool-call opener. When the proxy doesn't
@@ -37,6 +39,10 @@ type streamPrinter struct {
 	gutterOpen bool              // md path: gutter printed, first block not yet joined to it
 	printedAny bool              // md path: at least one block already written this response
 	blankAfter bool              // md path: the last line written to the sink was blank
+	// noLeadBlank skips the blank line begin() prints before the answer: the
+	// turn's first step, where the turn's own opening blank already separates
+	// it from the input line.
+	noLeadBlank bool
 	// onStatus drives a "thinking..." indicator when there's no standalone spinner
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
@@ -118,7 +124,7 @@ func (p *streamPrinter) refreshLabel(tail string) {
 	et := elapsedTail(p.start, p.tickTail)
 	switch {
 	case p.spinner != nil:
-		p.spinner.SetLabel(withColor("thinking... "+et, gray))
+		p.spinner.SetLabel(style.Paint("thinking... "+et, style.Dim))
 	case p.onStatus != nil:
 		p.onStatus(true, et)
 	}
@@ -252,8 +258,11 @@ func (p *streamPrinter) begin() {
 	if p.onStatus != nil {
 		p.onStatus(false, "") // answer started — clear the thinking status
 	}
-	fmt.Fprintln(p.writer())
-	fmt.Fprint(p.writer(), gutterPrefix(time.Now()))
+	tools.FlushFold() // a held read-only run lands above the prose it led to
+	if !p.noLeadBlank {
+		fmt.Fprintln(p.writer())
+	}
+	fmt.Fprint(p.writer(), gutterPrefix(tools.Now()))
 	p.gutterOpen = p.md != nil // render mode: first block joins this line
 	p.began = true
 }
@@ -295,15 +304,20 @@ func (p *streamPrinter) writeBlock(b string) {
 	}
 	p.begin()
 	heading := isHeadingBlock(b)
-	if heading && p.printedAny && !p.blankAfter {
+	// Markdown separates blocks with a blank line; so does the answer, exactly
+	// one, whatever kind the blocks are (blankAfter keeps a heading's trailing
+	// blank from doubling up).
+	if p.printedAny && !p.blankAfter {
 		fmt.Fprintln(p.writer())
 		p.blankAfter = true
 	}
 	out := p.md.render(b)
-	if p.gutterOpen {
+	joins := p.gutterOpen
+	if joins {
 		out = trimLeadingIndent(out)
 		p.gutterOpen = false
 	}
+	out = indentUnderGutter(out, joins)
 	fmt.Fprintln(p.writer(), out)
 	p.printedAny = true
 	p.blankAfter = false
@@ -368,8 +382,12 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 	if line == "" {
 		return
 	}
+	if w := style.ContentWidth(); w > 0 {
+		line = style.Clip(line, w-len(gutterIndent)) // one row: it's a trace, not the answer
+	}
+	tools.FlushFold()
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(time.Now()), withColor(line, gray))
+		gutterPrefix(tools.Now()), style.Paint(line, style.Dim))
 	p.crumbed = true // thoughtStat: skip, this step's trace already showed
 }
 
@@ -390,22 +408,19 @@ func estimatedReasoningTokens(trace string) int {
 	return len(trace) / 4
 }
 
-// thoughtStat prints one dim gutter line summarizing how long and how much a
-// model call spent deliberating — "thought 14s | 1.1k tok" — mirroring
-// breadcrumb's format. Uses res.Usage's reported reasoning-token count when
-// the backend provides one, otherwise estimates from the accumulated trace
-// length. No-op with no reasoning at all, when neither the elapsed-time nor
-// token threshold is met (a quick deliberation isn't worth a dedicated
-// line), or when breadcrumb already printed the trace for this same step (one
-// gray gutter line per step, not two). Callers only construct a streamPrinter
-// outside quiet mode, so this is implicitly never shown headless.
-func (p *streamPrinter) thoughtStat(res *AgentResponse) {
+// thoughtStat is how long a model call spent deliberating — "thought 14s" —
+// for the turn footer (footer.go). Uses res.Usage's reported reasoning-token
+// count when the backend provides one, otherwise estimates from the
+// accumulated trace length, to judge whether the deliberation was substantial.
+// "" with no reasoning at all, when neither the elapsed-time nor token
+// threshold is met, or when breadcrumb already showed this step's trace.
+func (p *streamPrinter) thoughtStat(res *AgentResponse) string {
 	if p.crumbed {
-		return
+		return ""
 	}
 	trace := p.reason.String()
 	if trace == "" {
-		return
+		return ""
 	}
 	var elapsed time.Duration
 	if !p.start.IsZero() {
@@ -419,11 +434,9 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 		tok = estimatedReasoningTokens(trace)
 	}
 	if elapsed < thoughtStatMinSeconds*time.Second && tok <= thoughtStatMinTokens {
-		return
+		return ""
 	}
-	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
-	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(time.Now()), withColor(line, gray))
+	return fmt.Sprintf("thought %ds", int(elapsed.Seconds()))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap
@@ -474,14 +487,15 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 			}
 			cs.live.SetThinking(on, tail)
 		}
-		p := &streamPrinter{md: cs.markdown(), onStatus: onStatus, start: time.Now()}
+		cs.turnStep++
+		p := &streamPrinter{md: cs.markdown(), onStatus: onStatus, start: time.Now(), noLeadBlank: cs.turnStep == 1}
 		p.startTicker()
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.stopTicker() // before the clear below, so no straggler tick redraws
 		p.finish()
 		cs.live.SetThinking(false, "")
-		p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
-		p.thoughtStat(res) // else: a turn-end "thought Ns | tok" stat, if reasoning was substantial
+		p.breadcrumb(res)                  // persist the reasoning trace of a silent tool step
+		cs.noteThought(p.thoughtStat(res)) // else: "thought Ns" for the footer, if reasoning was substantial
 		return res, true, err
 	}
 	s := NewSpinner()
@@ -491,7 +505,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop()
 		return res, false, err
 	}
-	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now()}
+	cs.turnStep++
+	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now(), noLeadBlank: cs.turnStep == 1}
 	p.startTicker()
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 	p.stopTicker() // before the spinner stops, so no straggler tick relabels
@@ -499,8 +514,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	if !p.began {
 		s.Stop() // stop before the breadcrumb so the line is clean
 	}
-	p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
-	p.thoughtStat(res) // else: a turn-end "thought Ns | tok" stat, if reasoning was substantial
+	p.breadcrumb(res)                  // persist the reasoning trace of a silent tool step
+	cs.noteThought(p.thoughtStat(res)) // else: "thought Ns" for the footer, if reasoning was substantial
 	return res, true, err
 }
 
@@ -574,6 +589,11 @@ func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed stri
 	realStdout := os.Stdout
 	os.Stdout = w
 	session.live = anchor
+	// stdout is a pipe now, so it reports no width; lay lines out to the
+	// anchor's real terminal instead (tool lines right-align and clip to it).
+	realWidth := style.TermWidth
+	style.TermWidth = anchor.Width
+	defer func() { style.TermWidth = realWidth }()
 	// Issue #109: push the row's figures at anchor creation so the FIRST turn
 	// shows the row immediately — the turn's own startActivity/send pushes
 	// refresh it as the turn runs. This is the one cross-goroutine read of
@@ -609,7 +629,7 @@ func runUnderAnchor(session *CortexSession, editor *lineedit.Terminal, seed stri
 // file lost anything).
 func printTestReceipt(receipt string) {
 	if receipt != "" {
-		fmt.Println(withColor(receipt, yellow))
+		fmt.Println(style.Paint(receipt, style.Warn))
 	}
 }
 
@@ -620,7 +640,7 @@ func printTestReceipt(receipt string) {
 // and no extra round, by the pass's contract).
 func printLintReceipt(receipt string) {
 	if receipt != "" {
-		fmt.Println(withColor(receipt, yellow))
+		fmt.Println(style.Paint(receipt, style.Warn))
 	}
 }
 
@@ -633,7 +653,7 @@ func printLintReceipt(receipt string) {
 // nothing to measure).
 func printTurnReceipt(receipt string) {
 	if receipt != "" {
-		fmt.Println(withColor(receipt, gray))
+		fmt.Println(style.Paint(receipt, style.Dim))
 	}
 }
 
@@ -645,7 +665,7 @@ func printTurnReceipt(receipt string) {
 // latter already printed by afterTurn).
 func printBackendError(err error) {
 	if line := backendErrorLine(err); line != "" {
-		fmt.Println(withColor(line, gray))
+		fmt.Println(style.Paint(line, style.Dim))
 	}
 }
 
@@ -662,7 +682,7 @@ func printBackendError(err error) {
 // routing for the redaction notice specifically).
 func printRedactions(w io.Writer, n int) {
 	if n > 0 {
-		fmt.Fprintln(w, withColor(fmt.Sprintf("%d secret pattern(s) redacted from the transcript, journal, and memory this turn", n), gray))
+		fmt.Fprintln(w, style.Paint(fmt.Sprintf("%d secret pattern(s) redacted from the transcript, journal, and memory this turn", n), style.Dim))
 	}
 }
 
@@ -692,11 +712,11 @@ func afterTurn(session *CortexSession, err error) {
 			compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
 		}
 	case errors.Is(err, context.Canceled):
-		fmt.Println(withColor("interrupted", yellow))
+		fmt.Println(style.Paint("interrupted", style.Warn))
 	default:
 		fmt.Printf("turn error: %v\n", err)
 		if d := diagnoseModelError(err); d != "" {
-			fmt.Println(withColor(d, yellow))
+			fmt.Println(style.Paint(d, style.Warn))
 		}
 		// An overflow error names the code model's real window: learn it
 		// (the gauge and read_file guard self-correct, C2) and compact so the

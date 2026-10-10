@@ -1,4 +1,4 @@
-[90m12:34:56[0m  [32mtool: study[0m[90m(internal/tools, where is the gutter)[0m
-[90m12:34:56[0m    [32mtool: read_file[0m[90m(/tmp/cortex-snapshot/nonexistent-seed-file.txt)[0m[90m  1.0s  error: /tmp/cortex-snapshot/nonexistent-seed-file.txt does not exi…[0m
-[90m12:34:56[0m    [32mtool: read_file[0m[90m(/tmp/cortex-snapshot/nonexistent-seed-file.txt)[0m[90m  1.0s  error: /tmp/cortex-snapshot/nonexistent-seed-file.txt does not exi…[0m
+[90m12:34:56[0m  [32mstudy[0m    internal/tools, where is the gutter
+[90m12:34:56[0m    [31mread[0m     /tmp/cortex-snapshot/nonexistent-seed-file.txt       [31merror: /tmp/cortex-snapsh…[0m
+[90m12:34:56[0m    [31mread[0m     /tmp/cortex-snapshot/nonexistent-seed-file.txt       [31merror: /tmp/cortex-snapsh…[0m
 [90m12:34:56[0m  [90m  study done: 2 calls, 1.0s, digest 21 B[0m

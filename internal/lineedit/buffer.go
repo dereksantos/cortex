@@ -61,8 +61,17 @@ func (b *buffer) right() {
 	}
 }
 
-func (b *buffer) home() { b.pos = 0 }
-func (b *buffer) end()  { b.pos = len(b.runes) }
+// home and end move within the cursor's line — in a single-line buffer that
+// is the whole buffer; in a multi-line draft, the line on screen.
+func (b *buffer) home() {
+	start, _, _, _ := b.lineBounds()
+	b.pos = start
+}
+
+func (b *buffer) end() {
+	_, end, _, _ := b.lineBounds()
+	b.pos = end
+}
 
 // wordLeft moves to the start of the previous word: skip spaces, then word.
 func (b *buffer) wordLeft() {
@@ -85,11 +94,17 @@ func (b *buffer) wordRight() {
 	}
 }
 
-func (b *buffer) killToEnd() { b.runes = b.runes[:b.pos] }
+// killToEnd (Ctrl-K) and killToStart (Ctrl-U) cut within the cursor's line,
+// so in a multi-line draft they never remove lines that aren't on screen.
+func (b *buffer) killToEnd() {
+	_, end, _, _ := b.lineBounds()
+	b.runes = append(b.runes[:b.pos:b.pos], b.runes[end:]...)
+}
 
 func (b *buffer) killToStart() {
-	b.runes = append([]rune{}, b.runes[b.pos:]...)
-	b.pos = 0
+	start, _, _, _ := b.lineBounds()
+	b.runes = append(b.runes[:start:start], b.runes[b.pos:]...)
+	b.pos = start
 }
 
 // killWord deletes the word before the cursor (Ctrl-W).
@@ -106,3 +121,62 @@ func (b *buffer) killWord() {
 }
 
 func isWordSep(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }
+
+// lineBounds returns the [start, end) rune range of the line holding the
+// cursor in a multi-line buffer, its 1-based number, and the line count.
+func (b *buffer) lineBounds() (start, end, line, lines int) {
+	line, lines = 1, 1
+	for i, r := range b.runes {
+		if r != '\n' {
+			continue
+		}
+		lines++
+		if i < b.pos {
+			line++
+			start = i + 1
+		}
+	}
+	end = len(b.runes)
+	for i := b.pos; i < len(b.runes); i++ {
+		if b.runes[i] == '\n' {
+			end = i
+			break
+		}
+	}
+	return start, end, line, lines
+}
+
+// lineUp moves the cursor to the same column of the previous line, clamped to
+// its length. Reports false on the first line (the caller falls through to
+// history).
+func (b *buffer) lineUp() bool {
+	start, _, line, _ := b.lineBounds()
+	if line == 1 {
+		return false
+	}
+	col := b.pos - start
+	prevEnd := start - 1 // the '\n' ending the previous line
+	prevStart := prevEnd
+	for prevStart > 0 && b.runes[prevStart-1] != '\n' {
+		prevStart--
+	}
+	b.pos = prevStart + min(col, prevEnd-prevStart)
+	return true
+}
+
+// lineDown moves the cursor to the same column of the next line, clamped to
+// its length. Reports false on the last line.
+func (b *buffer) lineDown() bool {
+	start, end, line, lines := b.lineBounds()
+	if line == lines {
+		return false
+	}
+	col := b.pos - start
+	nextStart := end + 1
+	nextEnd := nextStart
+	for nextEnd < len(b.runes) && b.runes[nextEnd] != '\n' {
+		nextEnd++
+	}
+	b.pos = nextStart + min(col, nextEnd-nextStart)
+	return true
+}

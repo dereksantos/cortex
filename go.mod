@@ -5,14 +5,15 @@ go 1.26.0
 // Pinned to the patch level that carries the stdlib security fixes
 // govulncheck tracks; CI (test.yml, release.yml) pins the same version.
 // Bump all three together.
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	charm.land/glamour/v2 v2.0.1
 	github.com/bwmarrin/discordgo v0.29.0
+	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/viterin/vek v0.4.3
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 )
@@ -23,7 +24,6 @@ require (
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20261001125412-878653296cfd // indirect
-	github.com/charmbracelet/x/ansi v0.11.8 // indirect
 	github.com/charmbracelet/x/exp/golden v0.1.0 // indirect
 	github.com/charmbracelet/x/exp/slice v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect

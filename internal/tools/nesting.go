@@ -33,7 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // nestedCallDisplayCap bounds how many of one subagent's calls are printed. A
@@ -57,14 +58,20 @@ type nestFrame struct {
 	suppressed int
 }
 
-// pendingAction is a nested call's announcement, held back until the call
-// finishes so its line can carry the elapsed time and result. extra collects
-// anything the tool printed meanwhile (a file diff), which must land AFTER the
-// announcement it belongs to.
+// pendingAction is a call's announcement, held back until the call finishes
+// so its line can carry the elapsed time and result. extra collects anything
+// the tool printed meanwhile (a file diff), which must land AFTER the
+// announcement it belongs to; result, when set, replaces the generic summary
+// (a diff's "+9 -2").
 type pendingAction struct {
 	indent string
 	action string
 	extra  []string
+	result string
+	// printed: the line already went out when the call started (no live
+	// status row to carry it) — finishCall only records it.
+	printed bool
+	at      time.Time // when the call was announced
 }
 
 var nest struct {
@@ -113,23 +120,63 @@ func indentPrefix() string {
 // <model>" banner) sit in the same column as the tool lines below them.
 func IndentPrefix() string { return indentPrefix() }
 
-// captureAction holds a nested call's action line back until the call
-// finishes. Returns false at the top level, where the line prints immediately
-// as it always has. A second action from the same call (bash spilling its
-// output to the summarizer, say) flushes the first rather than losing it.
-func captureAction(action string) bool {
+// captureAction holds a call's action line back until the call finishes, at
+// every level (track 2: each line carries its result). A second action from
+// the same call (bash spilling its output to the summarizer, say) flushes the
+// first rather than losing it.
+func captureAction(action string) {
+	live := liveTurn()
 	nest.mu.Lock()
-	if len(nest.frames) == 0 {
-		nest.mu.Unlock()
-		return false
-	}
 	prev := nest.pending
-	nest.pending = &pendingAction{indent: strings.Repeat("  ", len(nest.frames)), action: action}
-	nest.mu.Unlock()
-	if prev != nil {
-		printPending(prev, "")
+	top := len(nest.frames) == 0
+	p := &pendingAction{indent: strings.Repeat("  ", len(nest.frames)), action: action, at: Now()}
+	// Without a live status row, a top-level line prints as the call starts —
+	// nothing else would show that it is running.
+	p.printed = top && !live
+	nest.pending = p
+	// A held read run lands before anything this call prints mid-flight (a
+	// risky confirm, a summarizer banner): flush it now, unless this call
+	// may join it.
+	var run []foldEntry
+	if prev != nil || !top || !foldable(action) {
+		run = takeFold()
 	}
-	return true
+	nest.mu.Unlock()
+	printFold(run)
+	if prev != nil && !prev.printed {
+		printPending(prev, "", false)
+	}
+	if p.printed {
+		fmt.Println(formatToolLineAt(p.at, style.ContentWidth(), p.indent, action, "", false))
+	}
+}
+
+// flushAction prints the held-back line now, without a result. A subagent
+// call uses it: its line must come out before the nested calls it runs, and
+// its result arrives on the done line instead.
+func flushAction() {
+	nest.mu.Lock()
+	p := nest.pending
+	nest.pending = nil
+	run := takeFold()
+	if p != nil {
+		recordCall(p, len(nest.frames), "", "", nil) // /last shows the subagent above its calls
+	}
+	nest.mu.Unlock()
+	printFold(run)
+	if p != nil && !p.printed {
+		printPending(p, "", false)
+	}
+}
+
+// setPendingResult overrides the generic result summary for the call in
+// flight — a diff reports its +/- counts.
+func setPendingResult(result string) {
+	nest.mu.Lock()
+	defer nest.mu.Unlock()
+	if nest.pending != nil {
+		nest.pending.result = result
+	}
 }
 
 // captureExtra attaches already-rendered lines (a file diff) to the pending
@@ -139,6 +186,12 @@ func captureExtra(lines []string) bool {
 	nest.mu.Lock()
 	defer nest.mu.Unlock()
 	if nest.pending == nil {
+		return false
+	}
+	if nest.pending.printed {
+		// The line is already on screen: the diff prints under it now, and
+		// is kept for the record too.
+		nest.pending.extra = append(nest.pending.extra, lines...)
 		return false
 	}
 	nest.pending.extra = append(nest.pending.extra, lines...)
@@ -154,13 +207,16 @@ func beginNestedCall() {
 	}
 }
 
-// finishNestedCall prints the call's one line — action, elapsed, result — plus
-// whatever it buffered. Past the display cap the line is dropped and counted
-// for the done line instead.
-func finishNestedCall(d time.Duration, out string, err error) {
+// finishCall prints the call's one line — action, elapsed, result — plus
+// whatever it buffered. Inside a subagent, past the display cap the line is
+// dropped and counted for the done line instead.
+func finishCall(d time.Duration, out string, err error) {
 	nest.mu.Lock()
 	p := nest.pending
 	nest.pending = nil
+	if p != nil {
+		recordCall(p, len(nest.frames), callResult(p, d, out, err), out, err)
+	}
 	over := false
 	if n := len(nest.frames); n > 0 {
 		f := nest.frames[n-1]
@@ -171,23 +227,46 @@ func finishNestedCall(d time.Duration, out string, err error) {
 			}
 		}
 	}
+	held := false
+	var run []foldEntry
+	if p != nil && !over {
+		if held = holdForFold(p, d, out, err); !held {
+			run = takeFold()
+		}
+	}
 	nest.mu.Unlock()
-	if p == nil || over {
+	if p == nil || over || held || p.printed {
 		return
 	}
-	// A call that rendered a diff already shows its result in full underneath;
-	// summarizing it too would just repeat the tool's own "wrote N bytes to …"
-	// echo one line above the change itself. Time still rides on the line.
-	suffix := fmtElapsed(d)
-	if len(p.extra) == 0 || err != nil {
-		suffix += "  " + summarizeResult(out, err)
-	}
-	printPending(p, suffix)
+	printFold(run) // a read-only run before this call lands above it
+	printPending(p, callResult(p, d, out, err), err != nil)
 }
 
+// callResult is the right-hand column for a finished call: the tool's own
+// result when it set one (a diff's counts), else a one-line summary of what
+// came back — skipped when a diff already shows the change in full — led by
+// the elapsed time once a call takes long enough for it to matter.
+func callResult(p *pendingAction, d time.Duration, out string, err error) string {
+	result := p.result
+	switch {
+	case err != nil:
+		result = summarizeResult(out, err)
+	case result == "" && len(p.extra) == 0:
+		result = summarizeResult(out, nil)
+	}
+	if d >= elapsedShownAfter {
+		result = strings.TrimSpace(fmtElapsed(d) + "  " + result)
+	}
+	return result
+}
+
+// elapsedShownAfter is how long a call runs before its line shows the time; a
+// column of "3ms" on every read is noise.
+const elapsedShownAfter = time.Second
+
 // printPending emits a held-back announcement and its buffered lines.
-func printPending(p *pendingAction, suffix string) {
-	fmt.Println(formatToolAction(p.indent, p.action, suffix))
+func printPending(p *pendingAction, result string, failed bool) {
+	fmt.Println(formatToolLineAt(p.at, style.ContentWidth(), p.indent, p.action, result, failed))
 	for _, l := range p.extra {
 		fmt.Println(l)
 	}
@@ -199,20 +278,26 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 	if deps.Quiet() {
 		return
 	}
-	parts := []string{countNoun(f.calls, "call"), fmtElapsed(time.Since(f.start))}
+	fmt.Println(formatSubagentDone(f, time.Since(f.start), digest, err))
+}
+
+// formatSubagentDone renders the closing line of a subagent block: calls,
+// elapsed, anything suppressed, and the digest size or the error.
+func formatSubagentDone(f *nestFrame, elapsed time.Duration, digest string, err error) string {
+	parts := []string{CountNoun(f.calls, "call"), fmtElapsed(elapsed)}
 	if f.suppressed > 0 {
 		parts = append(parts, fmt.Sprintf("%d not shown", f.suppressed))
 	}
 	if err != nil {
-		parts = append(parts, "error: "+clipRunes(firstLine(err.Error()), summaryTextCap))
+		parts = append(parts, "error: "+style.Clip(firstLine(err.Error()), summaryTextCap))
 	} else {
 		parts = append(parts, "digest "+humanSize(len(digest)))
 	}
 	plain := f.indent + f.name + " done: " + strings.Join(parts, ", ")
-	if w := termWidth(); w > 0 {
-		plain = clipRunes(plain, w-len(gutterPad))
+	if w := style.ContentWidth(); w > 0 {
+		plain = style.Clip(plain, w-len(gutterPad))
 	}
-	fmt.Println(TimestampPrefix() + Color(plain, Gray))
+	return TimestampPrefix() + style.Paint(plain, style.Dim)
 }
 
 // subagentAction renders the parent-level action line for a subagent call. The
@@ -220,7 +305,7 @@ func printSubagentDone(deps Quieter, f *nestFrame, digest string, err error) {
 // clipped.
 func subagentAction(name, path, goal string) string {
 	if g := strings.TrimSpace(firstLine(goal)); g != "" {
-		return fmt.Sprintf("%s(%s, %s)", name, path, clipRunes(g, 48))
+		return fmt.Sprintf("%s(%s, %s)", name, path, style.Clip(g, 48))
 	}
 	return fmt.Sprintf("%s(%s)", name, path)
 }
@@ -230,16 +315,18 @@ func subagentAction(name, path, goal string) string {
 // shape otherwise.
 func summarizeResult(out string, err error) string {
 	if err != nil {
-		return "error: " + clipRunes(firstLine(err.Error()), summaryTextCap)
+		return "error: " + style.Clip(firstLine(err.Error()), summaryTextCap)
 	}
 	t := strings.TrimSpace(out)
 	if t == "" {
 		return "no output"
 	}
 	if n := strings.Count(t, "\n") + 1; n > 1 {
-		return countNoun(n, "line") + ", " + humanSize(len(out))
+		return CountNoun(n, "line") + ", " + humanSize(len(out))
 	}
-	return clipRunes(t, summaryTextCap)
+	// Collapse whitespace: a tab or control byte in tool output must not land
+	// raw in the result column.
+	return style.Clip(strings.Join(strings.Fields(t), " "), summaryTextCap)
 }
 
 // fmtElapsed renders a call's wall time at the precision that reads: whole
@@ -268,19 +355,4 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
-}
-
-// clipRunes shortens s to max visible characters, marking the cut.
-func clipRunes(s string, max int) string {
-	if max <= 0 {
-		return "…"
-	}
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	r := []rune(s)
-	if max == 1 {
-		return "…"
-	}
-	return string(r[:max-1]) + "…"
 }

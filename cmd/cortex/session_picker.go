@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // sessionPickerView is the interactive session picker of issue #110: a
@@ -307,7 +308,7 @@ func (p *sessionPickerView) row(s sessionInfo, selected bool, width int) string 
 	if !selected {
 		return text
 	}
-	return withColor(text, "\033[1m")
+	return style.Paint(text, style.Strong)
 }
 
 // match is the filtered listing: a case-insensitive substring match against the

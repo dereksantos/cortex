@@ -2,6 +2,7 @@ package lineedit
 
 import (
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -160,7 +161,7 @@ func TestDecodeBracketedPaste(t *testing.T) {
 func TestRenderScrollKeepsCursorVisible(t *testing.T) {
 	b := &buffer{}
 	b.insert([]rune("0123456789")...) // pos at end (10)
-	out := renderLine("> ", b, 6)     // prompt width 2, avail 4
+	out := renderLine("> ", b, 6, "") // prompt width 2, avail 4
 	// One row only: must start with CR+clear and contain the prompt.
 	if !strings.HasPrefix(out, "\r\033[K> ") {
 		t.Errorf("render prefix wrong: %q", out)
@@ -177,10 +178,12 @@ func TestRenderScrollKeepsCursorVisible(t *testing.T) {
 func TestRenderSummaryForPaste(t *testing.T) {
 	b := &buffer{}
 	b.insert([]rune("first\nsecond\nthird")...)
-	out := renderLine("> ", b, 80)
+	out := renderLine("> ", b, 80, "")
 	plain := stripANSI(out)
-	if !strings.Contains(plain, "first") || !strings.Contains(plain, "+2 lines") {
-		t.Errorf("summary = %q, want first line + line count", plain)
+	// A paste leaves the cursor at its end: the row shows that line, editable,
+	// and where it sits in the draft (multiline_test.go covers navigation).
+	if !strings.Contains(plain, "> third") || !strings.Contains(plain, "[line 3/3]") {
+		t.Errorf("summary = %q, want the cursor's line + its position", plain)
 	}
 }
 
@@ -189,6 +192,31 @@ func TestStripANSIWidth(t *testing.T) {
 	colored := "\x1b[36m> \x1b[0m"
 	if w := displayWidth(colored); w != 2 {
 		t.Errorf("displayWidth(colored) = %d, want 2", w)
+	}
+}
+
+func TestAcceptedLineRewritesTheRow(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	var out strings.Builder
+	term := &Terminal{in: r, out: &out, fd: int(r.Fd())}
+	term.SetAcceptedLine(func(line string, _ int) string { return "14:02:11  " + line })
+	if _, err := w.WriteString("hello\r"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	line, err := term.ReadLineEcho("> ", "")
+	if err != nil {
+		t.Fatalf("ReadLineEcho: %v", err)
+	}
+	if line != "hello" {
+		t.Errorf("line = %q, want hello", line)
+	}
+	if !strings.HasSuffix(out.String(), "\r\033[K14:02:11  hello\r\n") {
+		t.Errorf("accepted row not rewritten: %q", out.String())
 	}
 }
 

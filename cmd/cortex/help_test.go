@@ -29,3 +29,25 @@ func TestHelpLinesArePlainASCII(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpCommands(t *testing.T) {
+	names, help := helpCommands()
+	for _, want := range []string{"/help", "/undo", "/model", "/hook", "/quit"} {
+		if _, ok := help[want]; !ok {
+			t.Errorf("helpCommands missing %s (names %v)", want, names)
+		}
+	}
+	tests := map[string]string{
+		"/compact": "distill the session via study, freeing context",
+		"/model":   "show the code/study model bindings, or switch the coding model",
+		"/hook":    "turn the post-edit hook down or off for this session (never raises it)",
+	}
+	for name, want := range tests {
+		if got := help[name]; got != want {
+			t.Errorf("help[%s] = %q, want %q", name, got, want)
+		}
+	}
+	if len(names) != len(helpLines) {
+		t.Errorf("got %d names for %d help lines", len(names), len(helpLines))
+	}
+}

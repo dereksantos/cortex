@@ -34,7 +34,33 @@ type Terminal struct {
 	mu     sync.Mutex
 	anchor *Anchor
 	inAlt  bool
+
+	// accepted, when set, renders the row a submitted line leaves behind in
+	// scrollback (see SetAcceptedLine).
+	accepted func(line string, width int) string
+	// detail is the Ctrl-O action (SetDetail).
+	detail func()
+	// keyHints is the "?" key reference (SetKeyHints).
+	keyHints string
 }
+
+// SetAcceptedLine sets how a line submitted through ReadLineEcho is left in
+// scrollback: on Enter the prompt row is redrawn as f(line, width) before the
+// newline — so the status that sat beside the input while editing needn't be
+// kept in the history. f may return several rows joined by "\r\n" (the
+// terminal is in raw mode); width is the terminal's. Nil (the default) leaves
+// the row as typed. Plain ReadLine/ReadLinePrefilled (a y/N answer, say)
+// never use it.
+func (t *Terminal) SetAcceptedLine(f func(line string, width int) string) { t.accepted = f }
+
+// SetKeyHints sets the one-row key reference shown under the input when "?"
+// is typed first at the REPL's main prompt (ReadLineEcho). "" disables it.
+func (t *Terminal) SetKeyHints(s string) { t.keyHints = s }
+
+// SetDetail wires Ctrl-O at the prompt: f runs synchronously (typically opening
+// an inspector over the terminal) and the prompt redraws when it returns. Nil
+// leaves Ctrl-O inert. The anchored type-ahead during a turn ignores it.
+func (t *Terminal) SetDetail(f func()) { t.detail = f }
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
 func (t *Terminal) SetHistory(h *History) { t.history = h }
@@ -217,14 +243,21 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 // It backs the type-ahead path: keystrokes captured while a turn streamed land
 // here as the starting draft, so the user's in-flight input isn't lost.
 func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
-	return t.readLineWith(prompt, prefill, newReaderSource(t.fd))
+	return t.readLineWith(prompt, prefill, newReaderSource(t.fd), nil)
+}
+
+// ReadLineEcho is ReadLinePrefilled with the accepted-line rewrite
+// (SetAcceptedLine) applied on Enter — the REPL's main input read.
+func (t *Terminal) ReadLineEcho(prompt, prefill string) (string, error) {
+	return t.readLineWith(prompt, prefill, newReaderSource(t.fd), t.accepted)
 }
 
 // readLineWith is ReadLinePrefilled over an explicit byte source — the seam
 // the non-TTY tests drive the driver with an in-memory source, exactly as
 // inspectWith does for the inspector (both let the key-decoding and buffer
-// loop run for real without a terminal).
-func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string, error) {
+// loop run for real without a terminal) — and an optional accepted-line
+// rewrite.
+func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted func(string, int) string) (string, error) {
 	buf := &buffer{}
 	if prefill != "" {
 		setBuffer(buf, prefill)
@@ -235,17 +268,35 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string,
 	if t.completers != nil {
 		completion = NewCompletions()
 	}
+	// rowShown is whether a candidate row sits on the line below the input.
+	rowShown := false
 	redraw := func(row string) {
-		io.WriteString(t.out, renderLine(prompt, buf, t.width()))
 		// The candidate row renders below the input row as a plain-text row
-		// (no popup box). renderLine parks the cursor at the end of the input
-		// row, so the row text lands on the next line, and a fresh input-row
-		// redraw (\r\033[K) clears it because the candidate row never exceeds
-		// the terminal width. A multi-line buffer collapses to a summary
-		// (renderSummary), which is itself a single row, so the invariant
-		// holds there too.
+		// (no popup box), with the cursor kept on the input row. Every redraw
+		// first clears from the input row down (\033[J) when a row is showing,
+		// so the row never outlives the state that drew it — before, the next
+		// keystroke repainted the input over the row line and left a stale
+		// copy of the line above it.
+		lead := ""
+		if rowShown {
+			lead = "\r\033[J"
+			rowShown = false
+		}
 		if row != "" {
-			io.WriteString(t.out, "\r\n"+truncate(row, t.width()))
+			// Make room first: a newline at the bottom of the screen scrolls,
+			// and the cursor comes back up with the content.
+			lead += "\n\033[1A"
+		}
+		ghost := ""
+		if row == "" {
+			ghost = t.ghostHint(buf)
+		}
+		io.WriteString(t.out, lead+renderLine(prompt, buf, t.width(), ghost))
+		if row != "" {
+			// Save the cursor (parked at the edit column), draw the row on the
+			// line below, and restore it.
+			io.WriteString(t.out, "\0337\r\n\033[K"+truncate(row, t.width())+"\0338")
+			rowShown = true
 		}
 	}
 	redraw("")
@@ -265,7 +316,13 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string,
 		}
 		switch ev.kind {
 		case keyEnter:
+			if rowShown {
+				redraw("") // clear the candidate row before the line is left behind
+			}
 			line := buf.string()
+			if accepted != nil {
+				io.WriteString(t.out, "\r\033[K"+accepted(line, t.width()))
+			}
 			io.WriteString(t.out, "\r\n")
 			return line, nil // caller decides what to record (AddHistory)
 		case keyTab:
@@ -282,11 +339,29 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string,
 			filled, pos, row := completion.Tab(buf.string(), buf.pos, func(l string, c int) []string {
 				return cands
 			})
+			if c, ok := completion.focused(); ok {
+				if d := t.describe(c); d != "" {
+					row += "  " + dim(d) // one candidate in focus: say what it does
+				}
+			}
 			setBuffer(buf, filled)
 			buf.pos = pos
 			redraw(row)
 			continue // the candidate row is drawn by redraw; skip the generic one
+		case keyNewline:
+			buf.insert('\n')
+		case keyDetail:
+			if t.detail == nil || accepted == nil {
+				continue // only the REPL's main input read opens it
+			}
+			if rowShown {
+				redraw("")
+			}
+			t.detail()
 		case keyUp:
+			if buf.hasNewline() && buf.lineUp() {
+				break // moved within the draft; history stays where it is
+			}
 			if hpos == 0 {
 				continue
 			}
@@ -296,6 +371,9 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string,
 			hpos--
 			setBuffer(buf, t.history.at(hpos))
 		case keyDown:
+			if buf.hasNewline() && buf.lineDown() {
+				break
+			}
 			if hpos >= t.history.Len() {
 				continue
 			}
@@ -333,6 +411,16 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string,
 			return "", ErrInterrupted
 		case keyRune:
 			buf.insert(ev.r)
+			// "?" as the first character of the REPL's main input shows the
+			// key hints on the row below (cleared by the next key). The "?" is
+			// still typed — a message may start with one.
+			if ev.r == '?' && accepted != nil && t.keyHints != "" && buf.string() == "?" {
+				if completion != nil {
+					completion.Change()
+				}
+				redraw(t.keyHints)
+				continue
+			}
 		case keyPaste:
 			buf.insert([]rune(ev.paste)...)
 		case keyBackspace:
@@ -365,6 +453,44 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource) (string,
 		}
 		redraw("")
 	}
+}
+
+// describe asks the wired completers for a one-line description of a
+// candidate ("" when none offers one).
+func (t *Terminal) describe(cand string) string {
+	for _, name := range []string{"slash", "model", "path"} {
+		if d, ok := t.completers[name].(Describer); ok {
+			if s := d.Describe(cand); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// ghostHint is the dim remainder shown after the cursor while a /command is
+// being typed and only one command still matches — "/co" previews "mpact" and
+// what it does. Tab accepts it (the single-match fill). "" whenever the hint
+// would be a guess: the cursor isn't at the end, the word isn't a /command,
+// or more than one command matches.
+func (t *Terminal) ghostHint(buf *buffer) string {
+	c, ok := t.completers["slash"]
+	if !ok || buf.pos != len(buf.runes) || buf.hasNewline() {
+		return ""
+	}
+	line := buf.string()
+	if !strings.HasPrefix(line, "/") || strings.ContainsAny(line, " \t") {
+		return ""
+	}
+	cands := c.Candidates(line, buf.pos)
+	if len(cands) != 1 || !strings.HasPrefix(cands[0], line) {
+		return ""
+	}
+	hint := cands[0][len(line):]
+	if d := t.describe(cands[0]); d != "" {
+		hint += "   " + d
+	}
+	return hint
 }
 
 // completionCandidates merges every wired completer's candidates for the

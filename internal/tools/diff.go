@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // printFileDiff prints the diff of a file change under the tool-action line
@@ -32,7 +34,34 @@ func printFileDiff(deps Quieter, before, after string) {
 	if deps.Quiet() || richRenderDisabled {
 		return
 	}
-	emitLines(renderDiff(before, after, diffOptions{Width: termWidth(), Indent: indentPrefix()}))
+	lines, stat := renderDiffStat(before, after, diffOptions{Width: style.ContentWidth(), Indent: indentPrefix()})
+	if stat != "" {
+		setPendingResult(stat)
+	}
+	emitLines(lines)
+}
+
+// rowsStat is a change's size for the tool line's result column: "+9 -2",
+// "+40" for pure additions, "-3" for pure removals.
+func rowsStat(rows []diffRow) string {
+	adds, dels := 0, 0
+	for _, r := range rows {
+		switch r.op {
+		case '+':
+			adds++
+		case '-':
+			dels++
+		}
+	}
+	switch {
+	case adds == 0 && dels == 0:
+		return ""
+	case dels == 0:
+		return fmt.Sprintf("+%d", adds)
+	case adds == 0:
+		return fmt.Sprintf("-%d", dels)
+	}
+	return fmt.Sprintf("+%d -%d", adds, dels)
 }
 
 // emitLines writes already-rendered lines to the terminal — or, inside a
@@ -116,31 +145,39 @@ type diffRow struct {
 // decision in one pure function so the shape can be tested without a
 // terminal: callers hand it two strings and print what comes back.
 func renderDiff(before, after string, opt diffOptions) []string {
+	lines, _ := renderDiffStat(before, after, opt)
+	return lines
+}
+
+// renderDiffStat is renderDiff plus the change's size for the tool line's
+// result column ("+9 -2", diffStat's format), from the same diff rows — one
+// LCS per edit, not two. The stat is "" when there is no line diff to count.
+func renderDiffStat(before, after string, opt diffOptions) ([]string, string) {
 	opt = opt.withDefaults()
 	switch {
 	case before == after && before == "":
-		return []string{opt.note("wrote an empty file")}
+		return []string{opt.note("wrote an empty file")}, ""
 	case before == after:
-		return []string{opt.note("no change")}
+		return []string{opt.note("no change")}, ""
 	case isBinary(before) || isBinary(after):
-		return []string{opt.note(fmt.Sprintf("binary content, %d bytes → %d bytes", len(before), len(after)))}
+		return []string{opt.note(fmt.Sprintf("binary content, %d bytes → %d bytes", len(before), len(after)))}, ""
 	case len(before)+len(after) > diffMaxInputBytes:
 		return []string{opt.note(fmt.Sprintf("%s → %s (too large to diff)",
-			countNoun(len(splitLines(before)), "line"), countNoun(len(splitLines(after)), "line")))}
+			CountNoun(len(splitLines(before)), "line"), CountNoun(len(splitLines(after)), "line")))}, ""
 	}
 
 	a, b := splitLines(before), splitLines(after)
 	var out []string
 	switch {
 	case before == "":
-		out = append(out, opt.note("new file, "+countNoun(len(b), "line")))
+		out = append(out, opt.note("new file, "+CountNoun(len(b), "line")))
 	case after == "":
-		out = append(out, opt.note("emptied, "+countNoun(len(a), "line")+" removed"))
+		out = append(out, opt.note("emptied, "+CountNoun(len(a), "line")+" removed"))
 	}
 
 	rows := diffRows(a, b)
 	out = append(out, opt.body(rows)...)
-	return out
+	return out, rowsStat(rows)
 }
 
 // body renders the hunks of rows within the height cap, eliding the rest.
@@ -204,13 +241,13 @@ func (o diffOptions) body(rows []diffRow) []string {
 // note renders a gray one-line remark (the new-file/no-change header, the
 // elision count, a degradation notice).
 func (o diffOptions) note(s string) string {
-	return Color(truncatePlain(o.prefix()+s, o.Width), Gray)
+	return style.Paint(truncatePlain(o.prefix()+s, o.Width), style.Dim)
 }
 
 // hunkHeader renders the standard unified-diff position header.
 func (o diffOptions) hunkHeader(h hunk) string {
 	s := fmt.Sprintf("@@ -%d,%d +%d,%d @@", h.oldStart, h.oldCount, h.newStart, h.newCount)
-	return Color(truncatePlain(o.prefix()+s, o.Width), Gray)
+	return style.Paint(truncatePlain(o.prefix()+s, o.Width), style.Dim)
 }
 
 // row renders one diff row: line number, marker, text. Removed rows carry the
@@ -226,11 +263,11 @@ func (o diffOptions) row(r diffRow, numW int) string {
 	plain = truncatePlain(plain, o.Width)
 	switch r.op {
 	case '+':
-		return Color(plain, Green)
+		return style.Paint(plain, style.OK)
 	case '-':
-		return Color(plain, Red)
+		return style.Paint(plain, style.Err)
 	default:
-		return Color(plain, Gray)
+		return style.Paint(plain, style.Dim)
 	}
 }
 
@@ -455,12 +492,5 @@ func truncatePlain(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	r := []rune(s)
-	if len(r) <= width {
-		return s
-	}
-	if width == 1 {
-		return "…"
-	}
-	return string(r[:width-1]) + "…"
+	return style.Clip(s, width)
 }

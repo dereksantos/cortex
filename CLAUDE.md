@@ -133,7 +133,10 @@ files, the index, the user's `git stash` list, and `.cortex/` untouched; it
 prints only the files it actually changed, records a transcript note so the
 model learns its edits were reverted, and drops the consumed refs. One line
 when not in a git repo or when there is nothing to undo), `/sessions`,
-`/model [name]`, `/plan <task>`, `/hook off|format|all` (turns the post-edit
+`/last` (every tool call of the last turn, unabridged, in the inspector;
+Ctrl-O at the prompt opens it too — `cmd/cortex/last_turn_view.go`),
+`/memory` (browse notes read-only — `list_picker.go`), `/model [name]`
+(bare: a picker on a TTY — `list_picker.go`), `/plan <task>`, `/hook off|format|all` (turns the post-edit
 hook down or off for this session — monotone-down, never raises it; bare
 `/hook` shows the current mode), `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
@@ -200,10 +203,30 @@ resolve to a readable file leaves the input unchanged. History records the
 line exactly as typed.
 
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
-❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
-actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s
-`printToolAction`); role lines are colored by their timestamp instead of a
-per-role icon (`cmd/cortex/display.go`'s `gutter`); the plain spinner
+◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept — with
+one exception Derek made 2026-10-09: the prompt marker is `❯`
+(`tools.PromptGlyph`). In a live REPL turn (anchored prompt —
+`tools.BeginTurn(live)`), every tool call prints ONE line when it finishes —
+`HH:MM:SS  verb     target …  result`, verb in a fixed column, result (diff
+`+9 -2`, a summary, elapsed past 1s) right-aligned at the content width
+(terminal capped at 100) — laid out by `internal/tools/toolline.go`'s
+`formatToolLine`; while it runs the live status row names it. Without a live
+status row (plain mode, a one-off `cortex study`, `study-eval`) each line
+prints as the call starts, with no result column and no folding. Subagent calls
+(`study`/`agent`) are the exception: their line prints before they run so
+their nested calls land under it. A run of the coder's read-only calls
+(read/grep/outline/recall/memory reads) folds into one dim line — `read 3
+files · grep 2 searches` — printed when the run ends
+(`internal/tools/fold.go`; cmd/cortex calls `tools.FlushFold()` before its
+own mid-turn output). The input row is status first, cursor last —
+`qwen3.8-27b  1k|22k  . ❯ ` (`Prompt`/`PromptStatus`); on Enter the row is
+rewritten as a timestamped echo of the input
+(`lineedit.Terminal.SetAcceptedLine`, via `ReadLineEcho`). Answers sit under
+the gutter, rendered with a quieted glamour theme (accent inline code, no
+chips, plain bold headings, `-` bullets), and end with a one-line footer
+(`cmd/cortex/footer.go`: elapsed · thought · tools · files · cost). Every
+line carries the same dim `HH:MM:SS` gutter instead of a per-role icon
+(`cmd/cortex/display.go`'s `gutterPrefix`); the plain spinner
 (`internal/loopui/spinner.go`) is a static label with only its
 elapsed-seconds tick moving (no animated spinner frames). The anchored
 status row (`internal/lineedit/live.go`, issue #109) appends live stats to
@@ -542,5 +565,6 @@ go test ./...                # full suite
 - `internal/outline/` — the structural map (`Outline`/`Render`; `go/ast` + regex tiers, breadth-first to budget)
 - `internal/journal/` — append-only event log (incl. `study.result` telemetry)
 - `internal/shellrisk/` — command risk classifier
+- `internal/style/` — terminal styling: semantic color roles (`Dim`/`Accent`/`Action`/`OK`/`Warn`/`Err`), NO_COLOR, and width helpers (`Width`/`Clip`/`Justify`/`Wrap`); pick a role by meaning, never a hue ([`docs/tui-polish.md`](docs/tui-polish.md))
 - `pkg/llm/` — LLM providers
 - `pkg/config/` — layered config

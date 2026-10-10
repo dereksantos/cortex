@@ -11,6 +11,7 @@ import (
 	"github.com/dereksantos/cortex/internal/loopui"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/redact"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/userhome"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -424,4 +425,4 @@ func (cs *CortexSession) emitSessionMetrics() {
 
 func humanK(n int) string { return loopui.HumanK(n) }
 
-func ctxColor(used, max int) string { return loopui.ContextColor(used, max, compactThreshold) }
+func ctxColor(used, max int) style.Role { return loopui.ContextColor(used, max, compactThreshold) }

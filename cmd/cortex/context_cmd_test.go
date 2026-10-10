@@ -9,6 +9,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // seededContextSession builds a CortexSession with every zone populated —
@@ -333,20 +334,20 @@ func TestCacheHeadlineLineThresholds(t *testing.T) {
 	tests := []struct {
 		name           string
 		prompt, cached int
-		wantColor      string
+		wantColor      style.Role
 	}{
-		{"green at exactly 80%", 100, 80, green},
-		{"green above 80%", 100, 95, green},
-		{"yellow at exactly 40%", 100, 40, yellow},
-		{"yellow between thresholds", 100, 60, yellow},
-		{"red below 40%", 100, 10, red},
-		{"red at zero", 100, 0, red},
+		{"green at exactly 80%", 100, 80, style.OK},
+		{"green above 80%", 100, 95, style.OK},
+		{"yellow at exactly 40%", 100, 40, style.Warn},
+		{"yellow between thresholds", 100, 60, style.Warn},
+		{"red below 40%", 100, 10, style.Err},
+		{"red at zero", 100, 0, style.Err},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := &CortexSession{LastPromptTokens: tt.prompt, LastCachedTokens: tt.cached}
 			got := cs.cacheHeadlineLine()
-			if !strings.Contains(got, tt.wantColor) {
+			if !strings.Contains(got, string(tt.wantColor)) {
 				t.Errorf("cacheHeadlineLine() = %q, want it to carry color %q", got, tt.wantColor)
 			}
 		})

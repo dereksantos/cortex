@@ -22,7 +22,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/outline"
@@ -906,17 +905,15 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutco
 		return msg, BashOutcome{}, nil
 	}
 
-	// Inside a subagent, time the call and let its announcement out on the far
-	// side with the elapsed time and a result summary (nesting.go). The coder's
-	// own calls take the direct path: their line is already on screen, printed
-	// before the call ran.
-	if !inSubagent() {
-		return dispatchTool(ctx, tc, deps)
+	// Time the call and let its announcement out on the far side with the
+	// elapsed time and a result (nesting.go, toolline.go). While it runs, the
+	// REPL's live status row names it.
+	if inSubagent() {
+		beginNestedCall()
 	}
-	beginNestedCall()
 	start := time.Now()
 	out, outcome, err := dispatchTool(ctx, tc, deps)
-	finishNestedCall(time.Since(start), out, err)
+	finishCall(time.Since(start), out, err)
 	return out, outcome, err
 }
 
@@ -1008,13 +1005,10 @@ const defaultCurationBudgetTokens = 16000
 // window. Config-overridable via tools.max_tool_output.
 const defaultMaxToolOutput = 10000
 
-// printToolAction prints a timestamped, word-tagged tool-action line under
-// the current cortex turn, e.g. "15:04:05  tool: read_file(go.mod)". The
-// timestamp matches gutterPrefix's "HH:MM:SS  " format so tool lines stay
-// vertically aligned with user/assistant lines; the tool name shows in
-// green, its argument list dimmed so the verb reads first. Plain ASCII by
-// decision (2026-07-19) — the REPL dropped its icon set, so the "tool:" tag
-// itself (not a color) carries the meaning under NO_COLOR too.
+// printToolAction announces a tool call's action, e.g. "read_file(go.mod)".
+// The line is held back and printed when the call finishes (captureAction,
+// nesting.go), laid out by formatToolLine with its result on the right and
+// indented one level per enclosing subagent.
 //
 // Gated on deps.Quiet(): headless `cortex turn --json` and the served/Discord
 // sessions set it precisely so this stays off their stdout — a served turn's
@@ -1022,46 +1016,11 @@ const defaultMaxToolOutput = 10000
 // printing here too was pure duplication onto the server process's own
 // console, ANSI codes included (2026-07-19). Takes just Quieter, not the
 // full ToolDeps — the only capability this needs.
-//
-// Inside a subagent the line is held back rather than printed here
-// (captureAction, nesting.go): it comes out indented one level per depth once
-// the call finishes, carrying its elapsed time and result summary.
 func printToolAction(deps Quieter, action string) {
 	if deps.Quiet() {
 		return
 	}
-	if captureAction(action) {
-		return
-	}
-	fmt.Println(formatToolAction("", action, ""))
-}
-
-// formatToolAction renders one tool-action line: the gutter timestamp, the
-// nesting margin, the green verb, the dimmed argument list, and — for a
-// finished nested call — a dimmed "elapsed  summary" tail. The argument list
-// is the part that gives when the whole thing outgrows the terminal, since the
-// verb and the tail are the parts you can't reconstruct. Width 0 (piped, CI)
-// clips nothing.
-func formatToolAction(indent, action, suffix string) string {
-	name, args := action, ""
-	if i := strings.IndexByte(action, '('); i >= 0 {
-		name, args = action[:i], action[i:]
-	}
-	if w := termWidth(); w > 0 && args != "" {
-		fixed := len(gutterPad) + utf8.RuneCountInString(indent+"tool: "+name)
-		if suffix != "" {
-			fixed += 2 + utf8.RuneCountInString(suffix)
-		}
-		args = clipRunes(args, w-fixed)
-	}
-	line := Color("tool: "+name, Green)
-	if args != "" {
-		line += Color(args, Gray)
-	}
-	if suffix != "" {
-		line += Color("  "+suffix, Gray)
-	}
-	return TimestampPrefix() + indent + line
+	captureAction(action)
 }
 
 // --- outline ------------------------------------------------------------
@@ -1122,6 +1081,7 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	// tool call, so a one-off `cortex study`/`cortex learn` (no parent) keeps
 	// printing flat at the margin, exactly as it does today.
 	printToolAction(deps, subagentAction(sa.Name, path, goal))
+	flushAction()
 	frame := pushNest(sa.Name)
 	digest, err := deps.RunSubagent(ctx, sa, seedFn(goal, path, ol))
 	popNest()
@@ -1689,7 +1649,7 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
 		printToolAction(deps, fmt.Sprintf("edit_file(%s)", a.Path))
 	} else {
-		printToolAction(deps, fmt.Sprintf("edit_file(%s, %s)", a.Path, countNoun(len(edits), "edit")))
+		printToolAction(deps, fmt.Sprintf("edit_file(%s, %s)", a.Path, CountNoun(len(edits), "edit")))
 	}
 
 	// Filesystem access goes through the session's workdir anchor; messages
@@ -1733,13 +1693,13 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	warn := largeDeletionWarning(string(data), content)
 	editsNoun := ""
 	if multi {
-		editsNoun = countNoun(len(edits), "edit")
+		editsNoun = CountNoun(len(edits), "edit")
 	}
 	// Issue #173: the model's view of the file is stale after every edit
 	// (earlier edits in the same session changed it). Return a bounded
 	// snippet of the current changed region so the model's next edit anchors
 	// on the file's actual content, not the view it held before this call.
-	msg := editResultMessage(a.Path, editsNoun, countNoun(total, "replacement"), string(data), content)
+	msg := editResultMessage(a.Path, editsNoun, CountNoun(total, "replacement"), string(data), content)
 	msg += changedRegionSnippet(string(data), content)
 	result := resultWithWarning(msg, warn)
 	// Post-edit hook (issue #129): run the project's format/lint on the file
@@ -2046,9 +2006,9 @@ func resultWithWarning(s, w string) string {
 	return s + w
 }
 
-// countNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the
-// nouns used here (edit, replacement).
-func countNoun(n int, noun string) string {
+// CountNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the
+// nouns used here (edit, replacement, call, line, turn, note).
+func CountNoun(n int, noun string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, noun)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/fslock"
 	"github.com/dereksantos/cortex/internal/redact"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 const (
@@ -164,9 +165,9 @@ func (cs *CortexSession) StartTranscript() {
 // headless path stays machine-clean no matter what NO_COLOR or the TTY
 // say.
 func (cs *CortexSession) loadedContextBanner(id string, color bool) string {
-	col := func(v, c string) string { return v }
+	col := func(v string, _ style.Role) string { return v }
 	if color {
-		col = withColor
+		col = style.Paint
 	}
 	dir := cs.SessionsDir()
 
@@ -195,26 +196,26 @@ func (cs *CortexSession) loadedContextBanner(id string, color bool) string {
 	// Only show demotion info if we have turns (not a fresh session)
 	if totalTurns > 0 {
 		fmt.Fprintf(&b, "%s  %d turns (%d demoted, %d hydrated tail)\n",
-			col("context:", green),
+			col("context:", style.Action),
 			totalTurns, demotedTurns, hydratedTurns)
 	}
 
 	// Show message count
 	fmt.Fprintf(&b, "%s  %d messages\n",
-		col("messages:", green),
+		col("messages:", style.Action),
 		msgCount)
 
 	// Show session age if available
 	if info.ModTime.IsZero() {
 		fmt.Fprintf(&b, "%s  %s\n",
-			col("session:", gray),
-			col(id, cyan))
+			col("session:", style.Dim),
+			col(id, style.Accent))
 	} else {
 		age := relTime(info.ModTime)
 		fmt.Fprintf(&b, "%s  %s (%s old)\n",
-			col("session:", gray),
-			col(id, cyan),
-			col(age, gray))
+			col("session:", style.Dim),
+			col(id, style.Accent),
+			col(age, style.Dim))
 	}
 	return b.String()
 }
@@ -458,8 +459,8 @@ func sessionRow(s sessionInfo, marker string, color bool) string {
 		model = "-"
 	}
 	if color {
-		marker = withColor(marker, green)
-		model = withColor(model, gray)
+		marker = style.Paint(marker, style.OK)
+		model = style.Paint(model, style.Dim)
 	} else {
 		marker = "  "
 	}
@@ -765,7 +766,7 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 func (cs *CortexSession) printSessions() {
 	infos, err := listSessions(cs.SessionsDir(), 15)
 	if err != nil || len(infos) == 0 {
-		fmt.Println(withColor("no sessions found", gray))
+		fmt.Println(style.Paint("no sessions found", style.Dim))
 		return
 	}
 	for _, s := range infos {
@@ -775,7 +776,7 @@ func (cs *CortexSession) printSessions() {
 		}
 		fmt.Println(sessionRow(s, marker, s.ID == cs.SessionID))
 	}
-	fmt.Println(withColor(fmt.Sprintf("resume at startup: %s resume <id>", invokedName()), gray))
+	fmt.Println(style.Paint(fmt.Sprintf("resume at startup: %s resume <id>", invokedName()), style.Dim))
 }
 
 func (cs *CortexSession) Clear() {

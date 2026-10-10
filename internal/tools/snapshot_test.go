@@ -103,7 +103,7 @@ func TestToolActionLineSnapshot(t *testing.T) {
 		w := w
 		t.Run(caseName(w, false), func(t *testing.T) {
 			runCase(t, "toolaction", w, false, func(w int) string {
-				return formatToolAction("", action, "")
+				return formatToolLine("", action, "", false)
 			})
 		})
 	}

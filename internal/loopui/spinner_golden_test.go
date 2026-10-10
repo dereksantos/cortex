@@ -3,9 +3,9 @@ package loopui
 // spinner_golden_test.go — golden snapshot for the plain spinner frame
 // (issue #112). The spinner has no width axis (it renders a single status line
 // to stdout with no clipping). Its color comes from the label, which the
-// caller pre-colors via tools.Color — in the REPL the caller is cmd/cortex's
+// caller pre-colors via style.Paint — in the REPL the caller is cmd/cortex's
 // defaultLabel ("thinking..." in Cyan), so the colored golden records that
-// exact SGR; the NO_COLOR golden records the same frame with tools.Color
+// exact SGR; the NO_COLOR golden records the same frame with style.Paint
 // forced off, the shape a NO_COLOR terminal receives.
 //
 // The frame is captured deterministically: the spinner's repaint interval is
@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -151,7 +152,7 @@ func spinnerFrame(t *testing.T, label string) string {
 // Stop() clear (the LAST repaint, since a descheduled test goroutine may let
 // extra byte-identical repaints land before Stop) — in both color forms: the
 // label colored the way cmd/cortex's defaultLabel colors it (thinking... in
-// Cyan), and the same label with tools.Color forced off (the NO_COLOR
+// Cyan), and the same label with style.Paint forced off (the NO_COLOR
 // terminal's frame). Color is pinned via tools.SetColorDisabledForTest so the
 // goldens hold regardless of the developer's NO_COLOR environment.
 func TestSpinnerGolden(t *testing.T) {
@@ -159,11 +160,11 @@ func TestSpinnerGolden(t *testing.T) {
 
 	t.Run("colored", func(t *testing.T) {
 		defer tools.SetColorDisabledForTest(false)()
-		spinnerGolden(t, "spinner_colored", spinnerFrame(t, tools.Color(label, tools.Cyan)))
+		spinnerGolden(t, "spinner_colored", spinnerFrame(t, style.Paint(label, style.Accent)))
 	})
 
 	t.Run("no_color", func(t *testing.T) {
 		defer tools.SetColorDisabledForTest(true)()
-		spinnerGolden(t, "spinner_nocolor", spinnerFrame(t, tools.Color(label, tools.Cyan)))
+		spinnerGolden(t, "spinner_nocolor", spinnerFrame(t, style.Paint(label, style.Accent)))
 	})
 }

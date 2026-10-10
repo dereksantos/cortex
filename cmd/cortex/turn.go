@@ -10,12 +10,13 @@ import (
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 func (cs *CortexSession) startActivity(label string) {
 	cs.setPhase(phaseThinking) // a running tool is busy time, same light as reasoning
 	if cs.live != nil {
-		cs.live.SetActivity(label)
+		cs.live.SetActivity(tools.ShortAction(label))
 		cs.live.SetStatus(cs.statusStats()) // issue #109: refresh the row's live figures
 	}
 }
@@ -238,6 +239,17 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	cs.redactions = 0
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
+	began := time.Now()
+	cs.lastTurn = nil
+	cs.turnStep = 0
+	cs.turnThought = ""
+	// The interactive REPL's turn record (/last) and live line handling —
+	// held lines, folded reads — need the anchored status row (cs.live).
+	// Quiet sessions print nothing and may run concurrently (serve), so they
+	// never touch tools' process-wide turn state.
+	if !cs.quiet {
+		tools.BeginTurn(cs.live != nil)
+	}
 	// Issue #111: snapshot the working tree BEFORE this turn mutates anything.
 	// The snapshot names the tree the turn starts from (HEAD's commit on a
 	// clean tree) and records the hidden ref for this turn's ordinal; it is
@@ -430,7 +442,7 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	if maxIterOverride > 0 {
 		maxIter = maxIterOverride
 	}
-	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
+	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), Finalize: finalize}
 	// Issue #171 + #180: in-turn demotion. Before each main-loop send, shrink
 	// the whole prompt (hydrated tail + current turn, oldest first, keepRecent
 	// stay verbatim, drain to the low watermark) so a long turn — or a resumed
@@ -514,7 +526,7 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		cs.writeContextSample(iter, lastPromptTokens, maxTokens, tailEstNow)
 		if cs.live != nil {
 			// Force a redraw of the prompt line with updated context gauge
-			cs.live.SetPrompt(cs.Prompt())
+			cs.refreshAnchor()
 			cs.live.SetActivity("")
 		}
 	}
@@ -523,7 +535,7 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		// After each tool result is appended, force a prompt redraw
 		// to update the context gauge with the current context size
 		onAfterToolResult = func() {
-			cs.live.SetPrompt(cs.Prompt())
+			cs.refreshAnchor()
 			cs.live.SetActivity("")
 		}
 	}
@@ -550,6 +562,9 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		send = cs.senderOverride
 	}
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, send), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	if !cs.quiet {
+		cs.lastTurnCalls = tools.EndTurn() // also prints a read run still held
+	}
 	cs.Request.EphemeralSystem = ""
 	// Issue #117: settle exactly ONE journal record per failed send — the
 	// receipt rides the send-scoped marker on the error (heal.go's
@@ -686,7 +701,12 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	// a turn demotion never touched the view is identical to the wire copy.
 	// It also masks the capture's own artifacts (web_search/fetch_url lines
 	// and the answer) — issue #103 — adding those counts to cs.redactions.
-	cs.captureTurn(input, cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages)))
+	// The same original span feeds the REPL's turn footer (footer.go).
+	turnMsgs := cs.turnOriginalSpan(cs.Request, turnStart, len(cs.Request.Messages))
+	cs.captureTurn(input, turnMsgs)
+	summary := summarizeTurn(turnMsgs, time.Since(began), stats.Cost)
+	summary.Thought = cs.turnThought
+	cs.lastTurn = &summary
 	// Issue #103: fold AFTER captureTurn so the session-cumulative total
 	// includes the capture's own masking counts (the journal metadata and the
 	// session summary record the same figure, docs/journal.md).

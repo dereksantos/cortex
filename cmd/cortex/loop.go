@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -58,8 +57,8 @@ type DispatchFunc func(context.Context, ToolCall) string
 func (f DispatchFunc) Dispatch(ctx context.Context, call ToolCall) string { return f(ctx, call) }
 
 // Toolset is what the engine advertises to the model plus how it runs the calls.
-// BeforeBatch is an optional per-batch display hook (the coder prints a blank
-// line separating prose from its tool actions); nil for subagents and tests.
+// BeforeBatch is an optional per-batch display hook; nil when nothing needs
+// to happen between a model step and its tool calls (every caller today).
 // AfterToolResult is an optional callback invoked after each tool result is
 // appended, allowing the caller to update display with current context state.
 // OnReasoningFallback is an optional receipt hook: when a natural-finish
@@ -1473,6 +1472,7 @@ func printCoderProse(msg Message) {
 		}
 	}
 	if strings.TrimSpace(content) != "" {
+		tools.FlushFold()
 		Message{Role: "assistant", Content: content}.Print()
 	}
 }
@@ -1573,13 +1573,4 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 		}
 		return out
 	})
-}
-
-// coderBeforeBatch prints the blank line that separates the model's prose from
-// its tool actions (the old runToolCalls leading Println), suppressed in quiet
-// headless mode.
-func (cs *CortexSession) coderBeforeBatch() {
-	if !cs.quiet {
-		fmt.Println()
-	}
 }

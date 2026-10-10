@@ -10,12 +10,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/loopui"
+	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -171,21 +173,6 @@ var curationBudgetTokens = tools.DefaultLimits().CurationBudgetTokens
 // promptGlyph is the input affordance at the end of the status line.
 const promptGlyph = tools.PromptGlyph
 
-// Color palette and the NO_COLOR-aware wrapper live in the ui package;
-// aliased here so the many call sites in main.go read unchanged.
-const (
-	red     = tools.Red
-	cyan    = tools.Cyan
-	green   = tools.Green
-	blue    = tools.Blue
-	magenta = tools.Magenta
-	yellow  = tools.Yellow
-	gray    = tools.Gray
-	reset   = tools.Reset
-)
-
-func withColor(v string, c string) string { return tools.Color(v, c) }
-
 type Spinner = loopui.Spinner
 
 func NewSpinner() *Spinner { return loopui.NewSpinner() }
@@ -235,7 +222,7 @@ var (
 
 // printAvailableTools prints the list of available tools to stdout.
 func printAvailableTools() {
-	fmt.Println(withColor("Available tools:", cyan))
+	fmt.Println(style.Paint("Available tools:", style.Accent))
 	for _, tool := range tools.All {
 		fmt.Printf("  - %s\n", tool.Function.Name)
 	}
@@ -253,15 +240,44 @@ var helpLines = []string{
 	"/clear             reset the conversation and start a fresh session",
 	"/undo [N]          revert the Nth-most-recent turn's file changes (default 1)",
 	"/sessions          pick a saved session to resume (plain list when not a TTY)",
+	"/last              every tool call of the last turn, unabridged (Ctrl-O)",
+	"/memory            browse saved memory notes, read-only (the agent writes them)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
 	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
 }
 
+// keyHints is the one-row key reference "?" shows under an empty prompt.
+var keyHints = style.Paint("tab complete · alt-enter newline · ctrl-o last turn · ctrl-r search · esc stop", style.Dim)
+
+// helpCommands parses helpLines into the sorted command names ("/model") and
+// each one's description — the completion source's vocabulary.
+func helpCommands() ([]string, map[string]string) {
+	var names []string
+	help := map[string]string{}
+	for _, l := range helpLines {
+		fields := strings.Fields(l)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		// The description is what follows the run of two or more spaces after
+		// the command and its argument hint.
+		desc := ""
+		if i := strings.Index(l, "  "); i >= 0 {
+			desc = strings.TrimSpace(l[i:])
+		}
+		names = append(names, name)
+		help[name] = desc
+	}
+	sort.Strings(names)
+	return names, help
+}
+
 // printHelp lists the slash commands, plain text, one per line — matching
 // the REPL's plain style (no icons; ANSI color only).
 func printHelp() {
-	fmt.Println(withColor("Commands:", cyan))
+	fmt.Println(style.Paint("Commands:", style.Accent))
 	for _, line := range helpLines {
 		fmt.Println("  " + line)
 	}
@@ -295,12 +311,12 @@ var usageLines = []string{
 func printUsage() {
 	fmt.Println("cortex " + version())
 	fmt.Println()
-	fmt.Println(withColor("Usage:", cyan))
+	fmt.Println(style.Paint("Usage:", style.Accent))
 	for _, line := range usageLines {
 		fmt.Println("  " + line)
 	}
 	fmt.Println()
-	fmt.Println(withColor("Flags:", cyan))
+	fmt.Println(style.Paint("Flags:", style.Accent))
 	fmt.Println("  --help, -h        show this list")
 	fmt.Println("  --version, -v     print the version and exit")
 	fmt.Println("  --tools           list the agent's registered tools at startup")
@@ -464,6 +480,7 @@ func main() {
 	// and re-targets the session at that project's root, so the resumed (or
 	// fresh) session's ContextDir/SessionsDir/instructions/confinement all
 	// follow the project instead of the CWD.
+	resumed := false
 	if len(os.Args) >= 2 && os.Args[1] == "resume" {
 		project, rest := parseProjectFlag(os.Args[2:])
 		if project != "" {
@@ -492,7 +509,7 @@ func main() {
 			fmt.Printf("resume: %v - starting fresh\n", err)
 			session.StartTranscript()
 		} else {
-			session.showLoadedContext(session.SessionID)
+			resumed = true
 		}
 	} else {
 		session.StartTranscript()
@@ -502,6 +519,13 @@ func main() {
 	// can't open). Shut down with the transcript at exit.
 	session.EnableMemory()
 	defer session.Close()
+
+	// The opening header (docs/tui-polish.md, track 1): version · project ·
+	// model, plus what a resume carried over. After EnableMemory so the note
+	// count is real.
+	for _, line := range renderHeader(session.startupFacts(resumed)) {
+		fmt.Println(line)
+	}
 
 	// First-run greeting (Phase 1 / M1.5): fires exactly once, before the
 	// read loop, so the very first thing a fresh machine sees from `cortex`
@@ -517,7 +541,7 @@ func main() {
 	// One static hint after the greeting, every run (not just first-run) — the
 	// discoverability surface for /help now that the REPL carries no icon set
 	// to hint at itself visually.
-	fmt.Println(withColor("type /help for commands", gray))
+	fmt.Println(style.Paint("type /help for commands", style.Dim))
 
 	// Interactive terminals get the raw-mode line editor (arrows, editing,
 	// bracketed paste, ESC-to-interrupt). Piped/redirected input — tests, CI,
@@ -528,6 +552,10 @@ func main() {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
+			editor.SetAcceptedLine(session.acceptedLine)
+			// Ctrl-O at the prompt opens the last turn's calls, unabridged.
+			editor.SetDetail(func() { openLastTurn(editor, session) })
+			editor.SetKeyHints(keyHints)
 			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
 			// Risky-command confirmation reads the answer through the anchor's
@@ -588,7 +616,7 @@ func main() {
 		}
 		var input string
 		if editor != nil {
-			line, err := editor.ReadLinePrefilled(session.Prompt(), typeAhead)
+			line, err := editor.ReadLineEcho(session.Prompt(), typeAhead)
 			typeAhead = ""
 			if err == io.EOF {
 				break
@@ -632,7 +660,7 @@ func main() {
 		// /clear resets the conversation; /compact distills it via study.
 		if input == "/clear" {
 			session.Clear()
-			fmt.Println(withColor("cleared -> session "+session.SessionID, gray))
+			fmt.Println(style.Paint("cleared -> session "+session.SessionID, style.Dim))
 			continue
 		}
 		if input == "/compact" {
@@ -652,7 +680,7 @@ func main() {
 				if v, err := strconv.Atoi(arg); err == nil && v > 0 {
 					n = v
 				} else {
-					fmt.Println(withColor("usage: /undo [N]  (N is a positive integer, default 1)", gray))
+					fmt.Println(style.Paint("usage: /undo [N]  (N is a positive integer, default 1)", style.Dim))
 					continue
 				}
 			}
@@ -699,7 +727,7 @@ func main() {
 		if input == "/plan" || strings.HasPrefix(input, "/plan ") {
 			task := strings.TrimSpace(strings.TrimPrefix(input, "/plan"))
 			if task == "" {
-				fmt.Println(withColor("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", gray))
+				fmt.Println(style.Paint("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", style.Dim))
 				continue
 			}
 			process()
@@ -774,6 +802,51 @@ func main() {
 			printHelp()
 			continue
 		}
+		// /memory browses the saved notes, read-only — writing and forgetting
+		// stay model-driven (docs/memory-tools.md). On a TTY: a picker over
+		// both tiers; Enter opens a note, leaving it returns to the list.
+		if input == "/memory" {
+			if len(newMemoryPicker(session).items) == 0 {
+				fmt.Println(style.Paint("no memory notes yet — ask the agent to remember something", style.Dim))
+				continue
+			}
+			if !sessionsInspectable(editor) {
+				for _, l := range newMemoryPicker(session).Texts() {
+					fmt.Println(l)
+				}
+				continue
+			}
+			filter, last := "", ""
+			for {
+				picker := newMemoryPicker(session)
+				picker.SetFilter(filter)
+				picker.SelectID(last) // back on the note just read, under the same filter
+				if err := inspectSession(editor, picker); err != nil || !picker.Accepted() || picker.SelectedID() == "" {
+					break
+				}
+				filter, last = picker.Filter(), picker.SelectedID()
+				id := last
+				body, err := readMemoryNote(session, id)
+				if err != nil {
+					body = "could not read " + id + ": " + err.Error()
+				}
+				_ = inspectSession(editor, noteView{id: id, body: body})
+			}
+			continue
+		}
+		// /last opens the last turn's tool calls, unabridged — what the
+		// scrollback folded or capped (docs/tui-polish.md, track 4). Ctrl-O at
+		// the prompt opens the same view. Piped sessions get a plain listing.
+		if input == "/last" {
+			if sessionsInspectable(editor) {
+				openLastTurn(editor, session)
+			} else {
+				for _, l := range (lastTurnView{calls: session.lastTurnCalls}).Lines(0) {
+					fmt.Println(l)
+				}
+			}
+			continue
+		}
 		if input == "/context" {
 			// On an interactive TTY the map opens as a full-screen inspector
 			// (alt screen; scrollback restored byte-for-byte on exit). Piped
@@ -797,6 +870,19 @@ func main() {
 		// /model [name] shows the role bindings, or switches the coding model.
 		if input == "/model" || strings.HasPrefix(input, "/model ") {
 			name := strings.TrimSpace(strings.TrimPrefix(input, "/model"))
+			// A bare /model on an interactive terminal opens a picker over the
+			// models this session knows (docs/tui-polish.md, track 4); Enter
+			// switches the coder. Piped/plain sessions keep the printout.
+			if name == "" && sessionsInspectable(editor) {
+				picker := newModelPicker(session)
+				if err := inspectSession(editor, picker); err == nil && picker.Accepted() {
+					if id := picker.SelectedID(); id != "" && id != session.Request.Model {
+						session.SetModel(id)
+						fmt.Println(style.Paint("code model -> "+id, style.Dim))
+					}
+				}
+				continue
+			}
 			if name == "" {
 				fmt.Printf("code:  %s @ %s\nstudy: %s @ %s\n",
 					session.Request.Model, session.Request.BaseURL,
@@ -856,6 +942,9 @@ func main() {
 		if mentionAttachment != "" {
 			turnInput = mentionAttachment + "\n" + input
 		}
+		// The turn opens with one blank line under the input it answers
+		// (docs/tui-polish.md, track 2: a turn reads as one block).
+		fmt.Println()
 		var (
 			err error
 			res TurnResult
@@ -909,18 +998,21 @@ func main() {
 		// how much was masked (dim provenance, not an alarm) — the same
 		// per-turn count the journal capture's metadata and TurnResult carry.
 		printRedactions(os.Stdout, res.Redactions)
+		if err == nil {
+			session.printTurnFooter()
+		}
 		afterTurn(session, err)
 	}
 
 	// Report and record the session. emitSessionMetrics rides the eval journal class.
 	if session.turns > 0 {
 		session.emitSessionMetrics()
-		fmt.Println(withColor(session.sessionSummary(), gray))
+		fmt.Println(style.Paint(session.sessionSummary(), style.Dim))
 		// Pre-fill the resume command with this session's id so picking it back
 		// up is copy-paste, not a hunt through .cortex/sessions/.
 		if session.SessionID != "" {
-			fmt.Println(withColor(fmt.Sprintf("resume: %s resume %s", invokedName(), session.SessionID), gray))
+			fmt.Println(style.Paint(fmt.Sprintf("resume: %s resume %s", invokedName(), session.SessionID), style.Dim))
 		}
 	}
-	fmt.Println(withColor("exiting", gray))
+	fmt.Println(style.Paint("exiting", style.Dim))
 }

@@ -38,6 +38,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // goldenFrame compares got against dir/name+".golden" and fails with the full
@@ -110,8 +112,10 @@ var updateGoldens = flag.Bool("update", false, "write testdata/*.golden files in
 var wallClockRe = regexp.MustCompile(`\d{2}:\d{2}:\d{2}`)
 
 // goldenElapsedRe matches the per-call elapsed times a nested call line and
-// a subagent done line carry ("12ms", "1.4s", "2m03s").
-var goldenElapsedRe = regexp.MustCompile(`\d+m\d{2}s|\d+\.\d+s|\d+ms`)
+// a subagent done line carry ("12ms", "1.4s", "2m03s"). The leading group
+// keeps it out of SGR codes: "\x1b[32mstudy" must not read as "32ms" +
+// "tudy" — the tool lines put a colored verb straight after its SGR.
+var goldenElapsedRe = regexp.MustCompile(`(^|[^\d\[;])(\d+m\d{2}s|\d+\.\d+s|\d+ms)`)
 
 // normalizeFrame makes a rendered frame deterministic before it is compared
 // to or stored as a golden file: the wall clock is pinned to a fixed instant
@@ -120,7 +124,7 @@ var goldenElapsedRe = regexp.MustCompile(`\d+m\d{2}s|\d+\.\d+s|\d+ms`)
 // depends on when the test ran.
 func normalizeFrame(s string) string {
 	s = wallClockRe.ReplaceAllString(s, "12:34:56")
-	s = goldenElapsedRe.ReplaceAllString(s, "1.0s")
+	s = goldenElapsedRe.ReplaceAllString(s, "${1}1.0s")
 	return s
 }
 
@@ -149,6 +153,11 @@ func TestNormalizeFrame(t *testing.T) {
 			in:   "12:34:56  1.0s",
 			want: "12:34:56  1.0s",
 		},
+		{
+			name: "an SGR code before a verb is not an elapsed",
+			in:   "\x1b[32mstudy\x1b[0m  12ms",
+			want: "\x1b[32mstudy\x1b[0m  1.0s",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -164,9 +173,9 @@ func TestNormalizeFrame(t *testing.T) {
 // form: no clipping anywhere.
 func restoreWidth(t *testing.T, w int) func() {
 	t.Helper()
-	prev := termWidth
-	termWidth = func() int { return w }
-	return func() { termWidth = prev }
+	prev := style.TermWidth
+	style.TermWidth = func() int { return w }
+	return func() { style.TermWidth = prev }
 }
 
 // --- glyph contract ----------------------------------------------------------
@@ -256,7 +265,7 @@ func TestNoBannedGlyphsInRenderPaths(t *testing.T) {
 	t.Run("tool line", func(t *testing.T) {
 		defer restoreWidth(t, 80)()
 		colored, nocolor := framePair(t, func() string {
-			return formatToolAction("", "read_file("+read+")", "")
+			return formatToolLine("", "read_file("+read+")", "", false)
 		})
 		for _, fr := range []string{colored, nocolor} {
 			if bad := glyphAudit(fr, plainRuneAllowed); bad != "" {

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 func TestSplitBlocks(t *testing.T) {
@@ -282,13 +284,13 @@ func TestCtxColor(t *testing.T) {
 	win := 131072
 	tests := []struct {
 		used int
-		want string
+		want style.Role
 	}{
-		{0, green},
-		{win / 4, green},       // 25%
-		{win * 6 / 10, yellow}, // 60%
-		{win * 9 / 10, red},    // 90%
-		{win, red},             // full
+		{0, style.OK},
+		{win / 4, style.OK},        // 25%
+		{win * 6 / 10, style.Warn}, // 60%
+		{win * 9 / 10, style.Err},  // 90%
+		{win, style.Err},           // full
 	}
 	for _, tt := range tests {
 		if got := ctxColor(tt.used, win); got != tt.want {
@@ -299,12 +301,14 @@ func TestCtxColor(t *testing.T) {
 
 func TestSessionPrompt(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request(), LastPromptTokens: 8200}
-	got := sess.Prompt()
-
-	for _, want := range []string{"cortex " + Version, ModelCoder, promptGlyph} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Prompt() = %q, missing %q", got, want)
-		}
+	if got := sess.Prompt(); !strings.Contains(got, promptGlyph) {
+		t.Errorf("Prompt() = %q, missing %q", got, promptGlyph)
+	}
+	// The model and gauge ride at the row's right edge (PromptStatus); the
+	// version moved to the startup header.
+	got := sess.PromptStatus()
+	if !strings.Contains(got, ModelCoder) {
+		t.Errorf("PromptStatus() = %q, missing %q", got, ModelCoder)
 	}
 	// The old exact "8.2k/32.8k" (LastPromptTokens/window) scalar left the
 	// prompt row for the default two-zone gauge (contextbar.go's gaugeZones)
@@ -314,13 +318,13 @@ func TestSessionPrompt(t *testing.T) {
 	// ANSI reset sits between them — strip color before matching the text.
 	wantZones := humanK(sess.headTokens()) + zoneDivider + humanK(sess.tailTokens())
 	if !strings.Contains(stripANSI(got), wantZones) {
-		t.Errorf("Prompt() = %q, missing the two-zone gauge %q", got, wantZones)
+		t.Errorf("PromptStatus() = %q, missing the two-zone gauge %q", got, wantZones)
 	}
 
 	// repl.gauge = "blocks" still renders the fixed-spatial bracket bar.
 	sess.Config = &Config{Repl: ReplConfig{Gauge: "blocks"}}
-	if bar := sess.Prompt(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
-		t.Errorf("Prompt() with repl.gauge=blocks = %q, missing the bar structure ([head|tail...])", bar)
+	if bar := sess.PromptStatus(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
+		t.Errorf("PromptStatus() with repl.gauge=blocks = %q, missing the bar structure ([head|tail...])", bar)
 	}
 
 	// repl.gauge = "numeric" still renders the old scalar form, now off the
@@ -329,15 +333,15 @@ func TestSessionPrompt(t *testing.T) {
 	// head/tail/window/cells/style — see contextbar.go).
 	sess.Config = &Config{Repl: ReplConfig{Gauge: "numeric"}}
 	wantNumeric := humanK(sess.headTokens()) + "/" + humanK(sess.windowSize())
-	if numeric := sess.Prompt(); !strings.Contains(numeric, wantNumeric) {
-		t.Errorf("Prompt() with repl.gauge=numeric = %q, want to contain %q", numeric, wantNumeric)
+	if numeric := sess.PromptStatus(); !strings.Contains(numeric, wantNumeric) {
+		t.Errorf("PromptStatus() with repl.gauge=numeric = %q, want to contain %q", numeric, wantNumeric)
 	}
 
 	// The prompt is redrawn on every keystroke with only \r\033[K, which cannot
 	// erase an embedded newline — a \n here walks the line down one row per byte
 	// typed. The inter-turn blank line is the REPL loop's job, not Prompt()'s.
 	if strings.ContainsAny(got, "\n\r") {
-		t.Errorf("Prompt() must be a single line, got %q", got)
+		t.Errorf("PromptStatus() must be a single line, got %q", got)
 	}
 }
 
@@ -370,15 +374,15 @@ func TestPromptReflectsPhase(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request()}
 
 	sess.phase = phaseIdle
-	if got := sess.Prompt(); !strings.HasPrefix(got, withColor(".", gray)) {
+	if got := sess.Prompt(); !strings.Contains(got, style.Paint(".", style.Dim)+" "+style.Paint(promptGlyph, style.Accent)) {
 		t.Errorf("idle Prompt() = %q, want to start with the dim gray .", got)
 	}
 	sess.phase = phaseThinking
-	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("*", brightCyan)) {
+	if got := sess.Prompt(); !strings.Contains(got, style.Paint("*", style.Live)+" "+style.Paint(promptGlyph, style.Accent)) {
 		t.Errorf("thinking Prompt() = %q, want to start with the bright cyan *", got)
 	}
 	sess.phase = phaseStreaming
-	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("~", brightGreen)) {
+	if got := sess.Prompt(); !strings.Contains(got, style.Paint("~", style.Streaming)+" "+style.Paint(promptGlyph, style.Accent)) {
 		t.Errorf("streaming Prompt() = %q, want to start with the bright green ~", got)
 	}
 }
@@ -442,7 +446,7 @@ func TestMessageRender(t *testing.T) {
 	for _, role := range []string{"assistant", RoleSystem, RoleTool, RoleUser} {
 		m := Message{Role: role, Content: "hello"}
 		got := m.render(ts)
-		for _, want := range []string{"14:23:01", "hello", gray} {
+		for _, want := range []string{"14:23:01", "hello", string(style.Dim)} {
 			if !strings.Contains(got, want) {
 				t.Errorf("render(role=%s) = %q, missing %q", role, got, want)
 			}
@@ -456,10 +460,10 @@ func TestContextRatio(t *testing.T) {
 		t.Errorf("contextRatio = %v, want 0.8", got)
 	}
 	// The gauge color and the compact trigger share the same threshold.
-	if ctxColor(800, 1000) != red {
+	if ctxColor(800, 1000) != style.Err {
 		t.Error("gauge should be red exactly at compactThreshold")
 	}
-	if ctxColor(799, 1000) != yellow {
+	if ctxColor(799, 1000) != style.Warn {
 		t.Error("gauge should be yellow just under compactThreshold")
 	}
 }
@@ -642,6 +646,43 @@ func TestPromptCache(t *testing.T) {
 	})
 }
 
+func TestWrapRendered(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		width int
+		want  string
+	}{
+		{"fits", "short line", 20, "short line"},
+		{"prose wraps at spaces", "the report struct already carried json tags", 20,
+			"the report struct\nalready carried json\ntags"},
+		{"list item hangs under its text", "•  a list item long enough to wrap twice", 20,
+			"•  a list item long\n   enough to wrap\n   twice"},
+		{"numbered item hangs too", "1. first step that wraps", 14, "1. first step\n   that wraps"},
+		{"color survives", "\033[36mcyan words that wrap here\033[0m", 12, ""},
+		{"no width leaves it", "a b c", 0, "a b c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapRendered(tt.in, tt.width)
+			for _, l := range strings.Split(got, "\n") {
+				if tt.width > 0 && style.Width(l) > tt.width {
+					t.Errorf("line %q is wider than %d", l, tt.width)
+				}
+			}
+			if tt.want == "" {
+				if style.Strip(got) == got {
+					t.Errorf("color was lost: %q", got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("wrapRendered = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestMarkdownRendererPlainTextContract pins what the markdown renderer must
 // keep across glamour upgrades (#190, glamour v1 → charm.land/glamour/v2):
 // the text survives, H2+ headings carry no literal "##" (headingStyle strips
@@ -688,5 +729,17 @@ func TestMarkdownRendererPlainTextContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMarkdownRenderNeverWrapsCode(t *testing.T) {
+	md := newMarkdownRenderer(30)
+	if md == nil {
+		t.Fatal("renderer build failed")
+	}
+	code := "func a() { return reallyLongIdentifierNameThatMustNotWrap() }"
+	got := style.Strip(md.render("```go\n" + code + "\n```\n"))
+	if !strings.Contains(got, code) {
+		t.Errorf("code line was wrapped or altered:\n%s", got)
 	}
 }

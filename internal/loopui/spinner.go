@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // Spinner renders a static "thinking..." status line on stdout while we wait
@@ -35,7 +35,7 @@ func NewSpinner() *Spinner { return &Spinner{tickInterval: 90 * time.Millisecond
 
 // defaultLabel is shown while no caller-supplied label is set — e.g. the
 // blocking (non-streaming) send path, which never calls SetLabel at all.
-var defaultLabel = tools.Color("thinking...", tools.Cyan)
+var defaultLabel = style.Paint("thinking...", style.Accent)
 
 // SetLabel updates the status text. The string is printed verbatim, so
 // callers apply their own color/truncation (e.g. the live "thinking... 3s"

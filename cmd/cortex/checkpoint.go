@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/checkpoint"
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // checkpoint.go wires the internal/checkpoint package (issue #111, per-turn
@@ -401,11 +402,11 @@ func (cs *CortexSession) undo(n int) {
 	}
 	dir := cs.root()
 	if dir == "" || !checkpoint.Available(dir) {
-		fmt.Println(withColor("undo unavailable: not in a git repository", gray))
+		fmt.Println(style.Paint("undo unavailable: not in a git repository", style.Dim))
 		return
 	}
 	if cs.checkpoints == nil || cs.checkpoints.empty() {
-		fmt.Println(withColor("nothing to undo (no file changes yet)", gray))
+		fmt.Println(style.Paint("nothing to undo (no file changes yet)", style.Dim))
 		return
 	}
 	entry, ok := cs.checkpoints.nth(n)

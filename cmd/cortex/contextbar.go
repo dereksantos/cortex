@@ -14,7 +14,11 @@
 // "numeric" (the old x/y form).
 package main
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/dereksantos/cortex/internal/style"
+)
 
 // gaugeStyle selects how the context gauge renders.
 type gaugeStyle int
@@ -228,9 +232,9 @@ func (cs *CortexSession) tailTokens() int {
 func (cs *CortexSession) coloredGauge(cells, win int) string {
 	pressure := ctxColor(cs.LastPromptTokens, win)
 	if cs.gaugeStyle() != gaugeZones {
-		return withColor(cs.renderGauge(cells), pressure)
+		return style.Paint(cs.renderGauge(cells), pressure)
 	}
-	return withColor(humanK(cs.headTokens()), gray) +
-		withColor(zoneDivider, gray) +
-		withColor(humanK(cs.tailTokens()), pressure)
+	return style.Paint(humanK(cs.headTokens()), style.Dim) +
+		style.Paint(zoneDivider, style.Dim) +
+		style.Paint(humanK(cs.tailTokens()), pressure)
 }

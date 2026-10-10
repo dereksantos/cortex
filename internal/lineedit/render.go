@@ -6,6 +6,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // renderLine produces the escape-sequence string that redraws the input on a
@@ -15,14 +17,33 @@ import (
 // math. Two cases: a normal line scrolls horizontally to keep the cursor in
 // view; a multi-line paste collapses to a summary (you send it, you don't
 // in-line edit a pasted block).
-func renderLine(prompt string, buf *buffer, width int) string {
+//
+// ghost is an optional dim hint drawn after the input (a completion preview);
+// it shows only when the input isn't scrolled and it fits, and never moves
+// the cursor.
+func renderLine(prompt string, buf *buffer, width int, ghost string) string {
 	if width < 1 {
 		width = 80
 	}
 	if buf.hasNewline() {
 		return renderSummary(prompt, buf, width)
 	}
-	return renderScroll(prompt, buf, width)
+	out := renderScroll(prompt, buf, width)
+	if ghost == "" {
+		return out
+	}
+	used := displayWidth(prompt) + widthOf(buf.runes)
+	if used >= width-1 {
+		return out
+	}
+	hint := truncate(ghost, width-1-used)
+	if hint == "" {
+		return out
+	}
+	// renderScroll ends by parking the cursor; draw the hint right after the
+	// input, then re-park with the same tail.
+	park := out[strings.LastIndex(out, "\r"):]
+	return out[:strings.LastIndex(out, "\r")] + dim(hint) + park
 }
 
 func renderScroll(prompt string, buf *buffer, width int) string {
@@ -58,24 +79,17 @@ func renderScroll(prompt string, buf *buffer, width int) string {
 	return out
 }
 
-// renderSummary shows a one-line digest of a multi-line buffer (a paste):
-// the first line, truncated, plus a count of the rest.
+// renderSummary shows a multi-line buffer (a paste, or Alt-Enter newlines)
+// on its single row as the line holding the cursor — scrolled and editable
+// like any other line — with a dim "[line 2/3]" tag, so a multi-line draft
+// stays editable instead of collapsing to a frozen digest.
 func renderSummary(prompt string, buf *buffer, width int) string {
-	text := buf.string()
-	first := text
-	if i := strings.IndexByte(text, '\n'); i >= 0 {
-		first = text[:i]
-	}
-	extra := strings.Count(text, "\n")
-	tag := fmt.Sprintf("  [+%d lines, %d chars]", extra, len([]rune(text)))
-
-	promptW := displayWidth(prompt)
-	avail := width - promptW - displayWidth(tag)
-	if avail < 0 {
-		avail = 0
-	}
-	first = truncate(first, avail)
-	return "\r\033[K" + prompt + first + tag
+	start, end, line, lines := buf.lineBounds()
+	cur := &buffer{runes: buf.runes[start:end], pos: buf.pos - start}
+	tag := fmt.Sprintf("  [line %d/%d]", line, lines)
+	out := renderScroll(prompt, cur, width-displayWidth(tag))
+	cut := strings.LastIndex(out, "\r")
+	return out[:cut] + dim(tag) + out[cut:]
 }
 
 // truncate cuts s to at most w display columns, appending "…" if shortened.
@@ -130,29 +144,8 @@ func widthOf(rs []rune) int { return runewidth.StringWidth(string(rs)) }
 
 // displayWidth measures visible columns, ignoring ANSI escape sequences (the
 // prompt carries color codes that occupy no cells).
-func displayWidth(s string) int { return runewidth.StringWidth(stripANSI(s)) }
+func displayWidth(s string) int { return style.Width(s) }
 
-// stripANSI removes CSI escape sequences (ESC [ … final-byte) so width math
-// counts only visible glyphs.
-func stripANSI(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] == 0x1b {
-			j := i + 1
-			if j < len(s) && s[j] == '[' {
-				j++
-			}
-			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
-				j++
-			}
-			if j < len(s) {
-				j++ // consume the final byte
-			}
-			i = j
-			continue
-		}
-		b.WriteByte(s[i])
-		i++
-	}
-	return b.String()
-}
+// stripANSI removes CSI escape sequences so width math counts only visible
+// glyphs.
+func stripANSI(s string) string { return style.Strip(s) }

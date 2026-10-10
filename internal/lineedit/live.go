@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 // Anchor pins a one-row editable prompt to the bottom of the terminal and keeps
@@ -57,15 +59,16 @@ type Anchor struct {
 // (issue #109 review).
 var secondsTickRe = regexp.MustCompile(`\d+s$`)
 
-// dim wraps s in the bright-black SGR so the status row reads as transient
-// metadata. lineedit keeps its own copy rather than importing the cmd/cortex
-// palette (that would invert the dependency).
+// ansiDim/ansiReset are the Dim role's SGR and the reset; ansiReset also
+// closes a clipped styled line so a cut mid-style can't bleed color into the
+// rest of the frame.
 const (
-	ansiDim   = "\033[90m"
+	ansiDim   = string(style.Dim)
 	ansiReset = "\033[0m"
 )
 
-func dim(s string) string { return ansiDim + s + ansiReset }
+// dim paints s in the Dim role so the status row reads as transient metadata.
+func dim(s string) string { return style.Paint(s, style.Dim) }
 
 // Anchor pins an editable prompt seeded with seed and returns it plus a context
 // cancelled when the user hits ESC or Ctrl-C. Start the turn, route its output
@@ -476,6 +479,8 @@ func (a *Anchor) applyEvent(ev keyEvent) {
 		a.buf.insert(ev.r)
 	case keyPaste:
 		a.buf.insert([]rune(ev.paste)...)
+	case keyNewline:
+		a.buf.insert('\n')
 	case keyBackspace:
 		a.buf.backspace()
 	case keyDelete:
@@ -770,7 +775,7 @@ func (a *Anchor) drawLocked() {
 		b.WriteString("\r\n")
 		rows = 2
 	}
-	b.WriteString(renderLine(a.prompt, a.buf, width))
+	b.WriteString(renderLine(a.prompt, a.buf, width, ""))
 	io.WriteString(a.out, b.String())
 	a.rows = rows
 }

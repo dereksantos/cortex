@@ -19,7 +19,7 @@ func readLineWithNoTTY(t *testing.T, data string, prefill string, completers map
 	if completers != nil {
 		term.SetCompletion(completers)
 	}
-	return term.readLineWith("> ", prefill, &sliceSource{data: []byte(data)})
+	return term.readLineWith("> ", prefill, &sliceSource{data: []byte(data)}, nil)
 }
 
 // TestTabIsInertWithoutCompletion wires the non-TTY invariant into the driver
