@@ -247,6 +247,9 @@ var helpLines = []string{
 	"/quit              exit (Ctrl-D and /exit also work)",
 }
 
+// keyHints is the one-row key reference "?" shows under an empty prompt.
+var keyHints = style.Paint("tab complete · alt-enter newline · ctrl-o last turn · ctrl-r history · esc interrupts a turn · /help commands", style.Dim)
+
 // helpCommands parses helpLines into the sorted command names ("/model") and
 // each one's description — the completion source's vocabulary.
 func helpCommands() ([]string, map[string]string) {
@@ -552,6 +555,7 @@ func main() {
 			editor.SetAcceptedLine(session.acceptedLine)
 			// Ctrl-O at the prompt opens the last turn's calls, unabridged.
 			editor.SetDetail(func() { openLastTurn(editor, session) })
+			editor.SetKeyHints(keyHints)
 			editor.SetCompletion(mentionCompleter(session)) // issue #108
 			defer editor.Close()
 			// Risky-command confirmation reads the answer through the anchor's
