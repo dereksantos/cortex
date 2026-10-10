@@ -58,14 +58,16 @@ type nestFrame struct {
 	suppressed int
 }
 
-// pendingAction is a nested call's announcement, held back until the call
-// finishes so its line can carry the elapsed time and result. extra collects
-// anything the tool printed meanwhile (a file diff), which must land AFTER the
-// announcement it belongs to.
+// pendingAction is a call's announcement, held back until the call finishes
+// so its line can carry the elapsed time and result. extra collects anything
+// the tool printed meanwhile (a file diff), which must land AFTER the
+// announcement it belongs to; result, when set, replaces the generic summary
+// (a diff's "+9 -2").
 type pendingAction struct {
 	indent string
 	action string
 	extra  []string
+	result string
 }
 
 var nest struct {
@@ -114,23 +116,41 @@ func indentPrefix() string {
 // <model>" banner) sit in the same column as the tool lines below them.
 func IndentPrefix() string { return indentPrefix() }
 
-// captureAction holds a nested call's action line back until the call
-// finishes. Returns false at the top level, where the line prints immediately
-// as it always has. A second action from the same call (bash spilling its
-// output to the summarizer, say) flushes the first rather than losing it.
-func captureAction(action string) bool {
+// captureAction holds a call's action line back until the call finishes, at
+// every level (track 2: each line carries its result). A second action from
+// the same call (bash spilling its output to the summarizer, say) flushes the
+// first rather than losing it.
+func captureAction(action string) {
 	nest.mu.Lock()
-	if len(nest.frames) == 0 {
-		nest.mu.Unlock()
-		return false
-	}
 	prev := nest.pending
 	nest.pending = &pendingAction{indent: strings.Repeat("  ", len(nest.frames)), action: action}
 	nest.mu.Unlock()
 	if prev != nil {
-		printPending(prev, "")
+		printPending(prev, "", false)
 	}
-	return true
+}
+
+// flushAction prints the held-back line now, without a result. A subagent
+// call uses it: its line must come out before the nested calls it runs, and
+// its result arrives on the done line instead.
+func flushAction() {
+	nest.mu.Lock()
+	p := nest.pending
+	nest.pending = nil
+	nest.mu.Unlock()
+	if p != nil {
+		printPending(p, "", false)
+	}
+}
+
+// setPendingResult overrides the generic result summary for the call in
+// flight — a diff reports its +/- counts.
+func setPendingResult(result string) {
+	nest.mu.Lock()
+	defer nest.mu.Unlock()
+	if nest.pending != nil {
+		nest.pending.result = result
+	}
 }
 
 // captureExtra attaches already-rendered lines (a file diff) to the pending
@@ -155,10 +175,10 @@ func beginNestedCall() {
 	}
 }
 
-// finishNestedCall prints the call's one line — action, elapsed, result — plus
-// whatever it buffered. Past the display cap the line is dropped and counted
-// for the done line instead.
-func finishNestedCall(d time.Duration, out string, err error) {
+// finishCall prints the call's one line — action, elapsed, result — plus
+// whatever it buffered. Inside a subagent, past the display cap the line is
+// dropped and counted for the done line instead.
+func finishCall(d time.Duration, out string, err error) {
 	nest.mu.Lock()
 	p := nest.pending
 	nest.pending = nil
@@ -176,19 +196,34 @@ func finishNestedCall(d time.Duration, out string, err error) {
 	if p == nil || over {
 		return
 	}
-	// A call that rendered a diff already shows its result in full underneath;
-	// summarizing it too would just repeat the tool's own "wrote N bytes to …"
-	// echo one line above the change itself. Time still rides on the line.
-	suffix := fmtElapsed(d)
-	if len(p.extra) == 0 || err != nil {
-		suffix += "  " + summarizeResult(out, err)
-	}
-	printPending(p, suffix)
+	printPending(p, callResult(p, d, out, err), err != nil)
 }
 
+// callResult is the right-hand column for a finished call: the tool's own
+// result when it set one (a diff's counts), else a one-line summary of what
+// came back — skipped when a diff already shows the change in full — led by
+// the elapsed time once a call takes long enough for it to matter.
+func callResult(p *pendingAction, d time.Duration, out string, err error) string {
+	result := p.result
+	switch {
+	case err != nil:
+		result = summarizeResult(out, err)
+	case result == "" && len(p.extra) == 0:
+		result = summarizeResult(out, nil)
+	}
+	if d >= elapsedShownAfter {
+		result = strings.TrimSpace(fmtElapsed(d) + "  " + result)
+	}
+	return result
+}
+
+// elapsedShownAfter is how long a call runs before its line shows the time; a
+// column of "3ms" on every read is noise.
+const elapsedShownAfter = time.Second
+
 // printPending emits a held-back announcement and its buffered lines.
-func printPending(p *pendingAction, suffix string) {
-	fmt.Println(formatToolAction(p.indent, p.action, suffix))
+func printPending(p *pendingAction, result string, failed bool) {
+	fmt.Println(formatToolLine(p.indent, p.action, result, failed))
 	for _, l := range p.extra {
 		fmt.Println(l)
 	}
@@ -216,7 +251,7 @@ func formatSubagentDone(f *nestFrame, elapsed time.Duration, digest string, err 
 		parts = append(parts, "digest "+humanSize(len(digest)))
 	}
 	plain := f.indent + f.name + " done: " + strings.Join(parts, ", ")
-	if w := style.TermWidth(); w > 0 {
+	if w := style.ContentWidth(); w > 0 {
 		plain = style.Clip(plain, w-len(gutterPad))
 	}
 	return TimestampPrefix() + style.Paint(plain, style.Dim)
@@ -246,7 +281,9 @@ func summarizeResult(out string, err error) string {
 	if n := strings.Count(t, "\n") + 1; n > 1 {
 		return CountNoun(n, "line") + ", " + humanSize(len(out))
 	}
-	return style.Clip(t, summaryTextCap)
+	// Collapse whitespace: a tab or control byte in tool output must not land
+	// raw in the result column.
+	return style.Clip(strings.Join(strings.Fields(t), " "), summaryTextCap)
 }
 
 // fmtElapsed renders a call's wall time at the precision that reads: whole

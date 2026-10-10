@@ -135,3 +135,17 @@ func TestWrap(t *testing.T) {
 		})
 	}
 }
+
+func TestContentWidth(t *testing.T) {
+	tests := []struct{ term, want int }{
+		{0, 0}, {40, 40}, {100, 100}, {220, MaxContentWidth},
+	}
+	for _, tt := range tests {
+		prev := TermWidth
+		TermWidth = func() int { return tt.term }
+		if got := ContentWidth(); got != tt.want {
+			t.Errorf("ContentWidth() at %d cols = %d, want %d", tt.term, got, tt.want)
+		}
+		TermWidth = prev
+	}
+}

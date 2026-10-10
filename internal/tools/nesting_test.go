@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -35,15 +34,16 @@ func (d *subDeps) RunSubagent(_ context.Context, _ Subagent, _ string) (string, 
 // the next if an assertion fails mid-run.
 func resetNesting(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() {
+	clear := func() {
 		nest.mu.Lock()
 		nest.frames, nest.pending = nil, nil
 		nest.mu.Unlock()
-	})
+	}
+	// Before too: a test elsewhere in the package that calls a tool function
+	// directly (not through Execute) leaves its announcement held back.
+	clear()
+	t.Cleanup(clear)
 }
-
-// elapsedRe matches the per-call timing ("120ms", "1.4s", "2m03s").
-var elapsedRe = regexp.MustCompile(`\d+ms|\d+\.\d+s|\d+m\d\ds`)
 
 // seedFile writes n numbered lines and returns the path.
 func seedFile(t *testing.T, n int) string {
@@ -89,16 +89,14 @@ func TestNestedSubagentActivity(t *testing.T) {
 		}
 
 		// The parent announces at the margin, goal included.
-		if !strings.HasPrefix(got[0][10:], "tool: study(internal/tools, where is the gutter)") {
+		if !strings.HasPrefix(got[0][10:], "study    internal/tools, where is the gutter") {
 			t.Errorf("parent line = %q", got[0])
 		}
-		// Children sit one level in, each with elapsed + a result summary.
+		// Children sit one level in, each with a result summary (elapsed
+		// only shows past a second — TestCallResult).
 		for _, child := range got[1:3] {
-			if !strings.HasPrefix(child[10:], "  tool: read_file(") {
+			if !strings.HasPrefix(child[10:], "  read     ") {
 				t.Errorf("child should be indented two spaces: %q", child)
-			}
-			if !elapsedRe.MatchString(child) {
-				t.Errorf("child should carry its elapsed time: %q", child)
 			}
 			if !strings.Contains(child, "3 lines") {
 				t.Errorf("child should summarize its result: %q", child)
@@ -200,7 +198,7 @@ func TestNestedDiffFollowsItsCall(t *testing.T) {
 		got := strings.Split(strings.TrimRight(strip(out), "\n"), "\n")
 		action, diff := -1, -1
 		for i, l := range got {
-			if strings.Contains(l, "tool: write_file(") {
+			if strings.Contains(l, "write    ") {
 				action = i
 			}
 			if strings.Contains(l, "1 + hello") {
@@ -216,10 +214,10 @@ func TestNestedDiffFollowsItsCall(t *testing.T) {
 		if !strings.HasPrefix(got[diff], "              ") {
 			t.Errorf("a nested diff row should carry the nesting margin: %q", got[diff])
 		}
-		// The diff is the result, so the line above it carries time only — no
+		// The diff is the result, so the line above it carries its counts — no
 		// "wrote N bytes to …" echo duplicating what's rendered underneath.
-		if !elapsedRe.MatchString(got[action]) {
-			t.Errorf("the call should still report its elapsed time: %q", got[action])
+		if !strings.HasSuffix(got[action], "  +1") {
+			t.Errorf("the call should report the diff's counts: %q", got[action])
 		}
 		if strings.Contains(got[action], "wrote ") {
 			t.Errorf("a diff-bearing call should not also summarize itself: %q", got[action])

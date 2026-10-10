@@ -34,7 +34,35 @@ func printFileDiff(deps Quieter, before, after string) {
 	if deps.Quiet() || richRenderDisabled {
 		return
 	}
-	emitLines(renderDiff(before, after, diffOptions{Width: style.TermWidth(), Indent: indentPrefix()}))
+	if stat := diffStat(before, after); stat != "" {
+		setPendingResult(stat)
+	}
+	emitLines(renderDiff(before, after, diffOptions{Width: style.ContentWidth(), Indent: indentPrefix()}))
+}
+
+// diffStat is a change's size for the tool line's result column: "+9 -2",
+// "+40" for a new file, "" when there's no line diff to count (no change,
+// binary, too large — the diff body's own note says which).
+func diffStat(before, after string) string {
+	if before == after || isBinary(before) || isBinary(after) || len(before)+len(after) > diffMaxInputBytes {
+		return ""
+	}
+	adds, dels := 0, 0
+	for _, r := range diffRows(splitLines(before), splitLines(after)) {
+		switch r.op {
+		case '+':
+			adds++
+		case '-':
+			dels++
+		}
+	}
+	switch {
+	case dels == 0:
+		return fmt.Sprintf("+%d", adds)
+	case adds == 0:
+		return fmt.Sprintf("-%d", dels)
+	}
+	return fmt.Sprintf("+%d -%d", adds, dels)
 }
 
 // emitLines writes already-rendered lines to the terminal — or, inside a

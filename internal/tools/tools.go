@@ -25,7 +25,6 @@ import (
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/shellrisk"
-	"github.com/dereksantos/cortex/internal/style"
 )
 
 // The tool-call vocabulary lives in internal/agent (the leaf the engine and this
@@ -638,17 +637,15 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		}
 	}
 
-	// Inside a subagent, time the call and let its announcement out on the far
-	// side with the elapsed time and a result summary (nesting.go). The coder's
-	// own calls take the direct path: their line is already on screen, printed
-	// before the call ran.
-	if !inSubagent() {
-		return dispatchTool(ctx, tc, deps)
+	// Time the call and let its announcement out on the far side with the
+	// elapsed time and a result (nesting.go, toolline.go). While it runs, the
+	// REPL's live status row names it.
+	if inSubagent() {
+		beginNestedCall()
 	}
-	beginNestedCall()
 	start := time.Now()
 	out, err := dispatchTool(ctx, tc, deps)
-	finishNestedCall(time.Since(start), out, err)
+	finishCall(time.Since(start), out, err)
 	return out, err
 }
 
@@ -717,13 +714,10 @@ const defaultCurationBudgetTokens = 16000
 // window. Config-overridable via tools.max_tool_output.
 const defaultMaxToolOutput = 10000
 
-// printToolAction prints a timestamped, word-tagged tool-action line under
-// the current cortex turn, e.g. "15:04:05  tool: read_file(go.mod)". The
-// timestamp matches gutterPrefix's "HH:MM:SS  " format so tool lines stay
-// vertically aligned with user/assistant lines; the tool name shows in
-// green, its argument list dimmed so the verb reads first. Plain ASCII by
-// decision (2026-07-19) — the REPL dropped its icon set, so the "tool:" tag
-// itself (not a color) carries the meaning under NO_COLOR too.
+// printToolAction announces a tool call's action, e.g. "read_file(go.mod)".
+// The line is held back and printed when the call finishes (captureAction,
+// nesting.go), laid out by formatToolLine with its result on the right and
+// indented one level per enclosing subagent.
 //
 // Gated on deps.Quiet(): headless `cortex turn --json` and the served/Discord
 // sessions set it precisely so this stays off their stdout — a served turn's
@@ -731,46 +725,11 @@ const defaultMaxToolOutput = 10000
 // printing here too was pure duplication onto the server process's own
 // console, ANSI codes included (2026-07-19). Takes just Quieter, not the
 // full ToolDeps — the only capability this needs.
-//
-// Inside a subagent the line is held back rather than printed here
-// (captureAction, nesting.go): it comes out indented one level per depth once
-// the call finishes, carrying its elapsed time and result summary.
 func printToolAction(deps Quieter, action string) {
 	if deps.Quiet() {
 		return
 	}
-	if captureAction(action) {
-		return
-	}
-	fmt.Println(formatToolAction("", action, ""))
-}
-
-// formatToolAction renders one tool-action line: the gutter timestamp, the
-// nesting margin, the green verb, the dimmed argument list, and — for a
-// finished nested call — a dimmed "elapsed  summary" tail. The argument list
-// is the part that gives when the whole thing outgrows the terminal, since the
-// verb and the tail are the parts you can't reconstruct. Width 0 (piped, CI)
-// clips nothing.
-func formatToolAction(indent, action, suffix string) string {
-	name, args := action, ""
-	if i := strings.IndexByte(action, '('); i >= 0 {
-		name, args = action[:i], action[i:]
-	}
-	if w := style.TermWidth(); w > 0 && args != "" {
-		fixed := len(gutterPad) + style.Width(indent+"tool: "+name)
-		if suffix != "" {
-			fixed += 2 + style.Width(suffix)
-		}
-		args = style.Clip(args, w-fixed)
-	}
-	line := style.Paint("tool: "+name, style.Action)
-	if args != "" {
-		line += style.Paint(args, style.Dim)
-	}
-	if suffix != "" {
-		line += style.Paint("  "+suffix, style.Dim)
-	}
-	return TimestampPrefix() + indent + line
+	captureAction(action)
 }
 
 // --- outline ------------------------------------------------------------
@@ -823,6 +782,7 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	// tool call, so a one-off `cortex study`/`cortex learn` (no parent) keeps
 	// printing flat at the margin, exactly as it does today.
 	printToolAction(deps, subagentAction(sa.Name, path, goal))
+	flushAction()
 	frame := pushNest(sa.Name)
 	digest, err := deps.RunSubagent(ctx, sa, seedFn(goal, path, ol))
 	popNest()
