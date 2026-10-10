@@ -52,3 +52,16 @@ func TestCallResult(t *testing.T) {
 		})
 	}
 }
+
+func TestShortAction(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"read_file(greet.py)", "read greet.py"},
+		{"bash(python3 greet.py)", "bash python3 greet.py"},
+		{"grep", "grep"},
+	}
+	for _, tt := range tests {
+		if got := ShortAction(tt.in); got != tt.want {
+			t.Errorf("ShortAction(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

@@ -124,8 +124,13 @@ func captureAction(action string) {
 	nest.mu.Lock()
 	prev := nest.pending
 	nest.pending = &pendingAction{indent: strings.Repeat("  ", len(nest.frames)), action: action}
+	var run []foldEntry
+	if prev != nil {
+		run = takeFold()
+	}
 	nest.mu.Unlock()
 	if prev != nil {
+		printFold(run)
 		printPending(prev, "", false)
 	}
 }
@@ -137,7 +142,9 @@ func flushAction() {
 	nest.mu.Lock()
 	p := nest.pending
 	nest.pending = nil
+	run := takeFold()
 	nest.mu.Unlock()
+	printFold(run)
 	if p != nil {
 		printPending(p, "", false)
 	}
@@ -192,10 +199,18 @@ func finishCall(d time.Duration, out string, err error) {
 			}
 		}
 	}
+	held := false
+	var run []foldEntry
+	if p != nil && !over {
+		if held = holdForFold(p, d, out, err); !held {
+			run = takeFold()
+		}
+	}
 	nest.mu.Unlock()
-	if p == nil || over {
+	if p == nil || over || held {
 		return
 	}
+	printFold(run) // a read-only run before this call lands above it
 	printPending(p, callResult(p, d, out, err), err != nil)
 }
 

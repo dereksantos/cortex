@@ -37,6 +37,7 @@ func resetNesting(t *testing.T) {
 	clear := func() {
 		nest.mu.Lock()
 		nest.frames, nest.pending = nil, nil
+		fold.run = nil
 		nest.mu.Unlock()
 	}
 	// Before too: a test elsewhere in the package that calls a tool function

@@ -672,6 +672,9 @@ func main() {
 		//   - capture: ESC/Ctrl-C cancel and mid-turn keystrokes are captured
 		//     silently to seed the next prompt (interactive, raw streaming);
 		//   - signal: piped input falls back to SIGINT for cancel.
+		// The turn opens with one blank line under the input it answers
+		// (docs/tui-polish.md, track 2: a turn reads as one block).
+		fmt.Println()
 		var err error
 		switch {
 		case editor != nil && anchoredInput():

@@ -134,6 +134,9 @@ type CortexSession struct {
 	// lastTurn is the most recent completed turn's footer facts (footer.go);
 	// nil until one completes, and after a failed or interrupted turn.
 	lastTurn *turnSummary
+	// turnStep counts this turn's model calls (send); the first step's prose
+	// needs no leading blank line — the turn already opened with one.
+	turnStep int
 }
 
 func (cs *CortexSession) markdown() *markdownRenderer {

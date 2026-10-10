@@ -38,6 +38,10 @@ type streamPrinter struct {
 	gutterOpen bool              // md path: gutter printed, first block not yet joined to it
 	printedAny bool              // md path: at least one block already written this response
 	blankAfter bool              // md path: the last line written to the sink was blank
+	// noLeadBlank skips the blank line begin() prints before the answer: the
+	// turn's first step, where the turn's own opening blank already separates
+	// it from the input line.
+	noLeadBlank bool
 	// onStatus drives a "thinking..." indicator when there's no standalone spinner
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
@@ -253,7 +257,10 @@ func (p *streamPrinter) begin() {
 	if p.onStatus != nil {
 		p.onStatus(false, "") // answer started — clear the thinking status
 	}
-	fmt.Fprintln(p.writer())
+	tools.FlushFold() // a held read-only run lands above the prose it led to
+	if !p.noLeadBlank {
+		fmt.Fprintln(p.writer())
+	}
 	fmt.Fprint(p.writer(), gutterPrefix(tools.Now()))
 	p.gutterOpen = p.md != nil // render mode: first block joins this line
 	p.began = true
@@ -374,6 +381,10 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 	if line == "" {
 		return
 	}
+	if w := style.ContentWidth(); w > 0 {
+		line = style.Clip(line, w-len(gutterIndent)) // one row: it's a trace, not the answer
+	}
+	tools.FlushFold()
 	fmt.Fprintf(p.writer(), "%s%s\n",
 		gutterPrefix(tools.Now()), style.Paint(line, style.Dim))
 	p.crumbed = true // thoughtStat: skip, this step's trace already showed
@@ -428,6 +439,7 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 		return
 	}
 	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
+	tools.FlushFold()
 	fmt.Fprintf(p.writer(), "%s%s\n",
 		gutterPrefix(tools.Now()), style.Paint(line, style.Dim))
 }
@@ -479,7 +491,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 			}
 			cs.live.SetThinking(on, tail)
 		}
-		p := &streamPrinter{md: cs.markdown(), onStatus: onStatus, start: time.Now()}
+		cs.turnStep++
+		p := &streamPrinter{md: cs.markdown(), onStatus: onStatus, start: time.Now(), noLeadBlank: cs.turnStep == 1}
 		p.startTicker()
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.stopTicker() // before the clear below, so no straggler tick redraws
@@ -496,7 +509,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop()
 		return res, false, err
 	}
-	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now()}
+	cs.turnStep++
+	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now(), noLeadBlank: cs.turnStep == 1}
 	p.startTicker()
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 	p.stopTicker() // before the spinner stops, so no straggler tick relabels

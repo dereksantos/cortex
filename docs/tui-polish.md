@@ -1,13 +1,21 @@
 # REPL Polish — Scope
 
-> **Status. Track 1 BUILT (2026-10-09, branch `feat/repl-polish-foundation`);
-> tracks 2–5 PROPOSED.** Track 1 landed as: `internal/style` (roles, NO_COLOR,
-> `Width`/`Clip`/`Justify`/`Wrap`); literal-string render goldens in
-> `internal/tools/render_golden_test.go` and `cmd/cortex/render_golden_test.go`
-> (clock seam `tools.Now`); the startup header in `cmd/cortex/header.go`. The
-> goldens surfaced one gap for track 2: a nested tool line's elapsed/summary
-> suffix is never clipped, so it overruns narrow terminals. Visual mock of the
-> proposed turn, startup, input, picker and confirm surfaces:
+> **Status. Tracks 1–2 BUILT (2026-10-09, branch
+> `feat/repl-polish-foundation`); tracks 3–5 PROPOSED.** Track 1 landed as:
+> `internal/style` (roles, NO_COLOR, `Width`/`Clip`/`Justify`/`Wrap`,
+> `ContentWidth`); literal-string render goldens in
+> `internal/tools/render_golden_test.go` and
+> `cmd/cortex/render_golden_test.go` (clock seam `tools.Now`); the startup
+> header in `cmd/cortex/header.go`. Track 2 landed as: one line per tool call,
+> printed on completion (`internal/tools/toolline.go`); read-only runs folded
+> (`fold.go`, printed when the run ends — open question 1); answers indented
+> under the gutter and wrapped by us, not glamour (`render.go`'s
+> `wrapRendered`); the turn footer (`cmd/cortex/footer.go`); the cursor-first
+> prompt row with the model + gauge on the right and a timestamped echo of the
+> input left in scrollback (cost moved to the footer — open question 3); the
+> live status row names a running call with the same short verb
+> (`tools.ShortAction`). Visual mock of the proposed turn, startup, input,
+> picker and confirm surfaces:
 > <https://claude.ai/artifact/5a9HJ1ZEqhEc3yhvedRD4Q> (hand-written lines, not
 > real output).
 
@@ -153,11 +161,11 @@ golden updates.
 
 ## Open questions
 
-1. Fold timing: print the summary when the read-only run ends (simple, a
-   short delay before anything shows) or stream it on the anchored status row
-   (live, more anchor work)?
+1. ~~Fold timing~~ — decided 2026-10-09: the folded line prints when the run
+   ends; while it runs, the live status row names the current call.
 2. Does `@path` attach file content to the turn, or just name the path for
    the model to read with its own tools? The second keeps context
    model-driven, consistent with `docs/memory-tools.md`.
-3. Footer vs prompt-bar status: keep both, or drop cost and version from the
-   prompt bar once the footer carries them?
+3. ~~Footer vs prompt-bar status~~ — decided 2026-10-09: the prompt row
+   keeps model + gauge; version moved to the startup header, cost to the
+   footer.

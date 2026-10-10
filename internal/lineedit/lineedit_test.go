@@ -223,7 +223,7 @@ func TestAcceptedLineRewritesTheRow(t *testing.T) {
 	defer r.Close()
 	var out strings.Builder
 	term := &Terminal{in: r, out: &out, fd: int(r.Fd())}
-	term.SetAcceptedLine(func(line string) string { return "14:02:11  " + line })
+	term.SetAcceptedLine(func(line string, _ int) string { return "14:02:11  " + line })
 	if _, err := w.WriteString("hello\r"); err != nil {
 		t.Fatal(err)
 	}

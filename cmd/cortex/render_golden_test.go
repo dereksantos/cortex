@@ -72,9 +72,9 @@ func TestRenderGoldenPromptBar(t *testing.T) {
 }
 
 func TestRenderGoldenAcceptedLine(t *testing.T) {
-	prevNow, prevWidth := tools.Now, style.TermWidth
+	prevNow := tools.Now
 	tools.Now = func() time.Time { return time.Date(2026, 10, 9, 14, 2, 11, 0, time.UTC) }
-	defer func() { tools.Now, style.TermWidth = prevNow, prevWidth }()
+	defer func() { tools.Now = prevNow }()
 	tests := []struct {
 		name, input string
 		width       int
@@ -84,13 +84,13 @@ func TestRenderGoldenAcceptedLine(t *testing.T) {
 		{"typed", "add a --json flag to cortex learn", 80, false, "14:02:11  add a --json flag to cortex learn"},
 		{"typed colored", "add a --json flag", 80, true, "<90>14:02:11</>  <1>add a --json flag</>"},
 		{"paste", "why does this panic\ngoroutine 1 [running]:\nmain.main()", 80, false, "14:02:11  why does this panic  [+2 lines]"},
-		{"clipped to one row", strings.Repeat("word ", 20), 40, false, "14:02:11  word word word word word wor…"},
+		{"long input wraps under the gutter", "Look at README.md and greet.py, grep for def across the project, then tell me what it does", 60, false,
+			"14:02:11  Look at README.md and greet.py, grep for def\r\n          across the project, then tell me what it does"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer style.ForceColor(tt.color)()
-			style.TermWidth = func() int { return tt.width }
-			got := tagSGR(goldenSession().acceptedLine(tt.input))
+			got := tagSGR(goldenSession().acceptedLine(tt.input, tt.width))
 			if got != tt.want {
 				t.Errorf("accepted line changed.\n got: %q\nwant: %q", got, tt.want)
 			}

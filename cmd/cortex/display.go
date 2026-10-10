@@ -127,20 +127,24 @@ func (cs *CortexSession) PromptStatus() string {
 	return style.Paint(cs.Request.Model, style.Dim) + "  " + cs.coloredGauge(promptGaugeCells, cs.windowSize())
 }
 
-// acceptedLine is the row a submitted input leaves in scrollback: the
-// timestamp gutter and the input in the Strong role, so a turn opens on a line
-// shaped like every other line it prints. A multi-line paste shows its first
-// line and a count of the rest. Clipped to the terminal: it must stay one row.
-func (cs *CortexSession) acceptedLine(input string) string {
+// acceptedLine is what a submitted input leaves in scrollback: the timestamp
+// gutter and the input in the Strong role, so a turn opens on a line shaped
+// like every other line it prints. Long input wraps under the gutter — these
+// are the user's own words, so nothing is clipped — at the content width of a
+// terminal width columns wide. A multi-line paste shows its first line and a
+// count of the rest. Rows are joined with "\r\n": the editor is in raw mode.
+func (cs *CortexSession) acceptedLine(input string, width int) string {
 	first, rest, multi := strings.Cut(input, "\n")
 	tag := ""
 	if multi {
 		tag = fmt.Sprintf("  [+%d lines]", strings.Count(rest, "\n")+1)
 	}
-	if w := style.TermWidth(); w > 0 {
-		first = style.Clip(first, max(1, w-len(gutterIndent)-len(tag)-1))
+	rows := style.Wrap(first, answerWrapWidth(width))
+	for i, r := range rows {
+		rows[i] = style.Paint(r, style.Strong)
 	}
-	return gutterPrefix(tools.Now()) + style.Paint(first, style.Strong) + style.Paint(tag, style.Dim)
+	rows[len(rows)-1] += style.Paint(tag, style.Dim)
+	return gutterPrefix(tools.Now()) + strings.Join(rows, "\r\n"+gutterIndent)
 }
 
 func streamingEnabled() bool {
