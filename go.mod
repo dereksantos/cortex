@@ -13,9 +13,9 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/viterin/vek v0.4.3
-	golang.org/x/net v0.60.0
-	golang.org/x/sys v0.48.0
-	golang.org/x/term v0.46.0
+	golang.org/x/net v0.61.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/term v0.47.0
 )
 
 require (
@@ -44,8 +44,8 @@ require (
 	github.com/xo/terminfo v1.2.0 // indirect
 	github.com/yuin/goldmark v1.8.6 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20261007192929-f45ad48fbe92 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )
