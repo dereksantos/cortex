@@ -79,6 +79,27 @@ func (p *listPicker) Selected() int { return p.cursor }
 func (p *listPicker) Accept()        { p.accepted = true }
 func (p *listPicker) Accepted() bool { return p.accepted }
 
+// Texts is every item's row text, unfiltered and unstyled — the plain
+// listing a piped session prints.
+func (p *listPicker) Texts() []string {
+	out := make([]string, len(p.items))
+	for i, it := range p.items {
+		out[i] = it.Text
+	}
+	return out
+}
+
+// SelectID puts the cursor on the row with id among the current matches (a
+// no-op when it isn't one) — returning from a note lands back on that note.
+func (p *listPicker) SelectID(id string) {
+	for i, it := range p.match() {
+		if it.ID == id {
+			p.cursor = i
+			return
+		}
+	}
+}
+
 // SelectedID is the ID of the row under the cursor, "" when nothing matches.
 func (p *listPicker) SelectedID() string {
 	m := p.match()
@@ -145,7 +166,9 @@ func newModelPicker(cs *CortexSession) *listPicker {
 		}
 		items = append(items, pickItem{ID: id, Text: text})
 	}
-	return newListPicker("switch the code model", items, 0)
+	title := fmt.Sprintf("switch the code model — code: %s @ %s · study: %s @ %s",
+		cs.Request.Model, cs.Request.BaseURL, cs.Study.Model, cs.Study.Endpoint)
+	return newListPicker(title, items, 0)
 }
 
 // newMemoryPicker lists the session's notes — project tier, then user tier —

@@ -68,6 +68,10 @@ type pendingAction struct {
 	action string
 	extra  []string
 	result string
+	// printed: the line already went out when the call started (no live
+	// status row to carry it) — finishCall only records it.
+	printed bool
+	at      time.Time // when the call was announced
 }
 
 var nest struct {
@@ -121,17 +125,29 @@ func IndentPrefix() string { return indentPrefix() }
 // the same call (bash spilling its output to the summarizer, say) flushes the
 // first rather than losing it.
 func captureAction(action string) {
+	live := liveTurn()
 	nest.mu.Lock()
 	prev := nest.pending
-	nest.pending = &pendingAction{indent: strings.Repeat("  ", len(nest.frames)), action: action}
+	top := len(nest.frames) == 0
+	p := &pendingAction{indent: strings.Repeat("  ", len(nest.frames)), action: action, at: Now()}
+	// Without a live status row, a top-level line prints as the call starts —
+	// nothing else would show that it is running.
+	p.printed = top && !live
+	nest.pending = p
+	// A held read run lands before anything this call prints mid-flight (a
+	// risky confirm, a summarizer banner): flush it now, unless this call
+	// may join it.
 	var run []foldEntry
-	if prev != nil {
+	if prev != nil || !(top && foldable(action)) {
 		run = takeFold()
 	}
 	nest.mu.Unlock()
-	if prev != nil {
-		printFold(run)
+	printFold(run)
+	if prev != nil && !prev.printed {
 		printPending(prev, "", false)
+	}
+	if p.printed {
+		fmt.Println(formatToolLineAt(p.at, style.ContentWidth(), p.indent, action, "", false))
 	}
 }
 
@@ -143,9 +159,12 @@ func flushAction() {
 	p := nest.pending
 	nest.pending = nil
 	run := takeFold()
+	if p != nil {
+		recordCall(p, len(nest.frames), "", "", nil) // /last shows the subagent above its calls
+	}
 	nest.mu.Unlock()
 	printFold(run)
-	if p != nil {
+	if p != nil && !p.printed {
 		printPending(p, "", false)
 	}
 }
@@ -167,6 +186,12 @@ func captureExtra(lines []string) bool {
 	nest.mu.Lock()
 	defer nest.mu.Unlock()
 	if nest.pending == nil {
+		return false
+	}
+	if nest.pending.printed {
+		// The line is already on screen: the diff prints under it now, and
+		// is kept for the record too.
+		nest.pending.extra = append(nest.pending.extra, lines...)
 		return false
 	}
 	nest.pending.extra = append(nest.pending.extra, lines...)
@@ -210,7 +235,7 @@ func finishCall(d time.Duration, out string, err error) {
 		}
 	}
 	nest.mu.Unlock()
-	if p == nil || over || held {
+	if p == nil || over || held || p.printed {
 		return
 	}
 	printFold(run) // a read-only run before this call lands above it
@@ -241,7 +266,7 @@ const elapsedShownAfter = time.Second
 
 // printPending emits a held-back announcement and its buffered lines.
 func printPending(p *pendingAction, result string, failed bool) {
-	fmt.Println(formatToolLine(p.indent, p.action, result, failed))
+	fmt.Println(formatToolLineAt(p.at, style.ContentWidth(), p.indent, p.action, result, failed))
 	for _, l := range p.extra {
 		fmt.Println(l)
 	}

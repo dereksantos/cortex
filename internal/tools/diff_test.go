@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/style"
 )
@@ -294,6 +295,7 @@ func editCall(t *testing.T, fn string, args map[string]any) ToolCall {
 
 func TestEditFilePrintsDiff(t *testing.T) {
 	t.Run("edit_file shows the changed lines under its action line", func(t *testing.T) {
+		liveTurnForTest(t) // the REPL's live turn: the line carries the diff's counts
 		path := filepath.Join(t.TempDir(), "f.go")
 		if err := os.WriteFile(path, []byte("package main\n\nfunc f() int {\n\treturn 1\n}\n"), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -388,4 +390,29 @@ func TestEditFilePrintsDiff(t *testing.T) {
 			t.Errorf("no diff body expected with rendering off:\n%s", got)
 		}
 	})
+}
+
+func TestPlainModePrintsTheLineAsTheCallStarts(t *testing.T) {
+	resetNesting(t)
+	EndTurn() // no live turn: plain mode (CORTEX_LOOP_RENDER=0, piped, one-off study)
+	defer style.ForceColor(false)()
+	path := filepath.Join(t.TempDir(), "f.txt")
+	out := captureStdout(t, func() {
+		printToolAction(loud{}, "bash(sleep 600)")
+		// The line must already be out while the call runs.
+	})
+	if !strings.Contains(out, "bash     sleep 600") {
+		t.Fatalf("plain mode must announce the call before it runs, got %q", out)
+	}
+	out = captureStdout(t, func() {
+		finishCall(10*time.Minute, "done", nil)
+		printToolAction(loud{}, "read_file("+path+")")
+		finishCall(time.Millisecond, "x", nil)
+		printToolAction(loud{}, "read_file("+path+")")
+		finishCall(time.Millisecond, "x", nil)
+		FlushFold()
+	})
+	if strings.Contains(out, "done") || strings.Count(out, "read ") != 2 {
+		t.Errorf("plain mode: no result line after the fact and no folding, got %q", out)
+	}
 }

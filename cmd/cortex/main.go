@@ -811,20 +811,21 @@ func main() {
 				continue
 			}
 			if !sessionsInspectable(editor) {
-				for _, l := range newMemoryPicker(session).Lines(0) {
-					fmt.Println(strings.TrimPrefix(strings.TrimPrefix(l, "> "), "  "))
+				for _, l := range newMemoryPicker(session).Texts() {
+					fmt.Println(l)
 				}
 				continue
 			}
-			cursor := 0
+			filter, last := "", ""
 			for {
 				picker := newMemoryPicker(session)
-				picker.SetCursor(cursor)
+				picker.SetFilter(filter)
+				picker.SelectID(last) // back on the note just read, under the same filter
 				if err := inspectSession(editor, picker); err != nil || !picker.Accepted() || picker.SelectedID() == "" {
 					break
 				}
-				cursor = picker.Selected()
-				id := picker.SelectedID()
+				filter, last = picker.Filter(), picker.SelectedID()
+				id := last
 				body, err := readMemoryNote(session, id)
 				if err != nil {
 					body = "could not read " + id + ": " + err.Error()

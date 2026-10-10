@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/style"
@@ -20,13 +21,24 @@ type turnSummary struct {
 }
 
 // summarizeTurn counts what a turn did from its messages: tool calls made, and
-// the distinct paths written, edited, or removed.
+// the distinct paths written, edited, or removed — counting only calls whose
+// result wasn't an error ("Error: …", the coder dispatcher's failure form), so
+// an edit that never landed doesn't read as a changed file.
 func summarizeTurn(msgs []Message, elapsed time.Duration, cost float64) turnSummary {
 	s := turnSummary{Elapsed: elapsed, Cost: cost}
+	failed := map[string]bool{}
+	for _, m := range msgs {
+		if m.Role == RoleTool && m.ToolCallID != "" && strings.HasPrefix(m.Content, "Error: ") {
+			failed[m.ToolCallID] = true
+		}
+	}
 	changed := map[string]bool{}
 	for _, m := range msgs {
 		for _, tc := range m.ToolCalls {
 			s.Tools++
+			if failed[tc.ID] {
+				continue
+			}
 			switch tc.Function.Name {
 			case FunctionWriteFile, FunctionEditFile, FunctionRemove:
 				if p, err := tc.StringArg("path"); err == nil && p != "" {

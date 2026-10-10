@@ -33,6 +33,17 @@ func TestSummarizeTurn(t *testing.T) {
 	if got != want {
 		t.Errorf("summarizeTurn = %+v, want %+v", got, want)
 	}
+
+	// An edit whose result is an error never landed: not a changed file.
+	failedEdit := call(FunctionEditFile, `{"path":"c.go"}`)
+	failedEdit.ID = "call-9"
+	msgs = []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{failedEdit}},
+		{Role: RoleTool, ToolCallID: "call-9", Content: "Error: old_string not found in c.go"},
+	}
+	if got := summarizeTurn(msgs, time.Second, 0); got.Tools != 1 || got.FilesChanged != 0 {
+		t.Errorf("failed edit: summary = %+v, want 1 tool, 0 files changed", got)
+	}
 }
 
 func TestRenderFooterGolden(t *testing.T) {
@@ -68,5 +79,13 @@ func TestRiskyQuestionLayout(t *testing.T) {
 		`run it?  y once · a this command · p always "git reset*" · n `
 	if got != want {
 		t.Errorf("riskyQuestion =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestEmptyEnterKeepsThePromptRow(t *testing.T) {
+	defer style.ForceColor(false)()
+	cs := goldenSession()
+	if got := cs.acceptedLine("   ", 80); got != cs.Prompt() {
+		t.Errorf("empty input should leave the prompt row, got %q", got)
 	}
 }

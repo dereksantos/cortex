@@ -34,21 +34,18 @@ func printFileDiff(deps Quieter, before, after string) {
 	if deps.Quiet() || richRenderDisabled {
 		return
 	}
-	if stat := diffStat(before, after); stat != "" {
+	lines, stat := renderDiffStat(before, after, diffOptions{Width: style.ContentWidth(), Indent: indentPrefix()})
+	if stat != "" {
 		setPendingResult(stat)
 	}
-	emitLines(renderDiff(before, after, diffOptions{Width: style.ContentWidth(), Indent: indentPrefix()}))
+	emitLines(lines)
 }
 
-// diffStat is a change's size for the tool line's result column: "+9 -2",
-// "+40" for a new file, "" when there's no line diff to count (no change,
-// binary, too large — the diff body's own note says which).
-func diffStat(before, after string) string {
-	if before == after || isBinary(before) || isBinary(after) || len(before)+len(after) > diffMaxInputBytes {
-		return ""
-	}
+// rowsStat is a change's size for the tool line's result column: "+9 -2",
+// "+40" for pure additions, "-3" for pure removals.
+func rowsStat(rows []diffRow) string {
 	adds, dels := 0, 0
-	for _, r := range diffRows(splitLines(before), splitLines(after)) {
+	for _, r := range rows {
 		switch r.op {
 		case '+':
 			adds++
@@ -57,6 +54,8 @@ func diffStat(before, after string) string {
 		}
 	}
 	switch {
+	case adds == 0 && dels == 0:
+		return ""
 	case dels == 0:
 		return fmt.Sprintf("+%d", adds)
 	case adds == 0:
@@ -146,17 +145,25 @@ type diffRow struct {
 // decision in one pure function so the shape can be tested without a
 // terminal: callers hand it two strings and print what comes back.
 func renderDiff(before, after string, opt diffOptions) []string {
+	lines, _ := renderDiffStat(before, after, opt)
+	return lines
+}
+
+// renderDiffStat is renderDiff plus the change's size for the tool line's
+// result column ("+9 -2", diffStat's format), from the same diff rows — one
+// LCS per edit, not two. The stat is "" when there is no line diff to count.
+func renderDiffStat(before, after string, opt diffOptions) ([]string, string) {
 	opt = opt.withDefaults()
 	switch {
 	case before == after && before == "":
-		return []string{opt.note("wrote an empty file")}
+		return []string{opt.note("wrote an empty file")}, ""
 	case before == after:
-		return []string{opt.note("no change")}
+		return []string{opt.note("no change")}, ""
 	case isBinary(before) || isBinary(after):
-		return []string{opt.note(fmt.Sprintf("binary content, %d bytes → %d bytes", len(before), len(after)))}
+		return []string{opt.note(fmt.Sprintf("binary content, %d bytes → %d bytes", len(before), len(after)))}, ""
 	case len(before)+len(after) > diffMaxInputBytes:
 		return []string{opt.note(fmt.Sprintf("%s → %s (too large to diff)",
-			CountNoun(len(splitLines(before)), "line"), CountNoun(len(splitLines(after)), "line")))}
+			CountNoun(len(splitLines(before)), "line"), CountNoun(len(splitLines(after)), "line")))}, ""
 	}
 
 	a, b := splitLines(before), splitLines(after)
@@ -170,7 +177,7 @@ func renderDiff(before, after string, opt diffOptions) []string {
 
 	rows := diffRows(a, b)
 	out = append(out, opt.body(rows)...)
-	return out
+	return out, rowsStat(rows)
 }
 
 // body renders the hunks of rows within the height cap, eliding the rest.

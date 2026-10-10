@@ -131,6 +131,9 @@ func (cs *CortexSession) PromptStatus() string {
 // terminal width columns wide. A multi-line paste shows its first line and a
 // count of the rest. Rows are joined with "\r\n": the editor is in raw mode.
 func (cs *CortexSession) acceptedLine(input string, width int) string {
+	if strings.TrimSpace(input) == "" {
+		return cs.Prompt() // nothing submitted: leave the prompt row as it was, no bare timestamp
+	}
 	first, rest, multi := strings.Cut(input, "\n")
 	tag := ""
 	if multi {

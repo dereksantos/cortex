@@ -243,7 +243,13 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	cs.lastTurn = nil
 	cs.turnStep = 0
 	cs.turnThought = ""
-	tools.StartTurnLog()
+	// The interactive REPL's turn record (/last) and live line handling —
+	// held lines, folded reads — need the anchored status row (cs.live).
+	// Quiet sessions print nothing and may run concurrently (serve), so they
+	// never touch tools' process-wide turn state.
+	if !cs.quiet {
+		tools.BeginTurn(cs.live != nil)
+	}
 	// Issue #111: snapshot the working tree BEFORE this turn mutates anything.
 	// The snapshot names the tree the turn starts from (HEAD's commit on a
 	// clean tree) and records the hidden ref for this turn's ordinal; it is
@@ -556,8 +562,9 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		send = cs.senderOverride
 	}
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, send), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
-	tools.FlushFold() // a read-only run still held when the turn ends
-	cs.lastTurnCalls = tools.TurnLog()
+	if !cs.quiet {
+		cs.lastTurnCalls = tools.EndTurn() // also prints a read run still held
+	}
 	cs.Request.EphemeralSystem = ""
 	// Issue #117: settle exactly ONE journal record per failed send — the
 	// receipt rides the send-scoped marker on the error (heal.go's

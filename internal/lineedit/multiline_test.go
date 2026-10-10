@@ -112,3 +112,31 @@ func TestQuestionMarkShowsKeyHints(t *testing.T) {
 		t.Errorf("a plain read must not show hints: %q", out)
 	}
 }
+
+func TestLineKeysStayOnTheCursorsLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		op       func(*buffer)
+		wantText string
+		wantPos  int
+	}{
+		{"ctrl-k cuts to the end of this line only", (*buffer).killToEnd, "one\ntw\nthree", 6},
+		{"ctrl-u cuts to the start of this line only", (*buffer).killToStart, "one\no\nthree", 4},
+		{"home goes to this line's start", (*buffer).home, "one\ntwo\nthree", 4},
+		{"end goes to this line's end", (*buffer).end, "one\ntwo\nthree", 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &buffer{runes: []rune("one\ntwo\nthree"), pos: 6} // "tw|o"
+			tt.op(b)
+			if b.string() != tt.wantText || b.pos != tt.wantPos {
+				t.Errorf("got %q pos %d, want %q pos %d", b.string(), b.pos, tt.wantText, tt.wantPos)
+			}
+		})
+	}
+	single := &buffer{runes: []rune("hello world"), pos: 5}
+	single.killToEnd()
+	if single.string() != "hello" {
+		t.Errorf("single-line ctrl-k unchanged behavior: got %q", single.string())
+	}
+}

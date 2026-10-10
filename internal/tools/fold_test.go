@@ -2,6 +2,7 @@ package tools
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -89,5 +90,60 @@ func TestFoldOffUnderPlainRender(t *testing.T) {
 	})
 	if n := strings.Count(out, "\n"); n != 2 {
 		t.Errorf("CORTEX_LOOP_RENDER=0 should print each call, got %d lines:\n%s", n, out)
+	}
+}
+
+func TestHeldReadsLandBeforeANonFoldingCallStarts(t *testing.T) {
+	resetNesting(t)
+	defer style.ForceColor(false)()
+	out := captureStdout(t, func() {
+		for _, a := range []string{"read_file(a.go)", "grep(x, .)"} {
+			printToolAction(loud{}, a)
+			finishCall(time.Millisecond, "x", nil)
+		}
+		printToolAction(loud{}, "bash(git push)")
+		fmt.Println("CONFIRM run it?") // a risky confirm printed while bash is in flight
+		finishCall(time.Millisecond, "ok", nil)
+	})
+	fold, confirm := strings.Index(out, "read a.go · grep x"), strings.Index(out, "CONFIRM")
+	if fold < 0 || confirm < 0 || fold > confirm {
+		t.Errorf("the held reads must print before anything the next call prints:\n%s", out)
+	}
+}
+
+func TestFoldLineCarriesTheRunsStartTime(t *testing.T) {
+	resetNesting(t)
+	defer style.ForceColor(false)()
+	clock := time.Date(2026, 10, 9, 14, 0, 0, 0, time.UTC)
+	prev := Now
+	Now = func() time.Time { return clock }
+	defer func() { Now = prev }()
+	out := captureStdout(t, func() {
+		for _, a := range []string{"read_file(a.go)", "read_file(b.go)"} {
+			printToolAction(loud{}, a)
+			finishCall(time.Millisecond, "x", nil)
+		}
+		clock = clock.Add(90 * time.Second) // a long model step before the flush
+		FlushFold()
+	})
+	if !strings.HasPrefix(out, "14:00:00  read 2 files") {
+		t.Errorf("fold line should be stamped when the reads ran, got %q", out)
+	}
+}
+
+func TestSubagentCallIsRecordedAboveItsChildren(t *testing.T) {
+	resetNesting(t)
+	captureStdout(t, func() {
+		printToolAction(loud{}, "study(pkg, goal)")
+		flushAction()
+		pushNest("study")
+		beginNestedCall()
+		printToolAction(loud{}, "read_file(a.go)")
+		finishCall(time.Millisecond, "x", nil)
+		popNest()
+	})
+	calls := EndTurn()
+	if len(calls) != 2 || calls[0].Action != "study(pkg, goal)" || calls[1].Depth != 1 {
+		t.Errorf("want the study call, then its depth-1 child; got %+v", calls)
 	}
 }

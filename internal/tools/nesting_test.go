@@ -44,6 +44,7 @@ func resetNesting(t *testing.T) {
 	// directly (not through Execute) leaves its announcement held back.
 	clear()
 	t.Cleanup(clear)
+	liveTurnForTest(t)
 }
 
 // seedFile writes n numbered lines and returns the path.
@@ -266,4 +267,12 @@ func TestFmtElapsed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// liveTurnForTest runs the test inside a live REPL turn — the mode where
+// lines are held until a call finishes and read runs fold (turnlog.go).
+func liveTurnForTest(t *testing.T) {
+	t.Helper()
+	BeginTurn(true)
+	t.Cleanup(func() { EndTurn() })
 }

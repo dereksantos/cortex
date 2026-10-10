@@ -205,11 +205,14 @@ line exactly as typed.
 The REPL is plain-text by decision (2026-07-19): no icon set (the old
 ◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept — with
 one exception Derek made 2026-10-09: the prompt marker is `❯`
-(`tools.PromptGlyph`). Every tool call prints ONE line when it finishes —
+(`tools.PromptGlyph`). In a live REPL turn (anchored prompt —
+`tools.BeginTurn(live)`), every tool call prints ONE line when it finishes —
 `HH:MM:SS  verb     target …  result`, verb in a fixed column, result (diff
 `+9 -2`, a summary, elapsed past 1s) right-aligned at the content width
 (terminal capped at 100) — laid out by `internal/tools/toolline.go`'s
-`formatToolLine`; while it runs the live status row names it. Subagent calls
+`formatToolLine`; while it runs the live status row names it. Without a live
+status row (plain mode, a one-off `cortex study`, `study-eval`) each line
+prints as the call starts, with no result column and no folding. Subagent calls
 (`study`/`agent`) are the exception: their line prints before they run so
 their nested calls land under it. A run of the coder's read-only calls
 (read/grep/outline/recall/memory reads) folds into one dim line — `read 3

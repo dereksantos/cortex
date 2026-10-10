@@ -99,3 +99,26 @@ func TestMemoryPickerListsBothTiers(t *testing.T) {
 		t.Error("a missing store should be an error, not a panic")
 	}
 }
+
+func TestListPickerSelectIDAndTexts(t *testing.T) {
+	defer style.ForceColor(true)()
+	p := newListPicker("pick", []pickItem{{"x/a", "alpha"}, {"x/b", "beta"}, {"x/g", "gamma"}}, 0)
+	p.SetFilter("a") // alpha, beta, gamma all contain "a"
+	p.SelectID("x/g")
+	if p.SelectedID() != "x/g" {
+		t.Errorf("SelectID: got %q", p.SelectedID())
+	}
+	for _, l := range p.Texts() {
+		if style.Strip(l) != l || strings.HasPrefix(l, ">") {
+			t.Errorf("plain listing must carry no styling or cursor mark: %q", l)
+		}
+	}
+}
+
+func TestModelPickerTitleShowsBindings(t *testing.T) {
+	cs := &CortexSession{Request: &AgentRequest{Model: "qwen3.8-27b", BaseURL: "http://chatterbox:4000"}}
+	cs.Study.Model, cs.Study.Endpoint = "qwen3.8-27b", "http://chatterbox:4000"
+	if title := newModelPicker(cs).Title(); !strings.Contains(title, "code: qwen3.8-27b @ http://chatterbox:4000") {
+		t.Errorf("title should keep the bindings bare /model used to print: %q", title)
+	}
+}

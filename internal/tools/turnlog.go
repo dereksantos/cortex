@@ -27,23 +27,42 @@ type CallRecord struct {
 // recordOutputLines bounds how much of each call's output the record keeps.
 const recordOutputLines = 40
 
+// turnLog is the interactive turn in progress: whether one is active (only
+// then are calls recorded — a one-off `cortex study` or study-eval never grows
+// it), and whether it has a live status row (only then are top-level lines
+// held until the call finishes and read runs folded — without one, a held line
+// would leave the screen silent for as long as the call runs).
 var turnLog struct {
-	mu    sync.Mutex
-	calls []CallRecord
+	mu     sync.Mutex
+	active bool
+	live   bool
+	calls  []CallRecord
 }
 
-// StartTurnLog clears the record for a new turn.
-func StartTurnLog() {
+// BeginTurn starts recording a REPL turn. live reports that the REPL shows a
+// running call on its status row (the anchored prompt), which is what makes
+// holding a line until the call finishes safe.
+func BeginTurn(live bool) {
 	turnLog.mu.Lock()
 	defer turnLog.mu.Unlock()
-	turnLog.calls = nil
+	turnLog.active, turnLog.live, turnLog.calls = true, live, nil
 }
 
-// TurnLog returns the current turn's calls so far.
-func TurnLog() []CallRecord {
+// EndTurn prints any read run still held, stops recording, and returns the
+// turn's calls.
+func EndTurn() []CallRecord {
+	FlushFold()
 	turnLog.mu.Lock()
 	defer turnLog.mu.Unlock()
+	turnLog.active, turnLog.live = false, false
 	return append([]CallRecord(nil), turnLog.calls...)
+}
+
+// liveTurn reports whether lines may be held and runs folded.
+func liveTurn() bool {
+	turnLog.mu.Lock()
+	defer turnLog.mu.Unlock()
+	return turnLog.active && turnLog.live
 }
 
 // recordCall appends a finished call. Called by finishCall for every call that
@@ -67,6 +86,8 @@ func recordCall(p *pendingAction, depth int, result string, out string, err erro
 		Diff: append([]string(nil), p.extra...), Output: lines, More: more,
 	}
 	turnLog.mu.Lock()
-	turnLog.calls = append(turnLog.calls, rec)
+	if turnLog.active {
+		turnLog.calls = append(turnLog.calls, rec)
+	}
 	turnLog.mu.Unlock()
 }

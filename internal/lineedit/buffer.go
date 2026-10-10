@@ -61,8 +61,17 @@ func (b *buffer) right() {
 	}
 }
 
-func (b *buffer) home() { b.pos = 0 }
-func (b *buffer) end()  { b.pos = len(b.runes) }
+// home and end move within the cursor's line — in a single-line buffer that
+// is the whole buffer; in a multi-line draft, the line on screen.
+func (b *buffer) home() {
+	start, _, _, _ := b.lineBounds()
+	b.pos = start
+}
+
+func (b *buffer) end() {
+	_, end, _, _ := b.lineBounds()
+	b.pos = end
+}
 
 // wordLeft moves to the start of the previous word: skip spaces, then word.
 func (b *buffer) wordLeft() {
@@ -85,11 +94,17 @@ func (b *buffer) wordRight() {
 	}
 }
 
-func (b *buffer) killToEnd() { b.runes = b.runes[:b.pos] }
+// killToEnd (Ctrl-K) and killToStart (Ctrl-U) cut within the cursor's line,
+// so in a multi-line draft they never remove lines that aren't on screen.
+func (b *buffer) killToEnd() {
+	_, end, _, _ := b.lineBounds()
+	b.runes = append(b.runes[:b.pos:b.pos], b.runes[end:]...)
+}
 
 func (b *buffer) killToStart() {
-	b.runes = append([]rune{}, b.runes[b.pos:]...)
-	b.pos = 0
+	start, _, _, _ := b.lineBounds()
+	b.runes = append(b.runes[:start:start], b.runes[b.pos:]...)
+	b.pos = start
 }
 
 // killWord deletes the word before the cursor (Ctrl-W).

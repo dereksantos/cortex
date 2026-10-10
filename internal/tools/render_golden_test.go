@@ -23,6 +23,7 @@ func pinDisplay(t *testing.T, width int, color bool) {
 	Now = func() time.Time { return time.Date(2026, 10, 9, 14, 2, 11, 0, time.UTC) }
 	style.TermWidth = func() int { return width }
 	restoreColor := style.ForceColor(color)
+	liveTurnForTest(t)
 	t.Cleanup(func() {
 		Now, style.TermWidth = prevNow, prevWidth
 		restoreColor()

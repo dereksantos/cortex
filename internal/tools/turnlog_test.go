@@ -12,7 +12,7 @@ import (
 func TestTurnLogKeepsEveryCall(t *testing.T) {
 	resetNesting(t)
 	defer style.ForceColor(false)()
-	StartTurnLog()
+	BeginTurn(true)
 	captureStdout(t, func() {
 		for _, a := range []string{"read_file(a.go)", "grep(x, .)"} { // these two fold on screen
 			printToolAction(loud{}, a)
@@ -24,7 +24,7 @@ func TestTurnLogKeepsEveryCall(t *testing.T) {
 		finishCall(time.Millisecond, strings.Repeat("n\n", 100), nil)
 		FlushFold()
 	})
-	calls := TurnLog()
+	calls := EndTurn()
 	if len(calls) != 4 {
 		t.Fatalf("want 4 records (folded ones included), got %d", len(calls))
 	}
@@ -38,9 +38,15 @@ func TestTurnLogKeepsEveryCall(t *testing.T) {
 		t.Errorf("output head not bounded: %d lines, %d more", len(calls[3].Output), calls[3].More)
 	}
 
-	StartTurnLog()
-	if n := len(TurnLog()); n != 0 {
-		t.Errorf("StartTurnLog should clear, %d left", n)
+	BeginTurn(true)
+	if n := len(EndTurn()); n != 0 {
+		t.Errorf("BeginTurn should clear, %d left", n)
+	}
+	printToolAction(loud{}, "read_file(after.go)")
+	captureStdout(t, func() { finishCall(time.Millisecond, "x", nil) })
+	BeginTurn(true)
+	if n := len(EndTurn()); n != 0 {
+		t.Errorf("calls outside a turn (cortex study, study-eval) must not be recorded, got %d", n)
 	}
 }
 

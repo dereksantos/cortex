@@ -37,6 +37,7 @@ var foldNouns = map[string]string{
 type foldEntry struct {
 	name, action, result string
 	elapsed              time.Duration
+	at                   time.Time // when the call was announced
 }
 
 var fold struct {
@@ -55,15 +56,20 @@ func actionName(action string) string {
 // Reports false — print it normally — for a call that doesn't fold. Caller
 // holds nest.mu.
 func holdForFold(p *pendingAction, d time.Duration, out string, err error) bool {
-	if richRenderDisabled || len(nest.frames) > 0 || err != nil || len(p.extra) > 0 {
+	if richRenderDisabled || p.printed || len(nest.frames) > 0 || err != nil || len(p.extra) > 0 || !foldable(p.action) {
 		return false
 	}
-	name := actionName(p.action)
-	if _, ok := foldNouns[name]; !ok {
-		return false
+	if !liveTurn() {
+		return false // only a live turn may hold lines (turnlog.go)
 	}
-	fold.run = append(fold.run, foldEntry{name: name, action: p.action, result: callResult(p, d, out, nil), elapsed: d})
+	fold.run = append(fold.run, foldEntry{name: actionName(p.action), action: p.action, result: callResult(p, d, out, nil), elapsed: d, at: p.at})
 	return true
+}
+
+// foldable reports whether an action's tool is one that folds.
+func foldable(action string) bool {
+	_, ok := foldNouns[actionName(action)]
+	return ok
 }
 
 // takeFold empties the run and returns it. Caller holds nest.mu.
@@ -90,7 +96,7 @@ func printFold(run []foldEntry) {
 	case 0:
 		return
 	case 1:
-		fmt.Println(formatToolLine("", run[0].action, run[0].result, false))
+		fmt.Println(formatToolLineAt(run[0].at, style.ContentWidth(), "", run[0].action, run[0].result, false))
 		return
 	}
 	fmt.Println(formatFoldLine(run))
@@ -145,7 +151,10 @@ func formatFoldLine(run []foldEntry) string {
 			line += "  " + painted
 		}
 	}
-	return TimestampPrefix() + line
+	// The run's first call stamps the line: a run can be held across a long
+	// model step, and the gutter says when the reads happened, not when they
+	// were printed.
+	return Gutter(run[0].at) + line
 }
 
 // shortTarget is a folded call's target in a few cells: a path's base name,
