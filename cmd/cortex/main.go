@@ -248,7 +248,7 @@ var helpLines = []string{
 }
 
 // keyHints is the one-row key reference "?" shows under an empty prompt.
-var keyHints = style.Paint("tab complete · alt-enter newline · ctrl-o last turn · ctrl-r history · esc interrupts a turn · /help commands", style.Dim)
+var keyHints = style.Paint("tab complete · alt-enter newline · ctrl-o last turn · ctrl-r search · esc stop", style.Dim)
 
 // helpCommands parses helpLines into the sorted command names ("/model") and
 // each one's description — the completion source's vocabulary.
