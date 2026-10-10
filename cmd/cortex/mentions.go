@@ -376,15 +376,13 @@ func outlineFile(path string) (string, error) {
 var modelIDs = modelIDsImpl
 
 func mentionCompleter(session *CortexSession) map[string]lineedit.Completer {
-	// The fixed slash-command set (the REPL's vocabulary, passed in so
-	// lineedit stays free of cmd/cortex).
-	commands := []string{
-		"/clear", "/compact", "/context", "/help", "/hook",
-		"/model", "/plan", "/quit", "/sessions",
-	}
+	// The slash-command set and its descriptions come from the /help table
+	// (helpCommands), so completion can't drift from what /help lists.
+	commands, help := helpCommands()
 	return map[string]lineedit.Completer{
 		"slash": lineedit.SlashCompleter{
 			Commands: commands,
+			Help:     help,
 			Sub: func(line string, cursor int) []string {
 				// Only /model has a continuation today.
 				if !strings.HasPrefix(line, "/model ") {

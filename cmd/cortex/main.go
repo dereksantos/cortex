@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -242,6 +243,30 @@ var helpLines = []string{
 	"/model [name]      show the code/study model bindings, or switch the coding model",
 	"/hook off|format|all  turn the post-edit hook down or off for this session (never raises it)",
 	"/quit              exit (Ctrl-D and /exit also work)",
+}
+
+// helpCommands parses helpLines into the sorted command names ("/model") and
+// each one's description — the completion source's vocabulary.
+func helpCommands() ([]string, map[string]string) {
+	var names []string
+	help := map[string]string{}
+	for _, l := range helpLines {
+		fields := strings.Fields(l)
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		// The description is what follows the run of two or more spaces after
+		// the command and its argument hint.
+		desc := ""
+		if i := strings.Index(l, "  "); i >= 0 {
+			desc = strings.TrimSpace(l[i:])
+		}
+		names = append(names, name)
+		help[name] = desc
+	}
+	sort.Strings(names)
+	return names, help
 }
 
 // printHelp lists the slash commands, plain text, one per line — matching

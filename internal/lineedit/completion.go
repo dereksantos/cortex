@@ -30,6 +30,24 @@ type Completer interface {
 	Candidates(line string, cursor int) []string
 }
 
+// Describer is an optional Completer extension: a one-line description of a
+// candidate, shown beside it when it is the one in focus.
+type Describer interface {
+	Describe(candidate string) string
+}
+
+// focused is the single candidate the row is about: the only one offered, or
+// the one a cycling Tab just selected. ok is false while several are listed.
+func (cm *Completions) focused() (string, bool) {
+	switch {
+	case len(cm.src) == 1:
+		return cm.src[0], true
+	case cm.idx >= 0 && cm.idx < len(cm.src):
+		return cm.src[cm.idx], true
+	}
+	return "", false
+}
+
 // commonPrefix returns the longest prefix shared by every element of c.
 // An empty list yields ""; a single-element list is its own prefix.
 func commonPrefix(c []string) string {
@@ -241,7 +259,13 @@ type SlashCompleter struct {
 	// at the cursor (the argument), not the whole line — the "/model "
 	// prefix stays untouched by acceptance.
 	Sub func(line string, cursor int) []string
+	// Help, if non-nil, maps a command to its one-line description
+	// (Describe) — the /help table's own words.
+	Help map[string]string
 }
+
+// Describe implements Describer from Help.
+func (s SlashCompleter) Describe(candidate string) string { return s.Help[candidate] }
 
 func (s SlashCompleter) Candidates(line string, cursor int) []string {
 	if cursor == 0 {

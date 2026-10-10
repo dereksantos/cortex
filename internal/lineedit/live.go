@@ -773,7 +773,7 @@ func (a *Anchor) drawLocked() {
 		b.WriteString("\r\n")
 		rows = 2
 	}
-	b.WriteString(renderLine(a.prompt, a.buf, width))
+	b.WriteString(renderLine(a.prompt, a.buf, width, ""))
 	io.WriteString(a.out, b.String())
 	a.rows = rows
 }
