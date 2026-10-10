@@ -1,10 +1,15 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/style"
 )
+
+// memoryNoteMeta is the memory store's listing row.
+type memoryNoteMeta = memory.NoteMeta
 
 // pickItem is one selectable row of a listPicker: the value the caller gets
 // back (ID) and the row text shown and filtered on (Text).
@@ -141,4 +146,60 @@ func newModelPicker(cs *CortexSession) *listPicker {
 		items = append(items, pickItem{ID: id, Text: text})
 	}
 	return newListPicker("switch the code model", items, 0)
+}
+
+// newMemoryPicker lists the session's notes — project tier, then user tier —
+// as "name  hook  (tier · updated)". The row ID encodes tier and name
+// ("project/<name>") so the opener knows which store to read.
+func newMemoryPicker(cs *CortexSession) *listPicker {
+	var items []pickItem
+	add := func(tier string, metas []memoryNoteMeta) {
+		for _, m := range metas {
+			text := m.Name
+			if m.Hook != "" {
+				text += "  " + m.Hook
+			}
+			text += "  (" + tier + " · " + relTime(m.Updated) + ")"
+			items = append(items, pickItem{ID: tier + "/" + m.Name, Text: text})
+		}
+	}
+	if cs.memory != nil {
+		if metas, err := cs.memory.List(); err == nil {
+			add("project", metas)
+		}
+	}
+	if cs.userMemory != nil {
+		if metas, err := cs.userMemory.List(); err == nil {
+			add("user", metas)
+		}
+	}
+	return newListPicker("memory — enter opens a note", items, 0)
+}
+
+// readMemoryNote reads a note by the picker ID newMemoryPicker built.
+func readMemoryNote(cs *CortexSession, id string) (string, error) {
+	tier, name, _ := strings.Cut(id, "/")
+	store := cs.memory
+	if tier == "user" {
+		store = cs.userMemory
+	}
+	if store == nil {
+		return "", fmt.Errorf("no %s memory store", tier)
+	}
+	return store.Read(name)
+}
+
+// noteView shows one note's text in the inspector.
+type noteView struct {
+	id, body string
+}
+
+func (v noteView) Title() string { return "memory — " + v.id }
+
+func (v noteView) Lines(width int) []string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimRight(v.body, "\n"), "\n") {
+		out = append(out, style.Wrap(l, width)...)
+	}
+	return out
 }

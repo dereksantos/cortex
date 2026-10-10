@@ -435,6 +435,7 @@ helper, and writing table-driven tests):
 | `/undo [N]` | Revert the Nth-most-recent turn's file changes to the working tree (default 1): restore the per-turn checkpoint (a `git stash create` snapshot, issue #111), print the files changed, and record a transcript note so the model learns its edits were reverted. |
 | `/sessions` | Pick a saved session to resume: a full-screen list you can filter by prompt, id, or model (Enter resumes, ESC leaves the session alone). Prints the plain list when stdout isn't a TTY. |
 | `/last` | Every tool call of the last turn, unabridged — the calls the scrollback folded or capped, each with its diff and the head of its output. Ctrl-O at the prompt opens the same view. |
+| `/memory` | Browse the saved memory notes (project and user tiers), read-only: a filterable picker on a TTY, Enter opens a note. Writing and forgetting stay with the agent's memory tools. |
 | `/model [name]` | Switch the coding model: bare `/model` opens a filterable picker over the session's models on a TTY (Enter switches); `/model <name>` switches directly; piped sessions print the role bindings. |
 | `/hook off\|format\|all` | Turn the post-edit hook down or off for this session (monotone-down; bare `/hook` shows the current mode). |
 | `/quit`, `/exit` | Exit; Ctrl-D also works. |
