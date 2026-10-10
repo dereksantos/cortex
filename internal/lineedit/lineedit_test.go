@@ -161,7 +161,7 @@ func TestDecodeBracketedPaste(t *testing.T) {
 func TestRenderScrollKeepsCursorVisible(t *testing.T) {
 	b := &buffer{}
 	b.insert([]rune("0123456789")...) // pos at end (10)
-	out := renderLine("> ", b, 6, "")     // prompt width 2, avail 4
+	out := renderLine("> ", b, 6, "") // prompt width 2, avail 4
 	// One row only: must start with CR+clear and contain the prompt.
 	if !strings.HasPrefix(out, "\r\033[K> ") {
 		t.Errorf("render prefix wrong: %q", out)
@@ -180,8 +180,10 @@ func TestRenderSummaryForPaste(t *testing.T) {
 	b.insert([]rune("first\nsecond\nthird")...)
 	out := renderLine("> ", b, 80, "")
 	plain := stripANSI(out)
-	if !strings.Contains(plain, "first") || !strings.Contains(plain, "+2 lines") {
-		t.Errorf("summary = %q, want first line + line count", plain)
+	// A paste leaves the cursor at its end: the row shows that line, editable,
+	// and where it sits in the draft (multiline_test.go covers navigation).
+	if !strings.Contains(plain, "> third") || !strings.Contains(plain, "[line 3/3]") {
+		t.Errorf("summary = %q, want the cursor's line + its position", plain)
 	}
 }
 

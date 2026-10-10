@@ -335,7 +335,12 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 			buf.pos = pos
 			redraw(row)
 			continue // the candidate row is drawn by redraw; skip the generic one
+		case keyNewline:
+			buf.insert('\n')
 		case keyUp:
+			if buf.hasNewline() && buf.lineUp() {
+				break // moved within the draft; history stays where it is
+			}
 			if hpos == 0 {
 				continue
 			}
@@ -345,6 +350,9 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 			hpos--
 			setBuffer(buf, t.history.at(hpos))
 		case keyDown:
+			if buf.hasNewline() && buf.lineDown() {
+				break
+			}
 			if hpos >= t.history.Len() {
 				continue
 			}

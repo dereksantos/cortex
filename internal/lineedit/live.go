@@ -479,6 +479,8 @@ func (a *Anchor) applyEvent(ev keyEvent) {
 		a.buf.insert(ev.r)
 	case keyPaste:
 		a.buf.insert([]rune(ev.paste)...)
+	case keyNewline:
+		a.buf.insert('\n')
 	case keyBackspace:
 		a.buf.backspace()
 	case keyDelete:

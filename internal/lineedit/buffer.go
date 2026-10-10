@@ -106,3 +106,62 @@ func (b *buffer) killWord() {
 }
 
 func isWordSep(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }
+
+// lineBounds returns the [start, end) rune range of the line holding the
+// cursor in a multi-line buffer, its 1-based number, and the line count.
+func (b *buffer) lineBounds() (start, end, line, lines int) {
+	line, lines = 1, 1
+	for i, r := range b.runes {
+		if r != '\n' {
+			continue
+		}
+		lines++
+		if i < b.pos {
+			line++
+			start = i + 1
+		}
+	}
+	end = len(b.runes)
+	for i := b.pos; i < len(b.runes); i++ {
+		if b.runes[i] == '\n' {
+			end = i
+			break
+		}
+	}
+	return start, end, line, lines
+}
+
+// lineUp moves the cursor to the same column of the previous line, clamped to
+// its length. Reports false on the first line (the caller falls through to
+// history).
+func (b *buffer) lineUp() bool {
+	start, _, line, _ := b.lineBounds()
+	if line == 1 {
+		return false
+	}
+	col := b.pos - start
+	prevEnd := start - 1 // the '\n' ending the previous line
+	prevStart := prevEnd
+	for prevStart > 0 && b.runes[prevStart-1] != '\n' {
+		prevStart--
+	}
+	b.pos = prevStart + min(col, prevEnd-prevStart)
+	return true
+}
+
+// lineDown moves the cursor to the same column of the next line, clamped to
+// its length. Reports false on the last line.
+func (b *buffer) lineDown() bool {
+	start, end, line, lines := b.lineBounds()
+	if line == lines {
+		return false
+	}
+	col := b.pos - start
+	nextStart := end + 1
+	nextEnd := nextStart
+	for nextEnd < len(b.runes) && b.runes[nextEnd] != '\n' {
+		nextEnd++
+	}
+	b.pos = nextStart + min(col, nextEnd-nextStart)
+	return true
+}
