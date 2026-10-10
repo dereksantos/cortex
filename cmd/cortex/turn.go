@@ -243,6 +243,7 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	cs.lastTurn = nil
 	cs.turnStep = 0
 	cs.turnThought = ""
+	tools.StartTurnLog()
 	// Issue #111: snapshot the working tree BEFORE this turn mutates anything.
 	// The snapshot names the tree the turn starts from (HEAD's commit on a
 	// clean tree) and records the hidden ref for this turn's ordinal; it is
@@ -556,6 +557,7 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	}
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, send), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	tools.FlushFold() // a read-only run still held when the turn ends
+	cs.lastTurnCalls = tools.TurnLog()
 	cs.Request.EphemeralSystem = ""
 	// Issue #117: settle exactly ONE journal record per failed send — the
 	// receipt rides the send-scoped marker on the error (heal.go's

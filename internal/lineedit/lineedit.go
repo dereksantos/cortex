@@ -38,6 +38,8 @@ type Terminal struct {
 	// accepted, when set, renders the row a submitted line leaves behind in
 	// scrollback (see SetAcceptedLine).
 	accepted func(line string, width int) string
+	// detail is the Ctrl-O action (SetDetail).
+	detail func()
 }
 
 // SetAcceptedLine sets how a line submitted through ReadLineEcho is left in
@@ -48,6 +50,11 @@ type Terminal struct {
 // the row as typed. Plain ReadLine/ReadLinePrefilled (a y/N answer, say)
 // never use it.
 func (t *Terminal) SetAcceptedLine(f func(line string, width int) string) { t.accepted = f }
+
+// SetDetail wires Ctrl-O at the prompt: f runs synchronously (typically opening
+// an inspector over the terminal) and the prompt redraws when it returns. Nil
+// leaves Ctrl-O inert. The anchored type-ahead during a turn ignores it.
+func (t *Terminal) SetDetail(f func()) { t.detail = f }
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
 func (t *Terminal) SetHistory(h *History) { t.history = h }
@@ -337,6 +344,14 @@ func (t *Terminal) readLineWith(prompt, prefill string, src byteSource, accepted
 			continue // the candidate row is drawn by redraw; skip the generic one
 		case keyNewline:
 			buf.insert('\n')
+		case keyDetail:
+			if t.detail == nil || accepted == nil {
+				continue // only the REPL's main input read opens it
+			}
+			if rowShown {
+				redraw("")
+			}
+			t.detail()
 		case keyUp:
 			if buf.hasNewline() && buf.lineUp() {
 				break // moved within the draft; history stays where it is

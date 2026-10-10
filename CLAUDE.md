@@ -133,7 +133,9 @@ files, the index, the user's `git stash` list, and `.cortex/` untouched; it
 prints only the files it actually changed, records a transcript note so the
 model learns its edits were reverted, and drops the consumed refs. One line
 when not in a git repo or when there is nothing to undo), `/sessions`,
-`/model [name]`, `/plan <task>`, `/hook off|format|all` (turns the post-edit
+`/last` (every tool call of the last turn, unabridged, in the inspector;
+Ctrl-O at the prompt opens it too — `cmd/cortex/last_turn_view.go`),
+`/model [name]` (bare: a picker on a TTY — `list_picker.go`), `/plan <task>`, `/hook off|format|all` (turns the post-edit
 hook down or off for this session — monotone-down, never raises it; bare
 `/hook` shows the current mode), `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
