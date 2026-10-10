@@ -300,12 +300,14 @@ func TestCtxColor(t *testing.T) {
 
 func TestSessionPrompt(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request(), LastPromptTokens: 8200}
-	got := sess.Prompt()
-
-	for _, want := range []string{"cortex " + Version, ModelCoder, promptGlyph} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Prompt() = %q, missing %q", got, want)
-		}
+	if got := sess.Prompt(); !strings.Contains(got, promptGlyph) {
+		t.Errorf("Prompt() = %q, missing %q", got, promptGlyph)
+	}
+	// The model and gauge ride at the row's right edge (PromptStatus); the
+	// version moved to the startup header.
+	got := sess.PromptStatus()
+	if !strings.Contains(got, ModelCoder) {
+		t.Errorf("PromptStatus() = %q, missing %q", got, ModelCoder)
 	}
 	// The old exact "8.2k/32.8k" (LastPromptTokens/window) scalar left the
 	// prompt row for the default two-zone gauge (contextbar.go's gaugeZones)
@@ -315,13 +317,13 @@ func TestSessionPrompt(t *testing.T) {
 	// ANSI reset sits between them — strip color before matching the text.
 	wantZones := humanK(sess.headTokens()) + zoneDivider + humanK(sess.tailTokens())
 	if !strings.Contains(stripANSI(got), wantZones) {
-		t.Errorf("Prompt() = %q, missing the two-zone gauge %q", got, wantZones)
+		t.Errorf("PromptStatus() = %q, missing the two-zone gauge %q", got, wantZones)
 	}
 
 	// repl.gauge = "blocks" still renders the fixed-spatial bracket bar.
 	sess.Config = &Config{Repl: ReplConfig{Gauge: "blocks"}}
-	if bar := sess.Prompt(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
-		t.Errorf("Prompt() with repl.gauge=blocks = %q, missing the bar structure ([head|tail...])", bar)
+	if bar := sess.PromptStatus(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
+		t.Errorf("PromptStatus() with repl.gauge=blocks = %q, missing the bar structure ([head|tail...])", bar)
 	}
 
 	// repl.gauge = "numeric" still renders the old scalar form, now off the
@@ -330,15 +332,15 @@ func TestSessionPrompt(t *testing.T) {
 	// head/tail/window/cells/style — see contextbar.go).
 	sess.Config = &Config{Repl: ReplConfig{Gauge: "numeric"}}
 	wantNumeric := humanK(sess.headTokens()) + "/" + humanK(sess.windowSize())
-	if numeric := sess.Prompt(); !strings.Contains(numeric, wantNumeric) {
-		t.Errorf("Prompt() with repl.gauge=numeric = %q, want to contain %q", numeric, wantNumeric)
+	if numeric := sess.PromptStatus(); !strings.Contains(numeric, wantNumeric) {
+		t.Errorf("PromptStatus() with repl.gauge=numeric = %q, want to contain %q", numeric, wantNumeric)
 	}
 
 	// The prompt is redrawn on every keystroke with only \r\033[K, which cannot
 	// erase an embedded newline — a \n here walks the line down one row per byte
 	// typed. The inter-turn blank line is the REPL loop's job, not Prompt()'s.
 	if strings.ContainsAny(got, "\n\r") {
-		t.Errorf("Prompt() must be a single line, got %q", got)
+		t.Errorf("PromptStatus() must be a single line, got %q", got)
 	}
 }
 

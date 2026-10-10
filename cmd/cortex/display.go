@@ -94,28 +94,53 @@ func (cs *CortexSession) setPhase(p turnPhase) bool {
 		return false
 	}
 	cs.phase = p
-	if cs.live != nil {
-		cs.live.SetPrompt(cs.Prompt())
-	}
+	cs.refreshAnchor()
 	return true
 }
 
-func (cs *CortexSession) Prompt() string {
-	win := cs.windowSize()
-	status := style.Paint(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), style.Dim)
-	// The gauge is the two-zone numeric form (contextbar.go's gaugeZones) by
-	// default; coloredGauge composes its per-zone coloring (gray head/gray
-	// divider/pressure-colored tail) or, for the selectable bar styles, the
-	// single ctxColor wrap that predates gaugeZones. ctxColor keys off
-	// LastPromptTokens (the last request's actual billed size, not the
-	// gauge's own head+tail estimate) — same green/yellow/red threshold
-	// semantics as before this style existed.
-	gauge := cs.coloredGauge(promptGaugeCells, win)
-	cost := ""
-	if cs.costUSD > 0 {
-		cost = style.Paint(" | "+humanCost(cs.costUSD), style.Dim)
+// refreshAnchor redraws a live turn's pinned prompt with the current state
+// light and status. No-op outside an anchored turn.
+func (cs *CortexSession) refreshAnchor() {
+	if cs.live != nil {
+		cs.live.SetPrompt(cs.Prompt())
+		cs.live.SetRight(cs.PromptStatus())
 	}
-	return fmt.Sprintf("%s %s%s%s  %s ", phaseGlyph(cs.phase), status, gauge, cost, style.Paint(promptGlyph, style.Accent))
+}
+
+// Prompt is the input row's left side: the state light, then the marker the
+// cursor follows — ". > ". What used to precede the marker (version, model,
+// gauge, cost) moved: the model and gauge to PromptStatus at the row's right
+// edge, the version to the startup header, the cost to each turn's footer
+// (docs/tui-polish.md, track 2).
+func (cs *CortexSession) Prompt() string {
+	return fmt.Sprintf("%s %s ", phaseGlyph(cs.phase), style.Paint(promptGlyph, style.Accent))
+}
+
+// PromptStatus is the input row's right side: the model, then the context
+// gauge. The gauge is the two-zone numeric form (contextbar.go's gaugeZones)
+// by default; coloredGauge composes its per-zone coloring (gray head/gray
+// divider/pressure-colored tail) or, for the selectable bar styles, the
+// single ctxColor wrap that predates gaugeZones. ctxColor keys off
+// LastPromptTokens (the last request's actual billed size, not the gauge's
+// own head+tail estimate).
+func (cs *CortexSession) PromptStatus() string {
+	return style.Paint(cs.Request.Model, style.Dim) + "  " + cs.coloredGauge(promptGaugeCells, cs.windowSize())
+}
+
+// acceptedLine is the row a submitted input leaves in scrollback: the
+// timestamp gutter and the input in the Strong role, so a turn opens on a line
+// shaped like every other line it prints. A multi-line paste shows its first
+// line and a count of the rest. Clipped to the terminal: it must stay one row.
+func (cs *CortexSession) acceptedLine(input string) string {
+	first, rest, multi := strings.Cut(input, "\n")
+	tag := ""
+	if multi {
+		tag = fmt.Sprintf("  [+%d lines]", strings.Count(rest, "\n")+1)
+	}
+	if w := style.TermWidth(); w > 0 {
+		first = style.Clip(first, max(1, w-len(gutterIndent)-len(tag)-1))
+	}
+	return gutterPrefix(tools.Now()) + style.Paint(first, style.Strong) + style.Paint(tag, style.Dim)
 }
 
 func streamingEnabled() bool {

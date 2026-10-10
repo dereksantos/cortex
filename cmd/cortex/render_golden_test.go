@@ -36,7 +36,7 @@ func goldenSession() *CortexSession {
 // reset → "</>".
 func tagSGR(s string) string {
 	s = strings.ReplaceAll(s, "\033[0m", "</>")
-	for _, code := range []string{"90", "36", "32", "33", "31", "34", "35", "96", "92"} {
+	for _, code := range []string{"1", "90", "36", "32", "33", "31", "34", "35", "96", "92"} {
 		s = strings.ReplaceAll(s, "\033["+code+"m", "<"+code+">")
 	}
 	return s
@@ -44,25 +44,55 @@ func tagSGR(s string) string {
 
 func TestRenderGoldenPromptBar(t *testing.T) {
 	tests := []struct {
-		name  string
-		phase turnPhase
-		color bool
-		want  string
+		name       string
+		phase      turnPhase
+		color      bool
+		wantLeft   string
+		wantStatus string
 	}{
-		{"idle", phaseIdle, false, ". cortex <version> | qwen3-coder-q3 | 10k|60k | $0.0040  > "},
-		{"thinking", phaseThinking, false, "* cortex <version> | qwen3-coder-q3 | 10k|60k | $0.0040  > "},
-		{"streaming", phaseStreaming, false, "~ cortex <version> | qwen3-coder-q3 | 10k|60k | $0.0040  > "},
-		{"idle colored", phaseIdle, true, "<90>.</> <90>cortex <version> | qwen3-coder-q3 | </><90>10k</><90>|</><33>60k</><90> | $0.0040</>  <36>></> "},
-		{"thinking colored", phaseThinking, true, "<96>*</> <90>cortex <version> | qwen3-coder-q3 | </><90>10k</><90>|</><33>60k</><90> | $0.0040</>  <36>></> "},
+		{"idle", phaseIdle, false, ". > ", "qwen3-coder-q3  10k|60k"},
+		{"thinking", phaseThinking, false, "* > ", "qwen3-coder-q3  10k|60k"},
+		{"streaming", phaseStreaming, false, "~ > ", "qwen3-coder-q3  10k|60k"},
+		{"idle colored", phaseIdle, true, "<90>.</> <36>></> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
+		{"thinking colored", phaseThinking, true, "<96>*</> <36>></> ", "<90>qwen3-coder-q3</>  <90>10k</><90>|</><33>60k</>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer style.ForceColor(tt.color)()
 			cs := goldenSession()
 			cs.phase = tt.phase
-			got := tagSGR(strings.Replace(cs.Prompt(), version(), "<version>", 1))
+			if got := tagSGR(cs.Prompt()); got != tt.wantLeft {
+				t.Errorf("prompt changed.\n got: %q\nwant: %q", got, tt.wantLeft)
+			}
+			if got := tagSGR(cs.PromptStatus()); got != tt.wantStatus {
+				t.Errorf("prompt status changed.\n got: %q\nwant: %q", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestRenderGoldenAcceptedLine(t *testing.T) {
+	prevNow, prevWidth := tools.Now, style.TermWidth
+	tools.Now = func() time.Time { return time.Date(2026, 10, 9, 14, 2, 11, 0, time.UTC) }
+	defer func() { tools.Now, style.TermWidth = prevNow, prevWidth }()
+	tests := []struct {
+		name, input string
+		width       int
+		color       bool
+		want        string
+	}{
+		{"typed", "add a --json flag to cortex learn", 80, false, "14:02:11  add a --json flag to cortex learn"},
+		{"typed colored", "add a --json flag", 80, true, "<90>14:02:11</>  <1>add a --json flag</>"},
+		{"paste", "why does this panic\ngoroutine 1 [running]:\nmain.main()", 80, false, "14:02:11  why does this panic  [+2 lines]"},
+		{"clipped to one row", strings.Repeat("word ", 20), 40, false, "14:02:11  word word word word word wor…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer style.ForceColor(tt.color)()
+			style.TermWidth = func() int { return tt.width }
+			got := tagSGR(goldenSession().acceptedLine(tt.input))
 			if got != tt.want {
-				t.Errorf("prompt bar changed.\n got: %q\nwant: %q", got, tt.want)
+				t.Errorf("accepted line changed.\n got: %q\nwant: %q", got, tt.want)
 			}
 		})
 	}

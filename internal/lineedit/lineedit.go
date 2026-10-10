@@ -33,7 +33,19 @@ type Terminal struct {
 	mu     sync.Mutex
 	anchor *Anchor
 	inAlt  bool
+
+	// accepted, when set, renders the row a submitted line leaves behind in
+	// scrollback (see SetAcceptedLine).
+	accepted func(line string) string
 }
+
+// SetAcceptedLine sets how a line submitted through ReadLineStatus is left in
+// scrollback: on Enter the prompt row is redrawn as f(line) before the
+// newline — so the status that sat beside the input while editing needn't be
+// kept in the history. f must return a single row. Nil (the default) leaves
+// the row as typed. Plain ReadLine/ReadLinePrefilled (a y/N answer, say)
+// never use it.
+func (t *Terminal) SetAcceptedLine(f func(line string) string) { t.accepted = f }
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
 func (t *Terminal) SetHistory(h *History) { t.history = h }
@@ -208,12 +220,23 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 // It backs the type-ahead path: keystrokes captured while a turn streamed land
 // here as the starting draft, so the user's in-flight input isn't lost.
 func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
+	return t.readLine(prompt, "", prefill, nil)
+}
+
+// ReadLineStatus is ReadLinePrefilled with right, a status shown at the row's
+// right edge while the input leaves room for it (renderLine), and the
+// accepted-line rewrite (SetAcceptedLine) applied on Enter.
+func (t *Terminal) ReadLineStatus(prompt, right, prefill string) (string, error) {
+	return t.readLine(prompt, right, prefill, t.accepted)
+}
+
+func (t *Terminal) readLine(prompt, right, prefill string, accepted func(string) string) (string, error) {
 	src := newReaderSource(t.fd)
 	buf := &buffer{}
 	if prefill != "" {
 		setBuffer(buf, prefill)
 	}
-	redraw := func() { io.WriteString(t.out, renderLine(prompt, buf, t.width())) }
+	redraw := func() { io.WriteString(t.out, renderLine(prompt, right, buf, t.width())) }
 	redraw()
 
 	// History navigation: hpos indexes into history; at history.Len() means the
@@ -232,6 +255,9 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 		switch ev.kind {
 		case keyEnter:
 			line := buf.string()
+			if accepted != nil {
+				io.WriteString(t.out, "\r\033[K"+accepted(line))
+			}
 			io.WriteString(t.out, "\r\n")
 			return line, nil // caller decides what to record (AddHistory)
 		case keyUp:

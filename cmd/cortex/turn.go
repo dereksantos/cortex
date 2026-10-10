@@ -165,7 +165,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		cs.writeContextSample(iter, lastPromptTokens, maxTokens, tailEstNow)
 		if cs.live != nil {
 			// Force a redraw of the prompt line with updated context gauge
-			cs.live.SetPrompt(cs.Prompt())
+			cs.refreshAnchor()
 			cs.live.SetActivity("")
 		}
 	}
@@ -174,7 +174,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		// After each tool result is appended, force a prompt redraw
 		// to update the context gauge with the current context size
 		onAfterToolResult = func() {
-			cs.live.SetPrompt(cs.Prompt())
+			cs.refreshAnchor()
 			cs.live.SetActivity("")
 		}
 	}

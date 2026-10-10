@@ -546,6 +546,7 @@ func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse,
 // next prompt. ESC/Ctrl-C cancels via the anchor's context.
 func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
 	anchor, ctx := editor.Anchor(session.Prompt(), seed)
+	anchor.SetRight(session.PromptStatus())
 	r, w, err := os.Pipe()
 	if err != nil {
 		// Pipe setup failed (rare): fall back to the silent-capture path so the

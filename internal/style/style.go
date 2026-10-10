@@ -39,6 +39,9 @@ const (
 	OK   Role = "\033[32m"
 	Warn Role = "\033[33m"
 	Err  Role = "\033[31m"
+	// Strong is the user's own words echoed into scrollback — the line a
+	// turn opens on.
+	Strong Role = "\033[1m"
 	// Live and Streaming are the high-contrast variants the state light uses
 	// while a turn is running, so they pop against idle Dim.
 	Live      Role = "\033[96m"

@@ -2,6 +2,7 @@ package lineedit
 
 import (
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -153,7 +154,7 @@ func TestDecodeBracketedPaste(t *testing.T) {
 func TestRenderScrollKeepsCursorVisible(t *testing.T) {
 	b := &buffer{}
 	b.insert([]rune("0123456789")...) // pos at end (10)
-	out := renderLine("> ", b, 6)     // prompt width 2, avail 4
+	out := renderLine("> ", "", b, 6) // prompt width 2, avail 4
 	// One row only: must start with CR+clear and contain the prompt.
 	if !strings.HasPrefix(out, "\r\033[K> ") {
 		t.Errorf("render prefix wrong: %q", out)
@@ -170,7 +171,7 @@ func TestRenderScrollKeepsCursorVisible(t *testing.T) {
 func TestRenderSummaryForPaste(t *testing.T) {
 	b := &buffer{}
 	b.insert([]rune("first\nsecond\nthird")...)
-	out := renderLine("> ", b, 80)
+	out := renderLine("> ", "", b, 80)
 	plain := stripANSI(out)
 	if !strings.Contains(plain, "first") || !strings.Contains(plain, "+2 lines") {
 		t.Errorf("summary = %q, want first line + line count", plain)
@@ -182,5 +183,59 @@ func TestStripANSIWidth(t *testing.T) {
 	colored := "\x1b[36m> \x1b[0m"
 	if w := displayWidth(colored); w != 2 {
 		t.Errorf("displayWidth(colored) = %d, want 2", w)
+	}
+}
+
+func TestRenderLineRightStatus(t *testing.T) {
+	tests := []struct {
+		name, typed string
+		width       int
+		wantRight   bool
+	}{
+		{"empty input shows status", "", 40, true},
+		{"short input keeps it", "fix the gauge", 40, true},
+		{"input grows into it: status steps aside", "a much longer request that reaches the edge", 40, false},
+		{"wide terminal: status stops at the content edge", "", 160, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &buffer{}
+			setBuffer(b, tt.typed)
+			out := stripANSI(renderLine("> ", "model 10k|60k", b, tt.width))
+			if got := strings.Contains(out, "model 10k|60k"); got != tt.wantRight {
+				t.Errorf("status shown = %v, want %v: %q", got, tt.wantRight, out)
+			}
+			if tt.wantRight {
+				row := out[strings.Index(out, "> "):strings.LastIndex(out, "\r")]
+				if w, edge := displayWidth(row), min(tt.width, 100); w != edge {
+					t.Errorf("status should end at column %d, row is %d wide: %q", edge, w, row)
+				}
+			}
+		})
+	}
+}
+
+func TestAcceptedLineRewritesTheRow(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	var out strings.Builder
+	term := &Terminal{in: r, out: &out, fd: int(r.Fd())}
+	term.SetAcceptedLine(func(line string) string { return "14:02:11  " + line })
+	if _, err := w.WriteString("hello\r"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	line, err := term.ReadLineStatus("> ", "model", "")
+	if err != nil {
+		t.Fatalf("ReadLineStatus: %v", err)
+	}
+	if line != "hello" {
+		t.Errorf("line = %q, want hello", line)
+	}
+	if !strings.HasSuffix(out.String(), "\r\033[K14:02:11  hello\r\n") {
+		t.Errorf("accepted row not rewritten: %q", out.String())
 	}
 }
