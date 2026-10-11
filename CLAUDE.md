@@ -343,8 +343,9 @@ the model-driven memory tools
   `cortex turn` stderr + its `lint` JSON field, and in the journal.
   Workspace trust (the user config's `project.trusted`, set via
   `cortex project trust`) is the ONLY gate: on an untrusted workspace it
-  runs nothing (one-line "hook inactive" note on the session's first
-  edit), on a trusted one it runs the applicable per-file format command
+  runs nothing in any mode (one-line "hook inactive" note on the session's
+  first edit whose hook mode is not off — with the mode off, no note), on
+  a trusted one it runs the applicable per-file format command
   as a shell-free argv (templates with shell syntax are skipped with a
   note), each with a 10s budget — and appends a note (what ran, what it
   reported) to the result; the note never fails the edit. Commands are
@@ -442,7 +443,13 @@ the model-driven memory tools
 
 Layered, lowest→highest: `~/.cortex/config.json` (user) →
 `./.cortex/config.json` (project, field-by-field override) → `CORTEX_BACKEND`
-env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
+env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`. The
+project layer and the project `.cortex/` dir (sessions, journal, memory) are
+found by walking up from the CWD (`findProjectUp`), which skips an
+ancestor that is the user-level dir (`~/.cortex` or `$CORTEX_HOME`): a
+workspace under `$HOME` with no `.cortex/` of its own gets one at the CWD,
+never the user tier. With CWD == `$HOME`, `~/.cortex` is the workspace dir
+and its config is the user layer only.
 
 ```json
 {

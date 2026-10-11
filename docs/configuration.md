@@ -21,9 +21,23 @@ importers (`internal/capture`, `internal/storage`); it is not what the REPL,
 1. `~/.cortex/config.json` (or `$CORTEX_HOME/config.json` when `CORTEX_HOME`
    is set) — user defaults.
 2. The nearest `.cortex/config.json` found by walking up from the current
-   directory — project overrides.
+   directory — project overrides. The walk never picks the user-level
+   directory from an ancestor: `~/.cortex` and `$CORTEX_HOME` are skipped,
+   so a workspace under `$HOME` without its own `.cortex/` has no project
+   layer (and the user config is never loaded twice). With the CWD equal to
+   `$HOME` itself, `~/.cortex/config.json` is the user layer only.
 3. `CORTEX_BACKEND` (env) — supplies `backend.endpoint` only when neither
    config file set one.
+
+The same walk picks the project's `.cortex/` directory (sessions, journal,
+memory notes, history): the nearest `.cortex/` from the CWD upward, skipping
+an ancestor that is the user-level directory (`~/.cortex`, or
+`$CORTEX_HOME`). When there is none, the workspace root is the CWD and its
+`.cortex/` is created there on first write — so a fresh repo under `$HOME`
+gets its own `.cortex/` instead of writing into the user tier
+(`findProjectUp` in `cmd/cortex/config.go`). The one exception is a CWD of
+`$HOME` itself: its own `.cortex/` is `~/.cortex`, so that is the workspace
+dir there.
 
 Both files merge field-by-field (`mergeConfig` in `config.go`): a field
 present in the project file overrides the same field from the user file;
@@ -744,7 +758,10 @@ NOTHING: a trusted repo may use repo-local binaries
 no per-tool allowlist to run — the trust decision authorizes running
 what the repo configures. The first edit of a session on an untrusted
 workspace gets a one-line "post-edit hook inactive" note (later edits
-stay silent); a trusted workspace gets no note.
+stay silent) unless the hook mode is `off` (`tools.post_edit_hook`,
+`CORTEX_POST_EDIT_HOOK`, `/hook off`, or a per-call `hook: "skip"`): with
+the mode off the result carries no note, and the note stays due for the
+session's first edit with the hook on. A trusted workspace gets no note.
 
 On a TRUSTED workspace, the per-edit format command runs when it applies:
 the command must be per-file (a whole-project format has no argument to
