@@ -21,7 +21,7 @@ Each turn starts with an index of these notes. Between sessions,
 `cortex learn` reads the turn journal and saves the notes that the agent
 did not write.
 
-I use Cortex every day to develop Cortex. The project is experimental.
+I use Cortex every day to develop Cortex.
 Cortex keeps all of its data in plain files under `.cortex/`. You can read,
 edit, or delete these files.
 
