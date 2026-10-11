@@ -1058,6 +1058,16 @@ type ContextConfig struct {
 	// means the default (inTurnKeepRecentDefault, 6); a non-nil value ≤ 0 is
 	// rejected by validateContextConfig.
 	InTurnKeepRecent *int `json:"in_turn_keep_recent"`
+	// KeepReasoning gates the reasoning round-trip: the current turn's
+	// assistant reasoning (reasoning_content from a hybrid-thinking model) is
+	// sent back on the next step's request, so the model continues its plan
+	// instead of re-deriving it every tool call; prior turns' reasoning is
+	// never sent. It is also persisted to the session transcript as a separate
+	// reasoning_content field. Scoped to the OpenAI-compatible path (never sent
+	// to the OpenRouter dialect). Nil means ENABLED — the same availability
+	// kill-switch precedent as InTurnDemotion. false restores the previous
+	// behavior byte for byte: nothing is sent and nothing is persisted.
+	KeepReasoning *bool `json:"keep_reasoning"`
 }
 
 // defaultTailHighFraction / defaultTailDrainFraction / defaultOutlineFraction
@@ -1172,6 +1182,16 @@ func (c *Config) inTurnDemotionEnabled() bool {
 		return true
 	}
 	return *c.Context.InTurnDemotion
+}
+
+// keepReasoningEnabled reports whether the current turn's reasoning is kept
+// and round-tripped (context.keep_reasoning). Default enabled: a nil/absent
+// key keeps the shipped capability (the inTurnDemotionEnabled precedent).
+func (c *Config) keepReasoningEnabled() bool {
+	if c == nil || c.Context.KeepReasoning == nil {
+		return true
+	}
+	return *c.Context.KeepReasoning
 }
 
 // inTurnKeepRecentDefault is the count of the turn's most-recent tool results
@@ -1849,6 +1869,9 @@ func mergeContext(base, over ContextConfig) ContextConfig {
 	}
 	if over.InTurnKeepRecent != nil {
 		out.InTurnKeepRecent = over.InTurnKeepRecent
+	}
+	if over.KeepReasoning != nil {
+		out.KeepReasoning = over.KeepReasoning
 	}
 	return out
 }

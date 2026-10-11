@@ -29,8 +29,10 @@ type streamDelta struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 	// ReasoningContent is the model's chain-of-thought, emitted by
-	// always-thinking models (e.g. gpt-oss) before the answer. Display-only:
-	// callers surface it as live progress but never store or re-send it.
+	// always-thinking models (e.g. gpt-oss) before the answer. Callers surface
+	// it as live progress; cmd/cortex also keeps the assembled text on the
+	// assistant message and re-sends it for the current turn only
+	// (context.keep_reasoning).
 	ReasoningContent string `json:"reasoning_content"`
 	// Reasoning is OpenRouter's field name for the same chain-of-thought
 	// channel. Backends emit one or the other, never (observed) both; when
@@ -65,7 +67,7 @@ type StreamToolCall struct {
 // the server honored stream_options.include_usage), and the finish reason.
 type StreamResult struct {
 	Content      string
-	Reasoning    string // accumulated chain-of-thought (display-only)
+	Reasoning    string // accumulated chain-of-thought
 	ToolCalls    []StreamToolCall
 	Stats        GenerationStats
 	FinishReason string

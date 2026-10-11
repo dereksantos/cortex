@@ -568,3 +568,42 @@ func TestCitationFor(t *testing.T) {
 		t.Errorf("citationFor with empty session id = %q, want empty", got)
 	}
 }
+
+// TestPlanReasoningShed locks the reasoning-first shed: over budget, the
+// oldest reasoning is dropped first (never the newest), measured against the
+// same whole-prompt total PlanWholePromptStubbing uses; under budget, or with
+// at most one reasoning-bearing message, nothing is shed.
+func TestPlanReasoningShed(t *testing.T) {
+	est := func(m Msg) int { return TokensOf(len(m.Content) + len(m.ToolCallID) + len(m.Reasoning)) }
+	asst := func(reasoningTok int) Msg {
+		return Msg{Role: "assistant", Reasoning: strings.Repeat("r", reasoningTok*CharsPerToken)}
+	}
+	tool := func(tok int) Msg { return Msg{Role: "tool", Content: strings.Repeat("t", tok*CharsPerToken)} }
+	budget := WholePromptBudget{HighWM: 1000, LowWM: 600}
+	tests := []struct {
+		name  string
+		msgs  []Msg
+		fixed int
+		want  []int
+	}{
+		{name: "under high watermark: nothing", msgs: []Msg{asst(300), tool(10), asst(300), tool(10)}, want: nil},
+		{name: "over: oldest first until low watermark", msgs: []Msg{asst(300), tool(10), asst(300), tool(10), asst(300), tool(10), asst(300)}, want: []int{0, 2, 4}}, // 1230 → 930 → 630 → 330
+		{name: "fixed part counts toward the trigger", msgs: []Msg{asst(300), tool(10), asst(300)}, fixed: 500, want: []int{0}},
+		{name: "newest reasoning never shed", msgs: []Msg{asst(900), tool(10), asst(900)}, want: []int{0}},
+		{name: "single reasoning: nothing to shed", msgs: []Msg{tool(900), asst(900)}, want: nil},
+		{name: "no reasoning: nothing", msgs: []Msg{tool(900), tool(900)}, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PlanReasoningShed(tt.msgs, est, budget, tt.fixed)
+			if len(got) != len(tt.want) {
+				t.Fatalf("shed = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("shed = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}

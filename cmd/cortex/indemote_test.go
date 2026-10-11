@@ -989,7 +989,7 @@ func messagesEqual(a, b []Message) bool {
 		return false
 	}
 	for i := range a {
-		if a[i].Content != b[i].Content || a[i].Role != b[i].Role || a[i].ToolCallID != b[i].ToolCallID {
+		if a[i].Content != b[i].Content || a[i].Role != b[i].Role || a[i].ToolCallID != b[i].ToolCallID || a[i].Reasoning != b[i].Reasoning {
 			return false
 		}
 		if len(a[i].ToolCalls) != len(b[i].ToolCalls) {

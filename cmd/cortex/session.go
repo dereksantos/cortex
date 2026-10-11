@@ -569,6 +569,16 @@ func (cs *CortexSession) redactedMessage(m Message) Message {
 	redacted, n := redact.Redact(m.Content)
 	r.Content = redacted
 	cs.redactions += n
+	// Reasoning (the model's chain-of-thought) persists as its own
+	// reasoning_content field so trajectories show it — redacted like
+	// Content, since a model can think a secret it read. Dropped entirely
+	// under context.keep_reasoning:false (the transcript stays byte-for-byte
+	// the pre-reasoning shape). Persisted reasoning is never replayed: the
+	// wire scopes reasoning to the current turn (scopedReasoning).
+	if m.Reasoning != "" && cs.Config.keepReasoningEnabled() {
+		r.Reasoning, n = redact.Redact(m.Reasoning)
+		cs.redactions += n
+	}
 	if m.ToolCalls != nil {
 		r.ToolCalls = make([]ToolCall, len(m.ToolCalls))
 		for i, c := range m.ToolCalls {
@@ -795,6 +805,7 @@ func (cs *CortexSession) Clear() {
 	cs.Request.Effort = old.Effort
 	cs.Request.Vision = old.Vision
 	cs.Request.MaxTokens = old.MaxTokens
+	cs.Request.OmitReasoning = old.OmitReasoning
 	cs.ws = cs.newWorkingSet(1)
 	cs.outline = nil
 	cs.outlineFolded = ""

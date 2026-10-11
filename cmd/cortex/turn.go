@@ -521,7 +521,10 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		cs.LastOutputTokens = lastOutputTokens
 		tailEstNow := 0
 		if cs.ws != nil {
-			tailEstNow = cs.ws.TailTokens() + estTurnTokens(cs.Request.Messages[turnStart:])
+			// estTurnTokens counts Content only (a finished turn's reasoning is
+			// never re-sent); the in-flight turn's kept reasoning does ride the
+			// wire, so it is added here.
+			tailEstNow = cs.ws.TailTokens() + estTurnTokens(cs.Request.Messages[turnStart:]) + cs.Request.sentReasoningTokens()
 		}
 		cs.writeContextSample(iter, lastPromptTokens, maxTokens, tailEstNow)
 		if cs.live != nil {
