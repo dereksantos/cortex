@@ -12,9 +12,9 @@
 # post-edit format hook runs on the edit. Undo it with
 # `cortex project trust remove ~/demo/slug`.
 #
-# The setup also creates ~/demo/slug/.cortex. Without it, Cortex walks up
-# from ~/demo/slug, finds ~/.cortex, and uses your user-level data (notes,
-# sessions) for the demo session.
+# The setup also creates ~/demo/slug/.cortex/.gitignore. Cortex writes this
+# file itself on the first run and prints a note about it; creating it first
+# keeps that note out of the recording.
 
 Output docs/assets/demo.gif
 
