@@ -309,14 +309,25 @@ var usageLines = []string{
 // slash commands that only exist once the REPL is running. Without it
 // `cortex --help` fell through into the REPL, which reads as a hang.
 func printUsage() {
+	// Usage text that goes to a file or a pipe must stay plain text (issue
+	// #264): only paint when stdout is an interactive terminal. The color
+	// roles stay in style.Paint -- this only decides whether to paint at all,
+	// so the REPL and its golden tests keep their colored surfaces.
+	color := lineedit.IsInteractive(os.Stdout)
+	paint := func(s string, r style.Role) string {
+		if !color {
+			return s
+		}
+		return style.Paint(s, r)
+	}
 	fmt.Println("cortex " + version())
 	fmt.Println()
-	fmt.Println(style.Paint("Usage:", style.Accent))
+	fmt.Println(paint("Usage:", style.Accent))
 	for _, line := range usageLines {
 		fmt.Println("  " + line)
 	}
 	fmt.Println()
-	fmt.Println(style.Paint("Flags:", style.Accent))
+	fmt.Println(paint("Flags:", style.Accent))
 	fmt.Println("  --help, -h        show this list")
 	fmt.Println("  --version, -v     print the version and exit")
 	fmt.Println("  --tools           list the agent's registered tools at startup")

@@ -5,10 +5,14 @@
 package main
 
 import (
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/style"
 )
 
 func TestUsageLinesCoverSubcommands(t *testing.T) {
@@ -43,5 +47,40 @@ func TestUsageFlag(t *testing.T) {
 				t.Errorf("cortex %s output does not point at /help:\n%s", flag, got)
 			}
 		})
+	}
+}
+
+// TestUsagePlainWhenStdoutNotATerminal covers issue #264: usage text that
+// goes to a file or a pipe must be plain text, so `cortex --help > usage.txt`
+// and `cortex --help | less` carry no ANSI escapes. The color role logic in
+// style.Paint is unchanged; printUsage just declines to paint when stdout is
+// not a terminal.
+func TestUsagePlainWhenStdoutNotATerminal(t *testing.T) {
+	// Force Paint to emit color, to prove printUsage -- not the global
+	// NO_COLOR switch -- is what strips the escapes on a non-terminal.
+	defer style.ForceColor(true)()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	printUsage()
+	os.Stdout = orig
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("printUsage() wrote ANSI escapes to a non-terminal stdout (issue #264):\n%q", out)
+	}
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("printUsage() non-terminal output lost its headings:\n%s", out)
 	}
 }
