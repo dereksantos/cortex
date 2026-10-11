@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -108,6 +109,89 @@ type AgentRequest struct {
 	Timeout     time.Duration `json:"-"`
 	MaxAttempts int           `json:"-"`
 	Backoff     time.Duration `json:"-"`
+
+	// OmitReasoning (json:"-") is the context.keep_reasoning kill switch
+	// (config.go's keepReasoningEnabled), stamped inverted at session init so
+	// the zero value — every request literal, every subagent request — keeps
+	// the shipped default: the current turn's assistant reasoning rides back
+	// to the model as reasoning_content (see scopedReasoning). true strips
+	// every message's Reasoning from the wire, byte for byte the request
+	// cortex sent before reasoning was kept.
+	OmitReasoning bool `json:"-"`
+}
+
+// sendsReasoning reports whether this request round-trips the current turn's
+// assistant reasoning on the wire. Off when the kill switch is set, and off
+// for the OpenRouter dialect: the round-trip is scoped to the generic
+// OpenAI-compatible path (llama.cpp / vLLM / LiteLLM), whose chat templates
+// read reasoning_content on assistant messages. OpenRouter's request shape
+// for prior reasoning is its own (`reasoning_details`) and is not verified
+// here, so it keeps today's request byte for byte.
+func (r *AgentRequest) sendsReasoning() bool {
+	return !r.OmitReasoning && r.Dialect != llm.DialectOpenRouter
+}
+
+// reasoningFrom returns the index into r.Messages from which assistant
+// reasoning is sent: one past the LAST user-role message — the current
+// turn's user message, or a later harness nudge/finalize prompt. That is the
+// same boundary hybrid-thinking chat templates use (Qwen3's
+// last_query_index): reasoning is rendered only for the assistant messages
+// of the current tool-calling chain, so sending any earlier reasoning would
+// cost bytes the template drops anyway. len(r.Messages) (send nothing) when
+// sendsReasoning is false.
+func (r *AgentRequest) reasoningFrom() int {
+	if !r.sendsReasoning() {
+		return len(r.Messages)
+	}
+	for i := len(r.Messages) - 1; i >= 0; i-- {
+		if r.Messages[i].Role == RoleUser {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// sendsReasoningAt reports whether r.Messages[i]'s Reasoning goes on the
+// wire: an assistant message at or after reasoningFrom (from).
+func (r *AgentRequest) sendsReasoningAt(i, from int) bool {
+	return i >= from && r.Messages[i].Role == "assistant" && r.Messages[i].Reasoning != ""
+}
+
+// scopedReasoning returns r.Messages with Reasoning cleared on every message
+// that must not carry it on the wire — all of them when sendsReasoning is
+// false, otherwise everything before reasoningFrom (prior turns, including
+// reasoning a resumed transcript replayed) and any non-assistant message.
+// Copy-on-write: the stored Messages (and the transcript) keep their
+// reasoning, and a log with nothing to strip is returned as-is.
+func (r *AgentRequest) scopedReasoning() []Message {
+	from := r.reasoningFrom()
+	out := r.Messages
+	copied := false
+	for i := range r.Messages {
+		if r.Messages[i].Reasoning == "" || r.sendsReasoningAt(i, from) {
+			continue
+		}
+		if !copied {
+			out = append([]Message(nil), r.Messages...)
+			copied = true
+		}
+		out[i].Reasoning = ""
+	}
+	return out
+}
+
+// sentReasoningTokens estimates the tokens of reasoning this request will
+// put on the wire (the current turn's assistant reasoning, after any
+// shedding) — the term the context estimates add on top of Content.
+func (r *AgentRequest) sentReasoningTokens() int {
+	from := r.reasoningFrom()
+	sum := 0
+	for i := from; i < len(r.Messages); i++ {
+		if r.sendsReasoningAt(i, from) {
+			sum += len(r.Messages[i].Reasoning)
+		}
+	}
+	return cache.TokensOf(sum)
 }
 
 func (r *AgentRequest) effectiveTimeout() time.Duration {
@@ -154,10 +238,14 @@ type streamOptions struct {
 //     is what the outline stands in for
 //
 // The stored Messages are never mutated, so nothing accumulates and the transcript stays clean.
+// Reasoning is scoped first (scopedReasoning): only the current turn's
+// assistant messages keep it, so prior turns' reasoning never rides the wire.
 // The result is passed through wireSafe, so every message on the wire is one a
 // strict provider accepts.
 func (r *AgentRequest) wireMessages() []Message {
-	return wireSafe(r.composeWire())
+	scoped := *r
+	scoped.Messages = r.scopedReasoning()
+	return wireSafe(scoped.composeWire())
 }
 
 // composeWire assembles the two-zone layout wireMessages describes. Returns
@@ -471,7 +559,7 @@ func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
 	return &AgentResponse{
 		Choices: []Choice{{
 			Index:        0,
-			Message:      Message{Role: "assistant", Content: res.Content, ToolCalls: calls},
+			Message:      Message{Role: "assistant", Content: res.Content, ToolCalls: calls, Reasoning: res.Reasoning},
 			FinishReason: res.FinishReason,
 			Reasoning:    res.Reasoning,
 		}},
@@ -565,13 +653,12 @@ type Choice struct {
 	// Reasoning is the model's chain-of-thought for this choice, parsed off
 	// the wire response's message.reasoning_content / message.reasoning (a
 	// reasoning model's blocking-path fields) plus any leading
-	// <think>...</think> fence stripped out of Message.Content — display/
-	// telemetry-only, mirroring what the streaming path already exposes on
-	// StreamResult.Reasoning. json:"-" so it is never re-serialized: the
-	// custom UnmarshalJSON below is what actually populates it from the wire,
-	// and Message itself carries no reasoning field at all, so a stored or
-	// re-marshaled Message can never leak fence bytes or a reasoning field
-	// (see TestChoiceReasoningNeverRoundTrips).
+	// <think>...</think> fence stripped out of Message.Content, mirroring what
+	// the streaming path exposes on StreamResult.Reasoning. json:"-": the
+	// custom UnmarshalJSON below populates it from the wire. The same text is
+	// also carried on Message.Reasoning (its own reasoning_content field, never
+	// Content — fence bytes never leak back into Content), which is what the
+	// wire assembly round-trips for the current turn (scopedReasoning).
 	Reasoning string `json:"-"`
 }
 
@@ -628,6 +715,7 @@ func (c *Choice) UnmarshalJSON(data []byte) error {
 		}
 	}
 	c.Reasoning = reasoning
+	c.Message.Reasoning = reasoning
 	return nil
 }
 
@@ -638,6 +726,17 @@ type Message struct {
 
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+
+	// Reasoning is an assistant message's chain-of-thought, captured from the
+	// response (Choice.UnmarshalJSON / assembleStreamResponse). Serialized as
+	// reasoning_content — the field hybrid-thinking chat templates (Qwen3 via
+	// llama.cpp --jinja) render for the current tool-calling chain — and
+	// persisted under the same name in the session transcript (redacted, see
+	// redactedMessage). It reaches the wire ONLY through wireMessages, which
+	// strips it from every message outside the current turn
+	// (AgentRequest.scopedReasoning) and everywhere when the request does not
+	// round-trip reasoning (kill switch, OpenRouter dialect).
+	Reasoning string `json:"reasoning_content,omitempty"`
 
 	// Parts is the structured OpenAI content-parts form of Content
 	// (issue #216): text + image_url parts. When non-empty it replaces the
@@ -702,10 +801,12 @@ func (m *Message) MarshalJSON() ([]byte, error) {
 		Content    []part     `json:"content"`
 		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 		ToolCallID string     `json:"tool_call_id,omitempty"`
+		Reasoning  string     `json:"reasoning_content,omitempty"`
 	}{
 		Role:       m.Role,
 		Content:    parts,
 		ToolCalls:  m.ToolCalls,
 		ToolCallID: m.ToolCallID,
+		Reasoning:  m.Reasoning,
 	})
 }

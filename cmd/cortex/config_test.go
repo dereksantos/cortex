@@ -180,6 +180,56 @@ func TestMergeToolsEffortEscalation(t *testing.T) {
 	}
 }
 
+// TestSteerShellReads covers tools.steer_shell_reads: default off (nil
+// config, absent key, explicit false), an explicit true turns it on, it
+// reaches the tools seam through toolLimits(), parses from JSON, and a
+// project-level value overrides the user-level one.
+func TestSteerShellReads(t *testing.T) {
+	yes, no := true, false
+	var nilCfg *Config
+	tests := []struct {
+		name string
+		cfg  *Config
+		want bool
+	}{
+		{"nil config: off", nilCfg, false},
+		{"empty config: off", &Config{}, false},
+		{"explicit false: off", &Config{Tools: ToolConfig{SteerShellReads: &no}}, false},
+		{"explicit true: on", &Config{Tools: ToolConfig{SteerShellReads: &yes}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.steerShellReads(); got != tt.want {
+				t.Errorf("steerShellReads() = %v, want %v", got, tt.want)
+			}
+			if got := tt.cfg.toolLimits().SteerShellReads; got != tt.want {
+				t.Errorf("toolLimits().SteerShellReads = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("json key parses", func(t *testing.T) {
+		var c Config
+		if err := json.Unmarshal([]byte(`{"tools": {"steer_shell_reads": true}}`), &c); err != nil {
+			t.Fatal(err)
+		}
+		if !c.steerShellReads() {
+			t.Errorf("tools.steer_shell_reads: true should turn steering on")
+		}
+	})
+
+	t.Run("project overrides user; absent keeps base", func(t *testing.T) {
+		got := mergeTools(ToolConfig{SteerShellReads: &yes}, ToolConfig{SteerShellReads: &no})
+		if got.SteerShellReads == nil || *got.SteerShellReads {
+			t.Errorf("SteerShellReads = %v, want the project-level override (false) to win", got.SteerShellReads)
+		}
+		got2 := mergeTools(ToolConfig{SteerShellReads: &yes}, ToolConfig{})
+		if got2.SteerShellReads == nil || !*got2.SteerShellReads {
+			t.Errorf("SteerShellReads = %v, want the base value preserved", got2.SteerShellReads)
+		}
+	})
+}
+
 func TestLoadMergedConfig(t *testing.T) {
 	write := func(t *testing.T, dir, name, body string) string {
 		t.Helper()

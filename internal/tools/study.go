@@ -122,7 +122,7 @@ Your tools:
 - read_file(path, start, end): read a specific line range; a whole-file read of a large file is refused (outline or grep it first).
 - write_file(path, content): write a new file or overwrite one — prefer edit_file for changes to an existing file.
 - edit_file(path, old_string, new_string): exact-match edit, whitespace-tolerant on retry.
-- bash(command): run a shell command — build it, test it, inspect it. Risky commands are refused outright; there is no one to ask for approval in this loop, so don't attempt anything destructive or irreversible. Never use bash shell readers (cat, head, tail, tac, sed, grep, or similar) to read files or bash writers (sed -i, ed, perl -pi, python -c, > redirects) to write files — use read_file/outline/grep for reads and edit_file/write_file for writes.
+- bash(command): run a shell command — build it, test it, inspect it. Risky commands are refused outright; there is no one to ask for approval in this loop, so don't attempt anything destructive or irreversible. Reading and searching with the shell is fine, and so are scratch files outside the repository; change repository files with edit_file/write_file, not shell writers (sed -i, ed, perl -pi, python -c, > redirects).
 
 Locate, then change, then verify: use grep/outline to find exactly where the goal's work belongs, make the change, then run the relevant build/test command with bash to confirm it before you stop. If a check is blocked or refused, its result is still unknown — don't guess it, and a check of something else doesn't stand in for it. Verify what you can, look for another safe way to observe the same thing, adapt without repeating the refused call, and mark anything unverified in your report.
 
@@ -240,7 +240,7 @@ func StudySeed(goal, path, ol string) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "GOAL: %s\nPATH: %s\n\n", goal, path)
-	fmt.Fprintf(&b, "Search scope: keep grep/outline/read_file under PATH (%s). Start with grep for symbols, strings, facts, logs, journals, or multi-file questions; use outline when structure is missing. If the goal asks what/which file, grep for filename-shaped text first (for example `[A-Za-z0-9_.-]+\\.(go|md|json|yaml|toml)`).\n\n", path)
+	fmt.Fprintf(&b, "Search scope: keep grep/outline/read_file under PATH (%s). Start with grep for symbols, strings, facts, logs, journals, or multi-file questions; use outline when structure is missing. If the goal asks what/which file, grep for filename-shaped text first (for example `[A-Za-z0-9_.-]+\\.[A-Za-z0-9]+`).\n\n", path)
 	if strings.TrimSpace(ol) != "" {
 		b.WriteString("OUTLINE (each unit's line span is what you read with read_file):\n\n")
 		b.WriteString(ol)

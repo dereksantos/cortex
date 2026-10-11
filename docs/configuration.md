@@ -184,8 +184,9 @@ preflight check described above, which covers the same failure mode.
 ## `tools.*` gates
 
 All fields live under a top-level `"tools"` object. `nil`/absent means the
-tool ships enabled **except** `enable_effort_escalation`, which defaults
-off (opt-in behavior change, not an availability kill-switch).
+tool ships enabled **except** `enable_effort_escalation` and
+`steer_shell_reads`, which default off (opt-in behavior changes, not
+availability kill-switches).
 
 | Field | Gates | Default |
 |---|---|---|
@@ -198,11 +199,12 @@ off (opt-in behavior change, not an availability kill-switch).
 | `enable_context_merge` | `context_merge`. | `true` |
 | `enable_context_adjust_watermarks` | `context_adjust_watermarks`. | `true` |
 | `enable_effort_escalation` | The stuck-guard's one-shot reasoning-effort escalation (`docs/thinking-models.md` §5c) — an engine behavior, not a tool. | `false` |
+| `steer_shell_reads` | The `bash` result notes for shell file access. Default (`false`/absent): shell reads (`cat`, `head`, `tail`, `tac`, `sed -n`, `grep`) carry no note, and a file created by a `>`/`>>` redirect or `tee` carries no note when it is scratch — outside the workspace (e.g. `/tmp`) or not tracked by git (one `git ls-files` in the workdir; outside a git repo, or if git fails, in-workspace files count as tracked). Shell rewrites of tracked files — and every in-place form (`sed -i`, `ed`, `perl -pi`, `awk -i inplace`, `python -c` …) — still get the note steering to `edit_file`/`write_file`. `true` restores the previous steering: a read note pointing at `read_file`/`outline`/`grep` on every shell read, and the `edit_file`/`write_file` note on every shell-created file. Runtime notes only; the `bash` tool description is the same either way. | `false` |
 
-Every `false` above strips the corresponding tool declaration from the
-wire request, not just the dispatch path — a disabled tool is invisible to
-the model, not just refused if called (`session_core.go`'s
-`filterEnabledTools`).
+Every `false` above (other than the two opt-in behavior switches) strips
+the corresponding tool declaration from the wire request, not just the
+dispatch path — a disabled tool is invisible to the model, not just
+refused if called (`session_core.go`'s `filterEnabledTools`).
 
 Example disabling deletion and web access:
 
@@ -400,7 +402,8 @@ read per-session from the live `*CortexSession`'s config.
     "tail_drain_fraction": 0.333,
     "outline_fraction": 0.125,
     "in_turn_demotion": true,
-    "in_turn_keep_recent": 6
+    "in_turn_keep_recent": 6,
+    "keep_reasoning": true
   }
 }
 ```
@@ -412,6 +415,7 @@ read per-session from the live `*CortexSession`'s config.
 | `outline_fraction` | 0.125 (W/8) | Fraction of the window the demoted-turn outline (zone A) may grow to before it folds via the summarizer. |
 | `in_turn_demotion` | `true` | Gate for **in-turn demotion** (issue #171): before each main-loop send, if the current turn's accumulated tool results have outgrown the high watermark, the oldest are swapped for one-line recall-citable stubs in the wire copy only. **Absent/`null` means enabled** — an availability kill-switch, matching the `tools.enable_context_*`/`enable_web` precedent that an absent key must not disable a shipped capability. `false` turns the whole in-turn path off (byte-for-byte today's behavior). |
 | `in_turn_keep_recent` | 6 | How many of the turn's most-recent tool results always stay verbatim under in-turn demotion — even over budget, the newest few are what the model is actively working from. An explicit value `<= 0` is rejected at load; absent/`null` means the default (6). |
+| `keep_reasoning` | `true` | Keep the model's **reasoning within a turn**. A hybrid-thinking model's response `reasoning_content` (or its `reasoning` alias) is captured onto the assistant message and sent back as `reasoning_content` on that message in the next step's request — **only for the current turn's assistant messages** (those after the last user message, the same boundary Qwen3's chat template renders), so the model continues its plan instead of re-deriving it every tool call. Prior turns' reasoning is never sent. It is also persisted to the session transcript (`.cortex/sessions/*.jsonl`) as a separate `reasoning_content` field, secret-redacted like `content`, for trajectory analysis — never replayed on resume. Sent reasoning is booked in the in-turn demotion estimate, and when over budget the turn's **older reasoning is shed first** (all but the newest, oldest-first) before any tool result is stubbed. Scoped to the OpenAI-compatible path: never sent when `backend.type` is `openrouter`. **Absent/`null` means enabled** (same availability-kill-switch precedent as `in_turn_demotion`); `false` turns the whole feature off — the request is byte-for-byte the pre-feature one and nothing is persisted. Turn it off for a server that rejects `reasoning_content` on input messages. |
 
 **These are eval-verified defaults** — `cmd/cortex/context_eval_test.go`'s
 deterministic Δ suite and the live fleet eval

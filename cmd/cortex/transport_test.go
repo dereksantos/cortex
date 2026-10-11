@@ -144,11 +144,13 @@ func TestSendStreamReasoningTokenUsage(t *testing.T) {
 	}
 }
 
-// TestChoiceReasoningNeverRoundTrips is the design-constraint test: whatever
-// reasoning the blocking path parses off the wire must never come back out
-// when the stored Message is marshaled again — not as fence bytes left in
-// Content, not as a reasoning field, since Message carries none.
-func TestChoiceReasoningNeverRoundTrips(t *testing.T) {
+// TestChoiceReasoningStaysOutOfContent is the design-constraint test (it
+// replaces the pre-keep-reasoning "never round-trips" test): whatever
+// reasoning the blocking path parses off the wire lives ONLY in the message's
+// own reasoning_content field — never as fence bytes left in Content. Whether
+// that field reaches a later request is the wire assembly's decision
+// (scopedReasoning), pinned by the TestWireReasoning* tests.
+func TestChoiceReasoningStaysOutOfContent(t *testing.T) {
 	body := `{"choices":[{"message":{"role":"assistant","content":"<think>secret chain of thought</think>Answer.","reasoning_content":"also secret"}}]}`
 	srv := blockingServer(t, body)
 	defer srv.Close()
@@ -158,23 +160,29 @@ func TestChoiceReasoningNeverRoundTrips(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 	msg := res.Choices[0].Message
+	if msg.Content != "Answer." {
+		t.Errorf("Message.Content = %q, want %q (fence stripped)", msg.Content, "Answer.")
+	}
+	if strings.Contains(msg.Content, "secret") || strings.Contains(msg.Content, "<think>") {
+		t.Errorf("Message.Content leaked reasoning: %q", msg.Content)
+	}
+	if msg.Reasoning != res.Choices[0].Reasoning {
+		t.Errorf("Message.Reasoning = %q, want Choice.Reasoning %q", msg.Reasoning, res.Choices[0].Reasoning)
+	}
 
 	out, err := json.Marshal(&msg)
 	if err != nil {
 		t.Fatalf("marshal Message: %v", err)
 	}
-	got := string(out)
-	if strings.Contains(got, "secret") {
-		t.Errorf("marshaled Message leaked reasoning bytes: %s", got)
+	var back map[string]any
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if strings.Contains(got, "<think>") || strings.Contains(got, "</think>") {
-		t.Errorf("marshaled Message leaked a think fence: %s", got)
+	if back["content"] != "Answer." {
+		t.Errorf("marshaled content = %v, want %q", back["content"], "Answer.")
 	}
-	if strings.Contains(got, "reasoning") {
-		t.Errorf("marshaled Message carries a reasoning field: %s", got)
-	}
-	if msg.Content != "Answer." {
-		t.Errorf("Message.Content = %q, want %q (fence stripped)", msg.Content, "Answer.")
+	if _, ok := back["reasoning_content"]; !ok {
+		t.Errorf("marshaled Message has no reasoning_content field: %s", out)
 	}
 }
 

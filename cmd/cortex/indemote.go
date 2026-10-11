@@ -26,6 +26,11 @@ package main
 //     recorded the original content, so
 //     recall(@session/<id>#m<i>-<i+1>) resolves the stubbed message to its
 //     full original output (see Recall, tool_deps.go).
+//   - kept reasoning (context.keep_reasoning) is booked in the same estimate
+//     wherever the wire will carry it, and when over budget the current
+//     turn's OLDER reasoning is shed first (cache.PlanReasoningShed — every
+//     reasoning but the newest, oldest-first), before any tool result is
+//     stubbed.
 //
 // turn.go wires the hook:
 //
@@ -208,9 +213,16 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	// pure-policy shape; the policy's whole-prompt total is the precomputed
 	// fixed part (below) plus these, and the stubbed indices it returns are
 	// relative to this slice.
+	// Reasoning is booked only where the wire will actually carry it (the
+	// current turn's assistant messages, when the round-trip is on — see
+	// AgentRequest.scopedReasoning), so the estimate tracks what is sent.
+	from := req.reasoningFrom()
 	msgs := make([]cache.Msg, len(req.Messages)-tailFrom)
 	for i := range msgs {
 		msgs[i] = inTurnMsg(req.Messages[tailFrom+i])
+		if req.sendsReasoningAt(tailFrom+i, from) {
+			msgs[i].Reasoning = req.Messages[tailFrom+i].Reasoning
+		}
 	}
 	// The fixed part: the non-stubbable tokens that still go on the wire —
 	// the wire prefix [0, prefixEnd) plus the injected outline and ephemeral
@@ -221,6 +233,15 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 	// actually sent.
 	fixed := wirePrefixEstimate(req, prefixEnd)
 	budget := cache.WholePromptBudget{HighWM: policy.HighWM, LowWM: policy.LowWM}
+	// Shed FIRST: earlier steps' reasoning is the cheapest context to lose.
+	// Clearing it in place on the live log makes the shed stick for every
+	// later send this turn (the transcript already recorded it). Tool results
+	// are stubbed below only if shedding alone did not bring the prompt under
+	// budget — the stubbing plan measures the post-shed messages.
+	for _, idx := range cache.PlanReasoningShed(msgs, inTurnEstimator, budget, fixed) {
+		req.Messages[tailFrom+idx].Reasoning = ""
+		msgs[idx].Reasoning = ""
+	}
 	stubbed := cache.PlanWholePromptStubbing(msgs, inTurnEstimator, budget, policy.KeepRecent, prevStart-tailFrom, prevEnd-tailFrom, fixed)
 	for _, idx := range stubbed {
 		abs := tailFrom + idx
@@ -246,7 +267,7 @@ func (cs *CortexSession) applyInTurnDemotion(req *AgentRequest, turnStart int) {
 // in Content — keep the estimate to Content + tool-call-id so the drain math
 // tracks what actually shrinks (the Content swap).
 func inTurnEstimator(m cache.Msg) int {
-	return cache.TokensOf(len(m.Content) + len(m.ToolCallID))
+	return cache.TokensOf(len(m.Content) + len(m.ToolCallID) + len(m.Reasoning))
 }
 
 // wirePrefixEstimate is the whole-prompt estimate of the NON-STUBBABLE part
@@ -258,8 +279,12 @@ func inTurnEstimator(m cache.Msg) int {
 // [prefixEnd, tailFrom) counted once (as the outline block), never twice.
 func wirePrefixEstimate(req *AgentRequest, prefixEnd int) int {
 	sum := 0
-	for _, m := range req.Messages[:prefixEnd] {
+	from := req.reasoningFrom()
+	for i, m := range req.Messages[:prefixEnd] {
 		sum += len(m.Content)
+		if req.sendsReasoningAt(i, from) {
+			sum += len(m.Reasoning) // only when no user message follows the prefix
+		}
 		for _, call := range m.ToolCalls {
 			sum += len(call.Function.Name) + len(call.Function.Arguments)
 		}

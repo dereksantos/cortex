@@ -406,7 +406,7 @@ cortex resume [id]                  continue a session; with no id, select one
                                     from a list (or the latest when not a TTY)
 cortex turn [--session id] [--plan] [--json] <input...>
                                     run one headless turn; --plan makes a plan,
-                                    then runs each step as a separate turn
+                                    then runs each step as a separate turn (as /plan)
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex learn [--project <name>]     run one learning pass over the journal
 cortex change <start|commit|status> manage one git change at a time
@@ -441,7 +441,7 @@ writes table-driven tests:
 | `/help` | Shows the list of commands. |
 | `/context` | Shows a map of the context window and the cache use of the last request. |
 | `/compact` | Makes a summary of the session now, to free context. |
-| `/plan <task>` | Makes a plan in one turn, then runs each step as a separate turn. This is the same as `cortex turn --plan`. |
+| `/plan <task>` | Makes a plan in one turn, then runs each step as a separate turn. This is the same as `cortex turn --plan`. If a step cannot reproduce a reported problem, its reply starts with "Not reproduced:" and the evidence. |
 | `/clear` | Starts a new session. |
 | `/undo [N]` | Reverts the file changes of the Nth most recent turn (the default is 1). It shows the changed files and tells the model about the revert. |
 | `/sessions` | Shows a list of saved sessions. Type to filter. Enter continues a session. ESC closes the list. |

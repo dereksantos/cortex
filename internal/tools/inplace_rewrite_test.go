@@ -270,9 +270,24 @@ func TestDetectInPlaceRewrites_NoFalsePositives(t *testing.T) {
 	}
 }
 
-// TestInPlaceRewriteNote pins the model-facing note: it names the touched
-// targets (workdir-relative when anchored) and steers to edit_file/write_file.
+// withSteerShellReads turns tools.steer_shell_reads on for one test (the
+// previous read + create steering) and restores the defaults afterwards.
+func withSteerShellReads(t *testing.T) {
+	t.Helper()
+	l := DefaultLimits()
+	l.SteerShellReads = true
+	Configure(l)
+	t.Cleanup(ResetLimits)
+}
+
+// TestInPlaceRewriteNote pins the model-facing note under
+// tools.steer_shell_reads=true (the previous behavior, restored verbatim): it
+// names the touched targets (workdir-relative when anchored), steers rewrites
+// AND every shell-created file to edit_file/write_file, and steers shell
+// reads to read_file/outline/grep. The default (steering off) is pinned by
+// TestInPlaceRewriteNote_Default.
 func TestInPlaceRewriteNote(t *testing.T) {
+	withSteerShellReads(t)
 	cases := []struct {
 		name string
 		cmd  string
@@ -640,8 +655,11 @@ func TestBashInPlaceRewriteNoteEndToEnd(t *testing.T) {
 
 // TestBashReadNoteEndToEnd pins that the bash tool actually APPENDS the read
 // note to its result when a command reads files via the shell — the model sees
-// the steering to read_file/outline/grep (issue #209 step 2).
+// the steering to read_file/outline/grep (issue #209 step 2). Only under
+// tools.steer_shell_reads=true; by default shell reads carry no note
+// (TestBashShellAccessDefaultEndToEnd).
 func TestBashReadNoteEndToEnd(t *testing.T) {
+	withSteerShellReads(t)
 	cases := []struct {
 		name     string
 		cmd      string
@@ -707,7 +725,10 @@ func TestBashReadNoteEndToEnd(t *testing.T) {
 // rewrite note to its result when a command writes a file via tee — the one
 // writer the redirect scan cannot reach (issue #209 step 3) — while a bare
 // heredoc (which feeds stdin, creating no file) carries no note at all.
+// Under tools.steer_shell_reads=true: by default a tee onto a scratch path
+// outside the workspace carries no note (TestBashShellAccessDefaultEndToEnd).
 func TestBashTeeNoteEndToEnd(t *testing.T) {
+	withSteerShellReads(t)
 	cases := []struct {
 		name     string
 		cmd      string

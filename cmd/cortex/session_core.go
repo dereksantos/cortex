@@ -619,6 +619,9 @@ func NewCortexSession() *CortexSession {
 	req.MaxAttempts = code.maxAttempts(maxSendAttempts)
 	req.Backoff = code.backoff(retryBackoff)
 	req.Vision = code.VisionEnabled()
+	// context.keep_reasoning (default on): the kill switch strips the current
+	// turn's reasoning from the wire too, restoring the old request.
+	req.OmitReasoning = !cfg.keepReasoningEnabled()
 
 	// network.compat_timeout_sec is the config surface for the existing
 	// CORTEX_COMPAT_TIMEOUT_SEC env var's fallback default (pkg/llm's
