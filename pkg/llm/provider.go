@@ -73,6 +73,16 @@ type Provider interface {
 	Name() string
 }
 
+// ReasoningProvider is an optional capability: a Provider whose blocking
+// GenerateWithSystem can also hand back the response's separate
+// chain-of-thought field (reasoning_content / reasoning), "" when the backend
+// sent none. Callers type-assert for it; a provider without it is read through
+// GenerateWithSystem alone.
+type ReasoningProvider interface {
+	Provider
+	GenerateWithSystemReasoning(ctx context.Context, prompt, system string) (content, reasoning string, err error)
+}
+
 // StreamingProvider is an optional capability: a Provider that can stream its
 // response token-by-token. Callers type-assert for it and fall back to Generate
 // when a provider doesn't implement it, so non-streaming providers (Ollama,

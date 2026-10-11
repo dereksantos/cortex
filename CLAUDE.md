@@ -365,7 +365,22 @@ the model-driven memory tools
   packages with nothing wrong.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked. The Risky prompt shows the classifier's reason above the command
+  Blocked. Read-only inspection and routine build/test commands (`ls`, `git
+  status`, `go test`, …) take the safe path with no model call; any
+  shell-control character (pipe, chaining, redirect, substitution, `&`)
+  sends a command to the classifier instead, except a standalone stream
+  merge word — exactly `2>&1`, `>&2`, or `1>&2` — so `go test ./... 2>&1`
+  stays on the safe path while `2>&1;rm`, `2>&1file`, `2> out`, `> f`, and
+  `| tail` do not. The classifier fails closed: a transport error or a response it
+  cannot read is Risky ("classifier unavailable … gated for safety"). It
+  reads the verdict from the response content; only when the content is
+  empty (a reasoning model that ended its turn after reasoning) does it read
+  the response's reasoning field, accepting a verdict there only if it is a
+  concrete JSON verdict that concludes the reasoning and agrees with every
+  other one in it (templates like `"reason":"..."`, disagreement, or a prompt
+  that itself carries a `"risk"` key fail closed); a response with no answer
+  anywhere is re-sent once before failing closed
+  (`internal/shellrisk/llm.go`). The Risky prompt shows the classifier's reason above the command
   and offers `y` (once), `n`, `a` (always this session, exact command), and
   `p` (always this session, command prefix, e.g. `make test*`) (issue #107).
   Session approvals are memory-only — a fresh session starts with none —
