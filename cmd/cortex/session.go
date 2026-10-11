@@ -73,7 +73,7 @@ type sessionEntry struct {
 }
 
 func contextDir() string {
-	root := findUp(".cortex")
+	root := findProjectUp(".cortex")
 	if root == "" {
 		root = ".cortex"
 	}
