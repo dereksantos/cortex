@@ -1006,8 +1006,9 @@ func gitTrackedPaths(root string, rels []string) (map[string]bool, bool) {
 // one per workdir target in first-occurrence order, de-duplicated by
 // resolved path. "" when there is nothing to report — no workdir anchor, no
 // target inside the workdir, an untrusted workspace (the hook's own
-// once-per-session "inactive" note is the only output in that case), a hook
-// mode of off, or no format command that applies to the file's extension.
+// once-per-session "inactive" note, when the mode is not off, is the only
+// output in that case), a hook mode of off (silent, trusted or not), or no
+// format command that applies to the file's extension.
 //
 // The hook runs the command's argv against the file on disk, so a target
 // that does not exist yet (a create) simply yields no note — the file is

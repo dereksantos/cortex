@@ -744,7 +744,10 @@ NOTHING: a trusted repo may use repo-local binaries
 no per-tool allowlist to run — the trust decision authorizes running
 what the repo configures. The first edit of a session on an untrusted
 workspace gets a one-line "post-edit hook inactive" note (later edits
-stay silent); a trusted workspace gets no note.
+stay silent) unless the hook mode is `off` (`tools.post_edit_hook`,
+`CORTEX_POST_EDIT_HOOK`, `/hook off`, or a per-call `hook: "skip"`): with
+the mode off the result carries no note, and the note stays due for the
+session's first edit with the hook on. A trusted workspace gets no note.
 
 On a TRUSTED workspace, the per-edit format command runs when it applies:
 the command must be per-file (a whole-project format has no argument to

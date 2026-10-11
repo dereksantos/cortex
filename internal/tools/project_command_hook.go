@@ -21,8 +21,9 @@
 // repo-local binaries (./node_modules/.bin/eslint, ./bin/fmt) of ANY
 // language, so a per-tool allowlist would only couple the hook to specific
 // tools and keep producing bypasses. The first write/edit of a session
-// gets a one-line note saying the hook is inactive and how to enable it;
-// later edits stay silent.
+// with the hook mode not off gets a one-line note saying the hook is
+// inactive and how to enable it; later edits stay silent, and with the
+// mode off there is no note at all.
 //
 // Injection safety on the trusted path: commands run as a plain argv —
 // the template is split into argv BEFORE {file}/{dir} are substituted,
@@ -317,14 +318,19 @@ func hookOutcomeOf(templateRefused string, err error, changed bool) HookOutcome 
 // tool result is byte-identical to the pre-hook behavior in the common
 // case.
 //
-// On an untrusted workspace it runs NOTHING (trust is the hard gate, ahead
-// of the mode): the one-line "hook inactive" note is emitted exactly once
-// per SESSION (state is the session's per-run state, nil when the caller
-// has none — such a caller has no session to announce for, so the note is
-// never surfaced; that is also why every command-less or headless edit
-// stays byte-identical to the pre-hook result), and the slot is marked
-// consumed only when the note is actually emitted — a trusted workspace
-// never touches the state.
+// The mode is checked first: with the effective mode off the hook returns
+// silently, trusted or not, and leaves the note slot untouched (a note
+// telling the operator how to enable a hook they turned off is noise).
+// Otherwise, on an untrusted workspace it runs NOTHING (trust is the hard
+// gate for running anything, in every mode): the one-line "hook inactive"
+// note is emitted exactly once per SESSION (state is the session's per-run
+// state, nil when the caller has none — such a caller has no session to
+// announce for, so the note is never surfaced; that is also why every
+// command-less or headless edit stays byte-identical to the pre-hook
+// result), and the slot is marked consumed only when the note is actually
+// emitted — a trusted workspace and a mode-off call never touch the state,
+// so an untrusted session whose first edit was skipped (`hook: "skip"`)
+// still announces on its first edit with the hook on.
 //
 // It never returns an error: the hook observes, it doesn't veto. Every
 // failure (template refusal, spawn error, timeout, lint failure) is folded
@@ -332,15 +338,18 @@ func hookOutcomeOf(templateRefused string, err error, changed bool) HookOutcome 
 // the edit — and every note carries the elapsed time ("gofmt 0.2s", "eslint
 // timed out after 10s") so a slow tool is obvious in the result.
 func runProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, fsPath string, trusted bool, state *PostEditHookState, mode HookMode) (string, HookOutcome) {
+	if mode == HookModeOff {
+		// off: nothing runs, and it's the operator's choice, so silent —
+		// trusted or not. The inactive note would tell the operator how to
+		// enable a hook they turned off, so its slot is left unconsumed.
+		return "", HookOutcomeNotRun
+	}
 	if !trusted {
 		if state != nil && state.inactiveNoteDue() {
 			state.announceInactive()
 			return HookInactiveNote, HookOutcomeNotRun
 		}
 		return "", HookOutcomeNotRun
-	}
-	if mode == HookModeOff {
-		return "", HookOutcomeNotRun // off: nothing runs, and it's the operator's choice, so silent
 	}
 
 	// Note: in "all" mode lint is NOT run per edit (clippy/eslint are slow
@@ -412,7 +421,8 @@ func RunProjectCommandHook(ctx context.Context, cmds projectcmd.Commands, root, 
 }
 
 // HookInactiveNote is the one-line note the post-edit hook surfaces on the
-// FIRST write/edit of a session on an untrusted workspace (the "hook
+// FIRST write/edit of a session on an untrusted workspace whose effective
+// hook mode is not off (the "hook
 // inactive" note — the hook did not run at all, and the file is untouched,
 // not unformatted). Exported so a session wrapping the hook per turn (the
 // FormatHookNoter capability) can recognize the note's shape — the receipt's
@@ -432,8 +442,8 @@ const HookInactiveNote = "post-edit hook inactive: this workspace isn't trusted 
 // (the session folds the receipt into the capture summary).
 //
 // Gates, in order — all fail closed:
-//   - untrusted workspace: nothing runs (trust is the hard gate, ahead of
-//     the mode, exactly like the per-edit hook);
+//   - untrusted workspace: nothing runs (trust is the hard gate: nothing
+//     runs in any mode, exactly like the per-edit hook);
 //   - no lint command, or a lint command without {file}/{dir}: nothing to
 //     run (a whole-project lint is reported but never auto-run — the same
 //     rule roleApplicable applies);

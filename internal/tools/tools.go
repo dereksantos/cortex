@@ -333,10 +333,12 @@ func SetHookCeiling(m HookMode) { activeCeiling = m }
 // it never raises, see PostEditHookState.SetMode). A session (a
 // *CortexSession in cmd/cortex) is the unit of both "once per session" and
 // "the current mode": the note fires on the first write/edit of a session
-// on an untrusted workspace and stays quiet afterwards, and /hook off takes
-// effect from the next write/edit of that same session. The flag is marked
-// consumed only when the note is actually emitted, so a session that gets
-// trusted mid-session announces nothing after the flip. It is a POINTER
+// on an untrusted workspace whose effective mode is not off and stays quiet
+// afterwards, and /hook off takes effect from the next write/edit of that
+// same session (silencing the note too, if it has not fired yet). The flag
+// is marked consumed only when the note is actually emitted, so a session
+// that gets trusted mid-session announces nothing after the flip, and a
+// mode-off call (a `hook: "skip"`) leaves the slot for the next call. It is a POINTER
 // behind the HookState capability so the state mutates in place on the
 // session that owns it — and so a test's value-passed deps copies all
 // share the same session state.

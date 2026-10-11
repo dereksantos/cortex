@@ -343,8 +343,9 @@ the model-driven memory tools
   `cortex turn` stderr + its `lint` JSON field, and in the journal.
   Workspace trust (the user config's `project.trusted`, set via
   `cortex project trust`) is the ONLY gate: on an untrusted workspace it
-  runs nothing (one-line "hook inactive" note on the session's first
-  edit), on a trusted one it runs the applicable per-file format command
+  runs nothing in any mode (one-line "hook inactive" note on the session's
+  first edit whose hook mode is not off — with the mode off, no note), on
+  a trusted one it runs the applicable per-file format command
   as a shell-free argv (templates with shell syntax are skipped with a
   note), each with a 10s budget — and appends a note (what ran, what it
   reported) to the result; the note never fails the edit. Commands are
