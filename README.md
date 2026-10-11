@@ -21,11 +21,13 @@ Each turn starts with an index of these notes. Between sessions,
 `cortex learn` reads the turn journal and saves the notes that the agent
 did not write.
 
-I use Cortex every day to develop Cortex.
+I use Cortex every day to develop Cortex, and Cortex also fixes its own
+issues. See [Cortex builds Cortex](#cortex-builds-cortex).
 Cortex keeps all of its data in plain files under `.cortex/`. You can read,
 edit, or delete these files.
 
-[`Quick start`](#quick-start) · [`How memory works`](#how-working-memory-works) ·
+[`Quick start`](#quick-start) · [`Cortex builds Cortex`](#cortex-builds-cortex) ·
+[`How memory works`](#how-working-memory-works) ·
 [`Project status`](#project-status) · [`Roadmap`](ROADMAP.md)
 
 ## Example
@@ -59,6 +61,36 @@ served from its cache:
 ![The /context map: a glyph grid spanning a 256k window, showing the system
 prompt, memory index, and hydrated tail against free space, with the demote
 watermark marked](docs/assets/context-map.png)
+
+## Cortex builds Cortex
+
+Cortex fixes issues in its own repository. A self-development loop runs
+these steps with no person at the keyboard:
+
+1. The loop selects an open issue from the queue.
+2. Cortex plans the change, edits the code, and runs the tests.
+3. Cortex opens a pull request.
+4. Claude reviews the pull request. Claude cannot edit the code.
+5. Cortex fixes each review finding, and the review starts again.
+6. A pull request merges only after the review approves it and CI passes.
+
+From 2026-09-28 to 2026-10-10, the loop merged
+[49 pull requests](https://github.com/dereksantos/cortex/pulls?q=is%3Apr+is%3Amerged+label%3Acortex-loop).
+Cortex wrote about 85% of the commits in them. Claude wrote the other
+commits, mostly to merge `main` into the branches and to fix tests. Cortex used two
+open models: a 27B model on a local machine and a 177B model on a second
+machine.
+
+The reviews also find patterns in the mistakes that Cortex makes. We write
+each pattern as an issue, and the loop fixes it. These are some examples:
+
+- [#223](https://github.com/dereksantos/cortex/pull/223): per-turn
+  checkpoints and the `/undo` command.
+- [#212](https://github.com/dereksantos/cortex/pull/212): after Cortex
+  reads web content in a turn, more shell commands need your approval.
+- [#176](https://github.com/dereksantos/cortex/pull/176): `edit_file`
+  failed again and again because Cortex edited from an old view of the
+  file. Now a failed edit shows the current text of the nearest lines.
 
 ## Design
 
