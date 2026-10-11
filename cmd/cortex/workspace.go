@@ -12,9 +12,9 @@ import (
 // root path plus its derived .cortex dir and AGENTS.md instructions path,
 // constructed once and threaded through session construction, contextDir,
 // instructions discovery, and ConfinePath. This first pass is deliberately
-// behavior-preserving: WorkspaceFromCWD() reproduces findUp(".cortex")'s
-// existing upward-search exactly, so every CWD-implicit call site keeps
-// today's behavior bit-for-bit. NewWorkspace(root) is the explicit-root leg
+// behavior-preserving: WorkspaceFromCWD() uses the same upward search as
+// contextDir() (findProjectUp(".cortex")), so every CWD-implicit call site
+// resolves the same root. NewWorkspace(root) is the explicit-root leg
 // --project (M3.5) builds on; it takes no part in resolution yet.
 
 // Workspace is a resolved project root plus its derived paths. The zero
@@ -43,14 +43,15 @@ func NewWorkspace(root string) (*Workspace, error) {
 }
 
 // WorkspaceFromCWD resolves a Workspace the way every existing CWD-implicit
-// call site already does: findUp(".cortex") walks up from the working
-// directory looking for an existing .cortex dir; its parent becomes the
-// root. When no .cortex dir is found anywhere up the tree (a fresh
+// call site already does: findProjectUp(".cortex") walks up from the working
+// directory looking for an existing .cortex dir — skipping an ancestor's
+// user-level dir (~/.cortex or $CORTEX_HOME) — and its parent becomes the
+// root. When no project .cortex dir is found anywhere up the tree (a fresh
 // workspace), the root is the working directory itself — matching
 // contextDir()'s existing fallback (a relative "./.cortex" is created under
 // CWD on first write).
 func WorkspaceFromCWD() *Workspace {
-	if found := findUp(".cortex"); found != "" {
+	if found := findProjectUp(".cortex"); found != "" {
 		if abs, err := filepath.Abs(filepath.Dir(found)); err == nil {
 			return &Workspace{Root: abs}
 		}

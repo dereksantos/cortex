@@ -1353,7 +1353,83 @@ func findUp(rel string) string {
 	}
 }
 
-func findConfigPath() string { return findUp(filepath.Join(".cortex", "config.json")) }
+// findProjectUp is findUp for paths under a PROJECT's .cortex dir (rel is
+// ".cortex" or ".cortex/<file>"). It differs in one way: an ANCESTOR's
+// .cortex that is a user-level directory (isUserCortexDir) is skipped, so a
+// workspace under $HOME with no .cortex of its own never adopts ~/.cortex
+// (or $CORTEX_HOME) as its project dir — that would mix the project's
+// sessions/journal/memory into the user tier and inject the user's notes
+// into an unrelated project. The CWD's OWN .cortex is always accepted, even
+// when it is the user-level dir: with CWD == $HOME the workspace is $HOME
+// itself and its .cortex genuinely coincides with ~/.cortex.
+func findProjectUp(rel string) string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	dir := wd
+	for {
+		p := filepath.Join(dir, rel)
+		if _, err := os.Stat(p); err == nil {
+			if dir == wd || !isUserCortexDir(filepath.Join(dir, ".cortex")) {
+				return p
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// isUserCortexDir reports whether dir is a user-level Cortex directory:
+// the resolved user home (userhome.Dir — $CORTEX_HOME when set, else
+// ~/.cortex), or the default ~/.cortex even when $CORTEX_HOME points
+// elsewhere (it is still the machine's user tier, never a project's).
+// Comparison is by file identity (os.SameFile), so symlinked spellings of
+// the same directory match.
+func isUserCortexDir(dir string) bool {
+	var candidates []string
+	if d, err := userhome.Dir(); err == nil && d != "" {
+		candidates = append(candidates, d)
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".cortex"))
+	}
+	return sameFileAsAny(dir, candidates)
+}
+
+// sameFileAsAny reports whether p names the same existing file as any of
+// candidates.
+func sameFileAsAny(p string, candidates []string) bool {
+	pi, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	for _, c := range candidates {
+		if ci, err := os.Stat(c); err == nil && os.SameFile(pi, ci) {
+			return true
+		}
+	}
+	return false
+}
+
+// findConfigPath returns the PROJECT config layer's path, or "" when there
+// is none. It walks up like findProjectUp and additionally returns "" when
+// the match is the user config itself (CWD == $HOME: the CWD's own
+// .cortex/config.json is ~/.cortex/config.json), so the user config is
+// never layered twice — once as user, once as project.
+func findConfigPath() string {
+	p := findProjectUp(filepath.Join(".cortex", "config.json"))
+	if p == "" {
+		return ""
+	}
+	if u := userConfigPath(); u != "" && sameFileAsAny(p, []string{u}) {
+		return ""
+	}
+	return p
+}
 
 // agentInstructionFiles is the priority-ordered list of agent-instruction
 // files a repo may keep its conventions in. resolveInstructionFile returns

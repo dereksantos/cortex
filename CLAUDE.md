@@ -442,7 +442,13 @@ the model-driven memory tools
 
 Layered, lowest→highest: `~/.cortex/config.json` (user) →
 `./.cortex/config.json` (project, field-by-field override) → `CORTEX_BACKEND`
-env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
+env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`. The
+project layer and the project `.cortex/` dir (sessions, journal, memory) are
+found by walking up from the CWD (`findProjectUp`), which skips an
+ancestor that is the user-level dir (`~/.cortex` or `$CORTEX_HOME`): a
+workspace under `$HOME` with no `.cortex/` of its own gets one at the CWD,
+never the user tier. With CWD == `$HOME`, `~/.cortex` is the workspace dir
+and its config is the user layer only.
 
 ```json
 {
