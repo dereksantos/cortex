@@ -289,7 +289,16 @@ decisions:
    default — but the pin is template-kwargs-only; on an OpenRouter
    backend it would go silently inert (no `Reasoning{Enabled:false}`
    equivalent at those two sites). Study subagent deliberately NOT
-   pinned (the 2026-06-28 falsification stands).
+   pinned (the 2026-06-28 falsification stands). Second caveat
+   (2026-10-11): the kwarg is inert on a model whose template has no
+   thinking switch — a fleet-tagged `reasoner` (gpt-oss-20b behind
+   LiteLLM) reasons anyway, and in a 25-response sample 16 came back
+   with empty `content` and the verdict only at the end of
+   `reasoning_content`. The shell-risk judge therefore reads the
+   reasoning field when the content is empty — strictly (a concrete,
+   agreeing, concluding JSON verdict; templates, disagreement, or a
+   verdict-shaped prompt fail closed) — and re-sends once when a
+   response carries no answer anywhere (`internal/shellrisk/llm.go`).
 3. **Escalation defaults (P5): HOLD — fleet-shaped, not design-shaped.**
    The engine mechanics (finalize-off, stuck-escalate, SetModel
    re-resolve, model-pin re-derive) all verified shipped. But live: the

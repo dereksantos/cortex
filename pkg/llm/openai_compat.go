@@ -237,6 +237,14 @@ func (c *OpenAICompatClient) GenerateWithSystem(ctx context.Context, prompt, sys
 	return out, err
 }
 
+// GenerateWithSystemReasoning is GenerateWithSystem that also returns the
+// response's separate chain-of-thought field (reasoning_content, else
+// reasoning; "" when the backend sent neither). Satisfies ReasoningProvider.
+func (c *OpenAICompatClient) GenerateWithSystemReasoning(ctx context.Context, prompt, system string) (string, string, error) {
+	out, reasoning, _, err := c.generateFull(ctx, prompt, system)
+	return out, reasoning, err
+}
+
 // GenerateWithStats returns the response plus token usage. Local
 // endpoints typically don't expose cost (it's free), so callers
 // computing dollars should multiply tokens by their out-of-band
@@ -270,6 +278,12 @@ type streamOptions struct {
 type compatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ReasoningContent / Reasoning are the response-side chain-of-thought
+	// fields (llama.cpp --reasoning-format, vLLM, LiteLLM: reasoning_content;
+	// OpenRouter/Ollama: reasoning). omitempty keeps request messages — which
+	// never set them — byte-identical on the wire.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Reasoning        string `json:"reasoning,omitempty"`
 }
 
 type compatResponse struct {
@@ -406,8 +420,15 @@ func (e *compatErr) fullMessage() string {
 }
 
 func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string) (string, GenerationStats, error) {
+	out, _, stats, err := c.generateFull(ctx, prompt, system)
+	return out, stats, err
+}
+
+// generateFull is the blocking chat-completions call behind generate; it also
+// returns the response's reasoning field (reasoning_content, else reasoning).
+func (c *OpenAICompatClient) generateFull(ctx context.Context, prompt, system string) (string, string, GenerationStats, error) {
 	if c.model == "" {
-		return "", GenerationStats{}, fmt.Errorf("%s: model not set (use SetModel before generating)", c.name)
+		return "", "", GenerationStats{}, fmt.Errorf("%s: model not set (use SetModel before generating)", c.name)
 	}
 
 	msgs := make([]compatMessage, 0, 2)
@@ -426,25 +447,30 @@ func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string
 
 	raw, err := c.doRaw(ctx, "/chat/completions", body)
 	if err != nil {
-		return "", GenerationStats{}, err
+		return "", "", GenerationStats{}, err
 	}
 
 	var apiResp compatResponse
 	if err := json.Unmarshal(raw, &apiResp); err != nil {
-		return "", GenerationStats{}, fmt.Errorf("%s: decode response: %w", c.name, err)
+		return "", "", GenerationStats{}, fmt.Errorf("%s: decode response: %w", c.name, err)
 	}
 	if apiResp.Error != nil {
-		return "", GenerationStats{}, wrapServerError(c.name, apiResp.Error.fullMessage())
+		return "", "", GenerationStats{}, wrapServerError(c.name, apiResp.Error.fullMessage())
 	}
 	if len(apiResp.Choices) == 0 {
-		return "", GenerationStats{}, fmt.Errorf("%s: response had no choices", c.name)
+		return "", "", GenerationStats{}, fmt.Errorf("%s: response had no choices", c.name)
 	}
 
 	stats := GenerationStats{
 		InputTokens:  apiResp.Usage.PromptTokens,
 		OutputTokens: apiResp.Usage.CompletionTokens,
 	}
-	return apiResp.Choices[0].Message.Content, stats, nil
+	msg := apiResp.Choices[0].Message
+	reasoning := msg.ReasoningContent
+	if reasoning == "" {
+		reasoning = msg.Reasoning
+	}
+	return msg.Content, reasoning, stats, nil
 }
 
 // GenerateStream produces a response over SSE, invoking onDelta for each
