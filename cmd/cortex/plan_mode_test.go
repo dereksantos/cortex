@@ -130,18 +130,14 @@ func TestParsePlan(t *testing.T) {
 	}
 }
 
-// TestPlanStepPromptCarriesTaskAndPrinciple proves the per-step prompt
-// (issue #178) keeps the exact "Overall task: / Plan step N of M:" shape the
-// happy-path test asserts AND restates the verify-before-fix principle
-// (prompt.go's verifyBeforeFixPrinciple — the same const the base system
-// prompt carries), so each step turn (tools present) carries both even after
-// the planning turn is demoted out of the window. The check is on the
-// PRINCIPLE, not on recipe phrases: the principle says confirm the problem
-// exists before fixing it, and that a reported problem that doesn't
-// reproduce is finished by reporting it with the evidence. It ALSO carries
-// the no-repro output-shape convention (noReproMarker) that turns that
-// principle's "saying so" into words noReproNote can recognize.
-func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
+// TestPlanStepPromptCarriesTaskAndMarker proves the per-step prompt (issue
+// #178) keeps the exact "Overall task: / Plan step N of M:" shape the
+// happy-path test asserts AND carries the no-repro output-shape convention
+// (noReproMarker), so a step that finds the reported problem doesn't
+// reproduce writes it in words noReproNote recognizes. The working
+// principles themselves ride in the base system prompt, not here
+// (TestPlanPromptsCarryNoReproRule checks that on the wire).
+func TestPlanStepPromptCarriesTaskAndMarker(t *testing.T) {
 	got := planStepPrompt("reproduce and fix the flaky test", 2, 4, "reproduce the bug, then fix it", nil)
 	// The exact two-line shape the existing end-to-end tests assert on.
 	for _, want := range []string{"Overall task: reproduce and fix the flaky test", "Plan step 2 of 4: reproduce the bug, then fix it"} {
@@ -149,56 +145,8 @@ func TestPlanStepPromptCarriesTaskAndPrinciple(t *testing.T) {
 			t.Errorf("planStepPrompt missing %q:\n%s", want, got)
 		}
 	}
-	// The verify-before-fix principle is restated for the step turn — check
-	// the PRINCIPLE (verify-before-fix + honest no-repro outcome), not exact
-	// recipe wording.
-	if !strings.Contains(got, verifyBeforeFixPrinciple) {
-		t.Errorf("planStepPrompt does not restate the verify-before-fix principle (verifyBeforeFixPrinciple):\n%s", got)
-	}
-	if !strings.Contains(strings.ToLower(got), "confirm a problem exists before fixing") {
-		t.Errorf("planStepPrompt does not state the verify-before-fix principle (confirm before fix):\n%s", got)
-	}
-	// THE connect-through point (issue #178): the step prompt carries the
-	// no-repro output-shape convention, so a real model that concludes the
-	// bug doesn't reproduce writes it in the shape noReproNote recognizes.
 	if !strings.Contains(got, noReproMarker) {
 		t.Errorf("planStepPrompt does not carry the no-repro output-shape convention (noReproMarker):\n%s", got)
-	}
-	// And the issue #200 blocked-check principle: a step turn is where a
-	// blocked verification command actually lands, so the step prompt carries
-	// the standing principle verbatim (same const the base system prompt has)
-	// even after the planning turn is demoted out of the window.
-	if !strings.Contains(got, blockedCheckPrinciple) {
-		t.Errorf("planStepPrompt does not restate the blocked-check principle (blockedCheckPrinciple):\n%s", got)
-	}
-	// And the issue #162 review-feedback principle: a step turn is where a
-	// review round's findings land, and demotion at the turn boundaries can
-	// fold the review itself out of view — so the step prompt carries the
-	// per-finding-accounting principle verbatim (same const as the base prompt).
-	if !strings.Contains(got, reviewFeedbackPrinciple) {
-		t.Errorf("planStepPrompt does not restate the review-feedback principle (reviewFeedbackPrinciple):\n%s", got)
-	}
-	// And the issue #225 principles: a step turn is where a lower-level
-	// helper gets tested in place of the user-facing path the criterion
-	// names (testTargetPrinciple) and where a failing acceptance test gets
-	// bent to pass (specTestPrinciple) — so the step prompt carries both
-	// verbatim (same consts as the base system prompt) even after demotion
-	// folds the planning turn out of the window.
-	if !strings.Contains(got, testTargetPrinciple) {
-		t.Errorf("planStepPrompt does not restate the test-target principle (testTargetPrinciple):\n%s", got)
-	}
-	if !strings.Contains(got, specTestPrinciple) {
-		t.Errorf("planStepPrompt does not restate the spec-test principle (specTestPrinciple):\n%s", got)
-	}
-	// And the issue #231 comment-truth principle: the step turn is where the
-	// behavior actually changes — a reordered call, a new overwrite, a removed
-	// guard — so the comments adjacent to the edited span (and the summary
-	// written for the step) can go stale against it, and demotion at the turn
-	// boundaries folds the planning turn out of view. The step prompt carries
-	// the standing principle verbatim (same const as the base system prompt)
-	// so the obligation survives the fold.
-	if !strings.Contains(got, commentsTruthPrinciple) {
-		t.Errorf("planStepPrompt does not restate the comment-truth principle (commentsTruthPrinciple):\n%s", got)
 	}
 	// And the convention and the probe agree on the same phrase: the marker
 	// the model is told to use is the prefix noReproNote anchors on, so a
@@ -275,14 +223,13 @@ func TestNoReproNote(t *testing.T) {
 	}
 }
 
-// TestPlanPromptsCarryNoReproRule proves the prompts each turn actually sends
-// (issue #178) restate the verify-before-fix principle: the PLANNING prompt
-// (plan shape + task, no tools) and each STEP prompt (overall task + principle,
-// tools present). It drives TurnWithPlan through the existing planTestBackend
-// seam and inspects lastUserMessages — the recorded per-request user prompts —
-// so it checks the real bytes a turn carries, not just the instruction
-// constant. The check is on the PRINCIPLE (verify-before-fix + honest
-// no-repro outcome), not on the recipe phrases a procedural rule would use.
+// TestPlanPromptsCarryNoReproRule proves the requests each plan turn actually
+// sends (issue #178) carry the reproduce-before-fixing principle: every
+// request — the PLANNING turn (no tools) and each STEP turn — rides on the
+// base system prompt, and each STEP prompt carries the overall task and the
+// no-repro marker. It drives TurnWithPlan through the existing
+// planTestBackend seam and inspects the recorded per-request messages, so it
+// checks the real bytes a turn carries, not just the constants.
 func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 	root := t.TempDir()
 	backend := newPlanTestBackend(t,
@@ -300,27 +247,34 @@ func TestPlanPromptsCarryNoReproRule(t *testing.T) {
 		t.Fatalf("recorded prompts = %d, want 3 (one planning + two step)", len(users))
 	}
 
-	// (a) table: which prompt, and what it must carry.
-	// verifyBeforeFixPrinciple is the SAME const the base system prompt
-	// carries (prompt.go), so both planning and step turns see the identical
-	// wording; noReproMarker (the output-shape convention) rides in the STEP
-	// prompts only — the planning turn has no step, no tools, and its
-	// output-shape rules forbid anything before the list, so the marker must
-	// NOT be there (it would break parsePlan).
+	// (a) every request — planning and step turns alike — carries the base
+	// system prompt, which states the reproduce-before-fixing principle; the
+	// plan prompts don't restate it.
+	for i, sys := range backend.systemMessages() {
+		if !strings.HasPrefix(sys, SystemPrompt) {
+			t.Errorf("request %d's system message does not start with the base SystemPrompt:\n%s", i, sys)
+		}
+	}
+
+	// (b) table: which prompt, and what it must carry. noReproMarker (the
+	// output-shape convention) rides in the STEP prompts only — the planning
+	// turn has no step, no tools, and its output-shape rules forbid anything
+	// before the list, so the marker must NOT be there (it would break
+	// parsePlan).
 	tests := []struct {
 		name     string
 		prompt   string
 		contains []string
 	}{
 		{
-			name:     "planning prompt carries the verify-before-fix principle",
+			name:     "planning prompt carries the task",
 			prompt:   users[0],
-			contains: []string{verifyBeforeFixPrinciple, "confirm a problem exists before fixing"},
+			contains: []string{"Task: reproduce and fix a bug"},
 		},
 		{
-			name:     "step prompt carries the original task, the principle, the blocked-check principle, the review-feedback principle, and the no-repro marker",
+			name:     "step prompt carries the original task and the no-repro marker",
 			prompt:   users[1],
-			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", verifyBeforeFixPrinciple, "confirm a problem exists before fixing", blockedCheckPrinciple, reviewFeedbackPrinciple, "owed an explicit disposition", noReproMarker},
+			contains: []string{"Overall task:", "Plan step 1 of 2:", "reproduce and fix a bug", noReproMarker},
 		},
 	}
 	for _, tt := range tests {
@@ -425,6 +379,7 @@ type planTestBackend struct {
 	haveTools []bool
 	toolCount []int    // toolCount[i] is the number of tools the i-th request advertised
 	lastUser  []string // lastUser[i] is the last user message in the i-th request
+	firstSys  []string // firstSys[i] is the first system message in the i-th request
 	// cancelAt, when set, invokes cancelCtx on the request with index cancelAt
 	// (0-based, in arrival order) — the way a test simulates a user pressing
 	// Ctrl-C mid-turn without racing a watcher goroutine. cancelCtx is the
@@ -443,13 +398,19 @@ func newPlanTestBackend(t *testing.T, replies ...string) *planTestBackend {
 		var req map[string]any
 		_ = json.Unmarshal(body, &req)
 		tools, _ := req["tools"].([]any)
-		var lastUserContent string
+		var lastUserContent, firstSysContent string
 		if msgs, ok := req["messages"].([]any); ok {
 			for _, m := range msgs {
-				if mm, ok := m.(map[string]any); ok && mm["role"] == "user" {
-					if content, ok := mm["content"].(string); ok {
-						lastUserContent = content
-					}
+				mm, ok := m.(map[string]any)
+				if !ok {
+					continue
+				}
+				content, _ := mm["content"].(string)
+				switch {
+				case mm["role"] == "user":
+					lastUserContent = content
+				case mm["role"] == "system" && firstSysContent == "":
+					firstSysContent = content
 				}
 			}
 		}
@@ -459,6 +420,7 @@ func newPlanTestBackend(t *testing.T, replies ...string) *planTestBackend {
 		b.haveTools = append(b.haveTools, len(tools) > 0)
 		b.toolCount = append(b.toolCount, len(tools))
 		b.lastUser = append(b.lastUser, lastUserContent)
+		b.firstSys = append(b.firstSys, firstSysContent)
 		b.mu.Unlock()
 
 		// Simulate a user pressing Ctrl-C mid-turn: cancel the run's context on
@@ -524,6 +486,14 @@ func (b *planTestBackend) lastUserMessages() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]string(nil), b.lastUser...)
+}
+
+// systemMessages returns each request's first system message, in order —
+// the test's way of proving every plan turn rides on the base system prompt.
+func (b *planTestBackend) systemMessages() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.firstSys...)
 }
 
 // stepCount is the number of tools-present (STEP) requests — the planning
@@ -636,13 +606,6 @@ func TestTurnWithPlanHappyPath(t *testing.T) {
 	for i := 1; i < len(users); i++ {
 		if !strings.Contains(users[i], task) {
 			t.Errorf("step %d prompt %q does not contain the original task %q", i, users[i], task)
-		}
-		// Each step turn (tools present) must ALSO restate the
-		// verify-before-fix principle (issue #178) — the base system prompt
-		// carries it, but each step prompt restates it so it survives demotion
-		// of the planning turn.
-		if !strings.Contains(strings.ToLower(users[i]), strings.ToLower("confirm a problem exists before fixing")) {
-			t.Errorf("step %d prompt %q does not restate the verify-before-fix principle", i, users[i])
 		}
 	}
 	if len(res.Steps) != 3 {

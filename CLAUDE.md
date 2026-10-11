@@ -96,7 +96,7 @@ Three capabilities distinguish it:
 |---|---|
 | `cortex` | Interactive REPL (default) |
 | `cortex resume [id]` | Resume a prior session — with no id on an interactive TTY, opens the session picker first (ESC falls back to latest; non-TTY / `NO_COLOR` / `CORTEX_LOOP_RENDER=0` take latest directly); its resume banner goes to stderr (issue #118) |
-| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); the verify-before-fix principle rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a reported problem that doesn't reproduce is finished by reporting it with the evidence — the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); the review-feedback principle (issue #162) likewise rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in each step prompt — every review finding is owed a disposition of addressed / deferred-with-reason / disputed, pick one of several offered alternatives rather than applying them all, fix the class a reviewer's examples illustrate, and put things where the reviewer said, since a step turn is where a review round's findings land and demotion can fold the review out of view; the spec-test principle (issue #225) and test-target principle likewise ride in the base system prompt and are restated in the planning and step prompts — a failing test written from the issue's acceptance criteria is a spec, so making it green by editing the test instead of the behavior the criterion names is a deviation owed a report, and a criterion is verified only through the user-facing surface it describes, not a lower-level helper; the comment-truth principle (issue #231) likewise rides in the base system prompt (so every turn, loop-driven or not, sees it) and is restated in the planning and step prompts — a comment must say what the code does, not what was intended, and a summary or docs claim describing behavior is the same class: it must match the code you shipped; `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118); a turn that ran tools emits a measurement-only receipt on stderr and under the `receipt` JSON key, listing files changed (`git diff --stat` plus untracked files), the exit codes of the model's own runs of the project's test/build commands (`not run:` when the run was refused or blocked), the files the format hook failed on, and (when the task carried a `- [ ]` checklist) the checklist items the reply leaves out — measured at the turn's end, per item, every significant word of the item (lowercased, punctuation-stripped, stop-words dropped) must appear in the reply with a word-prefix match, so an item named in the reply's own words — including an explicit "not done" — is accounted for; one per line, no aggregate; plan-then-execute measures once per run, deterministically at the run's end, against the rendered per-step report (no step prompt carries the checklist); empty when there is no checklist or the reply accounted for every item (issues #219, #220); it is saved as a transcript note and never shown to the model; a final reply the engine's sanitizer could not repair (still empty, still carrying tool-call markup, or still truncated after salvage) is flagged on stderr as `summary issue: <value>` (values `empty`/`markup`/`truncated`) and under the `summary_issue` JSON key with `--json` — a driver that feeds the reply into a commit message can check for it before doing so (issue #230). |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); every plan turn carries the base system prompt, and each step prompt restates the overall task — a reported problem that doesn't reproduce is finished by reporting it with the evidence: the step prompts tell the model to lead such a reply with "Not reproduced:" + the evidence, and that note is carried into the later steps' prompts and the per-step report (issue #178); `--session`'s resume banner and the session id go to stderr — stdout is the answer only (issue #118); a turn that ran tools emits a measurement-only receipt on stderr and under the `receipt` JSON key, listing files changed (`git diff --stat` plus untracked files), the exit codes of the model's own runs of the project's test/build commands (`not run:` when the run was refused or blocked), the files the format hook failed on, and (when the task carried a `- [ ]` checklist) the checklist items the reply leaves out — measured at the turn's end, per item, every significant word of the item (lowercased, punctuation-stripped, stop-words dropped) must appear in the reply with a word-prefix match, so an item named in the reply's own words — including an explicit "not done" — is accounted for; one per line, no aggregate; plan-then-execute measures once per run, deterministically at the run's end, against the rendered per-step report (no step prompt carries the checklist); empty when there is no checklist or the reply accounted for every item (issues #219, #220); it is saved as a transcript note and never shown to the model; a final reply the engine's sanitizer could not repair (still empty, still carrying tool-call markup, or still truncated after salvage) is flagged on stderr as `summary issue: <value>` (values `empty`/`markup`/`truncated`) and under the `summary_issue` JSON key with `--json` — a driver that feeds the reply into a commit message can check for it before doing so (issue #230). |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
@@ -272,25 +272,14 @@ the model-driven memory tools
   Study's read set plus `write_file`/`edit_file`/`bash`, depth cap 1, Risky
   shell treated as Blocked inside it. Runs as the coder's current model by
   default (optional per-call `model` arg); config gate `tools.enable_agent`.
-- The built-in system prompt carries a locate-first working-style principle
-  (issue #142), spliced into the `# How you work` block and mirrored here
-  verbatim (a drift tripwire, same pattern as the debugging principle under
-  Constraints → Testing):
-
-  Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers.
-
-  The built-in system prompt also carries the writing half of that principle
-  (issue #224) as `locateBeforeWritingPrinciple`, spliced right after the
-  locate-first line and mirrored here verbatim (the same drift tripwire):
-
-  Locate before writing. Before writing code that names a helper, constant, type or path you have not seen in this session, grep or outline for it and use what actually exists — never invent identifiers, type shapes, or file paths; a name that is not there comes back undefined. Before adding a new package-level name (a test helper, a const, a fixture), grep the package (including its other _test.go files) so the name exists where you call it and does not collide with one already declared; checking first costs one tool call, a guessed name costs a build-and-fix round per guess.
-
-  It answers the self-dev loop's tick 20261006T074738Z: new code (mostly test
-  files) was written against helpers, type shapes and paths that were never
-  located (seven undefined identifiers at once; a compile error carried from
-  one session to the next; a duplicated package-level const). It rides in the
-  base system prompt and is restated in each plan step prompt (where new
-  files actually get written and demotion can fold the locate work away).
+- The built-in system prompt (`cmd/cortex/prompt.go`) is six short,
+  language-neutral working principles, capped at 4,000 composed characters
+  (`TestSystemPromptSizeBudget`); harness text the model sees — system,
+  plan-mode, and subagent prompts, and every tool's description — is kept
+  free of language-specific terms (`TestHarnessTextIsLanguageNeutral`).
+  Guidance for working on this repo (locate-first, locate-before-writing,
+  test integrity, debugging, comment truth, review feedback) lives in
+  [`AGENTS.md`](AGENTS.md).
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton. An
@@ -334,8 +323,8 @@ the model-driven memory tools
   span and retry `edit_file` — or use `write_file` for a whole-file rewrite —
   rather than scripting the change through `bash` (sed/awk/python) (#201:
   scripted multi-line edits corrupt files and skip the diff display + post-
-  edit hook). An interior-whitespace-only mismatch (e.g. gofmt re-aligned the
-  span's spacing) returns an "only whitespace differs" error with the region's
+  edit hook). An interior-whitespace-only mismatch (e.g. a formatter re-aligned
+  the span's spacing) returns an "only whitespace differs" error with the region's
   current lines, and a landed edit that removes guard-shaped lines
   (if/else/for/switch/case/return/panic/Lock/Unlock) not present in the
   replacement appends a GUARD DROPPED warning naming them (#210). A successful
@@ -526,19 +515,10 @@ Ollama, OpenRouter, OpenAI-compatible). There is exactly one LLM layer —
 - Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
 - Tests that EXECUTE shell commands must use forms portable across GNU and BSD (macOS) tools — e.g. `sed -i.bak 's/x/y/' f` instead of bare `sed -i 's/x/y/' f` (BSD sed reads the next argument as a backup suffix; #228, `internal/tools/shell_portability_test.go` guards this).
 
-Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code.
-
-Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification.
-
-Test the path the requirement names. A criterion is verified only through the user-facing surface it describes — the command, the API, the entry point the user invokes — not through a lower-level helper that surface routes through: a test that never calls the surface proves nothing about it, no matter how green.
-
-A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it.
-
-Every finding a review raises is owed an explicit disposition: addressed, deferred with a reason, or disputed. A finding left with none of these is a finding you dropped, and a dropped finding is invisible to the next round, so it comes back. When a reviewer offers several options as alternatives, pick one and say which — applying all of them is not thoroughness, it stacks behaviour the reviewer meant as a choice. When a reviewer gives example instances, name and fix the underlying class rather than only the instances listed: a fix that covers the examples and not the class needs another round for the next example. Where the reviewer asked for something to live, put it there — a note the reviewer asked to keep belongs in the place they named, not in a nearby file that happens to be open.
-
-A failing test written from the issue's acceptance criteria is a spec. Making it green by editing the test, its setup, or its expectation — instead of fixing the behavior the criterion names — is a deviation you must report in your summary, not a fix: the criterion stays unmet, a green suite does not count as coverage, and the defect the test caught must be fixed in production, never patched around in the test. If the criterion itself is wrong, say so with the evidence instead of silently rewriting it.
-
-A comment must say what the code does, not what you intended it to do. A comment the code doesn't implement is worse than no comment — it misleads the next reader, who is often you in a later session. After a behavioral change, re-read the comments adjacent to the span you edited — reordered calls, a new overwrite, a removed guard all stale them — and fix or delete any that no longer hold. A summary or docs claim describing behavior is the same class: it must match the code you shipped, and claiming behavior the code doesn't implement is a deviation owed the same report as a test you bent to pass.
+Working guidance for this codebase — tests as evidence, testing the path a
+requirement names, acceptance-criteria tests as specs, debugging, blocked
+checks, comment truth, and review-feedback dispositions — is in
+[`AGENTS.md`](AGENTS.md), which Cortex also loads when it works here.
 
 **Checks**: `./scripts/check.sh [fmt|vet|lint|all]` runs gofmt + `go vet`
 + golangci-lint (the same gate CI runs). Keep `go build ./...`, `go vet`,
@@ -554,6 +534,7 @@ go test ./...                # full suite
 
 ## Key files
 
+- `AGENTS.md` — working guidance for this codebase (tests, debugging, review feedback); the instruction file Cortex loads when it works in this repo
 - `cmd/cortex/main.go` — REPL, `CortexSession` (composition root), `Turn`, dispatch, config
 - `cmd/cortex/loop.go` — the `runLoop` engine + the `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` seams + `requestFor`
 - `cmd/cortex/study.go` — the `Study` subagent wiring (`RunSubagent`, `dispatcherFor`, `Outline`) + telemetry

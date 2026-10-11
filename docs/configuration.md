@@ -184,8 +184,9 @@ preflight check described above, which covers the same failure mode.
 ## `tools.*` gates
 
 All fields live under a top-level `"tools"` object. `nil`/absent means the
-tool ships enabled **except** `enable_effort_escalation`, which defaults
-off (opt-in behavior change, not an availability kill-switch).
+tool ships enabled **except** `enable_effort_escalation` and
+`steer_shell_reads`, which default off (opt-in behavior changes, not
+availability kill-switches).
 
 | Field | Gates | Default |
 |---|---|---|
@@ -198,11 +199,12 @@ off (opt-in behavior change, not an availability kill-switch).
 | `enable_context_merge` | `context_merge`. | `true` |
 | `enable_context_adjust_watermarks` | `context_adjust_watermarks`. | `true` |
 | `enable_effort_escalation` | The stuck-guard's one-shot reasoning-effort escalation (`docs/thinking-models.md` §5c) — an engine behavior, not a tool. | `false` |
+| `steer_shell_reads` | The `bash` result notes for shell file access. Default (`false`/absent): shell reads (`cat`, `head`, `tail`, `tac`, `sed -n`, `grep`) carry no note, and a file created by a `>`/`>>` redirect or `tee` carries no note when it is scratch — outside the workspace (e.g. `/tmp`) or not tracked by git (one `git ls-files` in the workdir; outside a git repo, or if git fails, in-workspace files count as tracked). Shell rewrites of tracked files — and every in-place form (`sed -i`, `ed`, `perl -pi`, `awk -i inplace`, `python -c` …) — still get the note steering to `edit_file`/`write_file`. `true` restores the previous steering: a read note pointing at `read_file`/`outline`/`grep` on every shell read, and the `edit_file`/`write_file` note on every shell-created file. Runtime notes only; the `bash` tool description is the same either way. | `false` |
 
-Every `false` above strips the corresponding tool declaration from the
-wire request, not just the dispatch path — a disabled tool is invisible to
-the model, not just refused if called (`session_core.go`'s
-`filterEnabledTools`).
+Every `false` above (other than the two opt-in behavior switches) strips
+the corresponding tool declaration from the wire request, not just the
+dispatch path — a disabled tool is invisible to the model, not just
+refused if called (`session_core.go`'s `filterEnabledTools`).
 
 Example disabling deletion and web access:
 

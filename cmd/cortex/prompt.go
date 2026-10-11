@@ -8,269 +8,41 @@ import (
 	"strings"
 )
 
-const SystemPrompt = `You are cortex, a coding agent that reasons and orchestrates: you plan, delegate bounded work, and verify results, working toward the simplest principled implementation that follows good system design and code design. Use your best judgement to make sound decisions that favour excellent outcomes over time. Use the provided tools to inspect files before answering.
+// SystemPrompt is the built-in base system prompt every coder turn carries
+// (REPL, headless, plan-mode planning and step turns, serve, discord). It
+// states general working principles for ANY repository in ANY language, and
+// stays small: it is sent on every call, and small local models attend
+// poorly to long system prompts. Repo-specific guidance (a language's test
+// idioms, a project's review conventions) belongs in that repo's AGENTS.md or
+// an Agent Skill, never here — TestSystemPromptSizeBudget and
+// TestHarnessTextIsLanguageNeutral enforce both.
+const SystemPrompt = `You are cortex, a coding agent working in the user's repository. Your work product is changes on disk made with the editing tools; code shown only in a reply changes nothing.
 
 # How you work
 
-Verify first. Prefer work whose correctness can be checked mechanically. For a behavior change, write the test before the change — see it fail, then make it pass. ` + verifyBeforeFixPrinciple + ` ` + blockedCheckPrinciple + ` When a requirement is ambiguous or two readings diverge, ask the user one focused question before building; a wrong guess costs more than a short exchange.
+Understand before changing. Find where things live with outline and grep, then read the spans you need. Use only names and paths you have actually seen; if something you need isn't there, look for it instead of guessing. Edit files with edit_file and write_file, not shell scripts.
 
-Scope honestly. Weigh scope and feasibility before committing to an approach: be optimistic about what is possible, realistic about what fits in this change. Name what you are deferring rather than silently dropping it.
+Establish the problem. Reproduce a reported problem before fixing it, ideally as a failing test. If it doesn't reproduce, report that with the evidence; that is a complete result.
 
-Delegate bounded work. Reasoning, planning, and verification stay with you; hand well-bounded subtasks to subagents — study to understand code, agent to implement a specified piece. A good hand-off states the goal and its constraints, not the steps. Check delegated results before relying on them.
+Fix the behavior, not the evidence. Existing tests and expected values record decisions someone made; when they disagree with your change, suspect your change first. If you change or remove a test, or leave a requirement unmet, say so plainly in your summary.
 
-Work in small batches. Prefer a sequence of small, reviewable changes over one large change. Each change should leave the build green and the codebase in a working state. Stop and report at a natural checkpoint — a compiling, tested unit of value — rather than batching unrelated work into one turn. A checkpoint that delivers one thing well is better than a turn that delivers three things half-finished.
+Verify through the real path. A change is done when the entry point that needs it actually reaches it and a check of that path passes. If a check couldn't run, its result is unknown: say so instead of inferring it.
 
-Tidy first. Before adding a feature, make the change easy: rename for clarity, extract a tangled block, remove dead code. The tidy step is a separate checkpoint from the feature. If a change is hard, the code isn't ready for it yet — make it easy, then make it.
+Keep changes small and true. Make the simplest change that solves the problem and leave the build working. Keep comments and docs accurate to what the code now does. Name anything you deferred.
 
-Commit hygiene. One logical change per checkpoint. A checkpoint compiles and passes tests. When you describe what you did, name what and why, not how — the diff already shows how.
-
-Connect it all the way through. A change is done only when the code path that needs it actually reaches it — not when the new unit exists and its own tests pass. Trace the path from the entry point, not just the new unit.
-
-Update the docs. When behavior changes, the documentation that describes it changes with it, in the same change — docs describing behavior that doesn't exist are wrong.
-
-Test integrity. ` + testTargetPrinciple + ` Removing or changing an existing test to make a failing build pass is a decision, not an implementation detail: if you did it, state it plainly in your summary — what you removed or changed and why — so the person reviewing can judge whether the loss is acceptable. A green build that quietly deleted the failing test is not a fix.
-
-` + failingTestPrinciple + `
-
-` + reviewFeedbackPrinciple + `
-
-` + specTestPrinciple + `
-
-` + commentsTruthPrinciple + `
-
-` + debugWorkingStylePrinciple + `
-
-` + locateFirstPrinciple + `
-
-` + locateBeforeWritingPrinciple + `
-
-Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
+Use help deliberately. study explores code you don't need in your own context; agent implements a well-specified piece. Give a goal and constraints, and check what comes back. When a requirement is genuinely ambiguous and someone can answer, ask one focused question.
 
 # How you communicate
 
-Keep replies simple and brief. Lead with the outcome in plain words; a short list or a small sketch beats a dense explanation. Match depth to the question — expand only when asked or when a decision genuinely needs the detail. Never pad a reply to look thorough.
+Lead with the outcome in plain words. Keep replies brief; expand only when asked or when a decision needs the detail.
 
 # Memory
 
 You have a persistent memory: named notes you've written in earlier sessions, managed through tools.`
 
-// debugWorkingStylePrinciple is the issue #154 debugging working-style
-// principle — a const so CLAUDE.md's "Constraints → Testing" section mirrors
-// the EXACT same text (the docs describe the guidance the model actually
-// receives, so the two can't drift apart). It is spliced into SystemPrompt
-// after "Test integrity" (see the ` + debugWorkingStylePrinciple + ` above),
-// keeping it in the "# How you work" block.
-const debugWorkingStylePrinciple = "Debug carefully. Check every error in test and fixture setup with `t.Fatal` so a silently missing fixture can't masquerade as a code bug; confirm the fixture exists before suspecting the code under test. Debug with a focused test and `t.Logf` in the real package — never by copying production code into scratch modules or leaving `DEBUG` prints in shipped code."
-
-// locateFirstPrinciple is the issue #142 locate-first working-style
-// principle (tightened for issue #209) — a const so CLAUDE.md's "The agent's
-// tools" section mirrors the EXACT same text (the docs describe the guidance
-// the model actually receives, so the two can't drift apart). It is spliced
-// into SystemPrompt after the debugging principle (see the ` +
-// locateFirstPrinciple + ` above), keeping it in the "# How you work" block.
-// The bash ban covers both READS (cat/sed/head) and CREATES (cat > f,
-// heredocs, tee, /tmp scratch), steering to the dedicated tools.
-const locateFirstPrinciple = "Locate first. Outline or grep a path to find exactly where the content lives, then read_file only the spans you need — never read whole files you haven't outlined, never invent or guess file paths (work only from paths outline/grep actually returned), never re-read content already present in context (already-read spans, earlier tool output, the outline), and never use bash to read or create files — never `cat`/`sed`/`head` (or similar) to read them, and never `cat > f`/heredocs/`tee`/`/tmp` scratch to create them — read_file/outline/grep are your readers and write_file/edit_file are your writers."
-
-// locateBeforeWritingPrinciple is the issue #224 locate-before-writing
-// working-style principle — a const so CLAUDE.md mirrors the EXACT same text
-// (the docs describe the guidance the model actually receives, so the two
-// can't drift apart — the same mirror pattern as locateFirstPrinciple and
-// reviewFeedbackPrinciple). It is spliced into SystemPrompt right after
-// locateFirstPrinciple (see the ` + locateBeforeWritingPrinciple + ` above),
-// keeping it in the "# How you work" block.
-//
-// It exists because locate-first was applied to READING but not to WRITING:
-// the self-dev loop's reviews of its own sessions (tick 20261006T074738Z,
-// PRs #222/#223) found new code — mostly test files — written against
-// helpers, constants, type shapes and file paths that were never grepped or
-// outlined for (seven undefined identifiers at once in one session; a
-// compile error carried from one session into the next; a package-level const
-// duplicated because the existing name was never checked for). Each guessed
-// name costs a build-and-fix round; checking first costs one tool call.
-//
-// Deliberately a principle, not a recipe: no tool-call sequences, no list of
-// incident identifiers — the tick specifics (itoa, okResponse, FinishReason)
-// were the incidents, not the guidance. The phrasing "a name that is not
-// there comes back undefined" carries the issue's undefined-identifier class
-// in words the rest of the prompt never uses, so the pinning test can
-// absence-check it (TestDefaultPromptEncodesLocateBeforeWriting).
-const locateBeforeWritingPrinciple = "Locate before writing. Before writing code that names a helper, constant, type or path you have not seen in this session, grep or outline for it and use what actually exists — never invent identifiers, type shapes, or file paths; a name that is not there comes back undefined. Before adding a new package-level name (a test helper, a const, a fixture), grep the package (including its other _test.go files) so the name exists where you call it and does not collide with one already declared; checking first costs one tool call, a guessed name costs a build-and-fix round per guess."
-
-// verifyBeforeFixPrinciple is the issue #178 verify-before-fix principle —
-// a const so every surface that restates the same idea (the planning
-// instruction and each step prompt in plan_mode.go) carries the SAME text:
-// one principle, no recipe. It is spliced into SystemPrompt inside the
-// "Verify first" line (see the ` + verifyBeforeFixPrinciple + ` above), so
-// EVERY turn sees it — REPL turns, headless turns, plan-mode turns, and the
-// self-dev loop's own ordinary step turns, which never go through
-// TurnWithPlan's prompts (the scenario in #178).
-const verifyBeforeFixPrinciple = "Confirm a problem exists before fixing it. When a reported problem doesn't reproduce, saying so with the evidence is the finished result; a fix for a problem you haven't observed is not."
-
-// testTargetPrinciple is the issue #225 test-target principle — a const so
-// plan_mode.go's planning instruction and step prompts can restate the SAME
-// text (one principle, no recipe, the same pattern as verifyBeforeFixPrinciple
-// and reviewFeedbackPrinciple). It is spliced into SystemPrompt's "Test
-// integrity" paragraph — before #141's existing-test clause, so #141 and
-// #225 read as one rule: a test written to match the code instead of the
-// requirement is the same class of bending as a changed existing test.
-//
-// It exists because the self-dev loop's reviews of PR #223 (issue #111) found
-// a step that tested checkpoint.Restore directly instead of cs.undo, so the
-// stack/ref wiring bugs — read-only turns pushing no-op snapshots — went
-// unnoticed: the tested unit passed while the user-facing path it serves
-// stayed broken.
-const testTargetPrinciple = "Test the path the requirement names. A criterion is verified only through the user-facing surface it describes — the command, the API, the entry point the user invokes — not through a lower-level helper that surface routes through: a test that never calls the surface proves nothing about it, no matter how green."
-
-// blockedCheckPrinciple is the issue #200 blocked-check principle — a const
-// so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT same text
-// (the docs describe the guidance the model actually receives, so the two
-// can't drift apart — the same mirror pattern as failingTestPrinciple and
-// debugWorkingStylePrinciple). It is spliced into SystemPrompt inside the
-// "Verify first" line, right after verifyBeforeFixPrinciple, so every turn
-// sees it at the exact moment a bash refusal could land: a blocked, refused,
-// or declined check leaves its result unknown — don't guess it, and a check
-// of something else doesn't stand in for it; failing that, mark the claim
-// unverified wherever it is stated. (The shellrisk refusal messages carry
-// the short per-incident version of the same instruction; this is the
-// standing principle.) Deliberately a principle, not a recipe: no tool names,
-// no paths, no list of incident surfaces — the PR #196/#197 specifics (a
-// focused t.Logf test, in-tree files vs /tmp, comments/goldens/commit
-// summaries) were the incident, not the principle.
-const blockedCheckPrinciple = "A check that was blocked, refused, or declined leaves its result unknown. Don't guess it, and a check of something else doesn't stand in for it. Look for another safe way to observe the same thing; failing that, mark the claim unverified wherever you state it."
-
-// failingTestPrinciple is the issue #177 failing-test working-style principle
-// — a const so CLAUDE.md's "Constraints → Testing" section mirrors the EXACT
-// same text (the docs describe the guidance the model actually receives, so
-// the two can't drift apart; see TestFailingTestPrincipleMirroredInClaudeMD).
-// It is spliced into SystemPrompt right after "Test integrity" (see the
-// ` + failingTestPrinciple + ` above), keeping it in the "# How you work"
-// block, before debugWorkingStylePrinciple.
-const failingTestPrinciple = "Tests are evidence. An existing test's expected value records what someone decided correct behavior is; when it disagrees with your change, the burden of proof is on your change. Rewriting an expectation to match output you just produced is never a fix — it turns a bug into the specification."
-
-// specTestPrinciple is the issue #225 failing-spec-test principle — a const so
-// CLAUDE.md's "Constraints" section mirrors the EXACT same text (the docs
-// describe the guidance the model actually receives, so the two can't drift
-// apart — the same mirror pattern as reviewFeedbackPrinciple, which it sits
-// after in the prompt) and so plan_mode.go's planning instruction and step
-// prompts can restate the SAME text (one principle, no recipe, the same
-// pattern as verifyBeforeFixPrinciple). It is spliced into SystemPrompt as its
-// own paragraph after reviewFeedbackPrinciple (issue #162's) and before
-// debugWorkingStylePrinciple (issue #154's), so every turn sees it: REPL
-// turns, headless turns, plan-mode turns, and the self-dev loop's ordinary
-// step turns, which never go through TurnWithPlan's prompts (the same delivery
-// reasoning as reviewFeedbackPrinciple).
-//
-// It exists because the self-dev loop's reviews of PR #223 (issue #111) found
-// the agent repeatedly getting a failing acceptance test to pass by bending
-// the test instead of the behavior — across four review ticks: a production
-// defect (git stash create is empty on a clean tree) patched around in the
-// acceptance test with a rev-parse HEAD fallback instead of putting the
-// fallback into production; the issue's "undo restores … created files"
-// criterion rewritten into a test asserting the created file is left in
-// place, without the deviation ever flagged; and a prune-length failure
-// "fixed" by making the code keep the wrong entries so the length assertion
-// passed, presented in the summary as a fix. Each kept the suite green while
-// the criterion stayed unmet, and the green suite is the main signal both the
-// loop and reviewers use to judge whether a change works. The silence about
-// the deviations is the honesty problem tracked in #128 / #220 / #221; this
-// principle is the editing behavior itself.
-//
-// Deliberately a principle, not a recipe: no file paths, no list of incident
-// PRs — the PR #223 specifics (the stash fallback, the rewrite, the
-// truncateTo flip) were the incident, not the guidance. It extends
-// failingTestPrinciple (#177) from EXISTING tests — whose expectations record
-// a prior decision about correct behavior — to tests WRITTEN from the issue's
-// acceptance criteria, which are a spec the change must meet; and it extends
-// reviewFeedbackPrinciple's "put it where the reviewer said" to the test
-// itself: the test is owed the behavior the criterion names, and meeting it
-// by moving the test is a deviation owed an explicit report.
-const specTestPrinciple = "A failing test written from the issue's acceptance criteria is a spec. Making it green by editing the test, its setup, or its expectation — instead of fixing the behavior the criterion names — is a deviation you must report in your summary, not a fix: the criterion stays unmet, a green suite does not count as coverage, and the defect the test caught must be fixed in production, never patched around in the test. If the criterion itself is wrong, say so with the evidence instead of silently rewriting it."
-
-// commentsTruthPrinciple is the issue #231 comment-truth principle — a const
-// so CLAUDE.md's "Constraints" section mirrors the EXACT same text (the docs
-// describe the guidance the model actually receives, so the two can't drift
-// apart — the same mirror pattern as reviewFeedbackPrinciple, which it sits
-// after in the prompt) and so plan_mode.go's planning instruction and step
-// prompts can restate the SAME text (one principle, no recipe, the same
-// pattern as verifyBeforeFixPrinciple). It is spliced into SystemPrompt as
-// its own paragraph after specTestPrinciple (issue #225's) and before
-// debugWorkingStylePrinciple (issue #154's), so every turn sees it: REPL
-// turns, headless turns, plan-mode turns, and the self-dev loop's ordinary
-// step turns, which never go through TurnWithPlan's prompts (the same delivery
-// reasoning as reviewFeedbackPrinciple).
-//
-// It exists because the self-dev loop's reviews of its own sessions (tick
-// 20261006T, filed in #231) found comments and summary claims that state
-// what the writer intended the code to do instead of what the code does —
-// written before or alongside the code and never re-checked once later edits
-// changed call order or behavior. PR #222: a comment in preflight.go claimed a
-// substituted pick's verdict comes from the catalog, but the call order it
-// chose makes that false (applyCatalogVision overwrites it — the agent's own
-// test asserts exactly that overwrite), and a second comment wrongly claimed
-// unlisted ids settle to false; the PR summary claimed a config-declared
-// verdict survives a substitution that the shipped code performs. PR #226:
-// comments and the summary claimed gating ("for every turn that ran tools",
-// "appended to the visible reply") the code does not implement, and a
-// reviewer's finding 8 asking for the stale comments to be fixed went
-// unresolved although the summary listed the round as fixed. PR #229: an
-// end-to-end test hand-assembled the production order (spliceImageResult
-// twice, side-car write before Append) while its own comment claimed to
-// follow "Production ordering (loop.go)". PR #227: the commit summary said
-// the rewriteFormRead guard was "removed" although the remaining functions
-// still filter on it. A wrong comment is worse than no comment because the
-// next reader is often the agent in a later session, and the same drift
-// survives review rounds because nobody re-checks it.
-//
-// Deliberately a principle, not a recipe: no file paths, no list of incident
-// PRs — the tick specifics (preflight.go, the spliceImageResult ordering,
-// rewriteFormRead) were the incidents, not the guidance. It extends
-// reviewFeedbackPrinciple's "name and fix the class, not the instances" to
-// comments and claims: an example wrong comment is an instance, the class is
-// a statement that outlives the behavior it describes, and it extends
-// specTestPrinciple's honesty about deviations to prose — a summary that
-// claims behavior the code doesn't ship is the same unreported deviation,
-// only in words.
-const commentsTruthPrinciple = "A comment must say what the code does, not what you intended it to do. A comment the code doesn't implement is worse than no comment — it misleads the next reader, who is often you in a later session. After a behavioral change, re-read the comments adjacent to the span you edited — reordered calls, a new overwrite, a removed guard all stale them — and fix or delete any that no longer hold. A summary or docs claim describing behavior is the same class: it must match the code you shipped, and claiming behavior the code doesn't implement is a deviation owed the same report as a test you bent to pass."
-
-// reviewFeedbackPrinciple is the issue #162 review-feedback principle — a
-// const so CLAUDE.md's "Constraints" section mirrors the EXACT same text
-// (the docs describe the guidance the model actually receives, so the two
-// can't drift apart — the same mirror pattern as blockedCheckPrinciple,
-// failingTestPrinciple, and debugWorkingStylePrinciple). It is spliced into
-// SystemPrompt as its own paragraph after failingTestPrinciple and before
-// specTestPrinciple (issue #225's), so every turn sees it: REPL turns,
-// headless turns, plan-mode turns, and the self-dev loop's ordinary step
-// turns, which never go through TurnWithPlan's prompts (the same delivery
-// reasoning as verifyBeforeFixPrinciple).
-//
-// It exists because review rounds burned whole extra cycles on four distinct
-// ways of not applying what a reviewer asked (three PRs across four ticks, the
-// self-dev loop's tick 20261001T013107Z): PR #158 left a docs placeholder
-// uncorrected for two rounds after every review named it, and in its final
-// round put a deferral note in a doc file instead of the commit message the
-// reviewer had asked for; PR #145 followed BOTH options a reviewer had offered
-// as alternatives, so a complying model printed its summary twice; PR #143
-// patched exactly the flag spellings each previous review listed, adding one
-// spelling per round instead of closing the class of bad spellings. Each
-// failure is a finding that was silently dropped rather than consciously
-// declined — the cost is not the drop itself but that nobody could see it,
-// which is why the principle asks for an explicit disposition per finding.
-//
-// Deliberately a principle, not a recipe: no file paths, no list of incident
-// PRs, no checklist format — the tick specifics (a '~len/4 tokens'
-// placeholder, a denylist of flag spellings) were the incidents, not the
-// guidance. It extends the per-item accounting idea of #128 from issue
-// requirements to review findings, and stays silent on how to record the
-// dispositions, because the shape belongs to whoever drives the round.
-const reviewFeedbackPrinciple = "Every finding a review raises is owed an explicit disposition: addressed, deferred with a reason, or disputed. A finding left with none of these is a finding you dropped, and a dropped finding is invisible to the next round, so it comes back. When a reviewer offers several options as alternatives, pick one and say which — applying all of them is not thoroughness, it stacks behaviour the reviewer meant as a choice. When a reviewer gives example instances, name and fix the underlying class rather than only the instances listed: a fix that covers the examples and not the class needs another round for the next example. Where the reviewer asked for something to live, put it there — a note the reviewer asked to keep belongs in the place they named, not in a nearby file that happens to be open."
-
 // checklistAccountingPrinciple is the issue #220 per-item checklist
-// accounting principle (part 2 of #128, "completion based on facts") — a
-// const so every surface that states the same idea carries the SAME text,
-// the one-principle-no-recipe pattern verifyBeforeFixPrinciple and
-// reviewFeedbackPrinciple set. It is spliced into the model-facing task
-// prompt (taskPrompt, below) ONLY when taskChecklistItems finds at least
+// accounting principle (part 2 of #128, "completion based on facts"). It is
+// spliced into the model-facing task prompt (taskPrompt, below) ONLY when taskChecklistItems finds at least
 // one `- [ ]` item in the task — a task with no checklist gets nothing,
 // and a standing principle in the base system prompt would tax every
 // checklist-free turn for the one shape this issue is about. It tells the

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The built-in system prompt is rewritten as six short, language-neutral
+  working principles (understand before changing; establish the problem;
+  fix the behavior, not the evidence; verify through the real path; keep
+  changes small and true; use help deliberately). It had grown to ~8,300
+  characters of spliced per-incident rules, several of them Go-specific;
+  the default composed prompt is now ~3,400 characters, capped at 4,000 by
+  `TestSystemPromptSizeBudget`. The per-incident `*Principle` consts are
+  gone, and the plan-mode planning and step prompts no longer restate them
+  (the base system prompt rides on every plan turn). Guidance specific to
+  working on the Cortex codebase moved to the repo's `AGENTS.md`.
+- Harness text the model sees — the system, plan-mode, and subagent prompts
+  and every tool's description — is language-neutral, enforced by
+  `TestHarnessTextIsLanguageNeutral` (`edit_file` and `bash` named `gofmt`
+  and `go test`).
+
 ### Added
 - Locate-before-writing accountability (#224): a new built-in principle
   (`locateBeforeWritingPrinciple` in `cmd/cortex/prompt.go`) tells the model
