@@ -323,8 +323,8 @@ func matchDenyFloor(cmd string) string {
 // safeBinaries are tools safe to run without a model call: read-only
 // inspection tools (which neither mutate the filesystem nor reach the network)
 // plus a few create-only filesystem scaffolds that cannot lose data. A command
-// whose sole binary is one of these (with no shell-control characters) runs
-// immediately.
+// whose sole binary is one of these (with no shell-control characters other
+// than a standalone stream merge — see matchSafePath) runs immediately.
 //
 // mv/cp/rm are deliberately ABSENT: they overwrite, relocate outside the tree,
 // or delete, so they go to the classifier. mkdir/touch/rmdir stay here —
@@ -369,8 +369,14 @@ var findWriteFlags = map[string]bool{
 // matchSafePath reports whether cmd is a read-only inspection command that may
 // run without a model call. It is conservative: any shell-control character
 // (pipe, redirect, chaining, command/var substitution) disqualifies it so
-// pipelines are always classified.
+// pipelines are always classified — with one exception: a standalone
+// stream-merge token (inertStreamMerges: `2>&1`, `>&2`, `1>&2`) is dropped
+// before the check, since duplicating one output stream onto the other opens
+// no file and runs nothing. `go test ./... 2>&1` stays on the safe path;
+// `2>&1;rm`, `2>&1file`, `2> out`, `> file`, `| tail` still go to the
+// classifier.
 func matchSafePath(cmd string) (string, bool) {
+	cmd = stripInertStreamMerges(cmd)
 	if hasShellControl(cmd) {
 		return "", false
 	}
@@ -419,6 +425,30 @@ const shellControl = "|&;<>`$(){}\n"
 
 func hasShellControl(cmd string) bool {
 	return strings.ContainsAny(cmd, shellControl)
+}
+
+// inertStreamMerges are the redirects matchSafePath tolerates: each only
+// duplicates stdout/stderr onto the other (fd-to-fd; the target is a digit,
+// never a file name), so none can write a file or run anything.
+var inertStreamMerges = map[string]bool{"2>&1": true, ">&2": true, "1>&2": true}
+
+// stripInertStreamMerges drops every word of cmd that is EXACTLY one of
+// inertStreamMerges, where words are split on spaces and tabs only. A merge
+// glued to anything else (`2>&1;rm`, `2>&1file`, `x2>&1`) is not an exact
+// word and is kept, as is any newline, so hasShellControl still sees it. The
+// result is only used for the safe-path decision, never run.
+func stripInertStreamMerges(cmd string) string {
+	if !strings.Contains(cmd, ">&") {
+		return cmd
+	}
+	words := strings.FieldsFunc(cmd, func(r rune) bool { return r == ' ' || r == '\t' })
+	kept := words[:0]
+	for _, w := range words {
+		if !inertStreamMerges[w] {
+			kept = append(kept, w)
+		}
+	}
+	return strings.Join(kept, " ")
 }
 
 // firstSubcommand returns the first non-flag token (the subcommand) from a

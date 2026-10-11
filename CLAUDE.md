@@ -365,7 +365,13 @@ the model-driven memory tools
   packages with nothing wrong.
 - `bash` is gated by `internal/shellrisk`: Safe runs, Risky prompts (judged
   against `turnIntent`), Blocked refuses. Headless sessions treat Risky as
-  Blocked. The classifier fails closed: a transport error or a response it
+  Blocked. Read-only inspection and routine build/test commands (`ls`, `git
+  status`, `go test`, …) take the safe path with no model call; any
+  shell-control character (pipe, chaining, redirect, substitution, `&`)
+  sends a command to the classifier instead, except a standalone stream
+  merge word — exactly `2>&1`, `>&2`, or `1>&2` — so `go test ./... 2>&1`
+  stays on the safe path while `2>&1;rm`, `2>&1file`, `2> out`, `> f`, and
+  `| tail` do not. The classifier fails closed: a transport error or a response it
   cannot read is Risky ("classifier unavailable … gated for safety"). It
   reads the verdict from the response content; only when the content is
   empty (a reasoning model that ended its turn after reasoning) does it read
