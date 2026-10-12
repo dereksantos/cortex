@@ -135,6 +135,28 @@ type localOffer struct {
 	// Note is a warning to print with the offer (context limits the stage
 	// could not fix itself), or empty.
 	Note string
+	// ParamsB is the picked model's parameter count in billions; 0 when the
+	// server did not report one.
+	ParamsB float64
+}
+
+// smallModelParamsB is the size below which the stage tells the user that a
+// free hosted model is likely to do better: models under 7B parameters
+// often fail at multi-step tool use. An unknown size (0) gets no hint.
+const smallModelParamsB = 7
+
+// smallModelHint returns the hint to show with an offer whose model is under
+// smallModelParamsB, or "" for a larger or unknown size. interactive selects
+// the wording: a prompt can offer "n"; a headless run can only name the
+// alternative.
+func smallModelHint(o localOffer, interactive bool) string {
+	if o.ParamsB <= 0 || o.ParamsB >= smallModelParamsB {
+		return ""
+	}
+	if interactive {
+		return "Small models often fail at multi-step agent work. Press n to use a free hosted model instead."
+	}
+	return "this is a small model, and small models often fail at multi-step agent work. For a free hosted model, set OPENROUTER_API_KEY and remove the saved config."
 }
 
 // Source is the ResolvedBackend.Source for this offer, e.g. "ollama-local".
@@ -245,7 +267,7 @@ func offerFor(ctx context.Context, client *http.Client, s localServer, tier Mode
 	if pick.ContextLength > 0 && pick.ContextLength < desired {
 		desired = pick.ContextLength
 	}
-	offer := localOffer{Spec: s.Spec, BaseModel: pick.ID, Model: pick.ID, Window: desired}
+	offer := localOffer{Spec: s.Spec, BaseModel: pick.ID, Model: pick.ID, Window: desired, ParamsB: pick.ParamsB}
 	switch s.Spec.Kind {
 	case kindOllama:
 		if pick.ServedContext < desired {
@@ -723,7 +745,11 @@ func (s localServerStage) Probe() (ResolvedBackend, bool) {
 		return ResolvedBackend{}, false
 	}
 	if s.Interactive {
-		fmt.Fprintf(s.Out, "Found %s with %s (%s context). Use it? [Y/n] ", o.Spec.Name, o.BaseModel, windowLabel(o.Window))
+		if h := smallModelHint(*o, true); h != "" {
+			fmt.Fprintf(s.Out, "Found %s with %s (%s context).\n%s\nUse it? [Y/n] ", o.Spec.Name, o.BaseModel, windowLabel(o.Window), h)
+		} else {
+			fmt.Fprintf(s.Out, "Found %s with %s (%s context). Use it? [Y/n] ", o.Spec.Name, o.BaseModel, windowLabel(o.Window))
+		}
 		answer := strings.ToLower(strings.TrimSpace(readLineUnbuffered(s.In)))
 		if answer != "" && answer != "y" && answer != "yes" {
 			fmt.Fprintf(s.Out, "Skipped %s.\n", o.Spec.Name)
@@ -732,6 +758,11 @@ func (s localServerStage) Probe() (ResolvedBackend, bool) {
 	}
 	if o.Note != "" {
 		fmt.Fprintln(s.Out, "cortex: note: "+o.Note)
+	}
+	if !s.Interactive {
+		if h := smallModelHint(*o, false); h != "" {
+			fmt.Fprintln(s.Out, "cortex: note: "+h)
+		}
 	}
 	model := o.Model
 	if o.DeriveNumCtx {

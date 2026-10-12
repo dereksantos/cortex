@@ -778,3 +778,79 @@ func TestOllamaContextWarning(t *testing.T) {
 		})
 	}
 }
+
+// TestSmallModelHint pins which picks get the "small model" hint: under
+// smallModelParamsB (7B) yes; 7B and larger, or an unknown size, no.
+func TestSmallModelHint(t *testing.T) {
+	tests := []struct {
+		name    string
+		paramsB float64
+		want    bool
+	}{
+		{"unknown size", 0, false},
+		{"1.5B", 1.5, true},
+		{"3.2B", 3.2, true},
+		{"7B", 7, false},
+		{"14.8B", 14.8, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, interactive := range []bool{true, false} {
+				got := smallModelHint(localOffer{ParamsB: tt.paramsB}, interactive) != ""
+				if got != tt.want {
+					t.Errorf("smallModelHint(%v, interactive=%v) shown = %v, want %v", tt.paramsB, interactive, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// smallOnlyOllama is a fake Ollama whose only usable chat model is 3.2B.
+func smallOnlyOllama() *fakeOllama {
+	return &fakeOllama{
+		tags: []map[string]any{ollamaTag("llama3.2:3b", "3.2B")},
+		shows: map[string]map[string]any{
+			"llama3.2:3b": ollamaShowReply(131072, "", "completion", "tools"),
+		},
+	}
+}
+
+// TestSmallModelHintEntryPoints drives the real first-run entry points: the
+// interactive prompt (runGuidedBootstrap) shows the hint before "Use it?"
+// only for a small pick, and the headless path (maybeRunHeadlessBootstrap)
+// notes it on stderr.
+func TestSmallModelHintEntryPoints(t *testing.T) {
+	tests := []struct {
+		name     string
+		fake     func() *fakeOllama
+		headless bool
+		want     string
+		wantHint bool
+	}{
+		{"interactive small", smallOnlyOllama, false, "Press n to use a free hosted model instead.\nUse it? [Y/n] ", true},
+		{"interactive large", standardOllama, false, "Found Ollama with qwen2.5-coder:14b (32k context). Use it? [Y/n] ", false},
+		{"headless small", smallOnlyOllama, true, "cortex: note: this is a small model", true},
+		{"headless large", standardOllama, true, "cortex: using Ollama with", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateBootstrap(t)
+			orig := bootstrapLocalSpecs
+			defer func() { bootstrapLocalSpecs = orig }()
+			bootstrapLocalSpecs = []localServerSpec{specFor(kindOllama, tt.fake().server(t).URL)}
+
+			var out string
+			if tt.headless {
+				_, out = captureStd(t, "", maybeRunHeadlessBootstrap)
+			} else {
+				out, _ = captureStd(t, "\n", runGuidedBootstrap)
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output = %q, want to contain %q", out, tt.want)
+			}
+			if got := strings.Contains(out, "small models often fail") || strings.Contains(out, "Small models often fail"); got != tt.wantHint {
+				t.Errorf("hint shown = %v, want %v (output %q)", got, tt.wantHint, out)
+			}
+		})
+	}
+}

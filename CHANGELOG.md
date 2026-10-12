@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-12
+
+### Fixed
+- First-run OpenRouter setup now saves the OpenRouter endpoint. Before, it
+  saved only the key, so the first turn went to `localhost:4000` and failed
+  with a connection error (#280).
+- Ollama models no longer run with Ollama's small default context. Ollama's
+  OpenAI-compatible API cannot set the context per request, so long prompts
+  were cut off without an error. First-run setup now creates a copy of the
+  model with the configured context (no weights are copied), and a session
+  warns when an Ollama model's context is smaller than its window (#280).
+
+### Added
+- Zero-config local models: on a first run with no config, Cortex finds a
+  running Ollama, LM Studio, or llama.cpp server, picks an installed model
+  that can call tools and fits this machine's RAM, and saves it for both the
+  code and study roles. On a terminal it asks first. An OpenRouter key, when
+  one is set, still takes precedence (#280).
+- When the picked local model has fewer than 7B parameters, first-run setup
+  says that small models often fail at agent work and offers a free hosted
+  model instead.
+
 ## [0.4.0] - 2026-10-12
 
 Most entries below were implemented by Cortex itself, through a
