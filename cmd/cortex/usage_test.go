@@ -84,3 +84,45 @@ func TestUsagePlainWhenStdoutNotATerminal(t *testing.T) {
 		t.Errorf("printUsage() non-terminal output lost its headings:\n%s", out)
 	}
 }
+
+// TestToolsFlagDoesNotShadowHelp covers the #284 review: stripping --tools
+// used to run *after* the --version/--help checks, so `cortex --tools --help`
+// left --help to face the unknown-subcommand guard and exited 2. The strip now
+// runs first, so --help is still honoured (exit 0, usage on stdout) no matter
+// where --tools / --show-tools appear.
+func TestToolsFlagDoesNotShadowHelp(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "cortex")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build cortex: %v\n%s", err, out)
+	}
+
+	for _, args := range [][]string{
+		{"--tools", "--help"},
+		{"--show-tools", "--help"},
+		{"--tools", "-h"},
+		{"--help", "--tools"},
+	} {
+		args := args
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cmd := exec.Command(bin, args...)
+			cmd.Env = append(os.Environ(), "HOME="+t.TempDir(), "NO_COLOR=1")
+			// Scratch CWD so a fall-through REPL cannot drop .cortex/ here.
+			cmd.Dir = t.TempDir()
+			var stdout, stderr strings.Builder
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("cortex %s: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "cortex study") {
+				t.Errorf("cortex %s: stdout does not list subcommands:\n%s",
+					strings.Join(args, " "), stdout.String())
+			}
+			if strings.Contains(stderr.String(), "unknown command") {
+				t.Errorf("cortex %s: --help (-h) was mistaken for an unknown command:\n%s",
+					strings.Join(args, " "), stderr.String())
+			}
+		})
+	}
+}

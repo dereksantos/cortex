@@ -310,33 +310,71 @@ var usageLines = []string{
 // slash commands that only exist once the REPL is running. Without it
 // `cortex --help` fell through into the REPL, which reads as a hang.
 func printUsage() {
-	// Usage text that goes to a file or a pipe must stay plain text (issue
-	// #264): only paint when stdout is an interactive terminal. The color
-	// roles stay in style.Paint -- this only decides whether to paint at all,
-	// so the REPL and its golden tests keep their colored surfaces.
-	color := lineedit.IsInteractive(os.Stdout)
+	printUsageTo(os.Stdout)
+}
+
+// knownSubcommand reports whether word names a subcommand main() dispatches
+// on. Kept beside usageLines so the two move together;
+// TestKnownSubcommandsCoverUsage pins them to each other.
+func knownSubcommand(word string) bool {
+	switch word {
+	case "resume", "turn", "study", "learn", "change", "serve", "scan",
+		"project", "model", "discord", "study-eval", "version":
+		return true
+	default:
+		return false
+	}
+}
+
+// printUsageTo writes the usage body to w. `cortex --help` passes stdout; the
+// unknown-command guard (issue #262) passes stderr, so a typo lands as an
+// error a caller would not mistake for normal output. Color follows the
+// destination: usage text that goes to a file or a pipe must stay plain
+// text (issue #264) -- only paint for an interactive terminal.
+func printUsageTo(w io.Writer) {
+	color := false
+	if f, ok := w.(*os.File); ok {
+		color = lineedit.IsInteractive(f)
+	}
 	paint := func(s string, r style.Role) string {
 		if !color {
 			return s
 		}
 		return style.Paint(s, r)
 	}
-	fmt.Println("cortex " + version())
-	fmt.Println()
-	fmt.Println(paint("Usage:", style.Accent))
+	fmt.Fprintln(w, "cortex "+version())
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, paint("Usage:", style.Accent))
 	for _, line := range usageLines {
-		fmt.Println("  " + line)
+		fmt.Fprintln(w, "  "+line)
 	}
-	fmt.Println()
-	fmt.Println(paint("Flags:", style.Accent))
-	fmt.Println("  --help, -h        show this list")
-	fmt.Println("  --version, -v     print the version and exit")
-	fmt.Println("  --tools           list the agent's registered tools at startup")
-	fmt.Println()
-	fmt.Println("Inside the REPL, type /help for the slash commands.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, paint("Flags:", style.Accent))
+	fmt.Fprintln(w, "  --help, -h        show this list")
+	fmt.Fprintln(w, "  --version, -v     print the version and exit")
+	fmt.Fprintln(w, "  --tools           list the agent's registered tools at startup")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Inside the REPL, type /help for the slash commands.")
 }
 
 func main() {
+	// The tool list is opt-in: strip --tools / --show-tools (if present) and
+	// remember it so printAvailableTools runs only when explicitly requested.
+	// Stripped ahead of the --version/--help checks below so a combined command
+	// like `cortex --tools --help` still sees --help as the first argument
+	// instead of being mistaken for an unknown subcommand (issue #262 review).
+	showTools := false
+	var args []string
+	for _, a := range os.Args {
+		switch a {
+		case "--tools", "--show-tools":
+			showTools = true
+		default:
+			args = append(args, a)
+		}
+	}
+	os.Args = args
+
 	// `cortex --version` / `cortex version` prints the same string the REPL
 	// banner shows (display.go) and exits 0 — the standard "how do I check
 	// what I have installed" surface (docs/completion-roadmap.md Track E4).
@@ -354,19 +392,16 @@ func main() {
 		os.Exit(0)
 	}
 
-	// The tool list is opt-in: strip --tools / --show-tools (if present) and
-	// remember it so printAvailableTools runs only when explicitly requested.
-	showTools := false
-	var args []string
-	for _, a := range os.Args {
-		switch a {
-		case "--tools", "--show-tools":
-			showTools = true
-		default:
-			args = append(args, a)
-		}
+	// Unknown-subcommand guard (issue #262): the first word must name a
+	// subcommand main() dispatches on. A typo (cortex sutdy) used to fall
+	// through into the REPL, which ignored the word and looked like a hang.
+	// Checked here, ahead of the backend bootstrap below, so a misspelled
+	// command never touches the user's config or opens a session.
+	if len(os.Args) >= 2 && !knownSubcommand(os.Args[1]) {
+		fmt.Fprintf(os.Stderr, "cortex: unknown command %q\n", os.Args[1])
+		printUsageTo(os.Stderr)
+		os.Exit(2)
 	}
-	os.Args = args
 
 	// Study-eval mode: `cortex study-eval` runs study over a fixture set and scores
 	// latency / coverage / groundedness. `cortex study-eval code-grid` runs the
