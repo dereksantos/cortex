@@ -7,7 +7,8 @@
 //	benchstore csv  [--bench b]                      the same as CSV, for graphing
 //	benchstore reindex                               index runs found on disk but not finished in the index
 //	benchstore begin --bench b --run-id id [--label k=v]   open a run dir (shell runners); prints its path
-//	benchstore finish --bench b --run-id id [--note s]     record a shell runner's finish + summary
+//	benchstore finish --bench b --run-id id [--note s]     record a shell runner's finish + summary, then sync
+//	benchstore sync                                  commit the records (local git) and upload new/changed bundles off-machine
 package main
 
 import (
@@ -34,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: benchstore <root|list|csv|reindex|begin|finish> [flags]")
+		return errors.New("usage: benchstore <root|list|csv|reindex|begin|finish|sync> [flags]")
 	}
 	root, err := benchstore.Root()
 	if err != nil {
@@ -79,6 +80,20 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Printf("recorded %s/%s: %d/%d passed\n", *bench, *runID, s.Pass, s.Pass+s.Fail)
+		benchstore.SyncBestEffort(os.Stdout)
+	case "sync":
+		up, why := benchstore.DefaultUploader(root)
+		if up == nil {
+			fmt.Printf("no off-machine copy: %s\n", why)
+		}
+		rep, err := benchstore.Sync(root, up)
+		if err != nil {
+			return err
+		}
+		for _, k := range rep.Uploaded {
+			fmt.Printf("uploaded %s\n", k)
+		}
+		fmt.Printf("committed=%v uploaded=%d unchanged=%d dest=%s\n", rep.Committed, len(rep.Uploaded), rep.Unchanged, rep.Offsite)
 	case "list", "csv":
 		entries, err := benchstore.ReadIndex(root)
 		if err != nil {

@@ -84,10 +84,33 @@ go run ./scripts/bench/benchstore finish --bench probe --run-id decider-shadow-0
 with `skipped` or `error`, and `tokens_in`/`tokens_out`/`cost_usd`/`wall_ms`/
 `failure_class` are rolled up when present.
 
+## Off-machine copy (`benchstore sync`)
+
+Every runner ends with a sync (`SyncBestEffort`), and
+`go run ./scripts/bench/benchstore sync` runs one by hand:
+
+1. **Local history.** The store is its own git repo (created on first sync).
+   Its `.gitignore` tracks only the records — `index.jsonl`, `run.json`,
+   `results.jsonl`, `*.v1.json(l)`, `source.patch`, `predictions.jsonl`,
+   `usage.jsonl`, `*.md`, `*.db`, the upload ledger — and each sync commits
+   them. It has no remote; nothing is pushed.
+2. **R2 bundles.** Each unit — every top-level entry of `runs/<bench>/` and
+   of `archive/` — is packed as a `.tar.gz` named by its content hash
+   (`runs/swebench/pair-20261008/<sha256[:16]>.tar.gz`) and uploaded with
+   `wrangler r2 object put --remote`. A changed unit gets a new key, so an
+   upload never overwrites an earlier one. `.sync/r2.jsonl` is the ledger of
+   what is already off-machine; `index.jsonl` is also kept at the bucket root.
+
+The bucket is local configuration, not repo content: `.sync/config.json` in
+the store (`{"r2_bucket": "<name>"}`), or `CORTEX_BENCH_R2_BUCKET` (`off`
+disables the upload; the git commit still happens). A sync failure never
+fails a run — the local record already exists — but it prints a warning with
+the retry command.
+
+Restore a run: `wrangler r2 object get <bucket>/<key> --file run.tgz --remote
+&& tar -xzf run.tgz -C "$CORTEX_BENCH_HOME"`.
+
 ## Not yet
 
-- **Off-machine copy.** The store is one disk. It is plain files (JSONL +
-  evidence dirs) so it can be a git repo with a private remote, or synced;
-  that choice is open.
 - **Trend view.** `benchstore csv` is the data feed; a dashboard over
   `index.jsonl` is the next step.

@@ -242,6 +242,7 @@ func run() error {
 		return fmt.Errorf("failed to record the run in the benchmark index: %w", err)
 	}
 	fmt.Printf("recorded: %s\n", runDir)
+	benchstore.SyncBestEffort(os.Stdout)
 	return nil
 }
 

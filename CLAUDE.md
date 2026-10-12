@@ -38,7 +38,10 @@ a dir inside any git working tree and never overwrites a run; a start event is
 indexed before the first task, so even a crashed run is on record);
 `TestEveryRunnerUsesTheStore` fails any runner that doesn't. An ad-hoc probe
 uses `go run ./scripts/bench/benchstore begin|finish`. Tag A/B arms with
-`--label key=value`; read with `benchstore list|csv`. Before calling a run
+`--label key=value`; read with `benchstore list|csv`. Each run ends with
+`benchstore sync` (records committed to the store's own local git; every run
+bundled to R2 by content hash, never overwritten — bucket from the store's
+`.sync/config.json`, not the repo). Before calling a run
 done, confirm it appears in `benchstore list`. Authority:
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
