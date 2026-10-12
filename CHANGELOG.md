@@ -7,90 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- The built-in system prompt is rewritten as six short, language-neutral
-  working principles (understand before changing; establish the problem;
-  fix the behavior, not the evidence; verify through the real path; keep
-  changes small and true; use help deliberately). It had grown to ~8,300
-  characters of spliced per-incident rules, several of them Go-specific;
-  the default composed prompt is now ~3,400 characters, capped at 4,000 by
-  `TestSystemPromptSizeBudget`. The per-incident `*Principle` consts are
-  gone, and the plan-mode planning and step prompts no longer restate them
-  (the base system prompt rides on every plan turn). Guidance specific to
-  working on the Cortex codebase moved to the repo's `AGENTS.md`.
-- Harness text the model sees — the system, plan-mode, and subagent prompts
-  and every tool's description — is language-neutral, enforced by
-  `TestHarnessTextIsLanguageNeutral` (`edit_file` and `bash` named `gofmt`
-  and `go test`).
+## [0.4.0] - 2026-10-12
+
+Most entries below were implemented by Cortex itself, through a
+self-development loop that picks issues, opens pull requests, and fixes
+review findings. See "Cortex builds Cortex" in the README.
 
 ### Added
-- Locate-before-writing accountability (#224): a new built-in principle
-  (`locateBeforeWritingPrinciple` in `cmd/cortex/prompt.go`) tells the model
-  that before writing code naming a helper, constant, type or path it has not
-  seen this session, it must grep or outline for it and use what exists —
-  never invent identifiers, type shapes, or file paths — and that before
-  adding a new package-level name (a test helper, a const, a fixture) it must
-  grep the package, including its other `_test.go` files, so the name exists
-  where it is called and does not collide with one already declared. It is
-  the writing half of the locate-first principle (#142), which until now was
-  applied to reading but not to writing: the self-dev loop's tick
-  20261006T074738Z reviews (PRs #222/#223) found sessions writing test files
-  against guessed identifiers (seven undefined at once), carrying a
-  type-shape compile error from one session into the next, and duplicating a
-  package-level const — each guess costing a build-and-fix round. It rides in
-  the base system prompt right after `locateFirstPrinciple` (so every turn
-  sees it, including the self-dev loop's ordinary step turns) and is restated
-  in each plan step prompt, where new files actually get written and
-  turn-boundary demotion can otherwise fold the locate work out of view.
-  Mirrored verbatim in `CLAUDE.md`'s "The agent's tools" section, and pinned
-  by content, position, plan-step-carry, and mirror tests.
-  The same issue's mechanical backstop rides with it: after a `.go`
-  `write_file`/`edit_file` lands, a stdlib-only pass
-  (`internal/tools/writesanity.go`) parses the written file's PACKAGE —
-  same-package `_test.go` siblings included, siblings excluded by build
-  constraints (`_windows.go` filename suffixes and `//go:build` lines this
-  process cannot judge are left out, so a legal platform twin pair never
-  reports a collision) — and appends ONE note listing every duplicate
-  package-level declaration and every bare name undefined anywhere in the
-  package, so a session fixes a batch of compile errors in one round instead
-  of one per build. The note never vetoes the write and is silent for non-Go
-  files, unparseable files, and clean packages.
-- Review-feedback accountability (#162): a new built-in principle
-  (`reviewFeedbackPrinciple` in `cmd/cortex/prompt.go`) tells the model that
-  every finding a review raises is owed an explicit disposition — addressed,
-  deferred with a reason, or disputed — so a dropped finding is visible instead
-  of silently vanishing; that several options offered as *alternatives* mean
-  picking one and saying which, never applying them all; that listed example
-  instances stand for an underlying class to fix, not the only instances to
-  patch; and that something goes where the reviewer said it should, not in a
-  nearby file. It rides in the base system prompt (so every turn sees it,
-  including the self-dev loop's ordinary step turns) and is restated in each
-  plan step prompt, where a review round's findings are actually applied and
-  turn-boundary demotion can otherwise fold the review out of view. It answers
-  the self-dev loop's reviews of PRs #158, #145, and #143, where review asks
-  survived several rounds unfixed, notes asked to be kept were dropped, both
-  offered alternatives were applied (printing one summary twice), and each
-  round patched one more example instead of closing the class. Mirrored
-  verbatim in `CLAUDE.md`'s "Constraints" section, restated in each
-  plan step prompt, and pinned by content, position, and mirror tests.
-- Journaled commit attribution (#146): a new machine-level `attribution`
-  writer-class (`attribution.commit`, `~/.cortex/journal/attribution/`) records
-  every `git commit` the harness sees and whether it carried the attribution
-  trailer — the `bash` tool's backstop, `cortex change commit`, and the Discord
-  WIP checkpoint. Each commit gets an intent event naming what the backstop
-  decided (`added`, `already_present`, `skipped_unparseable`, `skipped_amend`,
-  `skipped_stdin`, `disabled`) and, once the commit lands, a verified event with
-  its SHA and whether `git log -1` actually finds the trailer, so compliance is
-  measured rather than assumed. Writes are local and best-effort.
-- Self-ignoring `.cortex/` in git workspaces (#119): the first session in a
-  workspace that is inside a git repository writes a self-contained
-  `.cortex/.gitignore` (a lone `*`) so session transcripts, journal segments,
-  history, and memory are excluded from git without editing the user's own
-  `.gitignore`. A one-line `note:` to stderr announces the write; a repeat
-  session, a non-git workspace, an already-ignored `.cortex/`, or a missing
-  git binary is a silent no-op. This closes the leak where a routine
-  `git add -A && git commit` published transcripts that could carry secrets
-  captured from tool output (#103).
+- Image input for vision models. `models.<role>.vision` gates image content
+  parts; `read_file` attaches png/jpeg/gif/webp files, and `@image` mentions
+  (REPL) or an `attachments` field (`cortex serve`) attach them to a turn.
+  Images count toward the window and demote to recallable outline lines; a
+  text-only model gets a clear refusal (#222, #229, #233).
+- Turn receipts. A turn that ran tools reports files changed, exit codes of
+  the model's own test/build runs, files the format hook failed on, and the
+  `- [ ]` checklist items the reply leaves out: in the REPL, on `cortex turn`
+  stderr, and under the `receipt` JSON key. The model never sees them (#226, #234).
+- `tests changed:` and `leftover debug:` receipts when a turn removes or
+  shrinks tests, or leaves debug prints or scratch files behind; the model
+  gets them before its final answer (#145, #166).
+- Project commands. Cortex discovers format/lint/test/build commands
+  (go.mod, package.json, pyproject.toml, Cargo.toml, Makefile) or reads them
+  from `project.commands` or the instruction file's `## Commands` section.
+  On a trusted workspace (`cortex project trust`), each edited file is
+  formatted and lint runs once at turn end. See `cortex project commands`
+  and `/hook off|format|all` (#143).
+- Plan-then-execute: `cortex turn --plan` and `/plan <task>` plan a few
+  steps and run each as its own turn, with a per-step report. A bug that
+  does not reproduce is reported as "Not reproduced:" with the evidence
+  (#157, #186).
+- `/undo [N]` restores the working tree from per-turn git checkpoints. It
+  leaves the index, the stash list, `.cortex/`, and pre-existing untracked
+  files alone (#223).
+- Risky shell prompts show the classifier's reason and accept `a` (always
+  this command) or `p` (always this prefix) for the session (#208).
+- REPL: tab completion for slash commands, `/model` ids, and `@path`
+  mentions (#202); an interactive session picker for `/sessions` and
+  `cortex resume` (#207); a live status row with model, context fill,
+  tokens, reported cost, and elapsed time (#206); a turn-state light (#87).
+- REPL layout: one line per tool call with its result, folded runs of
+  read-only calls, a startup header, an answer footer, `/last` (Ctrl-O) to
+  inspect the last turn's tool calls, and pickers for `/memory` and
+  `/model` (#254).
+- In-turn demotion: when a turn outgrows the window budget, the oldest tool
+  results (this turn, then the previous one) become one-line stubs with
+  `recall` citations on the wire. `context.in_turn_demotion` (#172, #181).
+- The model's reasoning is sent back on each step of the same turn and shed
+  first when over budget; it is never replayed into later turns or sent to
+  OpenRouter. `context.keep_reasoning`, default on (#257).
+- `attribution.*` config: a `Co-Authored-By` trailer on commits Cortex makes
+  (`cortex change commit`, loop firings, Discord checkpoints, simple
+  `git commit` through `bash`) and a PR-footer line in the prompt. Each
+  commit is journaled with whether the trailer landed (#127, #196).
+- A write-sanity note after a `.go` file is written: every duplicate
+  package-level declaration and undefined name in the package, in one
+  pass (#235).
+- `thinking: "omit"` on a model role sends no reasoning field, for
+  providers that reject it (#211).
+
+### Changed
+- The built-in system prompt is six short, language-neutral principles,
+  capped at 4,000 characters. Tool descriptions no longer name
+  language-specific tools. Guidance for working on this repository moved
+  to `AGENTS.md` (#256).
+- The full memory guidance is in the system prompt only when there are notes
+  or a demoted outline to use, and never when `prompt.file` replaces the
+  base prompt (#158, #160).
+- Project instructions load from the first of `AGENTS.md`, `CLAUDE.md`, and
+  `.github/copilot-instructions.md`; the prompt header and `/context` name
+  the file (#152).
+- `edit_file` feedback: a failed match shows the file's current closest
+  region (or says only whitespace differs), an ambiguous match lists every
+  line, and a successful edit shows the changed region and warns on large
+  removals or dropped guard lines (`GUARD DROPPED`) (#164, #176, #203, #236).
+- `bash`: shell reads and scratch files get no steering note. An in-place
+  rewrite of a tracked file gets a note pointing to `edit_file`/`write_file`
+  and runs the format hook. `tools.steer_shell_reads: true` restores the
+  older notes (#203, #227, #258).
+- Orientation: every turn carries a workspace-root note; `read_file` on a
+  directory returns a listing; not-found errors name the workspace root,
+  point to `outline`/`grep`, and list nearby files (#184).
+- Blocked, refused, and declined commands say the check's result is
+  unknown. A command with the same effect as one blocked earlier in the
+  turn (e.g. `git commit --no-verify`, or a mutating `git stash`) is
+  blocked too (#174, #203, #204).
+- The model is warned 10 tool calls before the per-turn cap; a forced final
+  answer must account for leftover debug files, test changes, and lint
+  findings (#179).
+- `cortex turn --session` prints its resume banner and session id on
+  stderr; stdout carries only the answer (#168).
+- Dependency and toolchain updates (Go 1.27.2, golang.org/x/net 0.59.0,
+  x/crypto 0.57.0, glamour v2, and others), including bumps that clear
+  vulnerabilities govulncheck reported as reachable (#125, #191).
+
+### Fixed
+- In a workspace under `$HOME` without its own `.cortex/`, Cortex no longer
+  uses `~/.cortex` as the project dir, which mixed sessions and memory
+  across projects (#270).
+- No "hook inactive" note when the post-edit hook is off (#271).
+- The shell-risk classifier recovers a verdict that a reasoning model left
+  only in its reasoning (strictly, else it fails closed), re-sends a
+  no-answer response once, and retries transient errors. A plain `2>&1`
+  stream merge stays on the safe path (#211, #272).
+- `cortex --help` prints no color codes when stdout is not a terminal (#273).
+- An empty final round no longer returns stale pre-tool text as the answer:
+  it gets one bounded salvage re-ask, and with reasoning on, one retry with
+  reasoning off (#88, #156).
+- Final answers: leaked text-form tool-call markup is stripped (or run as a
+  real tool call mid-turn), and truncated answers are re-asked. A reply that
+  is still empty, markup, or truncated is flagged as `summary issue:` on
+  `cortex turn` stderr and `summary_issue` in `--json` (#211, #239).
+- Strict providers no longer reject sessions with an empty tool result or
+  malformed tool-call arguments; the wire copy is repaired and the
+  transcript is unchanged (#120).
+- A turn that recovered from a provider error prints `backend error:
+  <status> <message>` and journals a redacted `model.failure` entry (#167).
+- A repeated identical edit gets a plain "nothing to change" error that
+  says to re-read the span (#211).
+
+### Security
+- Secrets (provider keys, `KEY=`/`TOKEN=`/`SECRET=` assignments, PEM private
+  keys) are redacted before transcripts, journal entries, and memory notes
+  are written (#193).
+- A `fetch_url`/`web_search` result taints the turn: the content is framed
+  as untrusted data, commands the classifier would auto-approve need
+  explicit approval, stored session approvals do not apply, `git push` is
+  never auto-approved, and writes are confined to the workspace. Headless
+  runs block instead (#212).
+- In a git workspace, the first session writes `.cortex/.gitignore` (`*`),
+  so `git add -A` cannot commit transcripts or the journal (#175).
 
 ## [0.3.0] - 2026-08-07 — the Cortex slimdown
 

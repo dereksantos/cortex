@@ -1,171 +1,142 @@
 # Contributing to Cortex
 
-Thanks for looking at Cortex. This is research-grade software used daily by
-its author — contributions are welcome, but keep changes small and
-reviewable; see below for what the gate expects.
+Thank you for your interest in Cortex. Contributions are welcome. Keep each
+change small, so that a reviewer can read it in one pass.
 
-## What Cortex is
+Cortex is one binary, `cmd/cortex`: a coding agent for small and local
+models, with working memory built in. `CLAUDE.md` describes the
+architecture and is kept current with the code. `AGENTS.md` has the rules
+for working on this repository. Read both before a large change.
 
-Cortex is a local-first coding harness built around one binary,
-`cmd/cortex`: a coding agent for small and local models with working memory
-built in. It manages a bounded, two-zone context window (recent turns
-verbatim, older turns demoted to a cited outline, recallable on demand),
-lets the model curate its own durable notes through memory tools
-(`memory_write/read/search/forget`), and runs a bounded read-only `study`
-subagent for locating code without blowing the context budget. See the
-top of `CLAUDE.md` for the full picture and `docs/archive.md` for what
-existed before the project was slimmed down to this scope.
+## Build and test
 
-## Development setup
-
-Requires Go 1.26 (see `go.mod`).
+Cortex needs Go 1.26 or later. The `toolchain` line in `go.mod` selects Go
+1.27.2, which is the version CI uses.
 
 ```bash
 git clone https://github.com/dereksantos/cortex.git
 cd cortex
-go build ./cmd/cortex
-go test ./...
+go build ./cmd/cortex     # build the binary
+go test ./...             # run all tests
+./scripts/check.sh        # gofmt, go vet, and golangci-lint
 ```
 
-Optional one-time git hooks (`git config core.hooksPath .githooks`): a fast
-`pre-commit` (gofmt + go vet on staged files) and a `pre-push` that runs
-`golangci-lint` + `go test ./...`. Bypass only for real emergencies
-(`--no-verify`); prefer fixing the underlying issue.
+All three commands must pass before you open a pull request (PR).
+`./scripts/check.sh fmt`, `vet`, and `lint` run one check each. If
+golangci-lint is not installed, the script skips it with a warning. CI
+always runs it.
 
-### The gate
+Optional: run `git config core.hooksPath .githooks` to use the repository
+hooks. The pre-commit hook runs gofmt and go vet on staged files. The
+pre-push hook runs golangci-lint and `go test ./...`.
 
-`./scripts/check.sh all` runs gofmt + `go vet` + `golangci-lint` — this is
-the same check CI runs and is authoritative. Individual stages:
-`./scripts/check.sh {fmt,vet,lint}`. Before opening a PR:
+## Conventions
 
-```bash
-go build ./cmd/cortex
-go test ./...
-./scripts/check.sh all
-```
+- Use the standard library `testing` package only. Do not use testify or
+  other assertion libraries. Use `t.Errorf`, `t.Fatalf`, and `t.Fatal`.
+- Write table-driven tests with `t.Run` subtests.
+- Tests that need a live model are gated by an environment variable (for
+  example `CORTEX_LIVE_FLEET=1`). They are not part of `go test ./...` and
+  are not necessary for a PR.
+- Wrap errors with context: `fmt.Errorf("failed to X: %w", err)`.
+- Put entry points in `cmd/`, private code in `internal/`, and public API in
+  `pkg/`. Send all LLM calls through the `pkg/llm` provider interface.
+- When a change affects documented behavior, update the document in the
+  same PR (`CLAUDE.md`, `README.md`, or `docs/*.md`). Some tests compare
+  the README and `CLAUDE.md` with the code.
 
-All three must be clean. `golangci-lint` is skipped locally with a warning
-if not installed (`brew install golangci-lint` or
-`go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`);
-CI always runs it.
+## Find an issue
 
-## Testing constraints
+1. Look at the issues with the label
+   [`good first issue`](https://github.com/dereksantos/cortex/labels/good%20first%20issue)
+   or [`help wanted`](https://github.com/dereksantos/cortex/labels/help%20wanted).
+2. Optional: comment on the issue to say that you work on it. A comment
+   holds the issue for 3 days.
+3. Open a PR that fixes the issue. A working PR is the claim. You do not
+   need permission to start.
 
-- Standard library `testing` only — no testify, no other assertion
-  libraries. Use `t.Errorf` / `t.Fatalf` / `t.Fatal`.
-- Table-driven tests with `t.Run` subtests where the cases share shape.
-- Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
-- Tests that require a live model fleet are env-gated (e.g.
-  `CORTEX_LIVE_FLEET=1`) and are not part of the default `go test ./...`
-  run or a PR requirement — see below.
+If two PRs fix the same issue, the maintainer reviews the first PR that
+meets the acceptance criteria and passes CI. A PR that reserves an issue
+but does not fix it is closed.
 
-## Code conventions
+## The self-development loop
 
-- **Error handling**: wrap with context — `fmt.Errorf("failed to X: %w", err)`.
-- **Naming**: constructors are `NewXxx(cfg *config.Config)`; interfaces are
-  nouns (`Provider`, `Storage`), never `IProvider`-style.
-- **Package structure**: `cmd/` is entry points, `internal/` is private
-  implementation, `pkg/` is public API. There is exactly one LLM layer,
-  `pkg/llm` — go through its `Provider` interface (Anthropic, Ollama,
-  OpenRouter, OpenAI-compatible) rather than adding a parallel client.
-- Follow `gofmt`; keep functions and packages narrow rather than clever.
+Cortex fixes issues in its own repository (see "Cortex builds Cortex" in
+the README). You can see its work in the repository:
 
-## Where things live
+- The loop works only on open issues that the maintainer labels `loop-ok`.
+  It does not take an issue without this label, so your work on such an
+  issue does not collide with the loop.
+- Cortex opens a PR with the label `cortex-loop`. A bot account commits
+  through [githug](https://githug.ai).
+- Claude reviews the loop's PRs. Claude can read the code but cannot change
+  it. Cortex fixes each finding, and the review starts again.
+- Issues with the label `loop-finding` come from these reviews. The loop
+  takes one only after the maintainer adds `loop-ok`.
 
-`CLAUDE.md`'s "Key files" section is the map: the turn loop
-(`cmd/cortex/loop.go`), the `study` subagent (`cmd/cortex/study.go`), the
-tool-call vocabulary (`internal/agent`), the tool surface
-(`internal/tools`), the structural map (`internal/outline`), the
-append-only journal (`internal/journal`), the shell-risk classifier
-(`internal/shellrisk`), LLM providers (`pkg/llm`), and layered config
-(`pkg/config`). For what to set and how to run it, see
-`docs/configuration.md`. Read `CLAUDE.md` in full before making
-non-trivial changes — it is the authoritative description of today's
-architecture, kept current as the code moves.
+PRs from people are welcome at the same time. The maintainer reviews them.
 
-## Making a change
+## Open a pull request
 
-1. Branch from `main`.
-2. Keep the change small and reviewable — one concern per PR.
-3. Add or update tests for the behavior you touched (table-driven, stdlib
-   only, per above).
-4. Update the relevant doc if the change affects documented behavior
-   (`CLAUDE.md`, `docs/*.md`, `README.md`).
-5. Run `go build ./cmd/cortex && go test ./... && ./scripts/check.sh all`
-   and confirm it's clean.
-6. Open a PR with a clear description of what changed and why. Live-fleet
-   evals (anything gated on `CORTEX_LIVE_FLEET=1` or similar) are not
-   required for a PR to merge — the deterministic suite is the bar.
+1. Make a branch from `main`. Keep one concern in each PR.
+2. Add or update tests for the behavior that you change.
+3. Fill in `.github/pull_request_template.md`: a summary, and a test plan
+   that says what you ran. If you change terminal output, also do the
+   terminal render checklist in the template.
+4. Use a short, specific commit message. A `type: summary` prefix (`fix:`,
+   `feat:`, `docs:`) is common but not mandatory.
 
-Commit messages: short, imperative, and specific about the change; a
-`type: summary` prefix (`fix:`, `feat:`, `docs:`, `refactor:`, `test:`,
-`chore:`) is a reasonable convention but not enforced.
+These CI checks must pass before a merge: **Test on ubuntu-latest**,
+**Test on macos-latest** (go vet, `go test -race`, build, and the study
+contract), and **Commit identity**. CI also runs golangci-lint,
+govulncheck, and a cross-platform build. A maintainer must approve the PR.
 
-## Claiming issues
+### PRs written by an agent
 
-A working PR is the claim. You don't need to ask before you start.
+Every merged change must be connected to a person. For a PR from a fork,
+that person is the GitHub account that opened it. If an agent wrote your
+PR, say so in the description. The terms are the same: a real fix, a test,
+and a description of what changed and why.
 
-- If you comment that you're working on an issue, that holds it for 3 days.
-  After that, any PR that meets the issue's acceptance criteria will be
-  reviewed, whoever opens it.
-- When two PRs fix the same issue, the first one that meets the acceptance
-  criteria and passes CI is the one reviewed.
-- Placeholder or "stake" PRs (ones that reserve an issue without fixing
-  it) are closed.
-- Contributions from agents are welcome on the same terms: a real fix, a
-  test, and a description of what changed and why.
-
-### Agent-written PRs
-
-Every merged change should tie back to a person. For a PR from a fork, that
-person is the GitHub account that opened it. If an agent wrote your PR, say so
-in the description.
-
-Optionally, you can commit through [githug](https://githug.ai) so your
-agent's commits carry its own identity and an `Accountable:` trailer naming
-you: run `hug init --repo <you>/cortex` and `hug setup --agent <name>` in your
-fork's clone. The `Commit identity` check accepts fork PRs either way; it
-leaves a notice on commits that didn't come through githug. (Branches pushed
-to this repo itself must use githug for agent work.)
-
-## Releases (maintainer)
-
-Releases are tag-driven: pushing a `v*` tag runs
-`.github/workflows/release.yml`, which invokes GoReleaser
-(`.goreleaser.yaml`) to cross-compile darwin/linux × amd64/arm64
-(`CGO_ENABLED=0`), attach checksummed archives to a GitHub Release, and
-generate grouped notes from conventional-commit prefixes. The flow:
-
-1. Move `CHANGELOG.md`'s `[Unreleased]` content under a new
-   `## [X.Y.Z] — YYYY-MM-DD` heading (leave a fresh empty `Unreleased`).
-2. `git commit -am "chore(release): vX.Y.Z"`
-3. `git tag -a vX.Y.Z -m "vX.Y.Z"`
-4. `git push origin main --follow-tags`
-
-Optional local dry-run before tagging:
-`goreleaser release --snapshot --clean --skip=publish`.
-
-Versioning is pre-1.0 semver: minor bumps may carry breaking changes,
-patch releases are fixes only. `scripts/install.sh` downloads whatever
-the latest release is — its archive-name reconstruction must stay in sync
-with `.goreleaser.yaml`'s `name_template` (both files say so). The
-Homebrew-tap section in `.goreleaser.yaml` stays commented until the tap
-repo and its token secret exist.
+Optional: commit through githug so that your agent's commits have their own
+identity and an `Accountable:` trailer with your name. Run
+`hug init --repo <you>/cortex` and `hug setup --agent <name>` in the clone
+of your fork. The **Commit identity** check accepts fork PRs in both cases.
+It adds a notice to commits that did not come through githug. Agent work on
+branches in this repository itself must use githug.
 
 ## Privacy
 
-The journal (`.cortex/journal/`) is local-only by design — nothing in it
-leaves the machine as part of normal operation. `journal.AssertLocalOnly`
-exists as a code-review tripwire: if you add a code path that sends
-journal data outbound, expect it to be flagged. `.cortex/` is gitignored —
-in a git workspace the first session writes a self-contained
-`.cortex/.gitignore` (a lone `*`) rather than editing your `.gitignore`
-(#119); don't check in session transcripts, journal segments, or config
-containing keys.
+The journal (`.cortex/journal/`) stays on your computer.
+`journal.AssertLocalOnly` marks this rule in the code. A change that sends
+journal data out of the computer gets extra review. Do not commit session
+transcripts, journal files, or a config that contains keys. In a git
+workspace, Cortex writes `.cortex/.gitignore` to keep `.cortex/` out of git.
 
-## Reporting bugs and requesting features
+## Report a bug or request a feature
 
-Use the GitHub issue templates under `.github/ISSUE_TEMPLATE/`. Include
-your Cortex version/commit, OS, and backend/model configuration — the
-environment fields on the bug template match what `cortex --version` and
-your config actually report.
+Use the issue templates in `.github/ISSUE_TEMPLATE/`. Include the output of
+`cortex --version`, your operating system, and your backend and model
+configuration.
+
+## Releases (maintainer)
+
+A `v*` tag starts `.github/workflows/release.yml`. GoReleaser
+(`.goreleaser.yaml`) builds darwin and linux binaries for amd64 and arm64
+(`CGO_ENABLED=0`) and attaches checksummed archives to a GitHub Release.
+The release text points to `CHANGELOG.md`. GoReleaser does not generate
+notes from commits.
+
+1. In a PR, move the `[Unreleased]` entries of `CHANGELOG.md` under a new
+   `## [X.Y.Z] - YYYY-MM-DD` heading. Keep an empty `[Unreleased]` heading.
+2. Merge the PR.
+3. Tag the merge commit: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+4. Push the tag: `git push origin vX.Y.Z`.
+
+For a local dry run before the tag, use
+`goreleaser release --snapshot --clean`.
+
+Versions follow pre-1.0 semver: a minor version can contain breaking
+changes, and a patch version contains only fixes. `scripts/install.sh`
+downloads the latest release. Its archive name must agree with
+`name_template` in `.goreleaser.yaml`.
