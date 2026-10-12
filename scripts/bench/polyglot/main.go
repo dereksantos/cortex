@@ -32,6 +32,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/benchstore"
 )
 
 // defaults describe the local fleet this benchmark was built against
@@ -64,6 +66,8 @@ type options struct {
 	turnTimeout time.Duration
 	testTimeout time.Duration
 	list        bool
+	ephemeral   bool
+	labels      benchstore.LabelFlag
 }
 
 func main() {
@@ -74,9 +78,9 @@ func main() {
 }
 
 func parseFlags() *options {
-	o := &options{}
+	o := &options{labels: benchstore.LabelFlag{}}
 	flag.StringVar(&o.srcRoot, "src", "", "pinned polyglot-benchmark checkout (required)")
-	flag.StringVar(&o.outRoot, "out", "", "bench output root, one dir per run (required)")
+	flag.StringVar(&o.outRoot, "out", "", "parent of the run dir (default: the durable store, $CORTEX_BENCH_HOME or ~/.cortex/benchmarks, under runs/polyglot)")
 	flag.StringVar(&o.cortexBin, "cortex", "", "path to the cortex binary under test (required)")
 	flag.StringVar(&o.runID, "run-id", "", "run directory name (default: UTC timestamp)")
 	flag.StringVar(&o.exercises, "exercise", "", "comma-separated exercise names to run (overrides --only)")
@@ -92,6 +96,8 @@ func parseFlags() *options {
 	flag.DurationVar(&o.turnTimeout, "timeout", 10*time.Minute, "per-exercise wall-clock budget for the cortex turn")
 	flag.DurationVar(&o.testTimeout, "test-timeout", 2*time.Minute, "per-exercise budget for `go test ./...`")
 	flag.BoolVar(&o.list, "list", false, "list the discovered exercises and exit")
+	flag.BoolVar(&o.ephemeral, "ephemeral", false, "allow --out inside a git working tree (throwaway runs only; such results are not durable)")
+	flag.Var(o.labels, "label", "tag the run in the benchmark index, key=value (repeatable), e.g. --label arm=decider")
 	flag.Parse()
 	return o
 }
@@ -110,7 +116,7 @@ func run() error {
 		return nil
 	}
 	for _, req := range []struct{ name, val string }{
-		{"--src", o.srcRoot}, {"--out", o.outRoot}, {"--cortex", o.cortexBin},
+		{"--src", o.srcRoot}, {"--cortex", o.cortexBin},
 	} {
 		if req.val == "" {
 			return fmt.Errorf("%s is required", req.name)
@@ -137,10 +143,22 @@ func run() error {
 	if runID == "" {
 		runID = time.Now().UTC().Format("20060102-150405")
 	}
-	runDir := filepath.Join(o.outRoot, runID)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return fmt.Errorf("failed to create run dir %s: %w", runDir, err)
+	// The run directory comes from the durable store: outside any git
+	// working tree, created exclusively (an existing run is never
+	// overwritten), indexed at start so even a crashed run is on record.
+	store, err := benchstore.Begin(benchstore.BeginOptions{
+		Bench:      "polyglot",
+		RunID:      runID,
+		OutRoot:    o.outRoot,
+		Ephemeral:  o.ephemeral,
+		SourceRepo: ".",
+		Model:      o.model,
+		Labels:     o.labels,
+	})
+	if err != nil {
+		return err
 	}
+	runDir := store.Dir
 	transcripts := filepath.Join(runDir, "transcripts")
 	if err := os.MkdirAll(transcripts, 0o755); err != nil {
 		return fmt.Errorf("failed to create transcripts dir: %w", err)
@@ -220,6 +238,10 @@ func run() error {
 		return err
 	}
 	PrintSummary(os.Stdout, meta, rows)
+	if _, err := store.Finish(""); err != nil {
+		return fmt.Errorf("failed to record the run in the benchmark index: %w", err)
+	}
+	fmt.Printf("recorded: %s\n", runDir)
 	return nil
 }
 

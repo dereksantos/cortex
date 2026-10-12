@@ -18,9 +18,12 @@
 #
 # The full slice occupies the local GPU for hours. Run it deliberately.
 #
-# Everything lives under .cortex/bench/ (gitignored): the pinned checkout, the
-# built binary, and one directory per run holding run.json, results.jsonl,
-# transcripts/ and work/.
+# Caches live under .cortex/bench/ (gitignored, regeneratable): the pinned
+# checkout and the built binaries. RESULTS do not: each run's directory
+# (run.json, results.jsonl, transcripts/, work/) goes to the durable
+# benchmark store — $CORTEX_BENCH_HOME, else ~/.cortex/benchmarks — under
+# runs/polyglot/<run-id>/, and is recorded in its index.jsonl
+# (docs/benchmarks.md). Tag A/B arms with --label key=value.
 
 set -euo pipefail
 
@@ -63,8 +66,8 @@ echo "==> building the benchmark driver"
 (cd "$repo_root" && go build -o "${bin_dir}/polyglotbench" ./scripts/bench/polyglot)
 
 # --- 3. run ---------------------------------------------------------------
+cd "$repo_root"   # the driver records this tree's commit (and a dirty tree's patch)
 exec "${bin_dir}/polyglotbench" \
   --src "$src_dir" \
-  --out "$bench_root" \
   --cortex "${bin_dir}/cortex" \
   "$@"

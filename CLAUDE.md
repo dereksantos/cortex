@@ -27,6 +27,21 @@ for what existed before and why it went.
 > `internal/agent`, the tool surface in `internal/tools`, the structural map in
 > `internal/outline`. Everything below describes today's (post-refactor) code.
 
+## Benchmarks & evals — results are never lost
+
+**Every benchmark, eval, or probe result goes to the durable store —
+`$CORTEX_BENCH_HOME`, default `~/.cortex/benchmarks` — and nowhere else.**
+Not `.cortex/bench/` in the repo, not an agent worktree, not a scratchpad,
+not `/tmp`: months of results were lost exactly that way. The runners under
+`scripts/bench/` open every run through `internal/benchstore` (`Begin` refuses
+a dir inside any git working tree and never overwrites a run; a start event is
+indexed before the first task, so even a crashed run is on record);
+`TestEveryRunnerUsesTheStore` fails any runner that doesn't. An ad-hoc probe
+uses `go run ./scripts/bench/benchstore begin|finish`. Tag A/B arms with
+`--label key=value`; read with `benchstore list|csv`. Before calling a run
+done, confirm it appears in `benchstore list`. Authority:
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
 ## What Cortex is
 
 A single long-lived REPL process. The turn loop:
@@ -576,6 +591,7 @@ go test ./...                # full suite
 - `internal/tools/` — the agent's tool surface (`Execute`, the tool decls, `grep`, the `Study` profile, `ConfinePath`/`TargetedRead`)
 - `internal/outline/` — the structural map (`Outline`/`Render`; `go/ast` + regex tiers, breadth-first to budget)
 - `internal/journal/` — append-only event log (incl. `study.result` telemetry)
+- `internal/benchstore/` + `scripts/bench/` — the durable benchmark store and its runners (SWE-bench Verified + mini-SWE-agent, Aider polyglot); `docs/benchmarks.md`
 - `internal/shellrisk/` — command risk classifier
 - `internal/style/` — terminal styling: semantic color roles (`Dim`/`Accent`/`Action`/`OK`/`Warn`/`Err`), NO_COLOR, and width helpers (`Width`/`Clip`/`Justify`/`Wrap`); pick a role by meaning, never a hue ([`docs/tui-polish.md`](docs/tui-polish.md))
 - `pkg/llm/` — LLM providers

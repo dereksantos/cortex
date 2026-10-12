@@ -55,7 +55,12 @@ Flags (`--list` prints the corpus and exits):
 
 ## Output
 
-Everything lands in `.cortex/bench/<run-id>/` (gitignored):
+Every run lands in the **durable benchmark store** — `$CORTEX_BENCH_HOME`, default
+`~/.cortex/benchmarks` — at `runs/polyglot/<run-id>/`, outside any git working tree, and
+is recorded in the store's `index.jsonl` (see [`docs/benchmarks.md`](../../../docs/benchmarks.md)).
+An existing run id is refused, never overwritten; `--out` inside a repo or worktree is
+refused unless `--ephemeral`. Tag A/B arms with `--label key=value` (repeatable).
+A dirty tree under test also gets `source.patch` (`git diff HEAD`).
 
 ```
 run.json          pinned model, temperature, cortex commit, polyglot commit, host, times
@@ -73,7 +78,7 @@ One row:
 ```json
 {"exercise":"alphametics","pass":false,"tool_calls":14,"tokens_in":312840,
  "tokens_out":4120,"wall_ms":286110,"failure_class":"wrong_code",
- "transcript_path":".cortex/bench/20260806-120000/transcripts/alphametics.jsonl",
+ "transcript_path":"~/.cortex/benchmarks/runs/polyglot/20260806-120000/transcripts/alphametics.jsonl",
  "session_id":"20260806-120014","mutating_calls":3,"files_changed":1,
  "agent_turns":1,"verify_ms":740,"work_dir":"..."}
 ```
