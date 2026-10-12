@@ -108,3 +108,15 @@ descriptions are sent to every model in every repository. Keep them general:
 - When an observed failure suggests a new rule, prefer fixing the tool or the
   harness mechanism. If it is guidance, put it here (for this repo) or in an
   Agent Skill, not in the built-in prompt.
+
+## Benchmarks and evals
+
+Every benchmark, eval, or probe result is written to the durable store
+(`$CORTEX_BENCH_HOME`, default `~/.cortex/benchmarks`), never into the repo,
+a worktree, a scratchpad, or `/tmp` — results kept there have been lost
+before. Use the runners under `scripts/bench/` (they open each run through
+`internal/benchstore`); for an ad-hoc probe, `go run ./scripts/bench/benchstore
+begin` gives you the run directory and `finish` records it. A new runner must
+open its run with `benchstore.Begin` (`TestEveryRunnerUsesTheStore`). Report a
+run's numbers only after it shows in `benchstore list`. See
+`docs/benchmarks.md`.
