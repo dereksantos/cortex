@@ -268,6 +268,19 @@ The saved file:
 }
 ```
 
+When the picked model has fewer than 7B parameters, the prompt adds one
+line before the question, because small models often fail at multi-step
+agent work:
+
+```
+Found Ollama with llama3.2:3b (32k context).
+Small models often fail at multi-step agent work. Press n to use a free hosted model instead.
+Use it? [Y/n]
+```
+
+A non-interactive first run prints the same advice as a `cortex: note:`
+line on stderr. A model whose size the server does not report gets no hint.
+
 LM Studio and llama.cpp are saved the same way, with `backend.type`
 `"lmstudio"` / `"llamacpp"` (treated as generic OpenAI-compatible backends)
 and their `/v1` endpoint.
