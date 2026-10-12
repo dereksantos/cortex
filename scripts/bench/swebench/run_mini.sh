@@ -121,7 +121,7 @@ usage() {
 }
 
 cat > "${out}/run.json" <<EOF
-{"run_id": "${run_id}", "harness": "mini-swe-agent", "mini_version": "${MINI_VERSION}",
+{"run_id": "${run_id}", "harness": "mini-swe-agent", "mini_version": "${MINI_VERSION}", "model": "${model}",
  "official_config": "${official_cfg}", "overlay": "${overlay}", "backend": "${backend}", "wall_limit_s": ${wall_limit_s},
  "swebench_version": "${SWEBENCH_VERSION}", "dataset_revision": "${DATASET_REVISION}",
  "instance_cost_cap": ${instance_cost}, "usage_cap": ${usage_cap:-0}, "ids": "${ids}",

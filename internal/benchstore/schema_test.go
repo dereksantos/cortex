@@ -62,6 +62,7 @@ func TestNormalizeRun(t *testing.T) {
 func TestNormalizeMiniFromReports(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "run.json"), `{"harness":"mini-swe-agent"}`)
+	writeFile(t, filepath.Join(dir, "mini_overlay_litellm.yaml"), "model:\n  model_class: litellm\n  model_name: openai/qwen3.8-27b\n")
 	writeFile(t, filepath.Join(dir, "predictions.jsonl"),
 		`{"instance_id":"a","model_patch":"diff"}`+"\n"+`{"instance_id":"b","model_patch":"diff"}`+"\n"+`{"instance_id":"c","model_patch":""}`+"\n")
 	writeFile(t, filepath.Join(dir, "eval", "x", "report.json"), `{"a":{"resolved":true}}`)
@@ -77,7 +78,12 @@ func TestNormalizeMiniFromReports(t *testing.T) {
 	if s.Pass != 1 || s.Skipped != 1 || s.Fail != 1 || s.Classes[FailNoChange] != 1 {
 		t.Errorf("summary = %+v", s)
 	}
-	if _, err := os.Stat(filepath.Join(dir, RunFileV1)); err != nil {
-		t.Errorf("run.v1.json not written: %v", err)
+	b, err := os.ReadFile(filepath.Join(dir, RunFileV1))
+	if err != nil {
+		t.Fatalf("run.v1.json not written: %v", err)
+	}
+	var run RunV1
+	if err := json.Unmarshal(b, &run); err != nil || run.Models["code"] != "qwen3.8-27b" {
+		t.Errorf("model from the overlay = %v (err %v), want qwen3.8-27b", run.Models, err)
 	}
 }

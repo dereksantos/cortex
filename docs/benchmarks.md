@@ -151,7 +151,13 @@ the retry command.
 Restore a run: `wrangler r2 object get <bucket>/<key> --file run.tgz --remote
 && tar -xzf run.tgz -C "$CORTEX_BENCH_HOME"`.
 
-## Not yet
+## Trend dashboard
 
-- **Trend view.** `benchstore csv` is the data feed; a dashboard over
-  `index.jsonl` is the next step.
+`go run ./scripts/bench/benchstore export --out <dir>` writes the three
+tables the trend dashboard reads, from the v1 files: `runs.csv` (one row per
+logical run — benchmark, harness, model, commit, kind, counts, pass rate),
+`failures.csv` (run × failure class), and `tasks.csv` (one row per task
+attempt). `kind` separates measured runs from probes/smoke runs and aborted
+ones by run name, so trend lines don't mix them. Paths and host names are
+left out of the export. To refresh the dashboard after new runs: export,
+then upload the three files to it in place of the old ones.
