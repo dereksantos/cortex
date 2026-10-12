@@ -32,6 +32,16 @@ edit, or delete these files.
 
 ## Example
 
+Cortex finds and fixes a bug in a small project. The model is qwen3.8-27b
+on a local server. The playback is 1.5 times faster than real
+time.
+
+![Cortex reads a small Go project, runs the failing tests, fixes the bug
+with edit_file, and runs the tests again](docs/assets/demo.gif)
+
+To record this demo again, see
+[`docs/assets/demo/demo.tape`](docs/assets/demo/demo.tape).
+
 A long session does not keep all old messages in the context window. When
 an old turn is necessary again, the agent recalls it:
 
