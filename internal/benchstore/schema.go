@@ -56,7 +56,7 @@ var nativeClass = map[string]string{
 	"error":              FailAgentError,
 	"env_error":          FailInfra,
 	"eval_error":         FailInfra,
-	"patch_apply_failed": FailInfra,
+	"patch_apply_failed": FailWrongChange, // the agent's diff doesn't apply: unresolved, as SWE-bench scores it
 }
 
 // RunV1 is run.v1.json.

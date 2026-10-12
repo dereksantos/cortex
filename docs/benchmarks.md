@@ -41,12 +41,17 @@ not seen finish, so losing the index loses nothing — losing `runs/` does.
   working tree (`.git` dir or a linked worktree's `.git` file). `--ephemeral`
   opts out, for throwaway smoke checks whose results don't matter.
 - **On record from the first second.** A `start` event is appended before
-  the first task runs, so a crashed or killed run still shows up (as
-  `start` with no `finish`).
+  the first task runs, so a killed run still shows up (as `start` with no
+  `finish`). A run that ends early on an error still records its partial
+  results (`finish` with a note) and syncs them.
 - **Reproducible.** The commit under test is recorded, and a dirty tree's
-  diff is saved as `source.patch`.
+  tracked changes and untracked files are saved as `source.patch` (a failure
+  to capture it is recorded in `source.patch.err` and the run's index entry,
+  never dropped).
 - **Every runner uses it.** `TestEveryRunnerUsesTheStore` fails CI for any
-  `scripts/bench/*/main.go` that doesn't open its run with `benchstore.Begin`.
+  `scripts/bench/*/main.go` that doesn't open its run with `benchstore.Begin`
+  and sync it, and any shell runner that picks its own output dir without
+  `benchstore begin` / `finish`.
 
 ## Running
 
@@ -92,11 +97,11 @@ silently dropped.
 |---|---|---|---|
 | `chat_mode` | answered in prose: no tool calls, no change | `chat_mode` | `chat_mode` |
 | `no_change` | worked with tools but left no change on disk | `early_finalize` | `empty_patch` |
-| `wrong_change` | changed the code; the tests still fail | `wrong_code` | `wrong_patch` |
+| `wrong_change` | changed the code; the tests still fail (or the diff doesn't apply) | `wrong_code` | `wrong_patch`, `patch_apply_failed` |
 | `timeout` | hit the wall-clock limit | `timeout` | `timeout` |
 | `budget_stop` | hit the spend limit | — | `budget_stop` |
 | `agent_error` | the agent process errored | `error` | `error` |
-| `infra_error` | harness/environment failure (status `error`) | — | `env_error`, `eval_error`, `patch_apply_failed`, unscored prediction |
+| `infra_error` | harness/environment failure (status `error`) | — | `env_error`, `eval_error`, unscored prediction |
 
 A new runner maps its classes in `nativeClass`; an unmapped class is kept
 as-is rather than dropped.
@@ -133,14 +138,28 @@ Every runner ends with a sync (`SyncBestEffort`), and
 1. **Local history.** The store is its own git repo (created on first sync).
    Its `.gitignore` tracks only the records — `index.jsonl`, `run.json`,
    `results.jsonl`, `*.v1.json(l)`, `source.patch`, `predictions.jsonl`,
-   `usage.jsonl`, `*.md`, `*.db`, the upload ledger — and each sync commits
-   them. It has no remote; nothing is pushed.
+   `usage.jsonl`, the upload ledger, and `archive/` — and each sync commits
+   them before uploading anything, so a failed upload never leaves the local
+   history behind. It has no remote; nothing is pushed. This git repo is the
+   one `.git` the store's own durability check accepts.
 2. **R2 bundles.** Each unit — every top-level entry of `runs/<bench>/` and
    of `archive/` — is packed as a `.tar.gz` named by its content hash
    (`runs/swebench/pair-20261008/<sha256[:16]>.tar.gz`) and uploaded with
    `wrangler r2 object put --remote`. A changed unit gets a new key, so an
    upload never overwrites an earlier one. `.sync/r2.jsonl` is the ledger of
    what is already off-machine; `index.jsonl` is also kept at the bucket root.
+   One failed unit is reported and the rest still upload. Syncs take a lock,
+   so two runners finishing together don't collide.
+3. **No secrets off-machine.** A unit holding something shaped like a
+   provider API key (`sk-or-v1-`, `sk-ant-api`, `sk-proj-`, `ghp_`,
+   `github_pat_`) is not uploaded; the sync names the file. Scrub it, then
+   sync again.
+
+**Known limits.** A unit that changes after upload (a rescore, a run still
+writing) is uploaded whole again under a new key, and nothing prunes
+superseded bundles, so the bucket only grows. `wrangler r2 object put` caps
+one object at about 315 MB; a larger unit fails to upload (named in the sync
+error) until bundles are split or uploaded multipart.
 
 The bucket is local configuration, not repo content: `.sync/config.json` in
 the store (`{"r2_bucket": "<name>"}`), or `CORTEX_BENCH_R2_BUCKET` (`off`

@@ -22,6 +22,7 @@ package benchstore
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,13 +62,19 @@ var ErrEphemeral = errors.New("output dir is inside a git working tree")
 // CheckDurable refuses a run directory inside a git working tree. Gitignored
 // dirs in a repo or an agent worktree are exactly where results were lost:
 // a `git clean`, a worktree removal, or a fresh clone deletes them silently.
+// The store's own git repo (Sync makes the store root one) is the exception:
+// it only ever tracks records and is never cleaned.
 func CheckDurable(dir string) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
 	}
+	storeRoot, _ := Root()
 	for d := abs; ; d = filepath.Dir(d) {
-		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+		if d == storeRoot {
+			// The store root's .git is the store's own; anything above it
+			// still counts (a store placed inside a repo is not durable).
+		} else if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
 			return fmt.Errorf("%w: %s is under %s — results there are lost with a worktree removal or git clean; write under %s instead (or pass --ephemeral for a throwaway run)",
 				ErrEphemeral, abs, d, "$"+EnvHome+" / ~/.cortex/benchmarks")
 		}
@@ -150,6 +157,9 @@ func Begin(o BeginOptions) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validRunID(o.RunID); err != nil {
+		return nil, err
+	}
 	parent := o.OutRoot
 	if parent == "" {
 		parent = RunsDir(root, o.Bench)
@@ -184,18 +194,64 @@ func Begin(o BeginOptions) (*Run, error) {
 	if o.SourceRepo != "" {
 		e.Commit, e.Dirty = gitState(o.SourceRepo)
 		if e.Dirty {
-			if patch, err := exec.Command("git", "-C", o.SourceRepo, "diff", "HEAD", "--binary").Output(); err == nil {
-				if err := os.WriteFile(filepath.Join(dir, "source.patch"), patch, 0o644); err != nil {
-					return nil, fmt.Errorf("failed to save source.patch: %w", err)
-				}
+			if err := saveSourcePatch(o.SourceRepo, dir); err != nil {
+				// Never fail the run over it, but never drop it silently:
+				// the run's record says the patch is incomplete and why.
+				e.Note = "source.patch incomplete: " + err.Error()
+				_ = os.WriteFile(filepath.Join(dir, "source.patch.err"), []byte(err.Error()+"\n"), 0o644)
 			}
 		}
 	}
 	r := &Run{Root: root, Dir: dir, start: e}
 	if err := AppendIndex(root, e); err != nil {
+		// Nothing has run yet: remove the dir so a retry with this id works.
+		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 	return r, nil
+}
+
+// validRunID refuses ids that would escape runs/<bench>: absolute paths and
+// any "." / ".." / empty segment. Nested ids (night-1/w32768) are fine.
+func validRunID(id string) error {
+	if filepath.IsAbs(id) || strings.HasPrefix(id, "/") {
+		return fmt.Errorf("run id %q must be relative", id)
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(id), "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("run id %q has an empty, . or .. segment", id)
+		}
+	}
+	return nil
+}
+
+// saveSourcePatch writes source.patch: the tracked changes against HEAD plus
+// every untracked, non-ignored file as an addition, so `git apply` on the
+// recorded commit rebuilds the tree that ran.
+func saveSourcePatch(repo, dir string) error {
+	var buf bytes.Buffer
+	out, err := exec.Command("git", "-C", repo, "diff", "HEAD", "--binary").Output()
+	if err != nil {
+		return fmt.Errorf("git diff HEAD: %w", err)
+	}
+	buf.Write(out)
+	list, err := exec.Command("git", "-C", repo, "ls-files", "--others", "--exclude-standard", "-z").Output()
+	if err != nil {
+		return fmt.Errorf("git ls-files --others: %w", err)
+	}
+	for _, f := range strings.Split(string(list), "\x00") {
+		if f == "" {
+			continue
+		}
+		// --no-index exits 1 when the files differ, which they always do here.
+		d, err := exec.Command("git", "-C", repo, "diff", "--binary", "--no-index", "--", "/dev/null", f).Output()
+		var ee *exec.ExitError
+		if err != nil && !(errors.As(err, &ee) && ee.ExitCode() == 1) {
+			return fmt.Errorf("git diff --no-index %s: %w", f, err)
+		}
+		buf.Write(d)
+	}
+	return os.WriteFile(filepath.Join(dir, "source.patch"), buf.Bytes(), 0o644)
 }
 
 // Finish writes the run's v1 files (run.v1.json, results.v1.jsonl) from its
@@ -307,7 +363,7 @@ func gitState(repo string) (commit string, dirty bool) {
 		return "", false
 	}
 	commit = strings.TrimSpace(string(out))
-	st, err := exec.Command("git", "-C", repo, "status", "--porcelain", "--untracked-files=no").Output()
+	st, err := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
 	return commit, err == nil && len(strings.TrimSpace(string(st))) > 0
 }
 

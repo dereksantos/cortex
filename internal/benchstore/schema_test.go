@@ -19,6 +19,7 @@ func TestNormalizeRow(t *testing.T) {
 		{"swebench wrong patch", `{"instance_id":"x","resolved":false,"failure_class":"wrong_patch"}`, StatusFail, FailWrongChange, "wrong_patch"},
 		{"swebench env error", `{"instance_id":"x","failure_class":"env_error"}`, StatusError, FailInfra, "env_error"},
 		{"unscored prediction", `{"instance_id":"x","eval_status":"error_no_report"}`, StatusError, FailInfra, "error_no_report"},
+		{"patch that won't apply is the agent's fail", `{"instance_id":"x","failure_class":"patch_apply_failed"}`, StatusFail, FailWrongChange, "patch_apply_failed"},
 		{"unknown class is kept", `{"exercise":"x","failure_class":"novel"}`, StatusFail, "novel", "novel"},
 	}
 	for _, tt := range tests {
