@@ -3,6 +3,7 @@ package benchstore
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -43,11 +45,11 @@ const storeGitignore = `# benchstore: git tracks the records; R2 bundles hold ev
 !*.v1.json
 !*.v1.jsonl
 !source.patch
+!source.patch.err
 !predictions.jsonl
 !usage.jsonl
-!*.md
-!*.db
-!r2.jsonl
+!/.sync/r2.jsonl
+!/archive/**
 `
 
 // Uploader puts one local file at a key in the off-machine store.
@@ -119,7 +121,9 @@ type UploadRecord struct {
 //  2. every unit — each top-level entry of runs/<bench>/ and of archive/ —
 //     is bundled as a .tar.gz keyed by its content hash and uploaded once.
 //     A changed unit gets a NEW key, so an upload never overwrites an
-//     earlier one; the remote copy only accumulates.
+//     earlier one. The remote copy only accumulates: a unit that changes
+//     after upload (a rescore, a run still writing) is uploaded whole
+//     again, and nothing prunes superseded bundles.
 //
 // up may be nil (no off-machine copy); the commit still happens.
 func Sync(root string, up Uploader) (SyncReport, error) {
@@ -127,42 +131,71 @@ func Sync(root string, up Uploader) (SyncReport, error) {
 	if err := ensureGit(root); err != nil {
 		return rep, err
 	}
-	if up != nil {
-		rep.Offsite = up.Name()
-		done, err := readUploads(root)
+	// One sync at a time: two runners finishing together would otherwise
+	// race on git's index.lock and on the upload ledger.
+	unlock, err := lockFile(filepath.Join(root, ".sync", "lock"))
+	if err != nil {
+		return rep, err
+	}
+	defer unlock()
+	// Records first: a failed or slow upload must never leave the local
+	// history uncommitted.
+	if rep.Committed, err = commitRecords(root); err != nil {
+		return rep, err
+	}
+	if up == nil {
+		return rep, nil
+	}
+	rep.Offsite = up.Name()
+	done, err := readUploads(root)
+	if err != nil {
+		return rep, err
+	}
+	units, err := syncUnits(root)
+	if err != nil {
+		return rep, err
+	}
+	var failed []string
+	for _, u := range units {
+		h, secret, err := hashTree(filepath.Join(root, u))
 		if err != nil {
-			return rep, err
+			failed = append(failed, fmt.Sprintf("%s: %v", u, err))
+			continue
 		}
-		units, err := syncUnits(root)
-		if err != nil {
-			return rep, err
+		if secret != "" {
+			// Never ship a credential off-machine. The unit stays local
+			// (and in the local git records); someone has to scrub it.
+			failed = append(failed, fmt.Sprintf("%s: NOT uploaded — %s looks like it holds an API key; scrub it, then sync again", u, secret))
+			continue
 		}
-		for _, u := range units {
-			h, err := hashTree(filepath.Join(root, u))
-			if err != nil {
-				return rep, err
-			}
-			key := filepath.ToSlash(u) + "/" + h[:16] + ".tar.gz"
-			if done[key] {
-				rep.Unchanged++
-				continue
-			}
-			if err := uploadBundle(root, u, key, h, up); err != nil {
-				return rep, err
-			}
-			rep.Uploaded = append(rep.Uploaded, key)
+		key := filepath.ToSlash(u) + "/" + h[:16] + ".tar.gz"
+		if done[key] {
+			rep.Unchanged++
+			continue
 		}
-		// The index is a projection, but it is the one file a trend view
-		// needs; keep its latest copy addressable without unpacking bundles.
-		if idx := filepath.Join(root, "index.jsonl"); fileExists(idx) {
-			if err := up.Put("index.jsonl", idx); err != nil {
-				return rep, err
-			}
+		if err := uploadBundle(root, u, key, h, up); err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", u, err))
+			continue
+		}
+		rep.Uploaded = append(rep.Uploaded, key)
+	}
+	// The index is a projection, but it is the one file a trend view
+	// needs; keep its latest copy addressable without unpacking bundles.
+	if idx := filepath.Join(root, "index.jsonl"); fileExists(idx) {
+		if err := up.Put("index.jsonl", idx); err != nil {
+			failed = append(failed, fmt.Sprintf("index.jsonl: %v", err))
 		}
 	}
-	committed, err := commitRecords(root)
-	rep.Committed = committed
-	return rep, err
+	// The upload ledger changed: commit it too.
+	if c, err := commitRecords(root); err != nil {
+		failed = append(failed, fmt.Sprintf("commit ledger: %v", err))
+	} else {
+		rep.Committed = rep.Committed || c
+	}
+	if len(failed) > 0 {
+		return rep, fmt.Errorf("%d unit(s) not synced:\n  %s", len(failed), strings.Join(failed, "\n  "))
+	}
+	return rep, nil
 }
 
 // SyncBestEffort runs Sync with the default uploader and reports to w. A
@@ -216,11 +249,47 @@ func syncUnits(root string) ([]string, error) {
 	return units, nil
 }
 
-// hashTree hashes a file or directory: every regular file's relative path,
-// mode, and content, in path order. Symlinks hash their target string.
-func hashTree(path string) (string, error) {
+// secretMarkers are byte patterns of provider API keys. Sync refuses to
+// upload a unit containing one: bundles leave the machine, and runner logs
+// and agent trajectories can echo an environment.
+var secretMarkers = [][]byte{
+	[]byte("sk-or-v1-"),  // OpenRouter
+	[]byte("sk-ant-api"), // Anthropic
+	[]byte("sk-proj-"),   // OpenAI project keys
+	[]byte("ghp_"),       // GitHub personal tokens
+	[]byte("github_pat_"),
+}
+
+// scanWriter looks for secretMarkers across write boundaries.
+type scanWriter struct {
+	tail  []byte
+	found string
+}
+
+func (w *scanWriter) Write(p []byte) (int, error) {
+	if w.found == "" {
+		buf := append(w.tail, p...)
+		for _, m := range secretMarkers {
+			if bytes.Contains(buf, m) {
+				w.found = string(m) + "…"
+				break
+			}
+		}
+		keep := 32
+		if len(buf) < keep {
+			keep = len(buf)
+		}
+		w.tail = append([]byte(nil), buf[len(buf)-keep:]...)
+	}
+	return len(p), nil
+}
+
+// hashTree hashes a file or directory — every regular file's relative path,
+// mode, and content, in path order; symlinks hash their target string — and
+// reports the first file holding a secretMarker ("" for none).
+func hashTree(path string) (sum, secretIn string, err error) {
 	h := sha256.New()
-	err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -234,20 +303,24 @@ func hashTree(path string) (string, error) {
 			target, _ := os.Readlink(p)
 			fmt.Fprintf(h, "L %s %s\n", rel, target)
 		case info.Mode().IsRegular():
-			fmt.Fprintf(h, "F %s %o %d\n", rel, info.Mode().Perm(), info.Size())
+			fmt.Fprintf(h, "F %s %o\n", rel, info.Mode().Perm())
 			f, err := os.Open(p)
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(h, f)
+			sc := &scanWriter{}
+			_, err = io.Copy(io.MultiWriter(h, sc), f)
 			f.Close()
 			if err != nil {
 				return err
 			}
+			if sc.found != "" && secretIn == "" {
+				secretIn = filepath.Join(filepath.Base(path), rel) + " (" + sc.found + ")"
+			}
 		}
 		return nil
 	})
-	return hex.EncodeToString(h.Sum(nil)), err
+	return hex.EncodeToString(h.Sum(nil)), secretIn, err
 }
 
 func uploadBundle(root, unit, key, hash string, up Uploader) error {
@@ -298,9 +371,19 @@ func writeTarGz(w io.Writer, root, unit string) error {
 			if err != nil {
 				return err
 			}
-			_, err = io.Copy(tw, f)
+			// Exactly the size the header promised: a file a live run is
+			// still appending to is bundled as it was when its header was
+			// written (the next sync picks up the rest under a new key).
+			n, err := io.CopyN(tw, f, hdr.Size)
 			f.Close()
-			return err
+			if err != nil && !(errors.Is(err, io.EOF) && n < hdr.Size) {
+				return err
+			}
+			if n < hdr.Size { // shrank meanwhile: pad so the archive stays valid
+				if _, err := tw.Write(make([]byte, hdr.Size-n)); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -395,4 +478,24 @@ func tail(s string, n int) string {
 		return "…" + s[len(s)-n:]
 	}
 	return s
+}
+
+// lockFile takes an exclusive flock on path (created if missing) and returns
+// its release.
+func lockFile(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to lock %s: %w", path, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, nil
 }

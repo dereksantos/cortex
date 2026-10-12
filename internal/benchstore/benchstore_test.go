@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,7 @@ func TestBeginSavesSourcePatchWhenDirty(t *testing.T) {
 	git("add", ".")
 	git("commit", "-qm", "init")
 	writeFile(t, filepath.Join(repo, "f.txt"), "two\n")
+	writeFile(t, filepath.Join(repo, "added.txt"), "new file the run depends on\n")
 
 	run, err := Begin(BeginOptions{Bench: "b", RunID: "r", SourceRepo: repo})
 	if err != nil {
@@ -134,6 +136,9 @@ func TestBeginSavesSourcePatchWhenDirty(t *testing.T) {
 	}
 	if !strings.Contains(string(patch), "+two") {
 		t.Errorf("source.patch does not carry the edit:\n%s", patch)
+	}
+	if !strings.Contains(string(patch), "+new file the run depends on") {
+		t.Errorf("source.patch does not carry the untracked file:\n%s", patch)
 	}
 	if !run.start.Dirty || run.start.Commit == "" {
 		t.Errorf("start entry = %+v, want dirty with a commit", run.start)
@@ -216,6 +221,9 @@ func TestReindex(t *testing.T) {
 // TestEveryRunnerUsesTheStore is the tripwire for the durability rule: every
 // benchmark runner under scripts/bench must open its run through Begin, so a
 // new runner cannot quietly write results into a repo or worktree again.
+// outAssign spots a shell runner that picks its own output dir.
+var outAssign = regexp.MustCompile(`(?m)^\s*out=`)
+
 func TestEveryRunnerUsesTheStore(t *testing.T) {
 	mains, err := filepath.Glob(filepath.Join("..", "..", "scripts", "bench", "*", "main.go"))
 	if err != nil {
@@ -238,5 +246,60 @@ func TestEveryRunnerUsesTheStore(t *testing.T) {
 		if !strings.Contains(string(b), "benchstore.SyncBestEffort(") {
 			t.Errorf("%s does not sync its finished run off-machine (benchstore.SyncBestEffort) — docs/benchmarks.md", m)
 		}
+	}
+	// Shell runners that write a run directory open it with `benchstore begin`
+	// and close it with `benchstore finish` (which syncs).
+	shells, err := filepath.Glob(filepath.Join("..", "..", "scripts", "bench", "*", "*.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range shells {
+		b, err := os.ReadFile(sh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(b)
+		if !outAssign.MatchString(body) {
+			continue // a wrapper that hands off to a Go driver
+		}
+		if !(strings.Contains(body, "benchstore\" begin") || strings.Contains(body, "benchstore begin")) {
+			t.Errorf("%s writes a run dir without `benchstore begin` — docs/benchmarks.md", sh)
+		}
+		if strings.Contains(body, "benchstore\" begin") && !strings.Contains(body, "finish") {
+			t.Errorf("%s opens a run with `benchstore begin` but never runs `benchstore finish`", sh)
+		}
+	}
+}
+
+func TestBeginRejectsEscapingRunIDs(t *testing.T) {
+	t.Setenv(EnvHome, t.TempDir())
+	for _, id := range []string{"../x", "a/../../x", "/abs", "a//b", "./a"} {
+		t.Run(id, func(t *testing.T) {
+			if _, err := Begin(BeginOptions{Bench: "b", RunID: id}); err == nil {
+				t.Errorf("Begin accepted run id %q", id)
+			}
+		})
+	}
+	if _, err := Begin(BeginOptions{Bench: "b", RunID: "night-1/w32768"}); err != nil {
+		t.Errorf("nested run id refused: %v", err)
+	}
+}
+
+func TestReindexCarriesFieldsForward(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "runs", "b", "r")
+	writeFile(t, filepath.Join(dir, "run.json"), `{}`) // an old run.json with none of the fields
+	writeFile(t, filepath.Join(dir, "results.jsonl"), `{"pass":true}`+"\n")
+	if err := AppendIndex(root, Entry{Event: "start", Bench: "b", RunID: "r", Dir: dir,
+		StartedAt: "2026-10-01T00:00:00Z", Model: "m", Commit: "abc"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Reindex(root); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := ReadIndex(root)
+	got := Latest(entries)[0]
+	if got.Event != "reindex" || got.StartedAt != "2026-10-01T00:00:00Z" || got.Model != "m" || got.Commit != "abc" {
+		t.Errorf("latest = %+v, want the start entry's fields carried forward", got)
 	}
 }

@@ -20,9 +20,9 @@
 # Output: the durable benchmark store (docs/benchmarks.md) —
 # $CORTEX_BENCH_HOME (default ~/.cortex/benchmarks)/runs/swebench/<run-id>/mini/:
 # mini's own trajectories (<id>/<id>.traj.json), preds.json, minisweagent.log,
-# predictions.jsonl, a usage.jsonl ledger, scoring in .../mini/eval/, and a
-# results.jsonl (one {"instance_id","resolved","eval_status"} row per
-# prediction, from the official reports) that the store's index summarizes.
+# predictions.jsonl, a usage.jsonl ledger, and scoring in .../mini/eval/;
+# `benchstore finish` turns the predictions + official reports into the v1
+# result rows the store's index summarizes.
 # Give the cortex side a SIBLING id (e.g. pair-X/cortex vs pair-X): a mini run
 # nested inside a cortex run's directory is not found by `benchstore reindex`.
 
@@ -196,24 +196,9 @@ if [[ "$no_score" == 0 ]]; then
     > "${out}/eval/harness.log" 2>&1 || echo "harness exited non-zero"
   tail -15 "${out}/eval/harness.log"
 fi
-# results.jsonl in the store's shape, from the harness's per-instance reports;
-# a prediction with no report (scoring failed or skipped) is an error row.
-"${mini_venv}/bin/python" - "$out" <<'EOF'
-import json, sys, pathlib
-out = pathlib.Path(sys.argv[1])
-reports = {}
-for rp in (out / "eval").rglob("report.json"):
-    try:
-        reports.update(json.loads(rp.read_text()))
-    except (OSError, ValueError):
-        pass
-with open(out / "results.jsonl", "w") as f:
-    for line in (out / "predictions.jsonl").read_text().splitlines():
-        iid = json.loads(line)["instance_id"]
-        r = reports.get(iid)
-        status = "error_no_report" if r is None else ("resolved" if r.get("resolved") else "unresolved")
-        f.write(json.dumps({"instance_id": iid, "resolved": bool(r and r.get("resolved")), "eval_status": status}) + "\n")
-EOF
+# No results.jsonl here: benchstore finish derives the v1 rows from
+# predictions.jsonl + the harness's report.json files (empty patch →
+# no_change, applied-but-failing → wrong_change, no report → infra_error).
 (cd "$repo_root" && "${bench_root}/bin/benchstore" finish --bench swebench --run-id "${run_id}/mini")
 # Images this run pulled (2–5 GB each), removed after scoring like the cortex runner.
 (( ${#pulled[@]} )) && docker rmi "${pulled[@]}" >/dev/null 2>&1 || true

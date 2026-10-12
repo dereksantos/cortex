@@ -159,6 +159,18 @@ func run() error {
 		return err
 	}
 	runDir := store.Dir
+	// Whatever happens from here, the run's partial results are recorded and
+	// synced: an early return must not leave them only on this disk.
+	finished := false
+	defer func() {
+		if finished {
+			return
+		}
+		if _, ferr := store.Finish("run ended early"); ferr != nil {
+			fmt.Fprintf(os.Stderr, "benchstore: failed to record the partial run: %v\n", ferr)
+		}
+		benchstore.SyncBestEffort(os.Stderr)
+	}()
 	transcripts := filepath.Join(runDir, "transcripts")
 	if err := os.MkdirAll(transcripts, 0o755); err != nil {
 		return fmt.Errorf("failed to create transcripts dir: %w", err)
@@ -238,6 +250,7 @@ func run() error {
 		return err
 	}
 	PrintSummary(os.Stdout, meta, rows)
+	finished = true
 	if _, err := store.Finish(""); err != nil {
 		return fmt.Errorf("failed to record the run in the benchmark index: %w", err)
 	}

@@ -1,6 +1,7 @@
 package benchstore
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,11 +9,19 @@ import (
 	"testing"
 )
 
-type fakeUploader struct{ keys []string }
+type fakeUploader struct {
+	keys []string
+	fail map[string]bool // unit prefixes whose upload fails
+}
 
 func (f *fakeUploader) Put(key, file string) error {
 	if _, err := os.Stat(file); err != nil {
 		return err
+	}
+	for p := range f.fail {
+		if strings.HasPrefix(key, p) {
+			return errors.New("simulated upload failure")
+		}
 	}
 	f.keys = append(f.keys, key)
 	return nil
@@ -106,5 +115,71 @@ func TestDefaultUploaderNeedsLocalConfig(t *testing.T) {
 	t.Setenv(EnvR2Bucket, "off")
 	if up, _ := DefaultUploader(root); up != nil {
 		t.Errorf("off: up=%v, want nil", up)
+	}
+}
+
+func TestBeginAfterSync(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	t.Setenv(EnvHome, root)
+	if _, err := Begin(BeginOptions{Bench: "b", RunID: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Sync(root, nil); err != nil { // makes the store root a git repo
+		t.Fatal(err)
+	}
+	if _, err := Begin(BeginOptions{Bench: "b", RunID: "second"}); err != nil {
+		t.Errorf("Begin after Sync refused — the store's own .git must not count: %v", err)
+	}
+}
+
+func TestSyncSurvivesUploadFailures(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "runs", "b", "bad", "run.json"), `{}`)
+	writeFile(t, filepath.Join(root, "runs", "b", "good", "run.json"), `{}`)
+	up := &fakeUploader{fail: map[string]bool{"runs/b/bad/": true}}
+	rep, err := Sync(root, up)
+	if err == nil || !strings.Contains(err.Error(), "runs/b/bad") {
+		t.Errorf("Sync err = %v, want the failed unit named", err)
+	}
+	if len(rep.Uploaded) != 1 || !strings.HasPrefix(rep.Uploaded[0], "runs/b/good/") {
+		t.Errorf("uploaded %v, want the good unit despite the bad one", rep.Uploaded)
+	}
+	if !rep.Committed {
+		t.Error("records were not committed when an upload failed")
+	}
+}
+
+func TestSyncRefusesSecrets(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "runs", "b", "leaky", "logs", "agent.log"), "env: OPENROUTER_API_KEY=sk-or-v1-abcdef\n")
+	up := &fakeUploader{}
+	_, err := Sync(root, up)
+	if err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Errorf("Sync err = %v, want a refusal naming the API key", err)
+	}
+	if len(up.keys) > 1 { // index.jsonl may go; the unit must not
+		for _, k := range up.keys {
+			if strings.HasPrefix(k, "runs/b/leaky/") {
+				t.Errorf("uploaded a unit holding a secret: %s", k)
+			}
+		}
+	}
+}
+
+func TestScanWriterAcrossBoundaries(t *testing.T) {
+	w := &scanWriter{}
+	_, _ = w.Write([]byte("prefix sk-o"))
+	_, _ = w.Write([]byte("r-v1-xyz"))
+	if w.found == "" {
+		t.Error("a key split across two writes was not found")
 	}
 }

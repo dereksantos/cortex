@@ -86,8 +86,12 @@ func Discover(root string) ([]Entry, error) {
 // files from its native ones, then appends a "reindex" event for any run
 // whose latest index entry is missing, unfinished, or carries a different
 // summary — runs copied in from elsewhere, runs that crashed before
-// finishing, runs rescored after the fact. Append-only: it never rewrites or
-// drops index lines. Returns the entries it appended.
+// finishing, runs rescored after the fact. The index stays append-only (no
+// line is rewritten or dropped); the v1 files are rewritten, being a pure
+// function of each run's native files. A field the run's files don't carry
+// (an older run.json without started_at, say) is carried forward from the
+// run's previous index entry rather than blanked. Returns the entries it
+// appended.
 func Reindex(root string) ([]Entry, error) {
 	found, err := Discover(root)
 	if err != nil {
@@ -104,8 +108,11 @@ func Reindex(root string) ([]Entry, error) {
 	var added []Entry
 	for _, e := range found {
 		prev, seen := latest[e.Bench+"\x00"+e.RunID]
-		if seen && len(prev.Labels) > 0 {
-			e.Labels = prev.Labels // labels given at Begin outrank the discovered default
+		if seen {
+			if len(prev.Labels) > 0 {
+				e.Labels = prev.Labels // labels given at Begin outrank the discovered default
+			}
+			carryForward(&e, prev)
 		}
 		if err := Normalize(e.Bench, e.RunID, e.Dir, e.Labels); err != nil {
 			return added, err
@@ -138,4 +145,20 @@ func sameSummary(a, b *Summary) bool {
 	x, _ := json.Marshal(a)
 	y, _ := json.Marshal(b)
 	return string(x) == string(y)
+}
+
+// carryForward fills e's empty metadata from prev, the run's earlier entry.
+func carryForward(e *Entry, prev Entry) {
+	if e.StartedAt == "" {
+		e.StartedAt = prev.StartedAt
+	}
+	if e.EndedAt == "" {
+		e.EndedAt = prev.EndedAt
+	}
+	if e.Commit == "" {
+		e.Commit, e.Dirty = prev.Commit, prev.Dirty
+	}
+	if e.Model == "" {
+		e.Model = prev.Model
+	}
 }
