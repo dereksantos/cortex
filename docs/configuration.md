@@ -155,45 +155,138 @@ startup.
 
 ### Interactive first-run setup
 
-Running `cortex` (or `cortex resume`) from a real terminal with **no** user
-config, **no** project config, and **no** `$CORTEX_BACKEND` set is a true
-first run: before the REPL starts, `cortex` walks the `BackendResolver`
-chain (`cmd/cortex/bootstrap.go`) and, finding nothing already configured,
-runs `GuidedSetup` (`cmd/cortex/bootstrap_wire.go`):
+A **true first run** is a run with **no** user config, **no** project
+`.cortex/config.json`, and **no** `$CORTEX_BACKEND`. On a true first run,
+`cortex` resolves a backend before the first turn and saves it to
+`~/.cortex/config.json` (`PersistBackend`). It walks the `BackendResolver`
+chain (`cmd/cortex/bootstrap.go`) in this order, and the first stage that
+seats a backend wins:
 
-1. It prints a pointer to https://openrouter.ai/keys and prompts for a key
-   (`OpenRouter API key: `). Pressing Enter with no input skips setup —
-   `cortex` falls through to the previous behavior (targets
-   `localhost:4000`, reports a connection error) and nothing is written.
-2. A pasted key is stored in the macOS Keychain (service
-   `cortex-openrouter`, the same convention `pkg/secret` already uses) and
-   exported into the current process's environment so the very first turn
-   can use it immediately.
-3. The result is persisted to `~/.cortex/config.json` (`PersistBackend`):
-   `backend.type: "openrouter"`, `backend.key_service: "cortex-openrouter"`
-   (so a later launch finds the key without prompting again), and
-   `models.code`/`models.study` seeded from the curated table's top pick —
-   exactly the shape shown above, written for you.
+1. **An OpenRouter key** in `$OPENROUTER_API_KEY` or the macOS Keychain
+   entry `cortex-openrouter`. Saved as `backend.type: "openrouter"`,
+   `backend.endpoint: "https://openrouter.ai/api/v1"`, and
+   `backend.key_env` / `backend.key_service` naming where the key lives
+   (the key itself is never written), and `models.code`/`models.study`
+   seeded from the curated table's top pick.
+2. **A local model server** (`cmd/cortex/bootstrap_local.go`), probed
+   concurrently with a 2s deadline for the whole listing phase: Ollama
+   (`localhost:11434`, `/api/tags` + `/api/show`), LM Studio
+   (`localhost:1234`, `/api/v0/models`, else `/v1/models`), and a llama.cpp
+   server (`localhost:8080`, `/v1/models` + `/props`). The first server in
+   that order with a usable model wins.
+3. **The guided OpenRouter prompt** (terminal only): a pointer to
+   https://openrouter.ai/keys and an `OpenRouter API key: ` prompt. Enter
+   skips setup (nothing is written; `cortex` targets `localhost:4000` and
+   reports a connection error). A pasted key is stored in the Keychain
+   (service `cortex-openrouter`), exported into the current process, and
+   saved like stage 1.
 
-This entire flow is skipped — silently, unchanged from before — whenever
-any of the three bypass conditions holds (a user config file, a project
-`.cortex/config.json`, or `$CORTEX_BACKEND`), or when stdin isn't a
-terminal (a piped/CI/driver invocation): a **non-interactive** first run
-instead prints one hint line to stderr naming the config path and this
-doc, then proceeds exactly as before (targets `localhost:4000`, fails to
-connect after a few retries if nothing is listening there). Headless
-subcommands (`turn`, `study`, `scan`, `serve`, `discord`, …) never run this
-flow at all, whether or not stdin is a terminal — only the bare REPL entry
-points do.
+**Why a key comes first.** A key in the environment or the Keychain is
+something the user set up on purpose; a running local server may be there
+for other tools. When both exist, the key wins and the confirmation names
+the local server too:
 
-The `KeyProbe`/`OllamaProbe`/`SmokeProbe` stages of the chain are also live
-in production: an existing `$OPENROUTER_API_KEY` or an existing
-`cortex-openrouter` Keychain entry short-circuits the prompt (same
-persisted shape, `key_env`/`key_service` set accordingly), and a reachable
-local Ollama is tried before falling back to the guided prompt. The
-one-shot tool-call `SmokeProbe` itself is not wired in this pass — a stale
-curated pick still self-heals at every session start via the zero-config
-preflight check described above, which covers the same failure mode.
+```
+cortex: configured a openrouter backend (openrouter-env) — saved to ~/.cortex/config.json
+cortex: also found Ollama with qwen2.5-coder:14b (32k context). To use it instead, see "Interactive first-run setup" in docs/configuration.md.
+```
+
+To use the local server instead, replace the saved file with the shape
+shown under "Local model servers" below.
+
+#### Local model servers
+
+**Picking a model.** Embedding models, Ollama cloud entries, and models the
+server says cannot call tools (Ollama `capabilities` without `tools`) are
+skipped. The rest are ranked: models LM Studio has loaded first; then
+models whose parameter count fits this machine's RAM tier (the code-model
+size `cortex model` suggests — 3b / 7b / 14b / 32b — with 15% slack,
+because servers report exact counts such as 14.8B for a "14b"), by
+parameter count, with coding models (`coder`, `devstral`, `codestral` in
+the name) counted double and known tool-calling families (`qwen`,
+`gpt-oss`, `llama3`, `mistral`, `granite`, `glm`) counted 1.5x; then
+oversized models, smallest first. Both `models.code` and `models.study` are
+set to the pick.
+
+**Window.** The RAM tier's code window (8k / 32k / 32k / 64k / 128k),
+capped by the model's own context length and — on LM Studio and llama.cpp
+— by the context the server loaded the model with (`loaded_context_length`,
+`/props` `n_ctx`). When the server's context is the limit, or LM Studio has
+not loaded the model yet, `cortex` prints a note naming the fix
+(`lms load <id> --context-length N`, `llama-server -c N --jinja`). Below
+16k it also warns that the window is small for Cortex's prompt and tools.
+
+**The Ollama context trap.** `cortex` talks to every backend through the
+OpenAI-compatible `/chat/completions` path. Ollama's `/v1` endpoint maps
+`temperature`, `top_p`, `stop`, `seed` and `max_tokens` into its runner
+options but has no way to set `num_ctx` per request, so a model without a
+`num_ctx` parameter runs at the server default (`OLLAMA_CONTEXT_LENGTH`;
+4096 on Ollama 0.9), and a longer prompt is cut off by the server without
+an error. Library models such as `qwen2.5-coder` and `llama3.2` set no
+`num_ctx`. So when the picked model's `num_ctx` is below the window,
+`cortex` creates a variant with `POST /api/create`
+(`{"model": "cortex-<name>:<tag>-<N>k", "from": "<pick>", "parameters":
+{"num_ctx": N}}`) — metadata only, no weights copied or downloaded — and
+saves that name. Remove it any time with `ollama rm`. If the create fails
+(an Ollama too old for that API), the base model is saved and a warning
+names the fix (`OLLAMA_CONTEXT_LENGTH=N`).
+
+At every session start with `backend.type: "ollama"`, `cortex` also asks
+`/api/show` for the code model's `num_ctx` and prints a warning when it is
+below `models.code.window` or unset. `cortex` cannot see the server's
+`OLLAMA_CONTEXT_LENGTH`, so the unset case warns even when that variable
+covers the window; giving the model its own `num_ctx` silences it. The
+"model discovery unavailable" note is skipped when `models.code` pins both
+a model and a window, since discovery has nothing left to supply.
+
+**No usable model.** A server that answers but has nothing usable gets one
+line with the fix, sized to the RAM tier — nothing is downloaded — and the
+chain goes on to stage 3:
+
+```
+cortex: Ollama is running, but it has no model Cortex can use (Cortex needs a chat model that can call tools). To add one, run: ollama pull qwen2.5-coder:14b
+```
+
+**What a user sees.** On a terminal, one question; Enter or `y` accepts,
+anything else falls through to the guided OpenRouter prompt:
+
+```
+Found Ollama with qwen2.5-coder:14b (32k context). Use it? [Y/n]
+cortex: created Ollama model cortex-qwen2.5-coder:14b-32k (qwen2.5-coder:14b with num_ctx 32768); Ollama's OpenAI API cannot set the context per request, so the model carries it.
+cortex: using Ollama with cortex-qwen2.5-coder:14b-32k (32k context) — saved to ~/.cortex/config.json
+```
+
+The saved file:
+
+```json
+{
+  "backend": { "type": "ollama", "endpoint": "http://localhost:11434/v1" },
+  "models": {
+    "code":  { "model": "cortex-qwen2.5-coder:14b-32k", "window": 32768 },
+    "study": { "model": "cortex-qwen2.5-coder:14b-32k", "window": 32768 }
+  }
+}
+```
+
+LM Studio and llama.cpp are saved the same way, with `backend.type`
+`"lmstudio"` / `"llamacpp"` (treated as generic OpenAI-compatible backends)
+and their `/v1` endpoint.
+
+#### Non-interactive first runs
+
+`cortex turn`, and the REPL with piped stdin, run stages 1 and 2 without
+prompting — no secret is written, and the pick is a model the server
+already has — and print every message on stderr (a turn's stdout stays the
+answer only). They do nothing when anything answers on the default
+endpoint (`localhost:4000`, the zero-config LiteLLM port), since that setup
+already works without a config file. When no stage resolves a backend they
+print one hint naming the config path and this doc, then proceed as before
+(target `localhost:4000`). Other headless subcommands (`study`, `scan`,
+`serve`, `discord`, …) never run this flow.
+
+The chain's `SmokeProbe` stage is not wired: a stale curated pick
+self-heals at every session start via the zero-config preflight check
+described above, and a local pick is a model the server itself listed.
 
 ## `tools.*` gates
 
@@ -327,7 +420,7 @@ config gate — every session with memory enabled gets both tiers. See
 | `fleet_discovery_timeout_sec` | 4 | Timeout for the `/model/info` fleet-discovery probe. |
 | `preflight_timeout_sec` | 4 | Timeout for the startup model preflight's `ListModels` call — also bounds the healing ladder's mid-session catalog fetch. |
 | `self_heal` | `true` | Model self-healing (`docs/model-self-healing.md`). On: a model call failing with a healable class (model unknown/retired; rate-limited or 5xx after the transport's own retries) marks the model dead for the session, walks the curated `:free` ladder (then catalog discovery), and re-issues the same pending request on the replacement — one stderr notice + a `model.substitution` journal event per switch, `model.failure` when nothing recovers. The startup preflight also substitutes a **pinned** OpenRouter model missing from the live catalog. Off: the preflight reverts to curated-picks-only and a failing model simply surfaces its classified error. OpenRouter only — there is no free suite behind a local endpoint. The config file is never rewritten either way. |
-| `ollama_probe_timeout_sec` | 2 | Timeout for the guided first-run setup's local-Ollama reachability check. **Not actually reachable in practice**: this probe only ever runs during `GuidedSetup` on a true first run (no user config, no project config, no `$CORTEX_BACKEND` — see "Interactive first-run setup" above), which by definition means no config file exists yet to set this field from. Kept in the schema for documentation parity with the rest of `network.*`. |
+| `ollama_probe_timeout_sec` | 2 | Timeout for the first-run setup's local-server listing (Ollama, LM Studio, llama.cpp). **Not actually reachable in practice**: this probe only ever runs on a true first run (no user config, no project config, no `$CORTEX_BACKEND` — see "Interactive first-run setup" above), which by definition means no config file exists yet to set this field from. Kept in the schema for documentation parity with the rest of `network.*`. |
 | `compat_timeout_sec` | 300 | Sets the OpenAI-compatible client's fallback per-request timeout default (`pkg/llm`'s `DefaultCompatTimeoutSec`). Unlike every other timeout field on this page, **`CORTEX_COMPAT_TIMEOUT_SEC` (env) wins over this field** when both are set — matching the env knob's original subprocess-boundary rationale. A `models.<role>.request_timeout_sec` set explicitly still wins over both. |
 
 ## `serve.*` — `cortex serve` tunables

@@ -176,8 +176,10 @@ machine:
 2. Verify `cortex --version` prints a version, and tell me what it printed.
 3. Read the "Quick start" section of
    https://raw.githubusercontent.com/dereksantos/cortex/main/README.md and
-   set up `.cortex/config.json` in my current project. Ask me one question
-   first: local Ollama model, or an OpenRouter API key?
+   set up my backend. Ask me one question first: local model (Ollama,
+   LM Studio, or llama.cpp), or an OpenRouter API key? For a local model,
+   make sure the server is running with a model pulled; Cortex detects it
+   on first run, so no config file is needed.
 4. Don't launch cortex yourself — it's an interactive REPL. Just tell me
    it's ready and that I start it by running `cortex`.
 ```
@@ -193,17 +195,49 @@ used `go install` or the install script, use `cortex`.
 
 #### Local: Ollama
 
-1. Pull a model.
-2. Create a configuration file in the project.
-3. Set the model for the `code` role and the `study` role. Ollama does not
-   give the data that Cortex uses to select models automatically.
+1. Start Ollama.
+2. Pull a model that can call tools.
+3. Run `cortex` in your project.
 
 ```bash
 ollama pull qwen2.5-coder:7b
+cortex
+```
+
+Cortex finds the server and selects a model. It prints one line, for
+example `Found Ollama with qwen2.5-coder:7b (32k context). Use it? [Y/n]`.
+Press Enter to accept. Cortex saves the backend and the model in
+`~/.cortex/config.json`. It uses the same model for the `code` role and
+the `study` role.
+
+Cortex selects the model by name and by size. It prefers coding models
+that can call tools, and the largest model that fits the memory of the
+computer. It sets the context window from the model and the memory.
+
+Ollama does not let Cortex set the context size for each request. Thus
+Cortex creates a copy of the model with the correct context size, for
+example `cortex-qwen2.5-coder:7b-32k`. The copy uses the same model files.
+Cortex does not download a model.
+
+If Ollama has no model that Cortex can use, Cortex prints the command to
+pull one. LM Studio (port 1234) and a llama.cpp server (port 8080) also
+work. See "Interactive first-run setup" in
+[`docs/configuration.md`](docs/configuration.md).
+
+**Optional: set the model yourself.** Write the configuration file. Make
+sure that Ollama uses a context size that is equal to `window` or larger.
+If it does not, Ollama cuts long prompts. To do this, start Ollama with
+`OLLAMA_CONTEXT_LENGTH=32768 ollama serve`, or use a model that has its
+own `num_ctx`, such as the `cortex-` copy. At start, Cortex compares the
+`num_ctx` of the model with `window`. It prints a warning if `num_ctx` is
+smaller or not set. Cortex cannot see `OLLAMA_CONTEXT_LENGTH`.
+
+```bash
 mkdir -p .cortex
 cat > .cortex/config.json <<'JSON'
 {
   "backend": {
+    "type": "ollama",
     "endpoint": "http://localhost:11434/v1"
   },
   "models": {

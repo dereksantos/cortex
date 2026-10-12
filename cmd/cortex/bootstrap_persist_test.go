@@ -109,10 +109,10 @@ func TestPersistBackendNeverClobbersExistingStudyPin(t *testing.T) {
 	}
 }
 
-// TestPersistBackendOllamaDoesNotSeedStudy pins that the study-seeding step
-// is OpenRouter-specific: an Ollama backend (no Model set at all, per
-// BackendResolver's ollama-local stage) never touches models.study.
-func TestPersistBackendOllamaDoesNotSeedStudy(t *testing.T) {
+// TestPersistBackendNoModelLeavesModelsUnset pins that a resolved backend
+// with no Model writes no "models" block at all — study is seeded only from
+// a resolved code model, never invented.
+func TestPersistBackendNoModelLeavesModelsUnset(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
@@ -126,7 +126,7 @@ func TestPersistBackendOllamaDoesNotSeedStudy(t *testing.T) {
 		t.Fatalf("readJSONDoc: %v", err)
 	}
 	if _, ok := doc["models"]; ok {
-		t.Errorf("models field present = %s, want absent (ollama-local sets no Model)", doc["models"])
+		t.Errorf("models field present = %s, want absent (no Model resolved)", doc["models"])
 	}
 }
 
@@ -168,7 +168,7 @@ func TestBackendResolverChainSecondRunShortCircuitsOnPersistedConfig(t *testing.
 	firstRun := &BackendResolver{
 		Config: &fakeConfigProbe{ok: false},
 		Key:    &fakeKeyProbe{ok: false},
-		Ollama: &fakeOllamaProbe{up: false},
+		Local:  &fakeOllamaProbe{up: false},
 		Guided: &fakeGuidedSetup{ok: true},
 		Smoke:  &fakeSmokeProbe{},
 	}
@@ -189,7 +189,7 @@ func TestBackendResolverChainSecondRunShortCircuitsOnPersistedConfig(t *testing.
 	secondRun := &BackendResolver{
 		Config: fileConfigProbe{Path: path},
 		Key:    key,
-		Ollama: ollama,
+		Local:  ollama,
 		Guided: guided,
 		Smoke:  &fakeSmokeProbe{},
 	}

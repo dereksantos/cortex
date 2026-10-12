@@ -573,12 +573,22 @@ func NewCortexSession() *CortexSession {
 	var fleet Fleet
 	if !cfg.isOpenRouter() {
 		fleet = discoverFleet(context.Background(), cfg.backendEndpoint())
-		if fleet == nil {
+		// The note is advice to pin models; a code model pinned with its
+		// window (what the first-run local-server setup writes) has
+		// already followed it, so the note stays quiet then.
+		var pinned ModelSpec
+		if cfg != nil {
+			pinned = cfg.Models[roleCode]
+		}
+		if fleet == nil && (pinned.Model == "" || pinned.Window <= 0) {
 			printStartupWarning(os.Stderr, fmt.Sprintf("note: model discovery unavailable at %s — set backend in .cortex/config.json or pin models", cfg.backendEndpoint()))
 		}
 	}
 	code := cfg.resolveBinding(roleCode, fleet)
 	study := cfg.resolveBinding(roleStudy, fleet)
+	if w := ollamaContextWarning(context.Background(), httpClient, cfg.backendType(), code); w != "" {
+		printStartupWarning(os.Stderr, w)
+	}
 
 	// E2: at startup (not the per-turn Send hot path), preflight a curated
 	// OpenRouter pick against the live catalog — cheap (one bounded

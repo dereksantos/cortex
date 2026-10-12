@@ -462,19 +462,17 @@ func main() {
 		return
 	}
 
-	// Interactive-REPL-only backend bootstrap (docs/completion-roadmap.md
-	// Gate E): every headless subcommand above (`turn`, `learn`, `study`,
-	// `scan`, `project`, `model`, `change`, `serve`, `discord`, `study-eval`)
-	// already returned, so this only ever runs for the bare `cortex` /
-	// `cortex resume` REPL entry points. On a true first run (no user
-	// config, no project config, no $CORTEX_BACKEND) with stdin attached
-	// to a real terminal, walks the user through picking/pasting an
-	// OpenRouter key and persists the result before NewCortexSession()
-	// reads it — a fresh machine with just a key reaches a green first
-	// turn without hand-editing a config file. A non-interactive first run
-	// (piped stdin, CI) prints one hint instead and falls through to
-	// today's behavior (target localhost:4000) unchanged. An existing
-	// config or env var bypasses this entirely.
+	// REPL backend bootstrap (docs/completion-roadmap.md Gate E): every
+	// headless subcommand above already returned (`turn` runs its own,
+	// prompt-free variant — maybeRunHeadlessBootstrap), so this only runs
+	// for the bare `cortex` / `cortex resume` REPL entry points. On a true
+	// first run (no user config, no project config, no $CORTEX_BACKEND) it
+	// resolves a backend — an OpenRouter key from env/keychain, a local
+	// model server (Ollama, LM Studio, llama.cpp) after a [Y/n] prompt, or
+	// a pasted OpenRouter key — and persists it before NewCortexSession()
+	// reads it. With piped stdin (CI) it runs the prompt-free stages only
+	// and prints one hint when none resolves. An existing config or env var
+	// bypasses this entirely.
 	maybeRunGuidedBootstrap()
 
 	session := NewCortexSession()

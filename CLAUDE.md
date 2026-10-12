@@ -466,6 +466,15 @@ workspace under `$HOME` with no `.cortex/` of its own gets one at the CWD,
 never the user tier. With CWD == `$HOME`, `~/.cortex` is the workspace dir
 and its config is the user layer only.
 
+On a true first run (no user config, no project config, no
+`CORTEX_BACKEND`) the REPL and `cortex turn` resolve a backend and save it
+to the user config (`cmd/cortex/bootstrap*.go`): an OpenRouter key from
+env/keychain, then a local model server (Ollama, LM Studio, llama.cpp —
+model picked by name and RAM tier, both roles set to it, Ollama given a
+`num_ctx` variant because its `/v1` API cannot set the context per
+request), then (terminal only) the guided OpenRouter key prompt. See
+"Interactive first-run setup" in `docs/configuration.md`.
+
 ```json
 {
   "backend": { "type": "openrouter", "endpoint": "...", "key_env": "OPENROUTER_API_KEY" },

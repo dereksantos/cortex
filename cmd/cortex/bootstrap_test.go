@@ -32,14 +32,19 @@ func (f *fakeKeyProbe) Probe() (string, bool) {
 	return f.source, f.ok
 }
 
+// fakeOllamaProbe is a scripted LocalProbe: when up, it offers an Ollama
+// backend (Source "ollama-local").
 type fakeOllamaProbe struct {
 	up    bool
 	calls int
 }
 
-func (f *fakeOllamaProbe) Probe() bool {
+func (f *fakeOllamaProbe) Probe() (ResolvedBackend, bool) {
 	f.calls++
-	return f.up
+	if !f.up {
+		return ResolvedBackend{}, false
+	}
+	return ResolvedBackend{Source: "ollama-local", Backend: llm.BackendOllama}, true
 }
 
 type fakeGuidedSetup struct {
@@ -166,7 +171,7 @@ func TestBackendResolverChain(t *testing.T) {
 			r := &BackendResolver{
 				Config: &tt.config,
 				Key:    &tt.key,
-				Ollama: &tt.ollama,
+				Local:  &tt.ollama,
 				Guided: &tt.guided,
 				Smoke:  &fakeSmokeProbe{fail: fail},
 			}
@@ -232,7 +237,7 @@ func TestBackendResolverChainSeatsCuratedTopPick(t *testing.T) {
 		r := &BackendResolver{
 			Config: &fakeConfigProbe{ok: false},
 			Key:    &fakeKeyProbe{ok: false},
-			Ollama: &fakeOllamaProbe{up: false},
+			Local:  &fakeOllamaProbe{up: false},
 			Guided: &fakeGuidedSetup{ok: true},
 			Smoke:  &fakeSmokeProbe{},
 		}
@@ -253,7 +258,7 @@ func TestBackendResolverChainNoBackends(t *testing.T) {
 	r := &BackendResolver{
 		Config: &fakeConfigProbe{ok: false},
 		Key:    &fakeKeyProbe{ok: false},
-		Ollama: &fakeOllamaProbe{up: false},
+		Local:  &fakeOllamaProbe{up: false},
 		Guided: &fakeGuidedSetup{ok: false},
 		Smoke:  &fakeSmokeProbe{},
 	}

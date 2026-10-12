@@ -1,20 +1,29 @@
-// bootstrap_wire.go — wires the BackendResolver/GuidedSetup chain
-// (bootstrap.go, bootstrap_persist.go) into the interactive REPL's
-// startup path (docs/completion-roadmap.md Gate E). Everything the chain
-// needed already existed and was fully tested in isolation; nothing
-// called Resolve() outside tests. This file is that call, plus the small
-// set of concrete probe implementations Resolve() needs in production
-// (none existed — every existing test drove the chain with fakes).
+// bootstrap_wire.go — wires the BackendResolver chain (bootstrap.go,
+// bootstrap_local.go, bootstrap_persist.go) into startup
+// (docs/completion-roadmap.md Gate E), plus the concrete probes the chain
+// uses in production.
 //
-// Scope, deliberately kept small: the SmokeProbe stage is left unwired
-// (nil — BackendResolver.smokeTest treats that as always-pass, per its own
-// doc comment). A curated OpenRouter pick that's gone stale is already
-// self-healing at the next session start via preflightCuratedModels
-// (preflight.go), which runs on every launch regardless of how the config
-// got there; a bespoke one-shot smoke call here would duplicate that
-// safety net for a first-run-only path. Ollama's smoke behavior is
-// unverified beyond reachability (ollamaLocalProbe) for the same reason —
-// out of scope for this pass.
+// Two entry points run it, both only on a true first run (no user config,
+// no project config, no $CORTEX_BACKEND):
+//
+//   - the REPL (bare `cortex` / `cortex resume`), via maybeRunGuidedBootstrap:
+//     on a terminal, the full chain with prompts; with piped stdin, the
+//     non-interactive chain below.
+//   - `cortex turn`, via maybeRunHeadlessBootstrap: always the
+//     non-interactive chain, with every message on stderr (stdout stays the
+//     answer only).
+//
+// The non-interactive chain runs the prompt-free stages only — an
+// OpenRouter key from env/keychain, then a local model server — and writes
+// no secret (key_env/key_service name where the key lives). It leaves the
+// machine alone when something already answers on the default endpoint
+// (localhost:4000, the zero-config LiteLLM port): that setup works without
+// a config file.
+//
+// The SmokeProbe stage is left unwired (nil — BackendResolver.smokeTest
+// treats that as always-pass). A curated OpenRouter pick that's gone stale
+// self-heals at the next session start via preflightCuratedModels
+// (preflight.go); a local pick is a model the server itself listed.
 package main
 
 import (
@@ -22,13 +31,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
-	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // openRouterEnvVar is the env var name docs/configuration.md's examples
@@ -48,24 +59,23 @@ const openRouterKeychainService = "cortex-openrouter"
 type bootstrapAction int
 
 const (
-	// bootstrapNone: a backend is already resolvable without the guided
-	// flow (a config file exists, or CORTEX_BACKEND is set) — do nothing.
+	// bootstrapNone: a backend is already resolvable without the chain
+	// (a config file exists, or CORTEX_BACKEND is set) — do nothing.
 	bootstrapNone bootstrapAction = iota
 	// bootstrapGuided: a true first run on an interactive terminal — run
-	// GuidedSetup before session construction.
+	// the full chain, with prompts, before session construction.
 	bootstrapGuided
-	// bootstrapHint: a true first run, but stdin isn't a terminal (piped
-	// input, CI, a driver script) — print one hint and fall through to
-	// today's behavior unchanged.
-	bootstrapHint
+	// bootstrapNonInteractive: a true first run, but stdin isn't a
+	// terminal (piped input, CI, a driver script) — run the prompt-free
+	// stages; print one hint when none resolves.
+	bootstrapNonInteractive
 )
 
 // decideBootstrap is the pure wiring predicate: whether main() should run
-// the interactive GuidedSetup flow before session construction, print a
-// one-line hint and fall through unchanged, or do nothing because a
-// backend is already resolvable without it. Pure over its four inputs so
-// it's table-driven-testable without touching the filesystem, env, or a
-// real terminal.
+// the interactive chain before session construction, the non-interactive
+// one, or nothing because a backend is already resolvable without it. Pure
+// over its four inputs so it's table-driven-testable without touching the
+// filesystem, env, or a real terminal.
 //
 // "True first run" here (no user config, no project config, no
 // CORTEX_BACKEND env) is deliberately a different — narrower — question
@@ -80,21 +90,38 @@ func decideBootstrap(userConfigExists, projectConfigExists, hasBackendEnv, inter
 	if interactive {
 		return bootstrapGuided
 	}
-	return bootstrapHint
+	return bootstrapNonInteractive
 }
+
+// Production seams the bootstrap reads. Package vars so tests (TestMain)
+// point them at fakes: no test may probe the real localhost servers, read
+// the real keychain, or shell out for RAM.
+var (
+	bootstrapLocalSpecs           = defaultLocalServerSpecs
+	bootstrapDefaultRoot          = defaultEndpoint
+	bootstrapKeyProbe    KeyProbe = envKeychainKeyProbe{}
+	bootstrapRAM                  = totalSystemRAM
+	bootstrapHTTPClient           = &http.Client{}
+)
 
 // maybeRunGuidedBootstrap runs decideBootstrap over the real environment
 // and acts on it. Called from main() right before NewCortexSession(), on
-// the interactive-REPL path only (bare `cortex` / `cortex resume`) —
-// every headless subcommand (`turn`, `serve`, `discord`, `study`, `scan`,
-// `change`, `model`, `project`, `study-eval`) returns from main() earlier
-// and never reaches this call, so headless behavior is unchanged.
+// the interactive-REPL path (bare `cortex` / `cortex resume`).
 func maybeRunGuidedBootstrap() {
 	switch currentBootstrapAction() {
 	case bootstrapGuided:
 		runGuidedBootstrap()
-	case bootstrapHint:
-		printFirstRunHint()
+	case bootstrapNonInteractive:
+		runNonInteractiveBootstrap()
+	}
+}
+
+// maybeRunHeadlessBootstrap is `cortex turn`'s entry point: on a true first
+// run it runs the non-interactive chain whether or not stdin is a terminal
+// (a headless turn never prompts).
+func maybeRunHeadlessBootstrap() {
+	if currentBootstrapAction() != bootstrapNone {
+		runNonInteractiveBootstrap()
 	}
 }
 
@@ -102,7 +129,7 @@ func maybeRunGuidedBootstrap() {
 // real filesystem/env/terminal and evaluates the predicate. Split out
 // from maybeRunGuidedBootstrap so tests can assert the gathered decision
 // against a real (CORTEX_HOME-isolated) environment without also
-// exercising the interactive prompt or the stderr hint's side effects.
+// exercising the prompts or their side effects.
 func currentBootstrapAction() bootstrapAction {
 	return decideBootstrap(
 		pathExists(userConfigPath()),
@@ -112,52 +139,156 @@ func currentBootstrapAction() bootstrapAction {
 	)
 }
 
-// printFirstRunHint is the non-interactive first-run fallback: today's
-// behavior (target localhost:4000, fail after retries) is unchanged, but
-// the operator gets one clear pointer to what to do about it instead of a
-// bare connection error.
-func printFirstRunHint() {
-	fmt.Fprintf(os.Stderr,
+// printFirstRunHint is the non-interactive fallback when no stage resolved
+// a backend: Cortex goes on to target localhost:4000 and fail after
+// retries, and the operator gets one pointer to what to do about it
+// instead of a bare connection error.
+func printFirstRunHint(w io.Writer) {
+	fmt.Fprintf(w,
 		"cortex: no backend configured (no %s, no project .cortex/config.json, no $CORTEX_BACKEND) "+
-			"and stdin isn't a terminal, so the interactive setup is skipped. Set $CORTEX_BACKEND, write "+
-			"a config file, or run `cortex` from a terminal once to be walked through it — see "+
-			"docs/configuration.md.\n", userConfigPath())
+			"and no local model server with a usable model was found. Start Ollama, LM Studio or "+
+			"llama-server with a model, set $CORTEX_BACKEND, write a config file, or run `cortex` from "+
+			"a terminal once to be walked through it — see docs/configuration.md.\n", userConfigPath())
 }
 
-// runGuidedBootstrap builds the BackendResolver chain from production
-// probes, resolves a backend, and persists it — the M1.2–M1.3 pieces
-// (bootstrap.go, bootstrap_persist.go) wired together for the first time.
-// A failed or declined resolution (ErrNoBackend, or the user pressed
-// Enter to skip) leaves no config behind and falls through to today's
-// behavior: NewCortexSession() proceeds exactly as it would have without
-// this call.
+// runGuidedBootstrap is the interactive first run: prompts on stdin,
+// messages on stdout, failures on stderr.
 func runGuidedBootstrap() {
+	bootstrapRun{
+		Interactive: true,
+		In:          os.Stdin,
+		Out:         os.Stdout,
+		Err:         os.Stderr,
+		ConfigPath:  userConfigPath(),
+		Specs:       bootstrapLocalSpecs,
+		Tier:        machineTier(),
+		Key:         bootstrapKeyProbe,
+		Guided:      interactiveGuidedSetup{In: os.Stdin, Out: os.Stdout},
+		Client:      bootstrapHTTPClient,
+	}.run()
+}
+
+// runNonInteractiveBootstrap is the prompt-free first run: every message on
+// stderr, no guided stage.
+func runNonInteractiveBootstrap() {
+	bootstrapRun{
+		Out:         os.Stderr,
+		Err:         os.Stderr,
+		ConfigPath:  userConfigPath(),
+		Specs:       bootstrapLocalSpecs,
+		DefaultRoot: bootstrapDefaultRoot,
+		Tier:        machineTier(),
+		Key:         bootstrapKeyProbe,
+		Client:      bootstrapHTTPClient,
+	}.run()
+}
+
+// machineTier is the RAM-tier suggestion for this machine (model.go).
+func machineTier() ModelSuggestion {
+	ram, err := bootstrapRAM()
+	if err != nil {
+		ram = 0
+	}
+	return suggestModels(ram, runtime.GOARCH)
+}
+
+// bootstrapRun is one first-run resolution with every input explicit, so
+// tests drive the same code main() runs with fake servers and io.
+type bootstrapRun struct {
+	// Interactive selects the prompting chain (local-server confirmation,
+	// guided OpenRouter key). False runs the prompt-free stages only.
+	Interactive bool
+	In          io.Reader
+	Out         io.Writer
+	Err         io.Writer
+	ConfigPath  string
+	Specs       []localServerSpec
+	// DefaultRoot is probed in non-interactive runs only: when anything
+	// answers there, the run does nothing (a zero-config LiteLLM works).
+	DefaultRoot string
+	Tier        ModelSuggestion
+	Key         KeyProbe
+	Guided      GuidedSetup
+	Client      *http.Client
+}
+
+// bootstrapOutcome reports what run did, for tests.
+type bootstrapOutcome int
+
+const (
+	// outcomePersisted: a backend resolved and was saved to ConfigPath.
+	outcomePersisted bootstrapOutcome = iota
+	// outcomeDefaultAnswers: non-interactive, and the default endpoint
+	// answered — nothing done.
+	outcomeDefaultAnswers
+	// outcomeNone: no stage resolved a backend (or saving it failed).
+	outcomeNone
+)
+
+// run detects local servers (concurrently with the default-endpoint check
+// in non-interactive runs), resolves the chain, and persists the result.
+func (b bootstrapRun) run() (ResolvedBackend, bootstrapOutcome) {
+	ctx := context.Background()
+	var (
+		det     localDetection
+		answers bool
+		wg      sync.WaitGroup
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		det = detectLocal(ctx, b.Client, b.Specs, b.Tier)
+	}()
+	if !b.Interactive {
+		answers = endpointAnswers(ctx, b.Client, b.DefaultRoot)
+	}
+	wg.Wait()
+	if answers {
+		return ResolvedBackend{}, outcomeDefaultAnswers
+	}
+
 	resolver := &BackendResolver{
-		Config: fileConfigProbe{Path: userConfigPath()},
-		Key:    envKeychainKeyProbe{},
-		Ollama: ollamaLocalProbe{},
-		Guided: interactiveGuidedSetup{In: os.Stdin, Out: os.Stdout},
+		Config: fileConfigProbe{Path: b.ConfigPath},
+		Key:    b.Key,
+		Local:  localServerStage{Detection: det, Interactive: b.Interactive, In: b.In, Out: b.Out, Client: b.Client},
+	}
+	if b.Interactive && b.Guided != nil {
+		resolver.Guided = b.Guided
 	}
 
 	resolved, err := resolver.Resolve()
 	if err != nil {
-		fmt.Fprintln(os.Stderr,
-			"cortex: no backend available — continuing with the local default (http://localhost:4000); "+
-				"see docs/configuration.md to configure one.")
-		return
+		if b.Interactive {
+			fmt.Fprintln(b.Err,
+				"cortex: no backend available — continuing with the local default (http://localhost:4000); "+
+					"see docs/configuration.md to configure one.")
+		} else {
+			printFirstRunHint(b.Err)
+		}
+		return ResolvedBackend{}, outcomeNone
 	}
 
 	resolved = attachKeyRef(resolved)
-	path := userConfigPath()
-	if path == "" {
-		fmt.Fprintln(os.Stderr, "cortex: could not resolve the user config path ($CORTEX_HOME/config.json) — skipping persistence for this run.")
-		return
+	if b.ConfigPath == "" {
+		fmt.Fprintln(b.Err, "cortex: could not resolve the user config path ($CORTEX_HOME/config.json) — skipping persistence for this run.")
+		return resolved, outcomeNone
 	}
-	if err := PersistBackend(path, resolved); err != nil {
-		fmt.Fprintf(os.Stderr, "cortex: resolved a %s backend but failed to save it: %v\n", resolved.Source, err)
-		return
+	if err := PersistBackend(b.ConfigPath, resolved); err != nil {
+		fmt.Fprintf(b.Err, "cortex: resolved a %s backend but failed to save it: %v\n", resolved.Source, err)
+		return resolved, outcomeNone
 	}
-	fmt.Fprintf(os.Stdout, "cortex: configured a %s backend (%s) — saved to %s\n", resolved.Backend, resolved.Source, path)
+
+	if o := det.Offer; o != nil && resolved.Source == o.Source() {
+		fmt.Fprintf(b.Out, "cortex: using %s with %s (%s context) — saved to %s\n",
+			o.Spec.Name, resolved.Model, windowLabel(resolved.Window), b.ConfigPath)
+		return resolved, outcomePersisted
+	}
+	fmt.Fprintf(b.Out, "cortex: configured a %s backend (%s) — saved to %s\n", resolved.Backend, resolved.Source, b.ConfigPath)
+	if o := det.Offer; o != nil {
+		fmt.Fprintf(b.Out, "cortex: also found %s with %s (%s context). To use it instead, see \"Interactive first-run setup\" in docs/configuration.md.\n",
+			o.Spec.Name, o.BaseModel, windowLabel(o.Window))
+	}
+	return resolved, outcomePersisted
 }
 
 // attachKeyRef fills ResolvedBackend.KeyEnv/KeyService from b.Source. See
@@ -190,34 +321,18 @@ func (envKeychainKeyProbe) Probe() (string, bool) {
 	return "", false
 }
 
-// defaultOllamaProbeTimeout bounds the one /api/tags reachability check the
-// bootstrap chain's Ollama stage makes — Ollama is local, so this stays
-// short; a slow/absent daemon just falls through to the guided stage.
+// defaultOllamaProbeTimeout bounds the concurrent local-server listing
+// phase of the first-run chain (bootstrap_local.go's localListTimeout).
+// The servers are local, so this stays short; a slow/absent server just
+// falls through to the next stage.
 //
-// network.ollama_probe_timeout_sec exists in the config schema
-// (Config.ollamaProbeTimeout) for completeness with the rest of
-// docs/configuration.md's `network.*` section, but this probe only ever
-// runs from GuidedSetup on a TRUE first run — no user config, no project
-// config, no $CORTEX_BACKEND (docs/configuration.md "Interactive
-// first-run setup") — which means a config file setting this field can
-// never actually be loaded before this stage runs. Left a plain const
-// (not a var some call site overrides) for that reason: there is no
-// reachable production call site to wire it from.
+// network.ollama_probe_timeout_sec exists in the config schema for
+// completeness with the rest of docs/configuration.md's `network.*`
+// section, but this probe only ever runs on a TRUE first run — no user
+// config, no project config, no $CORTEX_BACKEND — so a config file setting
+// that field can never be loaded before the probe runs. Left a plain const
+// for that reason.
 const defaultOllamaProbeTimeout = 2 * time.Second
-
-const ollamaProbeTimeout = defaultOllamaProbeTimeout
-
-// ollamaLocalProbe is the production OllamaProbe (bootstrap.go chain
-// stage 3): wraps pkg/llm's existing /api/tags reachability probe
-// (pkg/llm/probe_ollama.go) rather than re-implementing it.
-type ollamaLocalProbe struct{}
-
-func (ollamaLocalProbe) Probe() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), ollamaProbeTimeout)
-	defer cancel()
-	_, err := llm.NewOllamaProbe(llm.OllamaProbeConfig{}).Probe(ctx)
-	return err == nil
-}
 
 // interactiveGuidedSetup is the production GuidedSetup (bootstrap.go
 // chain stage 4, last resort): prompts for an OpenRouter API key on In,

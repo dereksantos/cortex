@@ -24,7 +24,7 @@ func TestDecideBootstrap(t *testing.T) {
 		want                bootstrapAction
 	}{
 		{"nothing present, interactive => guided", false, false, false, true, bootstrapGuided},
-		{"nothing present, non-interactive => hint", false, false, false, false, bootstrapHint},
+		{"nothing present, non-interactive => hint", false, false, false, false, bootstrapNonInteractive},
 		{"user config present, interactive => none", true, false, false, true, bootstrapNone},
 		{"user config present, non-interactive => none", true, false, false, false, bootstrapNone},
 		{"project config present, interactive => none", false, true, false, true, bootstrapNone},
@@ -59,8 +59,8 @@ func TestCurrentBootstrapActionNoConfigNonTTYHints(t *testing.T) {
 	t.Setenv("CORTEX_BACKEND", "")
 	t.Chdir(t.TempDir())
 
-	if got := currentBootstrapAction(); got != bootstrapHint {
-		t.Errorf("currentBootstrapAction() = %v, want bootstrapHint (no config anywhere, non-TTY test process)", got)
+	if got := currentBootstrapAction(); got != bootstrapNonInteractive {
+		t.Errorf("currentBootstrapAction() = %v, want bootstrapNonInteractive (no config anywhere, non-TTY test process)", got)
 	}
 }
 
@@ -117,7 +117,7 @@ func TestCurrentBootstrapActionBackendEnvBypasses(t *testing.T) {
 	}
 }
 
-// TestPrintFirstRunHint pins the non-TTY hint's content: it must name the
+// TestPrintFirstRunHint pins the non-interactive hint's content: it must name the
 // user config path and point at docs/configuration.md, so a piped/CI
 // first run gets an actionable pointer instead of a bare connection
 // error.
@@ -125,19 +125,9 @@ func TestPrintFirstRunHint(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CORTEX_HOME", home)
 
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	printFirstRunHint()
-	os.Stderr = orig
-	w.Close()
-
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	out := string(buf[:n])
+	var b strings.Builder
+	printFirstRunHint(&b)
+	out := b.String()
 
 	wantConfigPath := filepath.Join(home, "config.json")
 	if !strings.Contains(out, wantConfigPath) {
@@ -152,7 +142,7 @@ func TestPrintFirstRunHint(t *testing.T) {
 // entry point main() calls is safe to invoke in a non-interactive process
 // (like this test): it must never attempt to read stdin (which would hang
 // a `go test` process, since nothing is writing to it) when
-// currentBootstrapAction() resolves to bootstrapHint or bootstrapNone.
+// currentBootstrapAction() resolves to bootstrapNonInteractive or bootstrapNone.
 // This is the "wiring predicate", not the interactive prompt itself —
 // interactiveGuidedSetup's own behavior is exercised through its io seam,
 // not by driving a real TTY.
