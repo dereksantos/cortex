@@ -4,7 +4,7 @@
 //
 //  1. existing config — if config already resolves a backend, use it
 //  2. an OpenRouter key from env or keychain
-//  3. a local Ollama probe
+//  3. a local model server (Ollama, LM Studio, llama.cpp — bootstrap_local.go)
 //  4. guided OpenRouter free-tier setup (last resort)
 //
 // Every stage that seats a candidate backend must also pass a one-shot
@@ -16,8 +16,7 @@
 //
 // This file defines the chain only. Persisting a resolved backend to
 // the user config, and the ConfigProbe that reads it back (M1.3), live
-// in bootstrap_persist.go. Wiring the chain into NewCortexSession lands
-// in a later increment.
+// in bootstrap_persist.go; bootstrap_wire.go runs the chain at startup.
 package main
 
 import (
@@ -31,11 +30,17 @@ import (
 // and for M1.3's config persistence.
 type ResolvedBackend struct {
 	// Source names which chain stage produced this backend: "config",
-	// "openrouter-env", "openrouter-keychain", "ollama-local", or
-	// "openrouter-guided".
+	// "openrouter-env", "openrouter-keychain", "ollama-local",
+	// "lmstudio-local", "llamacpp-local", or "openrouter-guided".
 	Source string
 	// Backend is the pkg/llm.Backend to construct.
 	Backend llm.Backend
+	// Endpoint is the OpenAI-compatible base URL to persist as
+	// backend.endpoint. Every seating stage sets it: with backend.endpoint
+	// unset, cmd/cortex sends to defaultEndpoint (localhost:4000) whatever
+	// backend.type says. The config stage leaves it empty (nothing is
+	// persisted from that stage).
+	Endpoint string
 	// Model is the model id to request (e.g. curatedTopPick().ID).
 	// Empty lets the constructed client fall back to its own default.
 	Model string
@@ -58,9 +63,13 @@ type ResolvedBackend struct {
 }
 
 // ErrNoBackend is returned when every chain stage is exhausted (config
-// missing, no key reachable, Ollama down, guided setup declined) or
+// missing, no key reachable, no usable local server, guided setup declined) or
 // every seated candidate fails its smoke probe.
 var ErrNoBackend = errors.New("bootstrap: no backend resolved")
+
+// openRouterEndpoint is the backend.endpoint the OpenRouter stages persist
+// (the value docs/configuration.md's examples use).
+const openRouterEndpoint = "https://openrouter.ai/api/v1"
 
 // ConfigProbe inspects existing config for an already-resolved backend
 // (chain stage 1: a config hit short-circuits the rest of the chain).
@@ -75,10 +84,11 @@ type KeyProbe interface {
 	Probe() (source string, ok bool)
 }
 
-// OllamaProbe reports whether a local Ollama instance is reachable
-// (chain stage 3).
-type OllamaProbe interface {
-	Probe() bool
+// LocalProbe offers a model on a local model server (chain stage 3). ok is
+// false when no server has a usable model or the user declined the offer.
+// The returned backend carries Endpoint, Model and Window.
+type LocalProbe interface {
+	Probe() (ResolvedBackend, bool)
 }
 
 // GuidedSetup walks the user through pasting an OpenRouter key and
@@ -101,7 +111,7 @@ type SmokeProbe interface {
 type BackendResolver struct {
 	Config ConfigProbe
 	Key    KeyProbe
-	Ollama OllamaProbe
+	Local  LocalProbe
 	Guided GuidedSetup
 	Smoke  SmokeProbe
 }
@@ -128,22 +138,21 @@ func (r *BackendResolver) Resolve() (ResolvedBackend, error) {
 	if r.Key != nil {
 		if source, ok := r.Key.Probe(); ok {
 			pick := curatedTopPick()
-			b := ResolvedBackend{Source: source, Backend: llm.BackendOpenRouter, Model: pick.ID, Window: pick.Window}
+			b := ResolvedBackend{Source: source, Backend: llm.BackendOpenRouter, Endpoint: openRouterEndpoint, Model: pick.ID, Window: pick.Window}
 			if r.smokeTest(b) {
 				return b, nil
 			}
 		}
 	}
-	if r.Ollama != nil && r.Ollama.Probe() {
-		b := ResolvedBackend{Source: "ollama-local", Backend: llm.BackendOllama}
-		if r.smokeTest(b) {
+	if r.Local != nil {
+		if b, ok := r.Local.Probe(); ok && r.smokeTest(b) {
 			return b, nil
 		}
 	}
 	if r.Guided != nil {
 		if ok := r.Guided.Guide(); ok {
 			pick := curatedTopPick()
-			b := ResolvedBackend{Source: "openrouter-guided", Backend: llm.BackendOpenRouter, Model: pick.ID, Window: pick.Window}
+			b := ResolvedBackend{Source: "openrouter-guided", Backend: llm.BackendOpenRouter, Endpoint: openRouterEndpoint, Model: pick.ID, Window: pick.Window}
 			if r.smokeTest(b) {
 				return b, nil
 			}

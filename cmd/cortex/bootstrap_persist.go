@@ -14,14 +14,15 @@ import (
 // PersistBackend writes a resolved backend to the user config file at
 // path via read-modify-write (configwrite.go): the file's other
 // top-level fields, and other roles under "models", survive byte-for-
-// byte (GOAL.md §2). Touches "backend.type"; "backend.key_env"/
+// byte (GOAL.md §2). Touches "backend.type"; "backend.endpoint" when
+// b.Endpoint is set (the local-server stage); "backend.key_env"/
 // "backend.key_service" when b.KeyEnv/b.KeyService are set (bootstrap_wire.go
 // fills these in from b.Source before calling PersistBackend); when b.Model
 // is set, also "models.<roleCode>.model" (and "models.<roleCode>.window"
 // when b.Window is set).
 //
-// E1 + E2: code and study are the same agent-role model by default, so an
-// OpenRouter backend whose Model came from the curated table (curated.go)
+// E1 + E2: code and study are the same agent-role model by default, so a
+// resolved Model (the curated OpenRouter pick, or a local server's pick)
 // also seeds "models.study" — but only when the file doesn't already carry
 // a study model, never clobbering a user's own pin.
 func PersistBackend(path string, b ResolvedBackend) error {
@@ -31,6 +32,11 @@ func PersistBackend(path string, b ResolvedBackend) error {
 	}
 	if err := setJSONPath(doc, []string{"backend", "type"}, string(b.Backend)); err != nil {
 		return fmt.Errorf("failed to persist resolved backend: %w", err)
+	}
+	if b.Endpoint != "" {
+		if err := setJSONPath(doc, []string{"backend", "endpoint"}, b.Endpoint); err != nil {
+			return fmt.Errorf("failed to persist resolved backend: %w", err)
+		}
 	}
 	if b.KeyEnv != "" {
 		if err := setJSONPath(doc, []string{"backend", "key_env"}, b.KeyEnv); err != nil {
@@ -51,7 +57,7 @@ func PersistBackend(path string, b ResolvedBackend) error {
 				return fmt.Errorf("failed to persist resolved backend: %w", err)
 			}
 		}
-		if b.Backend == llm.BackendOpenRouter && !docHasRoleModel(doc, roleStudy) {
+		if !docHasRoleModel(doc, roleStudy) {
 			if err := setJSONPath(doc, []string{"models", roleStudy, "model"}, b.Model); err != nil {
 				return fmt.Errorf("failed to persist resolved backend: %w", err)
 			}

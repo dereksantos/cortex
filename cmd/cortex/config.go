@@ -959,8 +959,8 @@ type NetworkConfig struct {
 	SelfHeal *bool `json:"self_heal"`
 	// OllamaProbeTimeoutSec is parsed, merged, and validated like every
 	// other field here, but has NO resolver method: the probe it would
-	// configure (bootstrap_wire.go's ollamaLocalProbe) only ever runs
-	// during GuidedSetup on a true first run — no config file can exist yet
+	// configure (bootstrap_local.go's local-server listing) only ever runs
+	// on a true first run — no config file can exist yet
 	// at that point by construction (docs/configuration.md's "Interactive
 	// first-run setup") — so there is no reachable call site to read this
 	// field from. Kept in the schema for documentation parity with the rest
@@ -1151,6 +1151,14 @@ func validateContextConfig(c ContextConfig) error {
 		return fmt.Errorf("context: tail_high_fraction (%.4f) + outline_fraction (%.4f) + prefix_headroom (%.4f, system prompt + memory index slack) = %.4f exceeds the compact trigger (%.4f) — normal demotion could make the 80%% compact threshold reachable; lower tail_high_fraction and/or outline_fraction", high, outline, contextPrefixHeadroom, sum, compactThreshold)
 	}
 	return nil
+}
+
+// backendType is backend.type, "" for a nil config.
+func (c *Config) backendType() string {
+	if c == nil {
+		return ""
+	}
+	return c.Backend.Type
 }
 
 func (c *Config) isOpenRouter() bool {

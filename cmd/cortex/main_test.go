@@ -30,12 +30,24 @@ func TestMain(m *testing.M) {
 			homeDir = dir
 		}
 	}
+	// The first-run bootstrap must never reach this machine's real local
+	// model servers, keychain, or default endpoint from a test: tests that
+	// exercise it point these seams at httptest servers and fakes.
+	bootstrapLocalSpecs = nil
+	bootstrapDefaultRoot = ""
+	bootstrapKeyProbe = noKeyProbe{}
+	bootstrapRAM = func() (uint64, error) { return 16 * bytesPerGiB, nil }
 	code := m.Run()
 	if homeDir != "" {
 		_ = os.RemoveAll(homeDir)
 	}
 	os.Exit(code)
 }
+
+// noKeyProbe is a KeyProbe that never finds an OpenRouter key.
+type noKeyProbe struct{}
+
+func (noKeyProbe) Probe() (string, bool) { return "", false }
 
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
 // matching the wire shape the model sends.

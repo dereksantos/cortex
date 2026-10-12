@@ -102,6 +102,12 @@ func runTurnCLI(args []string) {
 		os.Exit(2)
 	}
 
+	// A true first run (no config anywhere, no $CORTEX_BACKEND) resolves a
+	// backend without prompting — an OpenRouter key from env/keychain or a
+	// local model server — and saves it before the session reads config.
+	// Every message goes to stderr; stdout stays the answer only.
+	maybeRunHeadlessBootstrap()
+
 	session := NewCortexSession()
 	if err := applyProjectFlag(session, a.project); err != nil {
 		fmt.Fprintf(os.Stderr, "project %s: %v\n", a.project, err)
