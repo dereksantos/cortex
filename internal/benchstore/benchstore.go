@@ -77,8 +77,9 @@ func CheckDurable(dir string) error {
 	}
 }
 
-// Summary is the benchmark-neutral roll-up of one run's results.jsonl — the
-// numbers the trend views graph.
+// Summary is the benchmark-neutral roll-up of one run's results.v1.jsonl —
+// the numbers the trend views graph. Skipped counts infra errors (status
+// "error"), which PassRate excludes.
 type Summary struct {
 	N         int            `json:"n"`
 	Pass      int            `json:"pass"`
@@ -197,9 +198,13 @@ func Begin(o BeginOptions) (*Run, error) {
 	return r, nil
 }
 
-// Finish appends a finish event carrying the summary of the run's results.jsonl.
+// Finish writes the run's v1 files (run.v1.json, results.v1.jsonl) from its
+// native ones and appends a finish event carrying their summary.
 func (r *Run) Finish(note string) (Summary, error) {
-	s, err := SummarizeResults(filepath.Join(r.Dir, "results.jsonl"))
+	if err := Normalize(r.start.Bench, r.start.RunID, r.Dir, r.start.Labels); err != nil {
+		return Summary{}, fmt.Errorf("failed to write the v1 result files: %w", err)
+	}
+	s, err := Summarize(r.Dir)
 	if err != nil {
 		return s, err
 	}
@@ -285,50 +290,6 @@ func Latest(entries []Entry) []Entry {
 		return out[i].Bench+out[i].RunID < out[j].Bench+out[j].RunID
 	})
 	return out
-}
-
-// SummarizeResults rolls up a results.jsonl of any runner here. A row passes
-// on "pass": true or "resolved": true; it is skipped when "eval_status"
-// starts with "skipped" or "error". A missing file is an empty summary.
-func SummarizeResults(path string) (Summary, error) {
-	var s Summary
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
-	if err != nil {
-		return s, fmt.Errorf("failed to open results: %w", err)
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 1<<26)
-	for sc.Scan() {
-		var row map[string]any
-		if json.Unmarshal(sc.Bytes(), &row) != nil {
-			continue
-		}
-		s.N++
-		status, _ := row["eval_status"].(string)
-		switch {
-		case truthy(row["pass"]) || truthy(row["resolved"]):
-			s.Pass++
-		case strings.HasPrefix(status, "skipped") || strings.HasPrefix(status, "error"):
-			s.Skipped++
-		default:
-			s.Fail++
-		}
-		if c, _ := row["failure_class"].(string); c != "" {
-			if s.Classes == nil {
-				s.Classes = map[string]int{}
-			}
-			s.Classes[c]++
-		}
-		s.TokensIn += int64(num(row["tokens_in"]))
-		s.TokensOut += int64(num(row["tokens_out"]))
-		s.CostUSD += num(row["cost_usd"])
-		s.WallSec += num(row["wall_ms"]) / 1000
-	}
-	return s, sc.Err()
 }
 
 func truthy(v any) bool { b, ok := v.(bool); return ok && b }

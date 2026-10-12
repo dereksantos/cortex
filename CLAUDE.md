@@ -42,7 +42,9 @@ uses `go run ./scripts/bench/benchstore begin|finish`. Tag A/B arms with
 `benchstore sync` (records committed to the store's own local git; every run
 bundled to R2 by content hash, never overwritten — bucket from the store's
 `.sync/config.json`, not the repo). Before calling a run
-done, confirm it appears in `benchstore list`. Authority:
+done, confirm it appears in `benchstore list`. Every run carries the shared
+v1 result format (`run.v1.json` + `results.v1.jsonl`: status pass/fail/error,
+one failure taxonomy across benchmarks) — the shape all comparisons read. Authority:
 [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ## What Cortex is

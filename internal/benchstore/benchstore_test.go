@@ -65,7 +65,7 @@ func TestBeginFinish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if s.N != 2 || s.Pass != 1 || s.Fail != 1 || s.TokensIn != 15 || s.WallSec != 2 || s.Classes["early_finalize"] != 1 {
+	if s.N != 2 || s.Pass != 1 || s.Fail != 1 || s.TokensIn != 15 || s.WallSec != 2 || s.Classes["no_change"] != 1 {
 		t.Errorf("summary = %+v", s)
 	}
 
@@ -140,28 +140,37 @@ func TestBeginSavesSourcePatchWhenDirty(t *testing.T) {
 	}
 }
 
-func TestSummarizeResultsShapes(t *testing.T) {
+func TestSummarizeShapes(t *testing.T) {
 	tests := []struct {
 		name                string
 		rows                string
 		pass, fail, skip, n int
+		class               string
 	}{
-		{"polyglot rows", `{"pass":true}` + "\n" + `{"pass":false}`, 1, 1, 0, 2},
-		{"swebench rows", `{"resolved":true,"eval_status":"resolved","cost_usd":0.5}` + "\n" +
-			`{"resolved":false,"eval_status":"unresolved"}` + "\n" +
-			`{"resolved":false,"eval_status":"skipped_empty_patch"}`, 1, 1, 1, 3},
-		{"bad line is skipped", `{"pass":true}` + "\nnot json\n", 1, 0, 0, 1},
+		{"polyglot rows", `{"exercise":"a","pass":true}` + "\n" + `{"exercise":"b","pass":false,"failure_class":"early_finalize"}`, 1, 1, 0, 2, "no_change"},
+		{"swebench rows: an empty patch is a fail, not a skip", `{"instance_id":"a","resolved":true,"eval_status":"resolved","cost_usd":0.5}` + "\n" +
+			`{"instance_id":"b","resolved":false,"eval_status":"unresolved","failure_class":"wrong_patch"}` + "\n" +
+			`{"instance_id":"c","resolved":false,"eval_status":"skipped_empty_patch","failure_class":"empty_patch"}`, 1, 2, 0, 3, "no_change"},
+		{"infra errors are excluded from the rate", `{"instance_id":"a","resolved":true}` + "\n" +
+			`{"instance_id":"b","failure_class":"env_error"}`, 1, 0, 1, 2, "infra_error"},
+		{"bad line is skipped", `{"pass":true}` + "\nnot json\n", 1, 0, 0, 1, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := filepath.Join(t.TempDir(), "results.jsonl")
-			writeFile(t, p, tt.rows+"\n")
-			s, err := SummarizeResults(p)
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "results.jsonl"), tt.rows+"\n")
+			if err := Normalize("b", "r", dir, nil); err != nil {
+				t.Fatal(err)
+			}
+			s, err := Summarize(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if s.N != tt.n || s.Pass != tt.pass || s.Fail != tt.fail || s.Skipped != tt.skip {
 				t.Errorf("summary = %+v, want n=%d pass=%d fail=%d skip=%d", s, tt.n, tt.pass, tt.fail, tt.skip)
+			}
+			if tt.class != "" && s.Classes[tt.class] == 0 {
+				t.Errorf("classes = %v, want %s", s.Classes, tt.class)
 			}
 		})
 	}
