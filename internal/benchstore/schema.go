@@ -256,6 +256,13 @@ func Normalize(bench, runID, dir string, labels map[string]string) error {
 	if meta == nil {
 		meta = map[string]any{}
 	}
+	if meta["model"] == nil || meta["model"] == "" {
+		// Runs from before run_mini.sh recorded the model name it only in
+		// mini-SWE-agent's litellm overlay ("model_name: openai/<id>").
+		if m := overlayModel(dir); m != "" {
+			meta["model"] = m
+		}
+	}
 	run := NormalizeRun(bench, runID, meta, labels)
 	rows, err := nativeRows(dir)
 	if err != nil {
@@ -405,4 +412,19 @@ func str(v any) string {
 	default:
 		return fmt.Sprint(x)
 	}
+}
+
+// overlayModel reads model_name from a mini-SWE-agent litellm overlay in dir,
+// minus litellm's "openai/" routing prefix (the cortex side records the bare id).
+func overlayModel(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "mini_overlay_litellm.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), ":"); ok && k == "model_name" {
+			return strings.TrimPrefix(strings.Trim(strings.TrimSpace(v), `"'`), "openai/")
+		}
+	}
+	return ""
 }

@@ -8,6 +8,7 @@
 //	benchstore reindex                               index runs found on disk but not finished in the index
 //	benchstore begin --bench b --run-id id [--label k=v]   open a run dir (shell runners); prints its path
 //	benchstore finish --bench b --run-id id [--note s]     record a shell runner's finish + summary, then sync
+//	benchstore export --out dir                      runs.csv, failures.csv, tasks.csv for the trend dashboard
 //	benchstore sync                                  commit the records (local git) and upload new/changed bundles off-machine
 package main
 
@@ -35,7 +36,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: benchstore <root|list|csv|reindex|begin|finish|sync> [flags]")
+		return errors.New("usage: benchstore <root|list|csv|reindex|begin|finish|sync|export> [flags]")
 	}
 	root, err := benchstore.Root()
 	if err != nil {
@@ -47,6 +48,7 @@ func run(args []string) error {
 	runID := fs.String("run-id", "", "run id")
 	asJSON := fs.Bool("json", false, "print JSON lines")
 	note := fs.String("note", "", "free-text note on the finish event")
+	out := fs.String("out", "", "output directory (export)")
 	ephemeral := fs.Bool("ephemeral", false, "allow a run dir inside a git working tree")
 	labels := benchstore.LabelFlag{}
 	fs.Var(labels, "label", "key=value tag (repeatable)")
@@ -81,6 +83,11 @@ func run(args []string) error {
 		}
 		fmt.Printf("recorded %s/%s: %d/%d passed\n", *bench, *runID, s.Pass, s.Pass+s.Fail)
 		benchstore.SyncBestEffort(os.Stdout)
+	case "export":
+		if *out == "" {
+			return errors.New("export needs --out <dir>")
+		}
+		return export(root, *out)
 	case "sync":
 		up, why := benchstore.DefaultUploader(root)
 		if up == nil {
