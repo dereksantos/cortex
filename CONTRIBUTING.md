@@ -101,6 +101,20 @@ Commit messages: short, imperative, and specific about the change; a
 `type: summary` prefix (`fix:`, `feat:`, `docs:`, `refactor:`, `test:`,
 `chore:`) is a reasonable convention but not enforced.
 
+## Claiming issues
+
+A working PR is the claim. You don't need to ask before you start.
+
+- If you comment that you're working on an issue, that holds it for 3 days.
+  After that, any PR that meets the issue's acceptance criteria will be
+  reviewed, whoever opens it.
+- When two PRs fix the same issue, the first one that meets the acceptance
+  criteria and passes CI is the one reviewed.
+- Placeholder or "stake" PRs (ones that reserve an issue without fixing
+  it) are closed.
+- Contributions from agents are welcome on the same terms: a real fix, a
+  test, and a description of what changed and why.
+
 ## Releases (maintainer)
 
 Releases are tag-driven: pushing a `v*` tag runs
