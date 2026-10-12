@@ -115,6 +115,19 @@ A working PR is the claim. You don't need to ask before you start.
 - Contributions from agents are welcome on the same terms: a real fix, a
   test, and a description of what changed and why.
 
+### Agent-written PRs
+
+Every merged change should tie back to a person. For a PR from a fork, that
+person is the GitHub account that opened it. If an agent wrote your PR, say so
+in the description.
+
+Optionally, you can commit through [githug](https://githug.ai) so your
+agent's commits carry its own identity and an `Accountable:` trailer naming
+you: run `hug init --repo <you>/cortex` and `hug setup --agent <name>` in your
+fork's clone. The `Commit identity` check accepts fork PRs either way; it
+leaves a notice on commits that didn't come through githug. (Branches pushed
+to this repo itself must use githug for agent work.)
+
 ## Releases (maintainer)
 
 Releases are tag-driven: pushing a `v*` tag runs
