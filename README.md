@@ -9,12 +9,17 @@
        alt="The word CORTEX seeded as live cells in Conway's Game of Life, evolving into soup and then recalled back to the exact original">
 </p>
 
-**Cortex is a coding agent for small and local models. It manages its own
-context, keeps its own notes, and learns from its past sessions.**
+**Cortex is a turn-key coding agent for open-weight and local models.**
 
-Cortex keeps recent turns in the context window word for word. It replaces
-older turns with a short outline. Each outline line has a citation. The
-agent uses the `recall` tool to get the exact messages back from disk.
+Install one binary and run `cortex` in your project. Cortex finds a local
+model server (Ollama, LM Studio, or llama.cpp) and selects a model. If no
+server runs, it sets up a free hosted model on OpenRouter. You do not have
+to write a configuration file.
+
+Cortex keeps long sessions inside a small model's context window. It keeps
+recent turns word for word and replaces older turns with a short outline.
+Each outline line has a citation. The agent uses the `recall` tool to get
+the exact messages back from disk.
 
 The agent writes notes about decisions and constraints that it must keep.
 Each turn starts with an index of these notes. Between sessions,
@@ -79,9 +84,9 @@ these steps with no person at the keyboard:
 5. Cortex fixes each review finding, and the review starts again.
 6. A pull request merges only after the review approves it and CI passes.
 
-From 2026-09-28 to 2026-10-10, the loop merged
+From 2026-09-28 to 2026-10-07, the loop merged
 [49 pull requests](https://github.com/dereksantos/cortex/pulls?q=is%3Apr+is%3Amerged+label%3Acortex-loop).
-Cortex wrote about 85% of the commits in them. Claude wrote the other
+Cortex wrote 88% of the commits in them. Claude wrote the other
 commits, mostly to merge `main` into the branches and to fix tests. Cortex used two
 open models: a 27B model on a local machine and a 177B model on a second
 machine.
@@ -188,140 +193,45 @@ machine:
 
 ### 1. Install Cortex
 
-See [Install](#install). The commands below use `./bin/cortex`. If you
-used `go install` or the install script, use `cortex`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/dereksantos/cortex/main/scripts/install.sh | bash
+```
 
-### 2. Configure a backend
+For other methods, see [Install](#install).
 
-#### Local: Ollama
-
-1. Start Ollama.
-2. Pull a model that can call tools.
-3. Run `cortex` in your project.
+### 2. Run Cortex in your project
 
 ```bash
-ollama pull qwen2.5-coder:7b
+cd your-project
 cortex
 ```
 
-Cortex finds the server and selects a model. It prints one line, for
-example `Found Ollama with qwen2.5-coder:7b (32k context). Use it? [Y/n]`.
-Press Enter to accept. Cortex saves the backend and the model in
-`~/.cortex/config.json`. It uses the same model for the `code` role and
-the `study` role.
+On the first run, Cortex looks for a model in this sequence:
 
-Cortex selects the model by name and by size. It prefers coding models
-that can call tools, and the largest model that fits the memory of the
-computer. It sets the context window from the model and the memory.
+1. **An OpenRouter key** in `OPENROUTER_API_KEY` or the macOS Keychain.
+   Cortex uses a free model from a curated list.
+2. **A local model server**: Ollama (port 11434), LM Studio (port 1234),
+   or a llama.cpp server (port 8080). Cortex selects an installed model
+   and asks one question:
 
-Ollama does not let Cortex set the context size for each request. Thus
-Cortex creates a copy of the model with the correct context size, for
-example `cortex-qwen2.5-coder:7b-32k`. The copy uses the same model files.
-Cortex does not download a model.
+   ```text
+   Found Ollama with qwen2.5-coder:14b (32k context). Use it? [Y/n]
+   ```
 
-If Ollama has no model that Cortex can use, Cortex prints the command to
-pull one. LM Studio (port 1234) and a llama.cpp server (port 8080) also
-work. See "Interactive first-run setup" in
-[`docs/configuration.md`](docs/configuration.md).
+   Press Enter to accept.
+3. **The OpenRouter setup.** Cortex asks for an OpenRouter API key. You can
+   get a free key at https://openrouter.ai/keys. Cortex keeps the key in the
+   macOS Keychain and selects a free model.
 
-**Optional: set the model yourself.** Write the configuration file. Make
-sure that Ollama uses a context size that is equal to `window` or larger.
-If it does not, Ollama cuts long prompts. To do this, start Ollama with
-`OLLAMA_CONTEXT_LENGTH=32768 ollama serve`, or use a model that has its
-own `num_ctx`, such as the `cortex-` copy. At start, Cortex compares the
-`num_ctx` of the model with `window`. It prints a warning if `num_ctx` is
-smaller or not set. Cortex cannot see `OLLAMA_CONTEXT_LENGTH`.
+Cortex saves the result in `~/.cortex/config.json`. Later runs use it and
+do not ask again. When the model replies with a short greeting, the setup
+is complete.
 
-```bash
-mkdir -p .cortex
-cat > .cortex/config.json <<'JSON'
-{
-  "backend": {
-    "type": "ollama",
-    "endpoint": "http://localhost:11434/v1"
-  },
-  "models": {
-    "code":  { "model": "qwen2.5-coder:7b", "window": 32768 },
-    "study": { "model": "qwen2.5-coder:7b", "window": 32768 }
-  }
-}
-JSON
-```
+If the input is not a terminal (for example, `cortex turn` in a script),
+Cortex uses an OpenRouter key or a local server without a question. If it
+finds neither, it prints one line of help.
 
-#### Hosted: OpenRouter
-
-Put the API key in an environment variable. The configuration file
-contains only the name of the variable.
-
-**Default models.** If you do not set `models`, Cortex selects a free model
-from a curated list. It uses the same model for the `code` role and the
-`study` role. The list prefers models with large context windows and good
-coding results.
-
-```bash
-export OPENROUTER_API_KEY='...'
-mkdir -p .cortex
-cat > .cortex/config.json <<'JSON'
-{
-  "backend": {
-    "type": "openrouter",
-    "endpoint": "https://openrouter.ai/api/v1",
-    "key_env": "OPENROUTER_API_KEY"
-  }
-}
-JSON
-```
-
-The curated list is in `cmd/cortex/curated.go`. If a model is retired or
-fails during a session, Cortex changes to the next model on the list. This
-applies to curated models and to the models that you set. Cortex prints one
-line with the old model, the new model, and the reason. It also writes a
-journal entry. The `cortex model` command shows recent entries. Cortex does
-not change your configuration file. See
-[`docs/model-self-healing.md`](docs/model-self-healing.md) and
-`network.self_heal` in [`docs/configuration.md`](docs/configuration.md).
-
-**Set your own models.** Replace the model IDs with the models that you
-want for the `code` role and the `study` role:
-
-```bash
-export OPENROUTER_API_KEY='...'
-mkdir -p .cortex
-cat > .cortex/config.json <<'JSON'
-{
-  "backend": {
-    "type": "openrouter",
-    "endpoint": "https://openrouter.ai/api/v1",
-    "key_env": "OPENROUTER_API_KEY"
-  },
-  "models": {
-    "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
-    "study": { "model": "deepseek/deepseek-r1" }
-  }
-}
-JSON
-```
-
-### 3. Start a session
-
-```bash
-./bin/cortex
-```
-
-On the first run, the model sends a short greeting before the prompt
-shows. If the greeting shows, the backend operates correctly.
-
-If you have no configuration and you start `cortex` in a terminal, Cortex
-starts a setup procedure:
-
-1. Cortex asks for an OpenRouter API key. You can get a free key at
-   https://openrouter.ai/keys.
-2. Cortex keeps the key in the macOS Keychain.
-3. Cortex writes `~/.cortex/config.json` with a free curated model.
-
-To skip the setup, push Enter with no key. If the input is not a terminal
-(for example, a script or CI), Cortex prints one line of help. See
-[`docs/configuration.md`](docs/configuration.md) for all the steps.
+### 3. Start working
 
 This is a good first prompt:
 
@@ -334,7 +244,7 @@ Cortex saves each session to `.cortex/sessions/<id>.jsonl`. To continue a
 session, use this command:
 
 ```bash
-./bin/cortex resume
+cortex resume
 ```
 
 If you do not give a session id, `resume` opens a list of sessions:
@@ -346,6 +256,84 @@ If you do not give a session id, `resume` opens a list of sessions:
 If you give a session id, Cortex continues that session. If the output is
 not a color terminal (a pipe, `NO_COLOR`, or `CORTEX_LOOP_RENDER=0`),
 Cortex continues the latest session and does not open the list.
+
+### Local models
+
+Cortex selects a model by name and by size. It prefers coding models that
+can call tools, and the largest model that fits the memory of the
+computer. It uses the same model for the `code` role and the `study` role.
+
+- If the server has no model that Cortex can use, Cortex prints the
+  command to get one, for example `ollama pull qwen2.5-coder:14b`. Cortex
+  does not download a model.
+- If the selected model has fewer than 7B parameters, Cortex tells you
+  that small models often fail at agent work. Press `n` to use a free
+  hosted model instead.
+- Ollama does not let Cortex set the context size for each request. Thus
+  Cortex creates a copy of the model with the correct context size, for
+  example `cortex-qwen2.5-coder:14b-32k`. The copy uses the same model
+  files.
+
+See "Interactive first-run setup" in
+[`docs/configuration.md`](docs/configuration.md).
+
+### Hosted models: OpenRouter
+
+With no `models` section, Cortex selects a free model from a curated list
+(`cmd/cortex/curated.go`). The list prefers models with large context
+windows and good coding results. If a model is retired or fails during a
+session, Cortex changes to the next model on the list. It prints one line
+with the old model, the new model, and the reason, and writes a journal
+entry. The `cortex model` command shows recent entries. Cortex does not
+change your configuration file. See
+[`docs/model-self-healing.md`](docs/model-self-healing.md) and
+`network.self_heal` in [`docs/configuration.md`](docs/configuration.md).
+
+<details>
+<summary><strong>Set the models yourself</strong></summary>
+
+Write `.cortex/config.json` in the project, or `~/.cortex/config.json` for
+all projects.
+
+**Ollama.** Make sure that Ollama uses a context size that is equal to
+`window` or larger. If it does not, Ollama cuts long prompts. To do this,
+start Ollama with `OLLAMA_CONTEXT_LENGTH=32768 ollama serve`, or use a
+model that has its own `num_ctx`, such as the `cortex-` copy. At start,
+Cortex prints a warning if the `num_ctx` of the model is smaller than
+`window` or not set. Cortex cannot see `OLLAMA_CONTEXT_LENGTH`.
+
+```json
+{
+  "backend": {
+    "type": "ollama",
+    "endpoint": "http://localhost:11434/v1"
+  },
+  "models": {
+    "code":  { "model": "qwen2.5-coder:7b", "window": 32768 },
+    "study": { "model": "qwen2.5-coder:7b", "window": 32768 }
+  }
+}
+```
+
+**OpenRouter.** Put the API key in an environment variable. The
+configuration file contains only the name of the variable. Leave out
+`models` to use the curated free models.
+
+```json
+{
+  "backend": {
+    "type": "openrouter",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "key_env": "OPENROUTER_API_KEY"
+  },
+  "models": {
+    "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
+    "study": { "model": "qwen/qwen3-coder", "window": 131072 }
+  }
+}
+```
+
+</details>
 
 ### Use this README as input
 
