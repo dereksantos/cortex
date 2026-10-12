@@ -129,9 +129,11 @@ func writeTable(rows []benchstore.Entry) {
 	fmt.Fprintln(tw, "STARTED\tBENCH\tRUN\tMODEL\tCOMMIT\tSTATE\tPASS\tRATE\tLABELS")
 	for _, e := range rows {
 		pass, rate := "-", "-"
-		if s := e.Summary; s != nil && s.N > 0 {
+		if s := e.Summary; s != nil && s.Pass+s.Fail > 0 {
 			pass = fmt.Sprintf("%d/%d", s.Pass, s.Pass+s.Fail)
 			rate = fmt.Sprintf("%.0f%%", 100*s.PassRate())
+		} else if s != nil && s.N > 0 {
+			pass = fmt.Sprintf("unscored(%d)", s.N)
 		}
 		commit := e.Commit
 		if len(commit) > 7 {

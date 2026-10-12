@@ -72,7 +72,7 @@ func Discover(root string) ([]Entry, error) {
 			Model:     meta.Model,
 			Labels:    map[string]string{"harness": harness},
 		}
-		if s, err := SummarizeResults(filepath.Join(dir, "results.jsonl")); err == nil && s.N > 0 {
+		if s, err := Summarize(dir); err == nil && s.N > 0 {
 			e.Summary = &s
 		}
 		out = append(out, e)
@@ -82,10 +82,12 @@ func Discover(root string) ([]Entry, error) {
 	return out, err
 }
 
-// Reindex appends a "reindex" event for every run on disk whose latest index
-// event is not "finish" — runs copied in from elsewhere, or runs that crashed
-// before finishing. Append-only: it never rewrites or drops index lines.
-// Returns the entries it appended.
+// Reindex brings every run on disk up to date: it (re)writes each run's v1
+// files from its native ones, then appends a "reindex" event for any run
+// whose latest index entry is missing, unfinished, or carries a different
+// summary — runs copied in from elsewhere, runs that crashed before
+// finishing, runs rescored after the fact. Append-only: it never rewrites or
+// drops index lines. Returns the entries it appended.
 func Reindex(root string) ([]Entry, error) {
 	found, err := Discover(root)
 	if err != nil {
@@ -95,15 +97,23 @@ func Reindex(root string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	finished := map[string]bool{}
+	latest := map[string]Entry{}
 	for _, e := range Latest(existing) {
-		if e.Event == "finish" || e.Event == "reindex" {
-			finished[e.Bench+"\x00"+e.RunID] = true
-		}
+		latest[e.Bench+"\x00"+e.RunID] = e
 	}
 	var added []Entry
 	for _, e := range found {
-		if finished[e.Bench+"\x00"+e.RunID] {
+		prev, seen := latest[e.Bench+"\x00"+e.RunID]
+		if seen && len(prev.Labels) > 0 {
+			e.Labels = prev.Labels // labels given at Begin outrank the discovered default
+		}
+		if err := Normalize(e.Bench, e.RunID, e.Dir, e.Labels); err != nil {
+			return added, err
+		}
+		if s, err := Summarize(e.Dir); err == nil && s.N > 0 {
+			e.Summary = &s
+		}
+		if seen && prev.Event != "start" && sameSummary(prev.Summary, e.Summary) {
 			continue
 		}
 		if err := AppendIndex(root, e); err != nil {
@@ -122,4 +132,10 @@ func splitFirst(rel string) (first, rest string) {
 		}
 	}
 	return rel, ""
+}
+
+func sameSummary(a, b *Summary) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }

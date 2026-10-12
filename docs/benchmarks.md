@@ -60,6 +60,47 @@ Tag arms with `--label key=value` (repeatable) — `--label arm=decider`,
 `--label prompt=2026-10-07` — so trend views can group runs without parsing
 `run.json`.
 
+## Result format v1
+
+Every run directory carries two normalized files beside its runner's native
+`run.json`/`results.jsonl`. Runners write them through `Run.Finish`;
+`benchstore reindex` (re)writes them for runs copied in or rescored. The
+native files keep everything a runner records; **the v1 files are the one
+shape every summary, comparison, and trend view reads.** Fields beyond v1
+ride in `extra`, verbatim. Schema: `internal/benchstore/schema.go`.
+
+`run.v1.json` (`"schema": "cortex.bench.run/v1"`): `bench`, `run_id`,
+`harness` (the agent under test — `cortex`, `mini-swe-agent`, …),
+`harness_version`, `started_at`/`ended_at`, `models` (role → id), `backend`,
+`endpoint`, `window`, `temperature`, `cortex{commit,dirty}`,
+`dataset{name,revision,split}` (results compare only within one pin),
+`tasks`, `labels`, `host{name,os,arch}`, `extra`.
+
+`results.v1.jsonl`, one row per task (`"schema": "cortex.bench.result/v1"`):
+`task_id`, `status`, `failure_class`, `failure_detail` (the runner's own
+class), `tokens_in`, `tokens_out`, `cost_usd`, `wall_ms`, `tool_calls`,
+`turns`, `extra`.
+
+**Status:** `pass` · `fail` — anything the agent caused, including leaving
+no change at all · `error` — the harness or environment failed, not the
+agent. Pass rate = pass / (pass + fail); errors are counted and shown, never
+silently dropped.
+
+**Failure classes** (shared across benchmarks):
+
+| class | meaning | polyglot | swebench |
+|---|---|---|---|
+| `chat_mode` | answered in prose: no tool calls, no change | `chat_mode` | `chat_mode` |
+| `no_change` | worked with tools but left no change on disk | `early_finalize` | `empty_patch` |
+| `wrong_change` | changed the code; the tests still fail | `wrong_code` | `wrong_patch` |
+| `timeout` | hit the wall-clock limit | `timeout` | `timeout` |
+| `budget_stop` | hit the spend limit | — | `budget_stop` |
+| `agent_error` | the agent process errored | `error` | `error` |
+| `infra_error` | harness/environment failure (status `error`) | — | `env_error`, `eval_error`, `patch_apply_failed`, unscored prediction |
+
+A new runner maps its classes in `nativeClass`; an unmapped class is kept
+as-is rather than dropped.
+
 ## Reading
 
 ```bash
@@ -79,10 +120,10 @@ dir=$(go run ./scripts/bench/benchstore begin --bench probe --run-id decider-sha
 go run ./scripts/bench/benchstore finish --bench probe --run-id decider-shadow-01
 ```
 
-`results.jsonl` rows are summarized benchmark-neutrally: a row passes on
-`"pass": true` or `"resolved": true`, is skipped when `eval_status` starts
-with `skipped` or `error`, and `tokens_in`/`tokens_out`/`cost_usd`/`wall_ms`/
-`failure_class` are rolled up when present.
+Native rows are normalized to v1 on finish: a row passes on `"pass": true`
+or `"resolved": true`; `failure_class` maps through the shared taxonomy
+above; `tokens_in`/`tokens_out`/`cost_usd`/`wall_ms`/`tool_calls`/
+`agent_turns` carry over when present.
 
 ## Off-machine copy (`benchstore sync`)
 
