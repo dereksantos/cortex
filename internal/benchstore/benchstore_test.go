@@ -226,5 +226,8 @@ func TestEveryRunnerUsesTheStore(t *testing.T) {
 		if !strings.Contains(string(b), "benchstore.Begin(") {
 			t.Errorf("%s does not open its run with benchstore.Begin — results must go to the durable store (docs/benchmarks.md)", m)
 		}
+		if !strings.Contains(string(b), "benchstore.SyncBestEffort(") {
+			t.Errorf("%s does not sync its finished run off-machine (benchstore.SyncBestEffort) — docs/benchmarks.md", m)
+		}
 	}
 }
