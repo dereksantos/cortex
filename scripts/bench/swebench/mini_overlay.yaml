@@ -1,0 +1,21 @@
+# Overlay for mini-SWE-agent's OFFICIAL benchmarks/swebench.yaml, applied as
+#   mini-extra swebench -c swebench.yaml -c mini_overlay.yaml ...
+# It changes ONLY what the paired comparison must hold equal to the cortex
+# run: the model, the pinned OpenRouter provider (no fallback), temperature,
+# and the per-instance cost cap. Prompts, step limit (250), environment and
+# tool format are mini's own, untouched.
+#
+# model_class "openrouter" is mini's first-party OpenRouter client
+# (minisweagent/models/openrouter_model.py): model_kwargs go verbatim into the
+# request body, and each saved response records the upstream `provider` that
+# served it — which is how the pin is verified after the run.
+model:
+  model_class: openrouter
+  model_name: qwen/qwen3-coder
+  model_kwargs:
+    temperature: 0.0
+    provider:
+      order: ["novita/fp8"]
+      allow_fallbacks: false
+agent:
+  cost_limit: 2.0
