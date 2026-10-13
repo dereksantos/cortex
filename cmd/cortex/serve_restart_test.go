@@ -54,6 +54,14 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 		t.Fatal("created session id is empty")
 	}
 
+	// A restart means the first process exited, which closes its session
+	// files. Close it here, before the "before" listing: Windows updates an
+	// open file's modification time lazily, so a listing taken while the
+	// transcript is still open can show a time that changes once it closes.
+	if ms, ok := mgr1.Get(created.ID); ok {
+		ms.cs.Close()
+	}
+
 	projectsBefore := bodyString(t, doGet(t, ts1.URL+"/api/projects"))
 	sessionsBefore := bodyString(t, doGet(t, ts1.URL+"/api/projects/blog/sessions"))
 	ts1.Close()

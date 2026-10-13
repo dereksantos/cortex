@@ -224,7 +224,9 @@ func SyncBestEffort(w io.Writer) {
 	}
 }
 
-// syncUnits lists the bundle units: runs/<bench>/<entry> and archive/<entry>.
+// syncUnits lists the bundle units: runs/<bench>/<entry> and archive/<entry>,
+// "/"-separated on every platform (they name upload keys and records;
+// filepath.Join still reads them as paths).
 func syncUnits(root string) ([]string, error) {
 	var units []string
 	benches, err := os.ReadDir(filepath.Join(root, "runs"))
@@ -240,7 +242,7 @@ func syncUnits(root string) ([]string, error) {
 			return nil, err
 		}
 		for _, e := range entries {
-			units = append(units, filepath.Join("runs", b.Name(), e.Name()))
+			units = append(units, "runs/"+b.Name()+"/"+e.Name())
 		}
 	}
 	arch, err := os.ReadDir(filepath.Join(root, "archive"))
@@ -248,7 +250,7 @@ func syncUnits(root string) ([]string, error) {
 		return nil, err
 	}
 	for _, e := range arch {
-		units = append(units, filepath.Join("archive", e.Name()))
+		units = append(units, "archive/"+e.Name())
 	}
 	sort.Strings(units)
 	return units, nil
