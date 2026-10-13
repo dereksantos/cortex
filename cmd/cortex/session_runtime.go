@@ -12,6 +12,7 @@ import (
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/redact"
 	"github.com/dereksantos/cortex/internal/style"
+	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/internal/userhome"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -88,10 +89,12 @@ func turnArtifacts(turnMsgs []Message) (outcome, answer string) {
 	for _, m := range turnMsgs {
 		for _, tc := range m.ToolCalls {
 			switch tc.Function.Name {
-			case FunctionWriteFile, FunctionEditFile:
-				if p, err := tc.StringArg("path"); err == nil && !seen["f:"+p] {
-					seen["f:"+p] = true
-					files = append(files, p)
+			case FunctionWriteFile, FunctionEditFile, FunctionApplyPatch:
+				for _, p := range tools.MutatedPaths(tc) {
+					if !seen["f:"+p] {
+						seen["f:"+p] = true
+						files = append(files, p)
+					}
 				}
 			case FunctionBash:
 				if c, err := tc.StringArg("command"); err == nil && !seen["c:"+c] {

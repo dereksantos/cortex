@@ -597,7 +597,7 @@ var EditFile = newTool(FunctionEditFile,
 	objectSchema(map[string]any{
 		"path":        stringProp("Path to the file to edit."),
 		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
-		"new_string":  stringProp("Replacement text (single edit). May be empty to delete old_string."),
+		"new_string":  stringProp("Replacement text (single edit). Required; pass \"\" to delete old_string."),
 		"replace_all": boolProp("Replace every occurrence instead of requiring a unique match. Default false."),
 		"hook":        stringProp("Optional: \"skip\" skips the post-edit format/lint hook for this call only (never raises it, never affects trust)."),
 		"edits": map[string]any{
@@ -605,7 +605,7 @@ var EditFile = newTool(FunctionEditFile,
 			"description": "Optional: multiple edits applied in order, atomically. When set, the top-level old_string/new_string are ignored.",
 			"items": objectSchema(map[string]any{
 				"old_string":  stringProp("Text to find; indentation may differ from the file."),
-				"new_string":  stringProp("Replacement text; may be empty to delete."),
+				"new_string":  stringProp("Replacement text. Required; pass \"\" to delete."),
 				"replace_all": boolProp("Replace every occurrence. Default false."),
 			}, "old_string", "new_string"),
 		},
@@ -760,7 +760,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
-var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), Agent.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
+var All = []Tool{ReadFile, WriteFile, EditFile, ApplyPatch, Study.AsTool(), Agent.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
 	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool, ScanLandscapeTool}
 
@@ -797,7 +797,7 @@ var Agent = Subagent{
 	Name:        "agent",
 	Role:        "agent",
 	System:      agentSystem,
-	Tools:       []Tool{OutlineTool, GrepTool, ReadFile, WriteFile, EditFile, Bash},
+	Tools:       []Tool{OutlineTool, GrepTool, ReadFile, WriteFile, EditFile, ApplyPatch, Bash},
 	Bounds:      agent.Bounds{MaxTokens: 8_192, MaxIter: 20, ReadBudgetBytes: 128_000},
 	Declaration: AgentTool,
 	Seed:        StudySeed,
@@ -936,6 +936,9 @@ func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, Bash
 		return out, BashOutcome{}, err
 	case FunctionEditFile:
 		out, err := editFile(ctx, tc, deps)
+		return out, BashOutcome{}, err
+	case FunctionApplyPatch:
+		out, err := applyPatch(ctx, tc, deps)
 		return out, BashOutcome{}, err
 	case FunctionOutline:
 		out, err := outlineTool(tc, deps)
@@ -1620,10 +1623,21 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// as is trust.
 		Hook string `json:"hook"`
 	}
+	// present records which edits carried new_string at all. An absent
+	// new_string is NOT an empty one: a model that drops the argument means
+	// to replace, not delete, so treating absence as "" silently deleted
+	// code (the gpt-oss probe, 2026-10-13). Deleting takes an explicit "".
+	var present struct {
+		NewString *string `json:"new_string"`
+		Edits     []struct {
+			NewString *string `json:"new_string"`
+		} `json:"edits"`
+	}
 	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
 		if err := json.Unmarshal([]byte(s), &a); err != nil {
 			return "", fmt.Errorf("parse edit_file args: %w", err)
 		}
+		_ = json.Unmarshal([]byte(s), &present)
 	}
 	if a.Path == "" {
 		return "", fmt.Errorf("path is required")
@@ -1646,11 +1660,19 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 			// not be empty" here (as applyEdit would) describes a different
 			// mistake and sends the model to retry the same shape. Point at the
 			// missing field with an example so the retry lands on the first try.
-			return "", fmt.Errorf("no edit specified: set old_string (and optionally new_string), or pass an edits array like {\"edits\":[{\"old_string\":\"...\",\"new_string\":\"...\"}]}")
+			return "", fmt.Errorf("no edit specified: set old_string and new_string, or pass an edits array like {\"edits\":[{\"old_string\":\"...\",\"new_string\":\"...\"}]}")
+		}
+		if present.NewString == nil {
+			return "", fmt.Errorf("new_string is missing: pass the replacement text, or new_string \"\" to delete old_string")
 		}
 		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
 		printToolAction(deps, fmt.Sprintf("edit_file(%s)", a.Path))
 	} else {
+		for i, e := range present.Edits {
+			if e.NewString == nil {
+				return "", fmt.Errorf("edit %d: new_string is missing: pass the replacement text, or new_string \"\" to delete old_string", i+1)
+			}
+		}
 		printToolAction(deps, fmt.Sprintf("edit_file(%s, %s)", a.Path, CountNoun(len(edits), "edit")))
 	}
 
@@ -1684,25 +1706,36 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if err := os.WriteFile(fsPath, []byte(content), info.Mode()); err != nil {
 		return "", fmt.Errorf("write %s: %w", a.Path, err)
 	}
-	// The edit landed: show WHAT changed under the action line. edit_file
-	// already holds both sides in memory (data was read above, content is the
-	// applied result), so the diff costs nothing but the rendering.
-	printFileDiff(deps, string(data), content)
-	// Issue #141: a large deletion is the shape of the #127 incident (a test
-	// file sed'd away); the model sees it named in its own observation, not
-	// just as a diff on a terminal a headless run has. Both sides are already
-	// in memory here, so the check costs nothing.
-	warn := largeDeletionWarning(string(data), content)
 	editsNoun := ""
 	if multi {
 		editsNoun = CountNoun(len(edits), "edit")
 	}
+	return finishFileEdit(ctx, deps, a.Path, fsPath, string(data), content, editsNoun, total, hookSkip), nil
+}
+
+// finishFileEdit is everything after an in-place edit has landed on disk —
+// shared by edit_file and apply_patch's Update sections so both report a
+// change identically: the diff under the action line, the removal/guard
+// warnings and changed-region snippet in the result, then the post-edit hook
+// and write-sanity notes. path is the model-visible path, fsPath the
+// resolved one; editsNoun is "" for a single edit ("2 edits"/"3 hunks"
+// otherwise).
+func finishFileEdit(ctx context.Context, deps ToolDeps, path, fsPath, before, after, editsNoun string, total int, hookSkip bool) string {
+	// The edit landed: show WHAT changed under the action line. The caller
+	// already holds both sides in memory, so the diff costs nothing but the
+	// rendering.
+	printFileDiff(deps, before, after)
+	// Issue #141: a large deletion is the shape of the #127 incident (a test
+	// file sed'd away); the model sees it named in its own observation, not
+	// just as a diff on a terminal a headless run has. Both sides are already
+	// in memory here, so the check costs nothing.
+	warn := largeDeletionWarning(before, after)
 	// Issue #173: the model's view of the file is stale after every edit
 	// (earlier edits in the same session changed it). Return a bounded
 	// snippet of the current changed region so the model's next edit anchors
 	// on the file's actual content, not the view it held before this call.
-	msg := editResultMessage(a.Path, editsNoun, CountNoun(total, "replacement"), string(data), content)
-	msg += changedRegionSnippet(string(data), content)
+	msg := editResultMessage(path, editsNoun, CountNoun(total, "replacement"), before, after)
+	msg += changedRegionSnippet(before, after)
 	result := resultWithWarning(msg, warn)
 	// Post-edit hook (issue #129): run the project's format/lint on the file
 	// just edited. Never fails the edit — it only appends a note. The note
@@ -1718,10 +1751,10 @@ func editFile(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	// Issue #224: the write-sanity pass, same as writeFile — every package-
 	// name problem in one note, never a veto, byte-identical for non-Go.
-	if sn := writeSanityNote(fsPath, a.Path); sn != "" {
+	if sn := writeSanityNote(fsPath, path); sn != "" {
 		result += "\n" + sn
 	}
-	return result, nil
+	return result
 }
 
 // editResultMessage renders the model-facing result for a landed edit. Beyond

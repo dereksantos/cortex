@@ -32,23 +32,21 @@ import (
 // sed'd away), so armTestwatch baselines the project's test-named files
 // whenever a bash call is about to run.
 var testwatchTouchNames = map[string]bool{
-	tools.FunctionWriteFile: true,
-	tools.FunctionEditFile:  true,
-	tools.FunctionRemove:    true,
+	tools.FunctionWriteFile:  true,
+	tools.FunctionEditFile:   true,
+	tools.FunctionApplyPatch: true,
+	tools.FunctionRemove:     true,
 }
 
-// testwatchTouchedPath returns the path a mutating tool call names, or ""
-// when the call is not one of the scan's tool names (or its path arg is
-// missing) — the hook the coder dispatcher arms the snapshot with.
-func testwatchTouchedPath(call ToolCall) string {
+// testwatchTouchedPaths returns the paths a mutating tool call names (one
+// for write_file / edit_file / remove_path, every file section for
+// apply_patch), or nil when the call is not one of the scan's tool names —
+// the hook the coder dispatcher arms the snapshot with.
+func testwatchTouchedPaths(call ToolCall) []string {
 	if !testwatchTouchNames[call.Function.Name] {
-		return ""
+		return nil
 	}
-	p, err := call.StringArg("path")
-	if err != nil {
-		return ""
-	}
-	return p
+	return tools.MutatedPaths(call)
 }
 
 // armTestwatch arms the before-side of the workspace's test-named files in

@@ -48,8 +48,11 @@ func TestScanLandscapeToolRegistrationGate(t *testing.T) {
 			t.Error("scan_landscape should have been dropped when tools.enable_scan is false")
 		}
 	}
-	if len(filtered) != len(toolSet)-1 {
-		t.Errorf("len = %d, want %d", len(filtered), len(toolSet)-1)
+	// Compared with the same session's list with the gate on: the edit-format
+	// gate also leaves out one of edit_file/apply_patch, independent of scan.
+	enabled := filterEnabledTools(toolSet, (&CortexSession{Config: &Config{}}).IsToolEnabled)
+	if len(filtered) != len(enabled)-1 {
+		t.Errorf("len = %d, want %d", len(filtered), len(enabled)-1)
 	}
 }
 

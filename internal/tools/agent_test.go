@@ -38,14 +38,15 @@ func TestAgentProfileRegistered(t *testing.T) {
 // TestAgentToolsetMatchesDesignDoc covers docs/agent-tool.md decision 1
 // (toolset scope: read/search plus write/edit/bash) and decision 3 (excluded
 // coder-only tools): the allowlist Execute would use for a running Agent
-// instance is exactly outline/grep/read_file/write_file/edit_file/bash — no
-// more, no less — so none of the session-scoped coder-only tools (recall,
+// instance is exactly outline/grep/read_file/write_file/edit_file/apply_patch/
+// bash — no more, no less (the session's tools.edit_format leaves only one of
+// the two edit tools on the wire) — so none of the session-scoped coder-only tools (recall,
 // memory_*, context_*) or the subagent tools themselves (study, agent) are
 // reachable through it.
 func TestAgentToolsetMatchesDesignDoc(t *testing.T) {
 	allow := AllowOf(Agent.Tools)
 
-	want := []string{FunctionOutline, FunctionGrep, FunctionReadFile, FunctionWriteFile, FunctionEditFile, FunctionBash}
+	want := []string{FunctionOutline, FunctionGrep, FunctionReadFile, FunctionWriteFile, FunctionEditFile, FunctionApplyPatch, FunctionBash}
 	if len(allow) != len(want) {
 		t.Errorf("Agent toolset has %d entries, want exactly %d: %v", len(allow), len(want), want)
 	}

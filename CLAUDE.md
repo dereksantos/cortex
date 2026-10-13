@@ -277,7 +277,8 @@ stdout (no width, so no clipping).
 ## The agent's tools
 
 Registered in `internal/tools/tools.go` (`All` + dispatch in
-`tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `agent`, `outline`,
+`tools.Execute()`): `read_file`, `write_file`, `edit_file` / `apply_patch`
+(exactly one per session — `tools.edit_format`), `study`, `agent`, `outline`,
 `grep`, `bash`, `remove_path`, `web_search`, `fetch_url`, `scan_landscape`
 (coder-only, home-scoped survey of local agent harnesses/model runtimes;
 existence-only, never walks projects), `recall` (resolves a session-outline citation
@@ -352,6 +353,24 @@ the model-driven memory tools
   `-`, context unmarked, capped at 12 lines) so the
   model's view of the file stays in sync (#173). On a `.go` file a successful
   result may also carry the write-sanity note described in the next bullet.
+- `apply_patch` (`internal/tools/apply_patch.go`) is the patch-envelope
+  alternative to `edit_file` (`*** Begin Patch` … `*** End Patch`: Add /
+  Update [+ Move] / Delete File sections, `@@` hunks of ` `/`-`/`+` lines)
+  for model families post-trained on it. `tools.edit_format`
+  (`auto`|`replace`|`patch`; `auto` = patch for model ids containing
+  gpt-oss / gpt-4.1 / gpt-5 / codex) decides which ONE of the two the coder
+  and the `agent` subagent are offered (`IsToolEnabled`). It is a front end
+  only: each Update hunk goes through `edit_file`'s `applyEdit` (exact, then
+  whitespace-tolerant, unique — after the `@@` anchor line when one is
+  given), each updated file through the shared `finishFileEdit` (diff,
+  warnings, changed-region snippet, post-edit hook, write-sanity), and
+  Add/Delete through `write_file`/`remove_path` themselves, so every gate
+  holds. All sections are precondition-checked before anything is written.
+  The harness's edit bookkeeping (turn-end lint, footer, testwatch, journal
+  capture) reads `tools.MutatedPaths`, so patch edits count like
+  `edit_file`'s. `edit_file` itself refuses a call with `new_string` absent
+  (absence is not `""`; deleting takes an explicit `""`) — a model that
+  dropped the argument silently deleted code (2026-10-13 gpt-oss probe).
 - After `write_file`/`edit_file` lands, a post-edit hook runs the project's
   own format on the file just touched — it is FORMAT-ONLY. Lint moved to
   the turn END: in mode "all" on a trusted workspace it runs once per turn
