@@ -58,12 +58,16 @@ type Uploader interface {
 	Name() string
 }
 
-// WranglerR2 uploads with `wrangler r2 object put --remote`.
-type WranglerR2 struct{ Bucket string }
+// WranglerR2 uploads with `wrangler r2 object put --remote`. Dir is where
+// wrangler runs: it writes a .wrangler/ cache into its working directory, so
+// it runs in the store (whose .gitignore excludes it), never in a repo.
+type WranglerR2 struct{ Bucket, Dir string }
 
 // Put implements Uploader.
 func (w WranglerR2) Put(key, file string) error {
-	out, err := exec.Command("wrangler", "r2", "object", "put", w.Bucket+"/"+key, "--file", file, "--remote").CombinedOutput()
+	cmd := exec.Command("wrangler", "r2", "object", "put", w.Bucket+"/"+key, "--file", file, "--remote")
+	cmd.Dir = w.Dir
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("wrangler r2 put %s: %w\n%s", key, err, tail(string(out), 400))
 	}
@@ -93,7 +97,7 @@ func DefaultUploader(root string) (Uploader, string) {
 	if _, err := exec.LookPath("wrangler"); err != nil {
 		return nil, "wrangler not installed"
 	}
-	return WranglerR2{Bucket: bucket}, ""
+	return WranglerR2{Bucket: bucket, Dir: root}, ""
 }
 
 // SyncReport says what one Sync did.
