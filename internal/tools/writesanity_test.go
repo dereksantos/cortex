@@ -691,7 +691,7 @@ func TestWriteSanityNoteNeverFailsTheWrite(t *testing.T) {
 	target := filepath.Join(dir, "bad_guess.go")
 	out, _, err := Execute(context.Background(), ToolCall{Function: FunctionCall{
 		Name:      FunctionWriteFile,
-		Arguments: `{"path":"` + target + `","content":"package p\n\nfunc Test() { helperThatDoesNotExist() }\n"}`,
+		Arguments: `{"path":` + quoteJSON(target) + `,"content":"package p\n\nfunc Test() { helperThatDoesNotExist() }\n"}`,
 	}}, headlessDeps{})
 	if err != nil {
 		t.Fatalf("the sanity note must never fail the write, got error: %v", err)
@@ -720,7 +720,7 @@ func TestEditFileCarriesWriteSanityNote(t *testing.T) {
 	target := filepath.Join(dir, "a.go")
 	out, _, err := Execute(context.Background(), ToolCall{Function: FunctionCall{
 		Name:      FunctionEditFile,
-		Arguments: `{"path":"` + target + `","old_string":"realHelper()","new_string":"guessedHelper()"}`,
+		Arguments: `{"path":` + quoteJSON(target) + `,"old_string":"realHelper()","new_string":"guessedHelper()"}`,
 	}}, headlessDeps{})
 	if err != nil {
 		t.Fatalf("the sanity note must never fail the edit, got error: %v", err)

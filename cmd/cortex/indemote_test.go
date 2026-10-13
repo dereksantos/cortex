@@ -27,7 +27,7 @@ import (
 // label should carry.
 func indemoteToolResult(i, size int) (assistant, result Message) {
 	path := "f" + ritoa(i) + ".go"
-	argsJSON := `{"path":"` + path + `"}`
+	argsJSON := `{"path":` + jsonQuote(path) + `}`
 	assistant = Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_" + ritoa(i), Type: "function", Function: FunctionCall{Name: "read_file", Arguments: argsJSON}}}}
 	result = Message{Role: RoleTool, Content: strings.Repeat("x", size), ToolCallID: "call_" + ritoa(i)}
 	return
