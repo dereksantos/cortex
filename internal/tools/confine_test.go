@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -146,5 +147,27 @@ func TestReadRangeByteCap(t *testing.T) {
 	}
 	if !strings.Contains(out, "truncated") {
 		t.Errorf("a huge-line span should carry a truncation note:\n%.200s", out)
+	}
+}
+
+func TestIsRooted(t *testing.T) {
+	windows := runtime.GOOS == "windows"
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"main.go", false},
+		{"sub/dir/x.go", false},
+		{"../out", false}, // an escape, but not rooted: ConfinePath's Rel check refuses it
+		{"/etc/passwd", true},
+		{`\Windows\win.ini`, windows}, // a filename character on Unix
+		{`C:x.go`, windows},           // drive-relative on Windows; a filename on Unix
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isRooted(tt.path); got != tt.want {
+				t.Errorf("isRooted(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
