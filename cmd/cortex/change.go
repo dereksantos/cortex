@@ -23,8 +23,11 @@ import (
 const changeBranchPrefix = "cortex/"
 
 // gitCmdIn runs git in the given directory (an empty dir defaults to the
-// current process's working directory) and returns trimmed combined
-// output. On failure the error carries the command and git's own message,
+// current process's working directory) and returns its trimmed stdout.
+// Stderr stays out of the result: git prints warnings there on success (a
+// core.autocrlf "LF will be replaced by CRLF" line, for one) that would
+// otherwise corrupt a hash or a porcelain listing. On failure the error
+// carries the command and git's own message (stderr, else stdout),
 // so a caller (or the model reading a tool result) can see exactly what
 // went wrong. Every change-lifecycle helper below (gitCleanIn,
 // currentBranchIn, startChangeIn, commitChangeIn) goes through this one
@@ -36,10 +39,17 @@ const changeBranchPrefix = "cortex/"
 func gitCmdIn(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	trimmed := strings.TrimSpace(string(out))
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	trimmed := strings.TrimSpace(stdout.String())
 	if err != nil {
-		return trimmed, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, trimmed)
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = trimmed
+		}
+		return trimmed, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
 	}
 	return trimmed, nil
 }
