@@ -262,7 +262,7 @@ func TestEveryRunnerUsesTheStore(t *testing.T) {
 		if !outAssign.MatchString(body) {
 			continue // a wrapper that hands off to a Go driver
 		}
-		if !(strings.Contains(body, "benchstore\" begin") || strings.Contains(body, "benchstore begin")) {
+		if !strings.Contains(body, "benchstore\" begin") && !strings.Contains(body, "benchstore begin") {
 			t.Errorf("%s writes a run dir without `benchstore begin` — docs/benchmarks.md", sh)
 		}
 		if strings.Contains(body, "benchstore\" begin") && !strings.Contains(body, "finish") {
