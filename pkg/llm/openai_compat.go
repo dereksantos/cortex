@@ -73,6 +73,11 @@ type EndpointConfig struct {
 	// endpoints that reject unknown request fields (OpenAI proper).
 	ChatTemplateKwargs map[string]any
 
+	// Provider, when non-zero, is sent verbatim as OpenRouter's `provider`
+	// routing object on every chat-completions request (pin one upstream,
+	// forbid fallback). Leave nil for any non-OpenRouter endpoint.
+	Provider *ProviderRouting
+
 	// Timeout, when > 0, overrides the per-request HTTP timeout for
 	// this client (default compatTimeout / CORTEX_COMPAT_TIMEOUT_SEC).
 	// Callers that send near-window prompts to slow local hardware
@@ -124,6 +129,9 @@ type OpenAICompatClient struct {
 	// caller (cmd/cortex, from `models.<role>.vision` or an endpoint
 	// label/advert) says the model takes them.
 	vision bool
+	// provider, when non-nil, rides on every request — see
+	// EndpointConfig.Provider.
+	provider *ProviderRouting
 }
 
 // SetVision declares whether this client's model accepts image content
@@ -158,6 +166,7 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 		maxTokens:          defaultMaxTokens,
 		temperature:        envTemperature(),
 		chatTemplateKwargs: ep.ChatTemplateKwargs,
+		provider:           routingOrNil(ep.Provider),
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -258,11 +267,12 @@ func (c *OpenAICompatClient) GenerateWithStats(ctx context.Context, prompt strin
 // omitted from the wire unless configured, so the default request stays
 // universally compatible.
 type compatRequest struct {
-	Model              string          `json:"model"`
-	MaxTokens          int             `json:"max_tokens"`
-	Messages           []compatMessage `json:"messages"`
-	Temperature        *float64        `json:"temperature,omitempty"`
-	ChatTemplateKwargs map[string]any  `json:"chat_template_kwargs,omitempty"`
+	Model              string           `json:"model"`
+	MaxTokens          int              `json:"max_tokens"`
+	Messages           []compatMessage  `json:"messages"`
+	Temperature        *float64         `json:"temperature,omitempty"`
+	ChatTemplateKwargs map[string]any   `json:"chat_template_kwargs,omitempty"`
+	Provider           *ProviderRouting `json:"provider,omitempty"`
 	// Stream and StreamOptions are set only on the streaming path; omitempty
 	// keeps the blocking request byte-identical to before.
 	Stream        bool           `json:"stream,omitempty"`
@@ -443,6 +453,7 @@ func (c *OpenAICompatClient) generateFull(ctx context.Context, prompt, system st
 		Messages:           msgs,
 		Temperature:        c.temperature,
 		ChatTemplateKwargs: c.chatTemplateKwargs,
+		Provider:           c.provider,
 	}
 
 	raw, err := c.doRaw(ctx, "/chat/completions", body)
@@ -497,6 +508,7 @@ func (c *OpenAICompatClient) GenerateStream(ctx context.Context, prompt, system 
 		Messages:           msgs,
 		Temperature:        c.temperature,
 		ChatTemplateKwargs: c.chatTemplateKwargs,
+		Provider:           c.provider,
 		Stream:             true,
 		StreamOptions:      &streamOptions{IncludeUsage: true},
 	}
