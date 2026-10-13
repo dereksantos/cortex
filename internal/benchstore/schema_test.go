@@ -88,3 +88,39 @@ func TestNormalizeMiniFromReports(t *testing.T) {
 		t.Errorf("model from the overlay = %v (err %v), want qwen3.8-27b", run.Models, err)
 	}
 }
+
+func TestNormalizeMiniWallClockFromUsage(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "run.json"), `{"harness":"mini-swe-agent"}`)
+	writeFile(t, filepath.Join(dir, "predictions.jsonl"),
+		`{"instance_id":"a","model_patch":"diff"}`+"\n"+`{"instance_id":"b","model_patch":"diff"}`+"\n"+`{"instance_id":"c","model_patch":"diff"}`+"\n")
+	writeFile(t, filepath.Join(dir, "eval", "x", "report.json"),
+		`{"a":{"resolved":true},"b":{"resolved":false},"c":{"resolved":false}}`)
+	writeFile(t, filepath.Join(dir, "usage.jsonl"),
+		`{"instance_id":"a","wall_s":120,"timed_out":false}`+"\n"+`{"instance_id":"b","wall_s":3600,"timed_out":true}`+"\n")
+	if err := Normalize("swebench", "p/mini", dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readJSONL(filepath.Join(dir, ResultsFileV1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		wallMs float64
+		class  string
+	}{
+		"a": {120000, ""},
+		"b": {3600000, FailTimeout}, // cut short by --wall-limit: a timeout, not a wrong change
+		"c": {0, FailWrongChange},   // no ledger entry: no wall clock, classified from the patch
+	}
+	for _, r := range rows {
+		id := str(r["task_id"])
+		w := want[id]
+		if got := num(r["wall_ms"]); got != w.wallMs {
+			t.Errorf("%s wall_ms = %v, want %v", id, got, w.wallMs)
+		}
+		if got := str(r["failure_class"]); got != w.class {
+			t.Errorf("%s failure_class = %q, want %q", id, got, w.class)
+		}
+	}
+}
