@@ -53,6 +53,10 @@ import (
 // config-overridable — see CLAUDE.md's "explicitly not exposed" list.
 const discordMaxMessage = 1990
 
+// discordTokenEnv holds the bot token. It is also on the bash tool's strip
+// list (Config.secretEnvNames): the shell never needs it.
+const discordTokenEnv = "DISCORD_BOT_TOKEN"
+
 // defaultTypingRefresh is the immutable historical default — see
 // fleetDiscoveryTimeout's doc comment (config.go) for why
 // Config.discordTypingRefresh falls back to this const, never the mutable
@@ -145,7 +149,7 @@ func applyDiscordConfig(cfg *Config) {
 
 func runDiscordCLI() error {
 	applyDiscordConfig(LoadConfig())
-	token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
+	token := strings.TrimSpace(os.Getenv(discordTokenEnv))
 	if token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set — create a bot at https://discord.com/developers, enable the Message Content intent, and export its token")
 	}

@@ -15,15 +15,15 @@ func TestSecretEnvNames(t *testing.T) {
 		cfg  *Config
 		want map[string]bool
 	}{
-		{"nil config", nil, map[string]bool{}},
-		{"backend only", &Config{Backend: Backend{KeyEnv: "OPENROUTER_API_KEY"}}, map[string]bool{"OPENROUTER_API_KEY": true}},
+		{"nil config", nil, map[string]bool{"DISCORD_BOT_TOKEN": true}},
+		{"backend only", &Config{Backend: Backend{KeyEnv: "OPENROUTER_API_KEY"}}, map[string]bool{"OPENROUTER_API_KEY": true, "DISCORD_BOT_TOKEN": true}},
 		{
 			"backend + role keys",
 			&Config{
 				Backend: Backend{KeyEnv: "A_KEY", KeyService: "svc"},
 				Models:  map[string]ModelSpec{"code": {KeyEnv: "B_KEY"}, "study": {Model: "m"}},
 			},
-			map[string]bool{"A_KEY": true, "B_KEY": true},
+			map[string]bool{"A_KEY": true, "B_KEY": true, "DISCORD_BOT_TOKEN": true},
 		},
 	}
 	for _, tt := range tests {
