@@ -380,7 +380,7 @@ func writeTarGz(w io.Writer, root, unit string) error {
 			// written (the next sync picks up the rest under a new key).
 			n, err := io.CopyN(tw, f, hdr.Size)
 			f.Close()
-			if err != nil && !(errors.Is(err, io.EOF) && n < hdr.Size) {
+			if err != nil && (!errors.Is(err, io.EOF) || n >= hdr.Size) {
 				return err
 			}
 			if n < hdr.Size { // shrank meanwhile: pad so the archive stays valid

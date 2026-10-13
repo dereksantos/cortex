@@ -246,7 +246,7 @@ func saveSourcePatch(repo, dir string) error {
 		// --no-index exits 1 when the files differ, which they always do here.
 		d, err := exec.Command("git", "-C", repo, "diff", "--binary", "--no-index", "--", "/dev/null", f).Output()
 		var ee *exec.ExitError
-		if err != nil && !(errors.As(err, &ee) && ee.ExitCode() == 1) {
+		if err != nil && (!errors.As(err, &ee) || ee.ExitCode() != 1) {
 			return fmt.Errorf("git diff --no-index %s: %w", f, err)
 		}
 		buf.Write(d)
