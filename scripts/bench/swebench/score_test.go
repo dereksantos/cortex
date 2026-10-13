@@ -57,6 +57,12 @@ func TestHarnessLogDirMirrorsHarness(t *testing.T) {
 	if got := harnessLogDir("/e", "r", "a/b", "i"); !strings.Contains(got, "a__b") {
 		t.Errorf("slash not mapped: %s", got)
 	}
+	// A nested store run id is flattened: the harness puts it in a docker
+	// container name, where "/" is invalid (the probe-gptoss eval_error).
+	got = harnessLogDir("/e", "pair-x/cortex", "m", "i")
+	if want := filepath.Join("/e", "logs", "run_evaluation", "pair-x_cortex", "m", "i"); got != want {
+		t.Errorf("nested run id: got %s want %s", got, want)
+	}
 }
 
 // An empty patch is never sent to the harness (it would skip it anyway).
