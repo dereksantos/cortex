@@ -433,6 +433,9 @@ func Use() *http.Client {
 			},
 			target:  "p.go",
 			wantNil: true,
+			// "_unix" is not a filename suffix Go reads, so on Windows both
+			// files build and the duplicate is real.
+			requireNOGOOS: []string{"windows"},
 		},
 		{
 			// The mirror of the two above, and the one that matters more: the
@@ -577,16 +580,18 @@ func Use() *http.Client {
 			// …and the unjudged constraint never outranks the filename rule: a
 			// `_windows.go` sibling stays out of a non-windows build even under a
 			// header this check refuses to read, so the file sharing the written
-			// file's name is the un-suffixed one and the collision is 2, not 3
-			// (on Windows the suffix keeps `_windows.go` instead — same count).
+			// file's name is the un-suffixed one and the collision is 2, not 3.
+			// On Windows `_windows.go` builds too, so the honest count there is
+			// 3 and the case doesn't apply.
 			name: "an unjudgeable constraint does not resurrect a platform-suffixed sibling",
 			files: map[string]string{
 				"flock_windows.go": "//go:build integration\n\npackage p\n\nfunc flock() error { return nil }\n",
 				"flock_other.go":   "//go:build integration\n\npackage p\n\nfunc flock() error { return nil }\n",
 				"p.go":             "package p\n\nfunc Use() error { return flock() }\n\nfunc flock() error { return nil }\n",
 			},
-			target: "p.go",
-			want:   []string{"func flock is declared 2 times"},
+			target:        "p.go",
+			want:          []string{"func flock is declared 2 times"},
+			requireNOGOOS: []string{"windows"},
 		},
 		{
 			// Methods on a type in a SIBLING file: the method name never
@@ -691,7 +696,7 @@ func TestWriteSanityNoteNeverFailsTheWrite(t *testing.T) {
 	target := filepath.Join(dir, "bad_guess.go")
 	out, _, err := Execute(context.Background(), ToolCall{Function: FunctionCall{
 		Name:      FunctionWriteFile,
-		Arguments: `{"path":"` + target + `","content":"package p\n\nfunc Test() { helperThatDoesNotExist() }\n"}`,
+		Arguments: `{"path":` + quoteJSON(target) + `,"content":"package p\n\nfunc Test() { helperThatDoesNotExist() }\n"}`,
 	}}, headlessDeps{})
 	if err != nil {
 		t.Fatalf("the sanity note must never fail the write, got error: %v", err)
@@ -720,7 +725,7 @@ func TestEditFileCarriesWriteSanityNote(t *testing.T) {
 	target := filepath.Join(dir, "a.go")
 	out, _, err := Execute(context.Background(), ToolCall{Function: FunctionCall{
 		Name:      FunctionEditFile,
-		Arguments: `{"path":"` + target + `","old_string":"realHelper()","new_string":"guessedHelper()"}`,
+		Arguments: `{"path":` + quoteJSON(target) + `,"old_string":"realHelper()","new_string":"guessedHelper()"}`,
 	}}, headlessDeps{})
 	if err != nil {
 		t.Fatalf("the sanity note must never fail the edit, got error: %v", err)

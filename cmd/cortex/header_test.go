@@ -50,12 +50,14 @@ func TestHomeRel(t *testing.T) {
 	if err != nil {
 		t.Skip("no home directory")
 	}
+	// An absolute path outside home: "/opt/cortex", or "C:\opt\cortex" on Windows.
+	outside := filepath.Join(filepath.VolumeName(home)+string(filepath.Separator), "opt", "cortex")
 	tests := []struct {
 		name, in, want string
 	}{
 		{"home itself", home, "~"},
 		{"under home", filepath.Join(home, "eng", "cortex"), "~" + string(filepath.Separator) + filepath.Join("eng", "cortex")},
-		{"outside home", "/opt/cortex", "/opt/cortex"},
+		{"outside home", outside, outside},
 		{"sibling with home as prefix", home + "x", home + "x"},
 	}
 	for _, tt := range tests {

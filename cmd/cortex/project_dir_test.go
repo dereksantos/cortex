@@ -115,7 +115,7 @@ func TestProjectDirResolutionSkipsUserDir(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			base := resolvedPath(t, t.TempDir())
 			home, cortexHome, cwd := tc.setup(t, base)
-			t.Setenv("HOME", filepath.Join(base, home))
+			setHome(t, filepath.Join(base, home))
 			if cortexHome != "" {
 				t.Setenv("CORTEX_HOME", filepath.Join(base, cortexHome))
 			} else {
@@ -151,4 +151,12 @@ func TestProjectDirResolutionSkipsUserDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+// setHome points os.UserHomeDir at dir for the test. It reads HOME on Unix
+// and USERPROFILE on Windows, so both are set (#288).
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 }

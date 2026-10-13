@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -209,6 +210,9 @@ func TestEditFileTool(t *testing.T) {
 	})
 
 	t.Run("preserves file mode", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows has no Unix permission bits to preserve")
+		}
 		path := filepath.Join(t.TempDir(), "script.sh")
 		os.WriteFile(path, []byte("echo old\n"), 0755)
 

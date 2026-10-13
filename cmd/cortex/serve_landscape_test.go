@@ -34,7 +34,7 @@ func TestLandscapeEndpointReturnsScanReport(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/landscape")
@@ -63,7 +63,7 @@ func TestLandscapeEndpointNoRootsConfiguredIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/landscape")
@@ -94,7 +94,7 @@ func TestLandscapeEndpointFallsBackToJournalWhenNoRootsPersisted(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/landscape")
@@ -132,7 +132,7 @@ func TestLandscapeEndpointReturnsScanReportIsLiveSource(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	before := time.Now().Add(-time.Second)
@@ -173,7 +173,7 @@ func TestLandscapeRescanEndpointRunsScanAndAppendsJournalEvent(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPost(t, ts.URL+"/api/landscape/rescan", "")
@@ -211,7 +211,7 @@ func TestLandscapeRescanEndpointNoRootsIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPost(t, ts.URL+"/api/landscape/rescan", "")
@@ -228,7 +228,7 @@ func TestLandscapeRescanEndpointRejectsForeignHost(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/landscape/rescan", nil)
@@ -243,7 +243,7 @@ func TestLandscapeEndpointRejectsForeignHost(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/landscape", nil)

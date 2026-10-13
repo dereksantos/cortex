@@ -44,7 +44,7 @@ func TestServeCreatedSessionHasMemoryAndCapturesATurn(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
-	mgr := NewSessionManager(reg, serveMemorySessionFactory(backend))
+	mgr := newTestSessionManager(t, reg, serveMemorySessionFactory(backend))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 

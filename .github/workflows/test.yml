@@ -19,20 +19,24 @@ jobs:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # One OS failing shouldn't cancel the others: a flaky test on one
+      # runner would otherwise hide the Windows results.
+      fail-fast: false
       matrix:
-        # Windows excluded: the eval-harness work relies on POSIX
-        # subprocess group semantics (syscall.Setpgid, SIGTERM/SIGKILL
-        # via PID groups) that have no clean Windows equivalent. Files
-        # needing exclusion already carry //go:build !windows tags so
-        # local builds on Windows fail fast rather than silently
-        # misbehaving. Re-adding Windows to CI would require a shim
-        # layer for subprocess lifecycle — significantly more code than
-        # the exclusion saves.
-        os: [ubuntu-latest, macos-latest]
+        # Windows runs the suite so contributors there can trust
+        # `go test ./...` (issue #288, phase 1). The REPL's raw-mode input
+        # and the bash tool are not supported on Windows yet; tests that
+        # need them must skip there (t.Skip) with a reason.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # Exact patch pin, matching go.mod's toolchain directive and
         # release.yml. The patch level is load-bearing for the stdlib
         # CVEs govulncheck tracks — bump all three together.
         go-version: ['1.27.2']
+    # Git Bash on the Windows runner, so every step reads the same on all
+    # three (PowerShell would split -coverprofile=coverage.txt at the dot).
+    defaults:
+      run:
+        shell: bash
 
     steps:
     - name: Checkout code
@@ -169,8 +173,10 @@ jobs:
     - name: Build for macOS (Apple Silicon)
       run: GOOS=darwin GOARCH=arm64 go build -trimpath -o cortex-darwin-arm64 ./cmd/cortex
 
-    # Windows build dropped — see matrix comment above. We're not
-    # shipping a Windows binary while the eval-harness work blocks it.
+    # Built so the Windows compile can't regress; not a release target
+    # yet (issue #288).
+    - name: Build for Windows
+      run: GOOS=windows GOARCH=amd64 go build -trimpath -o cortex-windows-amd64.exe ./cmd/cortex
 
     - name: Upload artifacts
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

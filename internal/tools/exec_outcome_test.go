@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -106,13 +107,17 @@ func TestExecuteBashExitCodes(t *testing.T) {
 		name     string
 		command  string
 		wantExit int
+		unixOnly bool // relies on Unix signal semantics (#288 phase 3)
 	}{
 		{name: "clean exit", command: `{"command":"true"}`, wantExit: 0},
 		{name: "non-zero exit keeps its code", command: `{"command":"exit 3"}`, wantExit: 3},
-		{name: "signal-killed run reports 1", command: `{"command":"kill -KILL $$"}`, wantExit: 1},
+		{name: "signal-killed run reports 1", command: `{"command":"kill -KILL $$"}`, wantExit: 1, unixOnly: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.unixOnly && runtime.GOOS == "windows" {
+				t.Skip("a signal-killed bash reports a different code under Git Bash; the bash tool on Windows is #288 phase 3")
+			}
 			call := agent.ToolCall{Function: agent.FunctionCall{Name: FunctionBash, Arguments: tc.command}}
 			out, outcome, err := Execute(context.Background(), call, refuserGate{gateOk: true})
 			if err != nil {

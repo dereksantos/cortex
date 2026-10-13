@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/loops"
@@ -56,8 +57,9 @@ func (f *fakeRegistry) Remove(name string) error {
 // touches config/network (hermeticSessionFactory, serve_session_test.go) —
 // reused here by the M4.2a listing tests too since newServeMux now always
 // takes a *SessionManager, even for endpoints that don't exercise it.
-func testSessionManager(reg registry.Registry) *SessionManager {
-	return NewSessionManager(reg, hermeticSessionFactory())
+func testSessionManager(t *testing.T, reg registry.Registry) *SessionManager {
+	t.Helper()
+	return newTestSessionManager(t, reg, hermeticSessionFactory())
 }
 
 // testLoopsStore returns a loops.Store backed by a fresh temp-dir loops.json
@@ -137,7 +139,7 @@ func TestListProjectsEndpointReturnsRegisteredProjects(t *testing.T) {
 		"blog":   {Name: "blog", Root: "/tmp/blog"},
 		"cortex": {Name: "cortex", Root: "/tmp/cortex", Notes: "main repo"},
 	}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects")
@@ -166,7 +168,7 @@ func TestListProjectsEndpointReturnsRegisteredProjects(t *testing.T) {
 
 func TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects")
@@ -179,7 +181,7 @@ func TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull(t *testing.T)
 
 func TestListProjectsEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: "/tmp/blog"}}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/projects", nil)
@@ -204,7 +206,7 @@ func TestListProjectSessionsEndpointListsNewestFirst(t *testing.T) {
 	)
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects/blog/sessions")
@@ -233,7 +235,7 @@ func TestListProjectSessionsEndpointListsNewestFirst(t *testing.T) {
 func TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray(t *testing.T) {
 	root := t.TempDir() // no .cortex/sessions dir created at all
 	reg := &fakeRegistry{projects: map[string]registry.Project{"fresh": {Name: "fresh", Root: root}}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects/fresh/sessions")
@@ -249,7 +251,7 @@ func TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray(t *testing.T)
 
 func TestListProjectSessionsEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects/doesnotexist/sessions")
@@ -257,4 +259,29 @@ func TestListProjectSessionsEndpointUnknownProjectReturns404(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
+}
+
+// newTestSessionManager is NewSessionManager for tests: every session the
+// factory builds is closed when the test ends. A session holds its
+// transcript open, and Windows can't delete an open file, so without this
+// t.TempDir's cleanup fails there (#288). Call it after t.TempDir so the
+// close runs first (cleanups run last-registered first).
+func newTestSessionManager(t *testing.T, reg registry.Registry, newSession sessionFactory) *SessionManager {
+	t.Helper()
+	var mu sync.Mutex
+	var made []*CortexSession
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, cs := range made {
+			cs.Close()
+		}
+	})
+	return NewSessionManager(reg, func() *CortexSession {
+		cs := newSession()
+		mu.Lock()
+		made = append(made, cs)
+		mu.Unlock()
+		return cs
+	})
 }

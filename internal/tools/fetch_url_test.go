@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -17,7 +18,8 @@ func fetchCall(rawURL string) ToolCall {
 }
 
 func quoteJSON(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func TestFetchURLExtractsReadableHTML(t *testing.T) {

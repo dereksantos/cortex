@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -28,7 +29,7 @@ func TestWriteReadRemoveServePIDRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat(%s): %v", path, err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
+	if perm := fi.Mode().Perm(); perm != 0o600 && runtime.GOOS != "windows" { // no Unix permission bits on Windows
 		t.Errorf("serve.pid mode = %o, want 0600", perm)
 	}
 

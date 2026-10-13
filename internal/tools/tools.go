@@ -2471,7 +2471,7 @@ func confinedPath(root, p string) (string, error) {
 		return "", fmt.Errorf("resolve root: %w", err)
 	}
 	abs := filepath.Clean(p)
-	if !filepath.IsAbs(abs) {
+	if !isRooted(abs) {
 		abs = filepath.Join(rootAbs, abs)
 	}
 	rel, err := filepath.Rel(rootAbs, abs)

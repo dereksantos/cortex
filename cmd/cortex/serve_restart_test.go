@@ -32,7 +32,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	if err := reg1.Save(registry.Project{Name: "blog", Root: projectRoot}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	mgr1 := NewSessionManager(reg1, hermeticSessionFactory())
+	mgr1 := newTestSessionManager(t, reg1, hermeticSessionFactory())
 	ts1 := newTestServeServer(t, newServeMux(reg1, mgr1, "", "", testLoopsStore(t), newRunningSet()))
 
 	// Create a session while the "first process" is live, so there is
@@ -54,6 +54,14 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 		t.Fatal("created session id is empty")
 	}
 
+	// A restart means the first process exited, which closes its session
+	// files. Close it here, before the "before" listing: Windows updates an
+	// open file's modification time lazily, so a listing taken while the
+	// transcript is still open can show a time that changes once it closes.
+	if ms, ok := mgr1.Get(created.ID); ok {
+		ms.cs.Close()
+	}
+
 	projectsBefore := bodyString(t, doGet(t, ts1.URL+"/api/projects"))
 	sessionsBefore := bodyString(t, doGet(t, ts1.URL+"/api/projects/blog/sessions"))
 	ts1.Close()
@@ -62,7 +70,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	// SessionManager (empty in-memory map, no reference to mgr1's session)
 	// pointed at the very same on-disk projects.json and project root.
 	reg2 := registry.NewAt(regPath)
-	mgr2 := NewSessionManager(reg2, hermeticSessionFactory())
+	mgr2 := newTestSessionManager(t, reg2, hermeticSessionFactory())
 	ts2 := newTestServeServer(t, newServeMux(reg2, mgr2, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts2.Close()
 

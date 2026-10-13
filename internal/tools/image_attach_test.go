@@ -205,7 +205,7 @@ func TestAttachImageMissingFile(t *testing.T) {
 	if !strings.Contains(att.Reason, "gone.png") {
 		t.Errorf("Reason %q must name the reference the human typed", att.Reason)
 	}
-	if !strings.Contains(att.Error(), "no such file") {
+	if !strings.Contains(att.Error(), err.Error()) {
 		t.Errorf("Error() %q must carry the underlying cause", att.Error())
 	}
 	if !errors.Is(att, os.ErrNotExist) {

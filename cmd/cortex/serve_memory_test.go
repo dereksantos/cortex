@@ -76,7 +76,7 @@ func memoryTestMux(t *testing.T) (*http.ServeMux, string) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	mux := newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())
+	mux := newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet())
 	return mux, root
 }
 

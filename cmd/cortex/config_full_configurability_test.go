@@ -727,7 +727,7 @@ func TestConfigGrepCapsReachGrep(t *testing.T) {
 	cfg := &Config{Tools: ToolConfig{Grep: GrepConfig{MaxHits: 3}}}
 	tools.Configure(cfg.toolLimits())
 
-	call := ToolCall{Function: FunctionCall{Name: FunctionGrep, Arguments: `{"pattern":"needle","path":"` + dir + `"}`}}
+	call := ToolCall{Function: FunctionCall{Name: FunctionGrep, Arguments: `{"pattern":"needle","path":` + jsonQuote(dir) + `}`}}
 	out, _, err := tools.Execute(context.Background(), call, nil)
 	if err != nil {
 		t.Fatalf("grep: %v", err)

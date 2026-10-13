@@ -110,6 +110,33 @@ func TestRecordCheckpointCommitsOnMutatingTurn(t *testing.T) {
 	}
 }
 
+// With core.autocrlf=true (the default on Windows git installs), git warns
+// "LF will be replaced by CRLF" on stderr while it snapshots an LF file.
+// The checkpoint must read only stdout: a warning folded into the stash
+// hash used to make every turn look unchanged and drop its checkpoint.
+func TestCheckpointUnderAutocrlfWarnings(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	gitCmd(t, dir, "config", "core.autocrlf", "true")
+	mustWrite(t, dir, "a.txt", "v1\n")
+	gitCmd(t, dir, "add", "a.txt")
+	gitCmd(t, dir, "commit", "-q", "-m", "base")
+
+	cs := testCheckpointSession(t, dir)
+
+	runTurn(cs, 1, func() { mustWrite(t, dir, "a.txt", "v2\n") })
+	if cs.checkpoints == nil || cs.checkpoints.len() != 1 {
+		t.Fatalf("mutating turn under autocrlf: want 1 checkpoint, have %v", cs.checkpoints)
+	}
+
+	// The tree is now dirty with an LF file, so every snapshot warns; a
+	// read-only turn must still record nothing.
+	runTurn(cs, 2, nil)
+	if got := cs.checkpoints.len(); got != 1 {
+		t.Errorf("read-only turn under autocrlf changed the stack to %d entries, want 1", got)
+	}
+}
+
 func TestRecordCheckpointReadonlyTurnRecordsNothing(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)

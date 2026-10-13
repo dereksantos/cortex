@@ -5,8 +5,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
+
+// isRooted reports whether a tool's path argument names a location from a
+// filesystem root rather than from the workspace. On Unix that is exactly
+// filepath.IsAbs. On Windows it also covers what IsAbs leaves out there: a
+// path starting with "/" or "\" (rooted on the current drive) and one with
+// a drive letter ("C:x"). Models write Unix-style paths, so "/etc/passwd"
+// must read as absolute there too, not as a file under the workspace.
+func isRooted(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) || filepath.VolumeName(p) != ""
+}
 
 // confine.go holds the study subagent's two read-path guards, applied in the
 // study dispatcher (cmd/cortex) before a tool executes — once, for every
@@ -30,7 +47,7 @@ func ConfinePath(call ToolCall, root string) (ToolCall, error) {
 	if err != nil || strings.TrimSpace(path) == "" {
 		return call, nil // no path to confine (e.g. grep with the default ".")
 	}
-	if filepath.IsAbs(path) {
+	if isRooted(path) {
 		return call, fmt.Errorf("path %q must be relative to the workspace, not absolute", path)
 	}
 	if root == "" {

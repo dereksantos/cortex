@@ -500,7 +500,7 @@ func TestLearnUser_Live(t *testing.T) {
 		t.Skip("set CORTEX_LIVE_FLEET=1 to run the live learn --user cross-project promotion eval")
 	}
 
-	bin := filepath.Join(t.TempDir(), "cortex")
+	bin := filepath.Join(t.TempDir(), exeName("cortex"))
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build cortex: %v\n%s", err, out)
 	}

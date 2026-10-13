@@ -29,7 +29,7 @@ func TestGetSessionEndpointReturnsTranscriptViewModel(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects/blog/sessions/20260101-000000")
@@ -62,7 +62,7 @@ func TestGetSessionEndpointReturnsTranscriptViewModel(t *testing.T) {
 
 func TestGetSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects/doesnotexist/sessions/whatever")
@@ -77,7 +77,7 @@ func TestGetSessionEndpointUnknownSessionIDReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/projects/blog/sessions/does-not-exist")
@@ -92,7 +92,7 @@ func TestGetSessionEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/projects/blog/sessions/whatever", nil)

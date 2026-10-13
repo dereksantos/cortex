@@ -25,7 +25,7 @@ func TestListLoopsEndpointReturnsSpecsAndRunHistory(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/loops")
@@ -72,7 +72,7 @@ func TestListLoopsEndpointRowsCarryD11SelfPacingFields(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/loops")
@@ -98,7 +98,7 @@ func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/loops")
@@ -117,7 +117,7 @@ func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 
 func TestListLoopsEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/loops", nil)
@@ -152,7 +152,7 @@ func doPost(t *testing.T, url, body string) *http.Response {
 func TestCreateLoopEndpointCreatesLoop(t *testing.T) {
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
 	resp := doPost(t, ts.URL+"/api/loops", `{"name":"nightly","project":"blog","prompt":"sweep TODOs","interval_minutes":60,"max_turns":25,"enabled":true}`)
@@ -186,7 +186,7 @@ func TestCreateLoopEndpointCreatesLoop(t *testing.T) {
 func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
 	resp := doPost(t, ts.URL+"/api/loops", `{"name":"toohot","project":"blog","prompt":"go","interval_minutes":3}`)
@@ -209,7 +209,7 @@ func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 
 func TestCreateLoopEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/loops", strings.NewReader(`{"name":"x"}`))
@@ -243,7 +243,7 @@ func TestSetLoopEnabledEndpointTogglesFlag(t *testing.T) {
 			}
 
 			reg := &fakeRegistry{}
-			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
+			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", store, newRunningSet()))
 			defer ts.Close()
 
 			resp := doPost(t, ts.URL+"/api/loops/nightly"+tt.path, "")
@@ -289,7 +289,7 @@ func TestSetLoopEnabledEndpointUnknownNameReturns404(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &fakeRegistry{}
-			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 			defer ts.Close()
 
 			resp := doPost(t, ts.URL+"/api/loops/ghost"+tt.path, "")
@@ -326,7 +326,7 @@ func TestRunLoopEndpointFiresLoopAndReturnsRunHistory(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, noopTurnTestSessionFactory(t))
+	mgr := newTestSessionManager(t, reg, noopTurnTestSessionFactory(t))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", store, newRunningSet()))
 	defer ts.Close()
 
@@ -386,7 +386,7 @@ func TestRunLoopEndpointOverlapReturns409(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	release := make(chan struct{})
 	started := make(chan struct{})
-	mgr := NewSessionManager(reg, blockingTurnTestSessionFactoryStarted(t, started, release))
+	mgr := newTestSessionManager(t, reg, blockingTurnTestSessionFactoryStarted(t, started, release))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", store, newRunningSet()))
 	defer ts.Close()
 
@@ -441,7 +441,7 @@ func TestRunLoopEndpointOverlapReturns409(t *testing.T) {
 func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPost(t, ts.URL+"/api/loops/ghost/run-now", "")
@@ -457,7 +457,7 @@ func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
 
 func TestRunLoopEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/loops/nightly/run-now", strings.NewReader(""))
@@ -478,7 +478,7 @@ func TestSetLoopEnabledEndpointRejectsForeignHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &fakeRegistry{}
-			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 			defer ts.Close()
 
 			resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/loops/nightly"+tt.path, strings.NewReader(""))

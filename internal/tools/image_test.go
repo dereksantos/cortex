@@ -73,7 +73,7 @@ func readImageCall(t *testing.T, path string, start, end int) ToolCall {
 	_ = end
 	return ToolCall{ID: "c1", Type: "function", Function: FunctionCall{
 		Name:      FunctionReadFile,
-		Arguments: `{"path":"` + path + `"}`,
+		Arguments: `{"path":` + quoteJSON(path) + `}`,
 	}}
 }
 
@@ -226,7 +226,7 @@ func TestReadFileImageRangedRefused(t *testing.T) {
 	p := writeImage(t, dir, "shot.png", pngBytes(256))
 	tc := ToolCall{ID: "c1", Type: "function", Function: FunctionCall{
 		Name:      FunctionReadFile,
-		Arguments: `{"path":"` + p + `","start":1,"end":5}`,
+		Arguments: `{"path":` + quoteJSON(p) + `,"start":1,"end":5}`,
 	}}
 	deps := &textOnlyDeps{accept: true}
 	out, err := readFile(tc, deps)

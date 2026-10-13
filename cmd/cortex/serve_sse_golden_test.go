@@ -65,7 +65,7 @@ func TestTurnStreamEndpointGoldenFramesForMultiStepTurn(t *testing.T) {
 	quickRetries(t)
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, twoStepStreamTestSessionFactory(t))
+	mgr := newTestSessionManager(t, reg, twoStepStreamTestSessionFactory(t))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 

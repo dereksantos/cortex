@@ -23,7 +23,7 @@ func TestVersionString(t *testing.T) {
 }
 
 func TestVersionFlag(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "cortex")
+	bin := filepath.Join(t.TempDir(), exeName("cortex"))
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build cortex: %v\n%s", err, out)
 	}

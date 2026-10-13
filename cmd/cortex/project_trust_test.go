@@ -69,7 +69,7 @@ func TestWorkspaceTrustedMatching(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfgPath, []byte(`{"project": {"trusted": ["`+root+`"]}}`), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"project": {"trusted": [`+jsonQuote(root)+`]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -108,7 +108,7 @@ func TestWorkspaceTrustedFromMergedConfigIsUserLevelOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projRoot, ".cortex"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projJSON := `{"project": {"trusted": ["` + projRoot + `"]}}`
+	projJSON := `{"project": {"trusted": [` + jsonQuote(projRoot) + `]}}`
 	projPath := filepath.Join(projRoot, ".cortex", "config.json")
 	if err := os.WriteFile(projPath, []byte(projJSON), 0o644); err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestWorkspaceTrustedFromMergedConfigIsUserLevelOnly(t *testing.T) {
 	userHome := t.TempDir()
 	t.Setenv("CORTEX_HOME", userHome)
 	if err := os.WriteFile(filepath.Join(userHome, "config.json"),
-		[]byte(`{"project": {"trusted": ["`+projRoot+`"]}}`), 0o644); err != nil {
+		[]byte(`{"project": {"trusted": [`+jsonQuote(projRoot)+`]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	merged := loadMergedConfig(filepath.Join(userHome, "config.json"), projPath)
@@ -169,7 +169,7 @@ func TestWorkspaceTrustedFromMergedConfigIsUserLevelOnly(t *testing.T) {
 // names its own directory exactly.
 func TestWorkspaceTrustedEndToEndFromConfigs(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("CORTEX_HOME", home)
 
 	projRoot := t.TempDir() // the repository under test
@@ -179,12 +179,12 @@ func TestWorkspaceTrustedEndToEndFromConfigs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projRoot, ".cortex"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projJSON := `{"project": {"trusted": ["` + projRoot + `"]}}`
+	projJSON := `{"project": {"trusted": [` + jsonQuote(projRoot) + `]}}`
 	if err := os.WriteFile(filepath.Join(projRoot, ".cortex", "config.json"), []byte(projJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// The USER config trusts the OTHER root (must be honored).
-	userCfg := `{"project": {"trusted": ["` + userRoot + `"]}}`
+	userCfg := `{"project": {"trusted": [` + jsonQuote(userRoot) + `]}}`
 	userCfgPath := filepath.Join(home, "config.json")
 	if err := os.WriteFile(userCfgPath, []byte(userCfg), 0o644); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,7 @@ func TestWorkspaceTrustedEndToEndFromConfigs(t *testing.T) {
 // top-level keys — a trust edit must never clobber the user config.
 func TestTrustStoreRoundTrip(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("CORTEX_HOME", home)
 
 	cfgPath := filepath.Join(home, "config.json")

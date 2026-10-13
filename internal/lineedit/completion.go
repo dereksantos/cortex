@@ -391,14 +391,17 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 	}
 	// The path being typed is the word minus the "@" marker. A mention word
 	// with whitespace after "@" is prose ("email me at a@b"), not a mention.
-	rel := word[1:]
+	// A mention is written with "/" on every platform; a Windows user's "\"
+	// is read the same way. Filesystem calls below convert with filepath.
+	rel := filepath.ToSlash(word[1:])
 	if strings.ContainsAny(rel, " \t") {
 		return nil
 	}
 	root := p.RootAbs()
 	// An absolute or `..`-escaping mention is REFUSED outright — this is the
-	// confinement the acceptance test checks.
-	if filepath.IsAbs(rel) || containsDotDot(rel) {
+	// confinement the acceptance test checks. A leading "/" counts as
+	// absolute everywhere, though Windows would read it as drive-relative.
+	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "/") || containsDotDot(rel) {
 		return nil
 	}
 	// If the mention names an existing directory, list its children.
@@ -424,8 +427,8 @@ func (p PathCompleter) Candidates(line string, cursor int) []string {
 	// root the prefix is bare "@" (no trailing "/"), or a root-level file's
 	// candidate would come out as "@/main.go".
 	pre := strings.TrimSuffix(rel, tail)
-	if pre != "" && !strings.HasSuffix(pre, string(filepath.Separator)) {
-		pre += string(filepath.Separator)
+	if pre != "" && !strings.HasSuffix(pre, "/") {
+		pre += "/"
 	}
 	relAt := "@" + pre
 	return p.completeUnder(dir, tail, relAt)
@@ -451,7 +454,7 @@ func (p PathCompleter) nearestDir(abs string) (dir, tail string) {
 		if tail == "" {
 			tail = filepath.Base(abs)
 		} else {
-			tail = filepath.Base(abs) + string(filepath.Separator) + tail
+			tail = filepath.Base(abs) + "/" + tail
 		}
 		abs = parent
 	}
@@ -460,7 +463,7 @@ func (p PathCompleter) nearestDir(abs string) (dir, tail string) {
 // containsDotDot reports whether rel contains a `..` path segment. A bare
 // filename like "a..b" is fine; only an actual segment is an escape attempt.
 func containsDotDot(rel string) bool {
-	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+	for _, seg := range strings.Split(rel, "/") {
 		if seg == ".." {
 			return true
 		}
@@ -498,12 +501,12 @@ func (p PathCompleter) listDir(dir, rel string) []string {
 			continue
 		}
 		sep := ""
-		if rel != "" && !strings.HasSuffix(rel, string(filepath.Separator)) {
-			sep = string(filepath.Separator) // the typed dir has no trailing "/" yet
+		if rel != "" && !strings.HasSuffix(rel, "/") {
+			sep = "/" // the typed dir has no trailing "/" yet
 		}
 		cand := "@" + rel + sep + e.Name()
 		if e.IsDir() {
-			cand += string(filepath.Separator)
+			cand += "/"
 		}
 		if !p.confined(cand) {
 			continue
@@ -552,7 +555,7 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 		candRel := relAt + e.Name()
 		if rest == "" {
 			if e.IsDir() {
-				candRel += string(filepath.Separator)
+				candRel += "/"
 			}
 			if !p.confined(candRel) {
 				continue
@@ -583,7 +586,7 @@ func (p PathCompleter) completeUnder(dir, tail, relAt string) []string {
 			if gitignored(p.RootAbs(), full) {
 				continue
 			}
-			out = append(out, p.completeUnder(full, rest, relAt+e.Name()+string(filepath.Separator))...)
+			out = append(out, p.completeUnder(full, rest, relAt+e.Name()+"/")...)
 			if p.MaxCandidates > 0 && len(out) >= p.MaxCandidates {
 				return out[:p.MaxCandidates]
 			}

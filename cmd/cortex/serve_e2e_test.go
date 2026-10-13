@@ -49,7 +49,7 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	gitc("config", "user.email", "t@t")
 	gitc("config", "user.name", "t")
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
+	mgr := newTestSessionManager(t, reg, streamTurnTestSessionFactory(t))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 

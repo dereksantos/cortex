@@ -142,7 +142,7 @@ func pathNotFoundError(display, fsPath, root string) error {
 	// or out-of-workspace path is exactly where the model is guessing a foreign
 	// root, so tell it where the workspace actually is. A relative path that
 	// simply isn't there yet doesn't need the root repeated back.
-	if root != "" && (filepath.IsAbs(display) || !isUnderRoot(fsPath, root)) {
+	if root != "" && (isRooted(display) || !isUnderRoot(fsPath, root)) {
 		b.WriteString(" The workspace root is ")
 		b.WriteString(root)
 		b.WriteString("; all tool paths are relative to it.")

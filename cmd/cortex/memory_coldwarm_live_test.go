@@ -503,7 +503,7 @@ func TestMemoryColdVsWarm_Live(t *testing.T) {
 		t.Skip("set CORTEX_LIVE_FLEET=1 to run the live cold-vs-warm learning-loop eval")
 	}
 
-	bin := filepath.Join(t.TempDir(), "loop")
+	bin := filepath.Join(t.TempDir(), exeName("loop"))
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build loop: %v\n%s", err, out)
 	}

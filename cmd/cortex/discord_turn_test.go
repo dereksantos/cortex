@@ -46,7 +46,7 @@ func mustWorkspace(t *testing.T, root string) *Workspace {
 func TestDiscordRunTurnPostsProgressAndFinalReply(t *testing.T) {
 	backend := newTurnTestBackend(t)
 	reg := &fakeRegistry{}
-	mgr := NewSessionManager(reg, discordTurnSessionFactory(t, backend))
+	mgr := newTestSessionManager(t, reg, discordTurnSessionFactory(t, backend))
 	api := newFakeDiscordAPI()
 	bot := newDiscordBot(mgr, api, "", "")
 
@@ -84,7 +84,7 @@ func TestDiscordRunTurnPostsProgressAndFinalReply(t *testing.T) {
 func TestDiscordInterruptCancelsAnInFlightTurn(t *testing.T) {
 	backend := newSlowTurnTestBackend(t, 300*time.Millisecond)
 	reg := &fakeRegistry{}
-	mgr := NewSessionManager(reg, discordTurnSessionFactory(t, backend))
+	mgr := newTestSessionManager(t, reg, discordTurnSessionFactory(t, backend))
 	api := newFakeDiscordAPI()
 	bot := newDiscordBot(mgr, api, "", "")
 

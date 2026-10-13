@@ -31,8 +31,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // EnvHome overrides the root directory.
@@ -285,15 +286,15 @@ func AppendIndex(root string, e Entry) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("failed to create bench root: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(root, "index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(root, "index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o644) // O_RDWR so fslock can lock it on Windows
 	if err != nil {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	// The lock is released when the deferred Close runs.
+	if err := fslock.Lock(int(f.Fd())); err != nil {
 		return fmt.Errorf("failed to lock index: %w", err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("failed to append index: %w", err)
 	}

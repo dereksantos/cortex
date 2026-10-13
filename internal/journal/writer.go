@@ -105,7 +105,7 @@ func (w *Writer) recover() error {
 	w.written = info.Size()
 	w.entries = entries
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_RDWR, 0o644) // O_RDWR so fslock can lock it on Windows
 	if err != nil {
 		return fmt.Errorf("journal: open %s for append: %w", path, err)
 	}
@@ -127,7 +127,7 @@ func (w *Writer) openSegment(n int) error {
 		w.f = nil
 	}
 	path := segmentPath(w.opts.ClassDir, n)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o644) // O_RDWR so fslock can lock it on Windows
 	if err != nil {
 		return fmt.Errorf("journal: open %s: %w", path, err)
 	}

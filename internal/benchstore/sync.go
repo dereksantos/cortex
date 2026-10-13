@@ -17,8 +17,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // EnvR2Bucket names the R2 bucket that holds the off-machine copy; "off"
@@ -223,7 +224,9 @@ func SyncBestEffort(w io.Writer) {
 	}
 }
 
-// syncUnits lists the bundle units: runs/<bench>/<entry> and archive/<entry>.
+// syncUnits lists the bundle units: runs/<bench>/<entry> and archive/<entry>,
+// "/"-separated on every platform (they name upload keys and records;
+// filepath.Join still reads them as paths).
 func syncUnits(root string) ([]string, error) {
 	var units []string
 	benches, err := os.ReadDir(filepath.Join(root, "runs"))
@@ -239,7 +242,7 @@ func syncUnits(root string) ([]string, error) {
 			return nil, err
 		}
 		for _, e := range entries {
-			units = append(units, filepath.Join("runs", b.Name(), e.Name()))
+			units = append(units, "runs/"+b.Name()+"/"+e.Name())
 		}
 	}
 	arch, err := os.ReadDir(filepath.Join(root, "archive"))
@@ -247,7 +250,7 @@ func syncUnits(root string) ([]string, error) {
 		return nil, err
 	}
 	for _, e := range arch {
-		units = append(units, filepath.Join("archive", e.Name()))
+		units = append(units, "archive/"+e.Name())
 	}
 	sort.Strings(units)
 	return units, nil
@@ -494,12 +497,10 @@ func lockFile(path string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open lock %s: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fslock.Lock(int(f.Fd())); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("failed to lock %s: %w", path, err)
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+	// Closing the file releases the lock.
+	return func() { f.Close() }, nil
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,6 +177,9 @@ func gitOut2(t *testing.T, dir string, args ...string) (string, error) {
 // symlink, and a file whose content already matches the snapshot is NOT
 // rewritten and does NOT appear in the changed list.
 func TestRestoreHonoursModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs the exec bit and symlinks, which Windows checkouts don't have")
+	}
 	dir := initRepo(t)
 
 	// Committed base with an executable script and a symlink; a.txt is the

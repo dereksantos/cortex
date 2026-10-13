@@ -240,7 +240,9 @@ func TestSystemLegendDetailCoversEveryCandidateFile(t *testing.T) {
 			label := fileLabel(root, filepath.Join(root, rel))
 			wantLabel := filepath.Base(rel)
 			if strings.Contains(rel, string(os.PathSeparator)) {
-				wantLabel = rel // a file UNDER the root labels by its relative path
+				// A file UNDER the root labels by its relative path, written
+				// with "/" on every platform.
+				wantLabel = filepath.ToSlash(rel)
 			}
 			if label != wantLabel {
 				t.Fatalf("fileLabel(%q) = %q, want %q", rel, label, wantLabel)

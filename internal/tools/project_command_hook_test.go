@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +213,9 @@ func TestPostEditHookUntrustedRunsNothing(t *testing.T) {
 // a temp dir (repo-local binaries are legal on a trusted workspace), and
 // the hook must exec it and fold its observation in.
 func TestPostEditHookTrustedRunsArbitraryCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the formatter fixture is a shell script, which Windows cannot exec directly; the bash tool on Windows is #288 phase 3")
+	}
 	root := t.TempDir()
 	t.Chdir(root)
 	// A repo-local script that "formats" by appending a marker — any
@@ -280,6 +284,9 @@ func TestPostEditHookSkipsShellControlTemplate(t *testing.T) {
 // directory (the session root, CWD here), so the script must live OUTSIDE
 // the temp dir (a root-relative "./bin/…" would not resolve from CWD).
 func TestPostEditHookFileWithSpacesIsOneArgument(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the formatter fixture is a shell script, which Windows cannot exec directly; the bash tool on Windows is #288 phase 3")
+	}
 	root := t.TempDir()
 	t.Chdir(root)
 	script := filepath.Join(t.TempDir(), "my-fmt")

@@ -115,3 +115,22 @@ func TestOpenExclusive_CrossProcess(t *testing.T) {
 		t.Fatalf("cross-process open err = %v, want fslock.ErrBusy", err)
 	}
 }
+
+func TestLockableFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		flag, want int
+	}{
+		{"write-only append becomes read-write", os.O_WRONLY | os.O_APPEND | os.O_CREATE, os.O_RDWR | os.O_APPEND | os.O_CREATE},
+		{"write-only create-exclusive becomes read-write", os.O_WRONLY | os.O_CREATE | os.O_EXCL, os.O_RDWR | os.O_CREATE | os.O_EXCL},
+		{"read-write is unchanged", os.O_RDWR | os.O_APPEND, os.O_RDWR | os.O_APPEND},
+		{"read-only is unchanged", os.O_RDONLY, os.O_RDONLY},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := lockableFlag(tt.flag); got != tt.want {
+				t.Errorf("lockableFlag(%#x) = %#x, want %#x", tt.flag, got, tt.want)
+			}
+		})
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -427,12 +426,12 @@ func TestEntry_TSPreservedWhenProvided(t *testing.T) {
 
 func TestSegmentPath_ZeroPadded(t *testing.T) {
 	got := segmentPath("/tmp/x", 1)
-	want := "/tmp/x/0001.jsonl"
+	want := filepath.Join("/tmp/x", "0001.jsonl")
 	if got != want {
 		t.Errorf("segmentPath(1) = %q, want %q", got, want)
 	}
 	got = segmentPath("/tmp/x", 10000)
-	if !strings.HasSuffix(got, "/10000.jsonl") {
-		t.Errorf("segmentPath(10000) = %q, want suffix /10000.jsonl", got)
+	if want := filepath.Join("/tmp/x", "10000.jsonl"); got != want {
+		t.Errorf("segmentPath(10000) = %q, want %q", got, want)
 	}
 }

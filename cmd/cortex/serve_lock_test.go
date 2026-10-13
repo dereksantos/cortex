@@ -46,7 +46,7 @@ func TestCrossProcessSessionResumeGetsBusyError(t *testing.T) {
 		// boundary) tell the busy case apart from any other failure.
 		id := os.Getenv(crossProcessLockChildIDEnv)
 		reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-		mgr := NewSessionManager(reg, hermeticSessionFactory())
+		mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 		_, err := mgr.Resume("blog", id)
 		if err != nil && errors.Is(err, fslock.ErrBusy) {
 			fmt.Println("RESUME-BLOCKED")
@@ -58,7 +58,7 @@ func TestCrossProcessSessionResumeGetsBusyError(t *testing.T) {
 
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 
 	created, err := mgr.Create("blog")
 	if err != nil {

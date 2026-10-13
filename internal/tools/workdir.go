@@ -58,7 +58,7 @@ func workdirRootForErrors(deps ToolDeps) string {
 // the return value for filesystem access ONLY, keeping the original path in
 // anything the model or user reads.
 func resolveWorkdir(deps ToolDeps, path string) string {
-	if path == "" || filepath.IsAbs(path) {
+	if path == "" || isRooted(path) {
 		return path
 	}
 	wd := workdirOf(deps)

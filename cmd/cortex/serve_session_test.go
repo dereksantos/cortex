@@ -37,7 +37,7 @@ func hermeticSessionFactory() sessionFactory {
 func TestSessionManagerCreateStartsAndTracksNewSession(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 
 	ms, err := mgr.Create("blog")
 	if err != nil {
@@ -62,7 +62,7 @@ func TestSessionManagerCreateStartsAndTracksNewSession(t *testing.T) {
 
 func TestSessionManagerCreateUnknownProjectReturnsTypedError(t *testing.T) {
 	reg := &fakeRegistry{}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 
 	if _, err := mgr.Create("nope"); err == nil {
 		t.Fatal("Create(unregistered project) = nil error, want registry.ErrProjectNotFound")
@@ -74,7 +74,7 @@ func TestSessionManagerCreateUnknownProjectReturnsTypedError(t *testing.T) {
 func TestSessionManagerResumeOfLiveSessionReturnsSamePointerWithoutReopening(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 
 	created, err := mgr.Create("blog")
 	if err != nil {
@@ -99,7 +99,7 @@ func TestSessionManagerResumeRehydratesFromTranscriptAfterRestart(t *testing.T) 
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 
-	firstMgr := NewSessionManager(reg, hermeticSessionFactory())
+	firstMgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	created, err := firstMgr.Create("blog")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -107,7 +107,7 @@ func TestSessionManagerResumeRehydratesFromTranscriptAfterRestart(t *testing.T) 
 	wantMessages := len(created.cs.Request.Messages)
 	created.cs.transcript.Close() // simulate the process (and its transcript lock) going away
 
-	secondMgr := NewSessionManager(reg, hermeticSessionFactory())
+	secondMgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	resumed, err := secondMgr.Resume("blog", created.ID())
 	if err != nil {
 		t.Fatalf("Resume after restart: %v", err)
@@ -123,7 +123,7 @@ func TestSessionManagerResumeRehydratesFromTranscriptAfterRestart(t *testing.T) 
 func TestSessionManagerResumeUnknownIDReturnsError(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 
 	if _, err := mgr.Resume("blog", "does-not-exist"); err == nil {
 		t.Fatal("Resume(unknown id) = nil error, want an error")
@@ -138,7 +138,7 @@ func TestSessionManagerResumeUnknownIDReturnsError(t *testing.T) {
 func TestSessionManagerEvictsIdleSessionAndResumeRehydrates(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	clock := &fakeClock{now: time.Now()}
 	mgr.SetClock(clock.Now)
 	mgr.SetIdleTimeout(time.Second)
@@ -174,11 +174,11 @@ func TestSessionManagerEvictsIdleSessionAndResumeRehydrates(t *testing.T) {
 // TestSessionManagerZeroIdleTimeoutNeverEvicts pins the default (unset)
 // behavior every pre-M4.7 test already relies on: idleTimeout's zero value
 // disables eviction entirely, so SetIdleTimeout/SetClock are opt-in and
-// every existing NewSessionManager(reg, factory) call site is unaffected.
+// every existing newTestSessionManager(t, reg, factory) call site is unaffected.
 func TestSessionManagerZeroIdleTimeoutNeverEvicts(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	clock := &fakeClock{now: time.Now()}
 	mgr.SetClock(clock.Now)
 
@@ -201,7 +201,7 @@ func TestSessionManagerZeroIdleTimeoutNeverEvicts(t *testing.T) {
 func TestSessionManagerTouchExtendsIdleWindow(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	clock := &fakeClock{now: time.Now()}
 	mgr.SetClock(clock.Now)
 	mgr.SetIdleTimeout(2 * time.Second)
@@ -223,7 +223,7 @@ func TestSessionManagerTouchExtendsIdleWindow(t *testing.T) {
 func TestCreateSessionEndpointCreatesNewSession(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -257,7 +257,7 @@ func TestCreateSessionEndpointCreatesNewSession(t *testing.T) {
 func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -293,7 +293,7 @@ func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 
 func TestCreateSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -314,7 +314,7 @@ func TestCreateSessionEndpointUnknownProjectReturns404(t *testing.T) {
 func TestCreateSessionEndpointRejectsForeignHost(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 

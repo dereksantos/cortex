@@ -102,7 +102,7 @@ func TestTurnStreamEndpointStreamsProgressAndResult(t *testing.T) {
 	quickRetries(t)
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
+	mgr := newTestSessionManager(t, reg, streamTurnTestSessionFactory(t))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -178,7 +178,7 @@ func TestTurnStreamEndpointStreamsProgressAndResult(t *testing.T) {
 
 func TestTurnStreamEndpointUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: t.TempDir()}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -199,7 +199,7 @@ func TestTurnStreamEndpointUnknownSessionReturns404(t *testing.T) {
 func TestTurnStreamEndpointRejectsForeignHost(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
+	mgr := newTestSessionManager(t, reg, streamTurnTestSessionFactory(t))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
