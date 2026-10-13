@@ -398,8 +398,8 @@ For the full design, read
 - **Find code:** `outline`, `grep`, `read_file`, and the `study` subagent
   find the necessary code. They do not put the full repository into
   context.
-- **Change code:** `write_file`, `edit_file`, and `remove_path` change
-  files. `remove_path` operates only in the workspace.
+- **Change code:** `write_file`, `edit_file` (or `apply_patch`), and
+  `remove_path` change files. `remove_path` operates only in the workspace.
 - **Make sure that changes work:** `bash` runs builds and tests. A risk
   gate examines each command first.
 - **Search the web:** `web_search` and `fetch_url` give limited access to
@@ -434,7 +434,8 @@ for the design. To disable the tool, set `tools.enable_agent` to false.
 |---|---|
 | `read_file` | Reads a file or a range of lines. For a large file, it tells the agent to use Study, or it gives a Go declaration skeleton. It attaches a full image file (png, jpeg, gif, webp) for vision models. It refuses an image for a text-only model, for a file that is too large, or in a subagent. |
 | `write_file` | Creates or replaces a file. |
-| `edit_file` | Replaces exact text in a file. It also accepts whitespace differences and multiple edits at a time. If it fails, it gives the line numbers of the matches or the nearest text. If it succeeds, it shows the changed lines. |
+| `edit_file` | Replaces exact text in a file. It also accepts whitespace differences and multiple edits at a time. If it fails, it gives the line numbers of the matches or the nearest text. If it succeeds, it shows the changed lines. A missing `new_string` is an error; deleting text takes an explicit empty `new_string`. |
+| `apply_patch` | Edits files with a patch (`*** Begin Patch` … `*** End Patch`: add, update, move, or delete files). It replaces `edit_file` for model families trained on this format, such as gpt-oss, GPT-5, and Codex models (`tools.edit_format`). The model gets one of the two tools, never both. Each change is matched the same way as `edit_file`. |
 | `study` | Reads a large file or directory and gives a summary for a goal. |
 | `agent` | Gives one task to a subagent that can read, edit, and run `bash`. |
 | `outline` | Shows the structure of a project or a file without its full contents. |

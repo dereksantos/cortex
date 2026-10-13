@@ -170,7 +170,9 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 		fmt.Println(tools.TimestampPrefix() + tools.IndentPrefix() +
 			style.Paint(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), style.Action))
 	}
-	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
+	// filterEnabledTools: the Agent profile declares both edit tools and the
+	// session's tools.edit_format leaves exactly one, as for the coder.
+	ts := Toolset{Tools: filterEnabledTools(sa.Tools, cs.IsToolEnabled), Dispatch: cs.dispatcherFor(sa)}
 	// Issue #149 receipt: same hook as the coder turn (turn.go) — the subagent's
 	// own request is the model that needed the fallback; the role is the
 	// subagent's ("study").
@@ -255,12 +257,12 @@ func (cs *CortexSession) dispatcherFor(sa tools.Subagent) AgentDispatcher {
 		// Issue #129 piece 3: the subagent's own writes are the TURN's edits —
 		// the turn-end lint pass must see them (pre-piece-3, the per-edit
 		// hook ran for these very edits, so a subagent edit going unlinted
-		// would be a regression). The Agent profile is the only one with
-		// write_file/edit_file; the path is already ConfinePath'd, so it is
+		// would be a regression). The Agent profile is the only one with the
+		// file-writing tools; the paths are already ConfinePath'd, so they are
 		// workdir-resolvable (lintTouchedPath drops anything outside the
 		// workspace, and RunTurnEndLint skips files that no longer exist).
-		if call.Function.Name == tools.FunctionWriteFile || call.Function.Name == tools.FunctionEditFile {
-			if p, err := call.StringArg("path"); err == nil {
+		if tools.WritesFiles(call.Function.Name) {
+			for _, p := range tools.MutatedPaths(call) {
 				cs.lintTouchedPath(p)
 			}
 		}

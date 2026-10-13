@@ -17,11 +17,13 @@ end to end — including `bash` for running the tests/build that verify its
 own edits, per CLAUDE.md's testing discipline ("tests are the spec"). This
 mirrors the existing `Study` shape (own system prompt, own allowlist,
 mandatory `Bounds`) rather than granting blanket tool access: it is
-`outline`, `grep`, `read_file`, `write_file`, `edit_file`, and `bash` — the
-coder's file-and-shell surface minus everything §3 excludes below.
+`outline`, `grep`, `read_file`, `write_file`, `edit_file` (or `apply_patch`,
+per the session's `tools.edit_format`), and `bash` — the coder's
+file-and-shell surface minus everything §3 excludes below.
 
 DECISION: the `agent` profile's toolset is `outline`, `grep`, `read_file`,
-`write_file`, `edit_file`, `bash` — read/search plus write/edit and bash,
+`write_file`, `edit_file` or `apply_patch` (one, as for the coder), `bash` —
+read/search plus write/edit and bash,
 scoped by depth cap (§3 slice 2) rather than by withholding `bash` outright.
 
 ## 2. `shellrisk` Risky inside a subagent

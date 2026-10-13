@@ -26,12 +26,13 @@ const verbColumn = 8
 // displayVerbs shortens the model-facing tool names where the short form reads
 // as the same thing. Names not listed show as-is.
 var displayVerbs = map[string]string{
-	FunctionReadFile:  "read",
-	FunctionWriteFile: "write",
-	FunctionEditFile:  "edit",
-	FunctionRemove:    "remove",
-	FunctionFetchURL:  "fetch",
-	FunctionWebSearch: "search",
+	FunctionReadFile:   "read",
+	FunctionWriteFile:  "write",
+	FunctionEditFile:   "edit",
+	FunctionApplyPatch: "patch",
+	FunctionRemove:     "remove",
+	FunctionFetchURL:   "fetch",
+	FunctionWebSearch:  "search",
 }
 
 // splitAction splits an action string like `grep("x", dir)` or

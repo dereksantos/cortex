@@ -1618,6 +1618,7 @@ func TestTestwatchTouchFileNames(t *testing.T) {
 	}{
 		{tools.FunctionWriteFile, true},
 		{tools.FunctionEditFile, true},
+		{tools.FunctionApplyPatch, true},
 		{tools.FunctionRemove, true},
 		{tools.FunctionReadFile, false},
 		{tools.FunctionBash, false},
@@ -1630,11 +1631,16 @@ func TestTestwatchTouchFileNames(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "workspace_test.go"), []byte("y\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			call := ToolCall{ID: "c1", Function: FunctionCall{Name: tc.tool, Arguments: `{"path":"workspace_test.go"}`}}
-			p := testwatchTouchedPath(call)
-			cs.touchFile(p)
+			args := `{"path":"workspace_test.go"}`
+			if tc.tool == tools.FunctionApplyPatch {
+				args = `{"input":"*** Begin Patch\n*** Update File: workspace_test.go\n@@\n-y\n+z\n*** End Patch"}`
+			}
+			call := ToolCall{ID: "c1", Function: FunctionCall{Name: tc.tool, Arguments: args}}
+			for _, p := range testwatchTouchedPaths(call) {
+				cs.touchFile(p)
+			}
 			if got := len(cs.testwatch) > 0; got != tc.want {
-				t.Errorf("touchFile(testwatchTouchedPath(%s)) armed snapshot = %v, want %v", tc.tool, got, tc.want)
+				t.Errorf("touchFile(testwatchTouchedPaths(%s)) armed snapshot = %v, want %v", tc.tool, got, tc.want)
 			}
 		})
 	}

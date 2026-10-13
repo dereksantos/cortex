@@ -851,6 +851,14 @@ type ToolConfig struct {
 	// at session construction (Config.postEditHookMode).
 	PostEditHook string `json:"post_edit_hook"`
 
+	// EditFormat picks the coder's ONE file-edit tool (the Agent subagent
+	// follows it): "replace" = edit_file (find/replace), "patch" =
+	// apply_patch (the patch-envelope format some model families are
+	// post-trained on), "auto" or absent = patch for those families
+	// (editFormatPatchFamilies), replace for everything else. Resolved once
+	// per session from the code model (Config.editFormat).
+	EditFormat string `json:"edit_format"`
+
 	// CurationBudgetTokens / MaxToolOutput / OutlineDefaultBudget override
 	// internal/tools' same-named constants (0 = today's value).
 	CurationBudgetTokens int `json:"curation_budget_tokens"`
@@ -1671,6 +1679,11 @@ func validateConfig(cfg *Config) error {
 	if err := validateContextConfig(cfg.Context); err != nil {
 		return err
 	}
+	switch cfg.Tools.EditFormat {
+	case "", editFormatAuto, editFormatReplace, editFormatPatch:
+	default:
+		return fmt.Errorf("tools.edit_format must be %q, %q or %q, got %q", editFormatAuto, editFormatReplace, editFormatPatch, cfg.Tools.EditFormat)
+	}
 	for role, m := range cfg.Models {
 		if err := nonNegative("models."+role+".request_timeout_sec", m.RequestTimeoutSec); err != nil {
 			return err
@@ -2167,6 +2180,9 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	if over.EnableEffortEscalation != nil {
 		base.EnableEffortEscalation = over.EnableEffortEscalation
 	}
+	if over.EditFormat != "" {
+		base.EditFormat = over.EditFormat
+	}
 	base.CurationBudgetTokens = mergeIntField(base.CurationBudgetTokens, over.CurationBudgetTokens)
 	base.MaxToolOutput = mergeIntField(base.MaxToolOutput, over.MaxToolOutput)
 	base.OutlineDefaultBudget = mergeIntField(base.OutlineDefaultBudget, over.OutlineDefaultBudget)
@@ -2224,6 +2240,37 @@ func (c *Config) postEditHookMode() tools.HookMode {
 		return tools.HookModeAll
 	}
 	return tools.ParseHookMode(c.Tools.PostEditHook)
+}
+
+const (
+	editFormatAuto    = "auto"
+	editFormatReplace = "replace"
+	editFormatPatch   = "patch"
+)
+
+// editFormatPatchFamilies are the model-id fragments of families post-trained
+// on the patch envelope (the OpenAI Codex harness's apply_patch): gpt-oss,
+// GPT-4.1, GPT-5 and Codex models. Matched case-insensitively anywhere in the
+// id, so a provider prefix (openai/…) or a local alias (gpt-oss-20b) matches.
+var editFormatPatchFamilies = []string{"gpt-oss", "gpt-4.1", "gpt-5", "codex"}
+
+// editFormat resolves tools.edit_format for a session whose code model is
+// model: an explicit "replace"/"patch" wins; "auto" or absent picks patch for
+// editFormatPatchFamilies and replace otherwise.
+func (c *Config) editFormat(model string) string {
+	if c != nil {
+		switch c.Tools.EditFormat {
+		case editFormatReplace, editFormatPatch:
+			return c.Tools.EditFormat
+		}
+	}
+	id := strings.ToLower(model)
+	for _, f := range editFormatPatchFamilies {
+		if strings.Contains(id, f) {
+			return editFormatPatch
+		}
+	}
+	return editFormatReplace
 }
 
 func (c *Config) instructionBytesCap() int {

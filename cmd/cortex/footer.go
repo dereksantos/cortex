@@ -39,11 +39,8 @@ func summarizeTurn(msgs []Message, elapsed time.Duration, cost float64) turnSumm
 			if failed[tc.ID] {
 				continue
 			}
-			switch tc.Function.Name {
-			case FunctionWriteFile, FunctionEditFile, FunctionRemove:
-				if p, err := tc.StringArg("path"); err == nil && p != "" {
-					changed[p] = true
-				}
+			for _, p := range tools.MutatedPaths(tc) {
+				changed[p] = true
 			}
 		}
 	}

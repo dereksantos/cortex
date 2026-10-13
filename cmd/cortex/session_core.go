@@ -136,7 +136,12 @@ type CortexSession struct {
 	// current mode (tools.PostEditHookState; a REPL /hook command lowers
 	// it in place via SetMode — it never raises above the process
 	// ceiling installed below from the resolved config).
-	hookState     *tools.PostEditHookState
+	hookState *tools.PostEditHookState
+	// editFormat is the session's resolved tools.edit_format ("replace" |
+	// "patch"), fixed at construction from the code model: it decides which
+	// ONE of edit_file / apply_patch the model is offered (IsToolEnabled).
+	// A later /model switch keeps it — the declared tool list is built once.
+	editFormat    string
 	deleteRoot    string
 	allowDelete   bool
 	quiet         bool
@@ -692,6 +697,7 @@ func NewCortexSession() *CortexSession {
 	// dispatch's own gate (tools.go's Execute), as the single source of
 	// truth rather than a second parallel disabled-tool list; dispatch keeps
 	// its own check as defense-in-depth against a hallucinated tool name.
+	cs.editFormat = cs.Config.editFormat(cs.Request.Model)
 	cs.Request.Tools = filterEnabledTools(cs.Request.Tools, cs.IsToolEnabled)
 	return cs
 }
@@ -725,6 +731,15 @@ func (cs *CortexSession) hookModeName() string {
 
 // IsToolEnabled reports whether a context window tool is enabled via config.
 func (cs *CortexSession) IsToolEnabled(toolName string) bool {
+	// Exactly one file-edit tool is live per session (tools.edit_format):
+	// edit_file for "replace", apply_patch for "patch". An unresolved format
+	// (a session built without NewCortexSession) keeps edit_file.
+	switch toolName {
+	case tools.FunctionEditFile:
+		return cs.editFormat != editFormatPatch
+	case tools.FunctionApplyPatch:
+		return cs.editFormat == editFormatPatch
+	}
 	if cs.Config == nil {
 		return true // default: all tools enabled
 	}
