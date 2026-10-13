@@ -19,7 +19,7 @@ func isolateBootstrap(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("CORTEX_HOME", home)
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("CORTEX_BACKEND", "")
 	t.Chdir(t.TempDir())
 	return filepath.Join(home, "config.json")

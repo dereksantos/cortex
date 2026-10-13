@@ -90,7 +90,7 @@ func lintNoteShapeSession(t *testing.T, script []*AgentResponse) *CortexSession 
 	home := t.TempDir()
 	t.Setenv("CORTEX_HOME", home)
 	if err := os.WriteFile(filepath.Join(home, "config.json"),
-		[]byte(`{"project": {"trusted": ["`+cs.Workdir()+`"]}}`), 0o644); err != nil {
+		[]byte(`{"project": {"trusted": [`+jsonQuote(cs.Workdir())+`]}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cs.Config = &Config{}

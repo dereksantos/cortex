@@ -104,7 +104,7 @@ func corpusTrustUserConfig(t *testing.T, root string, trusted bool) {
 	t.Setenv("CORTEX_HOME", home)
 	list := "[]"
 	if trusted {
-		list = `["` + root + `"]`
+		list = `[` + jsonQuote(root) + `]`
 	}
 	if err := os.WriteFile(filepath.Join(home, "config.json"),
 		[]byte(`{"project": {"trusted": `+list+`}}`), 0o644); err != nil {
