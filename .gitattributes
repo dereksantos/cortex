@@ -1,0 +1,4 @@
+# Check out text files with LF on every platform. Golden files and fixtures
+# are compared byte for byte, and a Windows checkout would otherwise turn
+# them into CRLF (issue #288).
+* text=auto eol=lf

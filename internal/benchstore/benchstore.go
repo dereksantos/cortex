@@ -31,8 +31,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // EnvHome overrides the root directory.
@@ -290,10 +291,10 @@ func AppendIndex(root string, e Entry) error {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	// The lock is released when the deferred Close runs.
+	if err := fslock.Lock(int(f.Fd())); err != nil {
 		return fmt.Errorf("failed to lock index: %w", err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("failed to append index: %w", err)
 	}

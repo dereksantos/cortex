@@ -17,8 +17,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // EnvR2Bucket names the R2 bucket that holds the off-machine copy; "off"
@@ -494,12 +495,10 @@ func lockFile(path string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open lock %s: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fslock.Lock(int(f.Fd())); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("failed to lock %s: %w", path, err)
 	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+	// Closing the file releases the lock.
+	return func() { f.Close() }, nil
 }
