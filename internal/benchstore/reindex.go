@@ -3,6 +3,7 @@ package benchstore
 import (
 	"encoding/json"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,6 +73,15 @@ func Discover(root string) ([]Entry, error) {
 			Model:     meta.Model,
 			Labels:    map[string]string{"harness": harness},
 		}
+		// A run copied in from another host carries the labels it was begun
+		// with in its own run.v1.json; this host's index has never seen them.
+		var v1 struct {
+			Labels map[string]string `json:"labels"`
+		}
+		if b, err := os.ReadFile(filepath.Join(dir, RunFileV1)); err == nil &&
+			json.Unmarshal(b, &v1) == nil && len(v1.Labels) > 0 {
+			e.Labels = v1.Labels
+		}
 		if s, err := Summarize(dir); err == nil && s.N > 0 {
 			e.Summary = &s
 		}
@@ -109,9 +119,16 @@ func Reindex(root string) ([]Entry, error) {
 	for _, e := range found {
 		prev, seen := latest[e.Bench+"\x00"+e.RunID]
 		if seen {
-			if len(prev.Labels) > 0 {
-				e.Labels = prev.Labels // labels given at Begin outrank the discovered default
+			// Labels given at Begin outrank the discovered ones, key by key;
+			// a key only the run's own run.v1.json carries is kept.
+			merged := map[string]string{}
+			for k, v := range e.Labels {
+				merged[k] = v
 			}
+			for k, v := range prev.Labels {
+				merged[k] = v
+			}
+			e.Labels = merged
 			carryForward(&e, prev)
 		}
 		if err := Normalize(e.Bench, e.RunID, e.Dir, e.Labels); err != nil {
@@ -120,7 +137,7 @@ func Reindex(root string) ([]Entry, error) {
 		if s, err := Summarize(e.Dir); err == nil && s.N > 0 {
 			e.Summary = &s
 		}
-		if seen && prev.Event != "start" && sameSummary(prev.Summary, e.Summary) {
+		if seen && prev.Event != "start" && sameSummary(prev.Summary, e.Summary) && maps.Equal(prev.Labels, e.Labels) {
 			continue
 		}
 		if err := AppendIndex(root, e); err != nil {

@@ -303,3 +303,32 @@ func TestReindexCarriesFieldsForward(t *testing.T) {
 		t.Errorf("latest = %+v, want the start entry's fields carried forward", got)
 	}
 }
+
+// A run copied in from another host: its labels live in its own run.v1.json,
+// and this host's index (if it saw the run at all) holds only the default.
+func TestReindexKeepsLabelsACopiedRunCarries(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "runs", "b", "r")
+	writeFile(t, filepath.Join(dir, "run.json"), `{"harness":"cortex"}`)
+	writeFile(t, filepath.Join(dir, "results.jsonl"), `{"pass":true}`+"\n")
+	writeFile(t, filepath.Join(dir, RunFileV1), `{"labels":{"harness":"cortex","model":"m","arm":"a"}}`)
+	// An earlier reindex (before the fix) already indexed it with only the default.
+	if err := AppendIndex(root, Entry{Event: "reindex", Bench: "b", RunID: "r", Dir: dir,
+		Labels: map[string]string{"harness": "cortex"}, Summary: &Summary{N: 1, Pass: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for round := 1; round <= 2; round++ { // the second round has a harness-only index entry to merge with
+		if _, err := Reindex(root); err != nil {
+			t.Fatal(err)
+		}
+		entries, _ := ReadIndex(root)
+		got := Latest(entries)[0].Labels
+		if got["model"] != "m" || got["arm"] != "a" || got["harness"] != "cortex" {
+			t.Errorf("round %d: labels = %v, want the run's own labels kept", round, got)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dir, RunFileV1))
+	if err != nil || !strings.Contains(string(b), `"arm": "a"`) {
+		t.Errorf("run.v1.json rewritten without the run's labels: %s (err %v)", b, err)
+	}
+}

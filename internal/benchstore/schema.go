@@ -332,7 +332,15 @@ func nativeRows(dir string) ([]map[string]any, error) {
 				row["wall_ms"] = s * 1000
 			}
 		}
-		if rep, ok := reports[id]; !ok {
+		emptyPatch := strings.TrimSpace(str(p["model_patch"])) == ""
+		if rep, ok := reports[id]; !ok && emptyPatch {
+			// The harness skips an empty patch and writes no report: the
+			// agent changed nothing, which is not a scoring failure.
+			row["eval_status"], row["failure_class"] = "skipped_empty", "empty_patch"
+			if hasUsage && truthy(u["timed_out"]) {
+				row["failure_class"] = "timeout"
+			}
+		} else if !ok {
 			row["eval_status"] = "error_no_report"
 		} else if truthy(rep["resolved"]) {
 			row["resolved"], row["eval_status"] = true, "resolved"
@@ -341,7 +349,7 @@ func nativeRows(dir string) ([]map[string]any, error) {
 			switch {
 			case hasUsage && truthy(u["timed_out"]):
 				row["failure_class"] = "timeout"
-			case strings.TrimSpace(str(p["model_patch"])) == "":
+			case emptyPatch:
 				row["failure_class"] = "empty_patch"
 			default:
 				row["failure_class"] = "wrong_patch"
