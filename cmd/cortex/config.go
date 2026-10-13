@@ -2060,14 +2060,15 @@ func mergeBackend(base, over Backend) Backend {
 }
 
 // secretEnvNames lists every environment variable this config names as an
-// API key source (backend.key_env and each models.<role>.key_env). The bash
-// tool strips these from its shell's environment (internal/tools/shellenv.go)
+// API key source (backend.key_env and each models.<role>.key_env), plus the
+// Discord adapter's bot token (discord.go reads it from the environment). The
+// bash tool strips these from its shell's environment (internal/tools/shellenv.go)
 // so a model's `env` can never copy cortex's own credential into a transcript.
 func (c *Config) secretEnvNames() []string {
+	out := []string{discordTokenEnv}
 	if c == nil {
-		return nil
+		return out
 	}
-	var out []string
 	if c.Backend.KeyEnv != "" {
 		out = append(out, c.Backend.KeyEnv)
 	}
