@@ -27,7 +27,7 @@ var ErrBusy = errors.New("file is locked by another process")
 //
 // The lock is released when the returned *os.File is closed.
 func OpenExclusive(path string, flag int, perm os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(path, flag, perm)
+	f, err := os.OpenFile(path, lockableFlag(flag), perm)
 	if err != nil {
 		return nil, fmt.Errorf("fslock: open %s: %w", path, err)
 	}
@@ -44,9 +44,23 @@ func OpenExclusive(path string, flag int, perm os.FileMode) (*os.File, error) {
 // Lock takes a blocking exclusive lock on an already-open file descriptor.
 // It is used where the file is opened separately (the journal opens a segment
 // before locking it). The lock is released when that descriptor is closed.
+//
+// Open the file O_RDWR, not O_WRONLY: with O_APPEND, Windows opens an
+// append-only handle, and LockFileEx refuses to lock one ("Access is
+// denied"). Unix doesn't care, so the same flags work everywhere.
 func Lock(fd int) error {
 	if err := flock(fd, false); err != nil {
 		return fmt.Errorf("fslock: lock fd %d: %w", fd, err)
 	}
 	return nil
+}
+
+// lockableFlag turns a write-only open into read-write so the handle can be
+// locked on Windows (see Lock). Read access changes nothing else: callers
+// still only write.
+func lockableFlag(flag int) int {
+	if flag&(os.O_WRONLY|os.O_RDWR) == os.O_WRONLY {
+		return flag&^os.O_WRONLY | os.O_RDWR
+	}
+	return flag
 }

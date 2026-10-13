@@ -286,7 +286,7 @@ func AppendIndex(root string, e Entry) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("failed to create bench root: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(root, "index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(root, "index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o644) // O_RDWR so fslock can lock it on Windows
 	if err != nil {
 		return fmt.Errorf("failed to open index: %w", err)
 	}
