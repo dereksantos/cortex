@@ -563,6 +563,7 @@ func NewCortexSession() *CortexSession {
 	configurePrompt(cfg)
 	tools.Configure(cfg.toolLimits())
 	tools.SetHookCeiling(cfg.postEditHookMode())
+	tools.SetShellSecretEnv(cfg.secretEnvNames())
 	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 	openRouterPreflightTimeout = cfg.preflightTimeout()
 	labelTickInterval = cfg.tickerInterval()

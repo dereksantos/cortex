@@ -2574,6 +2574,8 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, BashOutcome,
 		attributionBeforeHEAD, _, _ = attributionHead(runDir)
 	}
 	shellCmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// nil when no secrets are configured → inherit the environment unchanged.
+	shellCmd.Env = shellEnv()
 	if runDir != "" {
 		shellCmd.Dir = runDir
 	}
