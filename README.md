@@ -462,6 +462,7 @@ for the design. To disable the tool, set `tools.enable_agent` to false.
 ```text
 cortex                              start the interactive REPL
 cortex --version | cortex version   print the version
+cortex completion <bash|zsh|fish>  print a shell completion script
 cortex resume [id]                  continue a session; with no id, select one
                                     from a list (or the latest when not a TTY)
 cortex turn [--session id] [--plan] [--json] <input...>
