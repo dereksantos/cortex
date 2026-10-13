@@ -35,6 +35,7 @@ HEADROOM="0.25"   # OpenRouter's usage counter can lag a few seconds
 
 run_id="" ids="" usage_cap="" instance_cost="2.0" key_service="cortex-openrouter" no_score=0
 backend="openrouter" endpoint="" model="" temperature="1.0" wall_limit_s=0
+labels=(--label harness=mini-swe-agent)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-id) run_id="$2"; shift 2 ;;
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --model) model="$2"; shift 2 ;;                # litellm: the proxy's model alias
     --temperature) temperature="$2"; shift 2 ;;
     --wall-limit) wall_limit_s="$2"; shift 2 ;;    # seconds per instance; 0 = none
+    --label) labels+=(--label "$2"); shift 2 ;;    # key=value, repeatable (benchstore index)
     *) echo "unknown flag $1" >&2; exit 2 ;;
   esac
 done
@@ -66,7 +68,7 @@ export_file="${bench_root}/swebench-data/verified-${DATASET_REVISION:0:12}.jsonl
 # created exclusively, recorded in the index at start.
 mkdir -p "${bench_root}/bin"
 (cd "$repo_root" && go build -o "${bench_root}/bin/benchstore" ./scripts/bench/benchstore)
-out="$(cd "$repo_root" && "${bench_root}/bin/benchstore" begin --bench swebench --run-id "${run_id}/mini" --label harness=mini-swe-agent)"
+out="$(cd "$repo_root" && "${bench_root}/bin/benchstore" begin --bench swebench --run-id "${run_id}/mini" "${labels[@]}")"
 
 # --- pinned harnesses ------------------------------------------------------------
 if [[ ! -x "${mini_venv}/bin/python" ]]; then "${PYTHON_BIN:-python3.11}" -m venv "$mini_venv"; fi

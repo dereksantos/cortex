@@ -315,18 +315,35 @@ func nativeRows(dir string) ([]map[string]any, error) {
 		}
 		return nil
 	})
+	// usage.jsonl is run_mini.sh's per-instance ledger: the wall clock it
+	// measured around the agent and whether --wall-limit cut it short.
+	usage := map[string]map[string]any{}
+	if ledger, err := readJSONL(filepath.Join(dir, "usage.jsonl")); err == nil {
+		for _, u := range ledger {
+			usage[str(u["instance_id"])] = u
+		}
+	}
 	for _, p := range preds {
 		id := str(p["instance_id"])
 		row := map[string]any{"instance_id": id}
+		u, hasUsage := usage[id]
+		if hasUsage {
+			if s, ok := u["wall_s"].(float64); ok {
+				row["wall_ms"] = s * 1000
+			}
+		}
 		if rep, ok := reports[id]; !ok {
 			row["eval_status"] = "error_no_report"
 		} else if truthy(rep["resolved"]) {
 			row["resolved"], row["eval_status"] = true, "resolved"
 		} else {
 			row["eval_status"] = "unresolved"
-			if strings.TrimSpace(str(p["model_patch"])) == "" {
+			switch {
+			case hasUsage && truthy(u["timed_out"]):
+				row["failure_class"] = "timeout"
+			case strings.TrimSpace(str(p["model_patch"])) == "":
 				row["failure_class"] = "empty_patch"
-			} else {
+			default:
 				row["failure_class"] = "wrong_patch"
 			}
 		}
