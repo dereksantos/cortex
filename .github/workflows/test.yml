@@ -19,6 +19,9 @@ jobs:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # One OS failing shouldn't cancel the others: a flaky test on one
+      # runner would otherwise hide the Windows results.
+      fail-fast: false
       matrix:
         # Windows runs the suite so contributors there can trust
         # `go test ./...` (issue #288, phase 1). The REPL's raw-mode input
