@@ -40,7 +40,7 @@ func hermeticDiscordManager(t *testing.T) *SessionManager {
 	t.Helper()
 	t.Chdir(t.TempDir())
 	reg := &fakeRegistry{}
-	return NewSessionManager(reg, func() *CortexSession {
+	return newTestSessionManager(t, reg, func() *CortexSession {
 		return &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 	})
 }
@@ -217,7 +217,7 @@ func TestDiscordHandleReactionAddIgnoresWrongMessageOrEmoji(t *testing.T) {
 func TestRegistryEmptyProjectSkipsLookup(t *testing.T) {
 	t.Chdir(t.TempDir())
 	reg := &fakeRegistry{}
-	mgr := NewSessionManager(reg, func() *CortexSession {
+	mgr := newTestSessionManager(t, reg, func() *CortexSession {
 		return &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 	})
 	if _, err := mgr.Create(""); err != nil {

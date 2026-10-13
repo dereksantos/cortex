@@ -32,7 +32,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	if err := reg1.Save(registry.Project{Name: "blog", Root: projectRoot}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	mgr1 := NewSessionManager(reg1, hermeticSessionFactory())
+	mgr1 := newTestSessionManager(t, reg1, hermeticSessionFactory())
 	ts1 := newTestServeServer(t, newServeMux(reg1, mgr1, "", "", testLoopsStore(t), newRunningSet()))
 
 	// Create a session while the "first process" is live, so there is
@@ -62,7 +62,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	// SessionManager (empty in-memory map, no reference to mgr1's session)
 	// pointed at the very same on-disk projects.json and project root.
 	reg2 := registry.NewAt(regPath)
-	mgr2 := NewSessionManager(reg2, hermeticSessionFactory())
+	mgr2 := newTestSessionManager(t, reg2, hermeticSessionFactory())
 	ts2 := newTestServeServer(t, newServeMux(reg2, mgr2, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts2.Close()
 

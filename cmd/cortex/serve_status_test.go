@@ -13,7 +13,7 @@ import (
 
 func TestStatusEndpointReturnsUptimeSessionsAndLoops(t *testing.T) {
 	reg := &fakeRegistry{}
-	mgr := testSessionManager(reg)
+	mgr := testSessionManager(t, reg)
 	store := testLoopsStore(t)
 	if err := store.Save(loops.Spec{Name: "nightly", Project: "blog", Prompt: "sweep", IntervalMinutes: 60, Enabled: true}); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -51,7 +51,7 @@ func TestStatusEndpointReturnsUptimeSessionsAndLoops(t *testing.T) {
 
 func TestStatusEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	mgr := testSessionManager(reg)
+	mgr := testSessionManager(t, reg)
 	store := testLoopsStore(t)
 	mux := newServeMux(reg, mgr, "", "", store, newRunningSet())
 	mux.HandleFunc("GET /api/status", handleStatus(time.Now(), mgr, store))

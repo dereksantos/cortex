@@ -87,7 +87,7 @@ func TestTurnEndpointRunsTurnAgainstLiveSession(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
-	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
+	mgr := newTestSessionManager(t, reg, turnTestSessionFactory(backend))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -142,7 +142,7 @@ func TestTurnEndpointResumesSessionNotLiveOnThisManager(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 
 	firstBackend := newTurnTestBackend(t)
-	firstMgr := NewSessionManager(reg, turnTestSessionFactory(firstBackend))
+	firstMgr := newTestSessionManager(t, reg, turnTestSessionFactory(firstBackend))
 	created, err := firstMgr.Create("blog")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -151,7 +151,7 @@ func TestTurnEndpointResumesSessionNotLiveOnThisManager(t *testing.T) {
 	created.cs.transcript.Close() // simulate the creating process (and its fslock) going away
 
 	secondBackend := newTurnTestBackend(t)
-	secondMgr := NewSessionManager(reg, turnTestSessionFactory(secondBackend))
+	secondMgr := newTestSessionManager(t, reg, turnTestSessionFactory(secondBackend))
 	ts := newTestServeServer(t, newServeMux(reg, secondMgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -218,7 +218,7 @@ func TestTurnEndpointResumeBusyReturns409(t *testing.T) {
 	id := cs.SessionID
 	t.Cleanup(func() { _ = cs.transcript.Close() })
 
-	freshMgr := NewSessionManager(reg, hermeticSessionFactory())
+	freshMgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, freshMgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -239,7 +239,7 @@ func TestTurnEndpointResumeBusyReturns409(t *testing.T) {
 
 func TestTurnEndpointUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: t.TempDir()}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -261,7 +261,7 @@ func TestTurnEndpointRejectsForeignHost(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
-	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
+	mgr := newTestSessionManager(t, reg, turnTestSessionFactory(backend))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -288,7 +288,7 @@ func TestTurnEndpointSameSessionSerializes(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
-	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
+	mgr := newTestSessionManager(t, reg, turnTestSessionFactory(backend))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
@@ -343,7 +343,7 @@ func TestTurnEndpointDifferentSessionsRunConcurrently(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
-	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
+	mgr := newTestSessionManager(t, reg, turnTestSessionFactory(backend))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 

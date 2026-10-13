@@ -23,7 +23,7 @@ func TestDashboardEndpointReturnsViewModel(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"plain": {Name: "plain", Root: root},
 	}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/dashboard")
@@ -56,7 +56,7 @@ func TestDashboardEndpointReturnsViewModel(t *testing.T) {
 
 func TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/dashboard")
@@ -75,7 +75,7 @@ func TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull(t *testing.T)
 
 func TestDashboardEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/dashboard", nil)

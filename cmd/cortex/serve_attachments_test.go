@@ -148,7 +148,7 @@ func serveAttachHarness(t *testing.T) (*wireBackend, string, string) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newWireBackend(t)
-	mgr := NewSessionManager(reg, func() *CortexSession {
+	mgr := newTestSessionManager(t, reg, func() *CortexSession {
 		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 		cs.Request.BaseURL = backend.srv.URL
 		cs.Request.Vision = true // the verdict a vision-capable binding stamps
@@ -375,7 +375,7 @@ func TestServeTurnStreamAcceptsAttachments(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newWireBackend(t)
-	mgr := NewSessionManager(reg, func() *CortexSession {
+	mgr := newTestSessionManager(t, reg, func() *CortexSession {
 		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 		cs.Request.BaseURL = backend.srv.URL
 		cs.Request.Vision = true
@@ -556,7 +556,7 @@ func TestServeTurnURLAttachmentWebDisabledIsRefused(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newWireBackend(t)
 	off := false
-	mgr := NewSessionManager(reg, func() *CortexSession {
+	mgr := newTestSessionManager(t, reg, func() *CortexSession {
 		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 		cs.Request.BaseURL = backend.srv.URL
 		cs.Request.Vision = true
@@ -636,7 +636,7 @@ func TestServeTurnTextOnlyModelRefusesAttachment(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newWireBackend(t)
-	mgr := NewSessionManager(reg, func() *CortexSession {
+	mgr := newTestSessionManager(t, reg, func() *CortexSession {
 		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 		cs.Request.BaseURL = backend.srv.URL
 		cs.Request.Vision = false // the text-only verdict

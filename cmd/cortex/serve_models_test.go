@@ -29,7 +29,7 @@ func TestModelsEndpointReturnsRolesAndFleet(t *testing.T) {
 	t.Setenv("CORTEX_TEST_MODELS_KEY", "super-secret-value")
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/models")
@@ -72,7 +72,7 @@ func TestModelsEndpointFleetUnreachableStillReturnsRoles(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doGet(t, ts.URL+"/api/models")
@@ -96,7 +96,7 @@ func TestModelsEndpointRejectsForeignHost(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/models", nil)
@@ -137,7 +137,7 @@ func TestSetModelBindingUserScopeWritesAndUnknownFieldsSurvive(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/code?scope=user", `{"model":"new-code-model","endpoint":"http://x.example"}`)
@@ -188,7 +188,7 @@ func TestSetModelBindingResponseNeverIncludesSecretValue(t *testing.T) {
 	t.Setenv("CORTEX_TEST_SET_MODEL_KEY", "super-secret-write-value")
 
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/code?scope=user", `{"key_env":"CORTEX_TEST_SET_MODEL_KEY"}`)
@@ -213,7 +213,7 @@ func TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigU
 	projectRoot := t.TempDir()
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: projectRoot}}}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/study?scope=project&project=blog", `{"model":"proj-study-model"}`)
@@ -256,7 +256,7 @@ func TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigU
 
 func TestSetModelBindingProjectScopeMissingProjectQueryReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/code?scope=project", `{"model":"x"}`)
@@ -268,7 +268,7 @@ func TestSetModelBindingProjectScopeMissingProjectQueryReturns400(t *testing.T) 
 
 func TestSetModelBindingProjectScopeUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/code?scope=project&project=doesnotexist", `{"model":"x"}`)
@@ -280,7 +280,7 @@ func TestSetModelBindingProjectScopeUnknownProjectReturns404(t *testing.T) {
 
 func TestSetModelBindingUnknownRoleReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/not-a-real-role?scope=user", `{"model":"x"}`)
@@ -292,7 +292,7 @@ func TestSetModelBindingUnknownRoleReturns400(t *testing.T) {
 
 func TestSetModelBindingUnsupportedScopeReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	for _, scope := range []string{"", "bogus"} {
@@ -316,7 +316,7 @@ func TestSetModelBindingUnsupportedScopeReturns400(t *testing.T) {
 func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	created, err := mgr.Create("blog")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -356,7 +356,7 @@ func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *te
 	// precedent) resumes the same id straight from the transcript, which
 	// never recorded the in-memory-only override.
 	created.cs.transcript.Close() // simulate the process (and its transcript lock) going away
-	secondMgr := NewSessionManager(reg, hermeticSessionFactory())
+	secondMgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	resumed, err := secondMgr.Resume("blog", id)
 	if err != nil {
 		t.Fatalf("Resume after restart: %v", err)
@@ -368,7 +368,7 @@ func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *te
 
 func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/code?scope=session&session=does-not-exist", `{"model":"x"}`)
@@ -380,7 +380,7 @@ func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
 
 func TestSetModelBindingSessionScopeMissingSessionQueryReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doPut(t, ts.URL+"/api/models/code?scope=session", `{"model":"x"}`)
@@ -393,7 +393,7 @@ func TestSetModelBindingSessionScopeMissingSessionQueryReturns400(t *testing.T) 
 func TestSetModelBindingSessionScopeUnsupportedRoleReturns400(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	mgr := newTestSessionManager(t, reg, hermeticSessionFactory())
 	created, err := mgr.Create("blog")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -411,7 +411,7 @@ func TestSetModelBindingSessionScopeUnsupportedRoleReturns400(t *testing.T) {
 
 func TestSetModelBindingRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	resp := doForeignHost(t, http.MethodPut, ts.URL+"/api/models/code?scope=user", strings.NewReader(`{"model":"x"}`))

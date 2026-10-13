@@ -18,7 +18,7 @@ import (
 // asset (app.js) still serve their real embedded content.
 func TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(t, reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	t.Chdir(t.TempDir()) // no cmd/cortex/webui/ reachable under this cwd

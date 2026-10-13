@@ -262,7 +262,7 @@ func TestLoopSchedulerTickSkipsWhileRunNowInFlight(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	running := newRunningSet()
-	mgr := NewSessionManager(reg, blockingTurnTestSessionFactoryStarted(t, started, release))
+	mgr := newTestSessionManager(t, reg, blockingTurnTestSessionFactoryStarted(t, started, release))
 	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", store, running))
 	defer ts.Close()
 
