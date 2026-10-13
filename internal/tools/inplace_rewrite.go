@@ -1059,13 +1059,14 @@ var (
 	errNotInPlaceWorkdir = errors.New("outside the workdir")
 )
 
-// absOf anchors raw to workdir (relative) or takes it as-is (absolute); ""
-// when the path is unresolvable.
+// absOf anchors raw to workdir (relative) or takes it as-is (absolute, or
+// rooted like "/tmp/x" on Windows — see isRooted); "" when the path is
+// unresolvable.
 func absOf(raw, workdir string) string {
 	if raw == "" {
 		return ""
 	}
-	if filepath.IsAbs(raw) {
+	if isRooted(raw) {
 		return raw
 	}
 	return filepath.Join(workdir, raw)

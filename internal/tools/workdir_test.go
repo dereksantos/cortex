@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -133,6 +134,9 @@ func TestOutlineResolvesAgainstWorkdir(t *testing.T) {
 }
 
 func TestBashRunsInWorkdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Git Bash prints MSYS-style paths (/tmp/...) for pwd; the bash tool on Windows is #288 phase 3")
+	}
 	cwd := t.TempDir()
 	wd := t.TempDir()
 	t.Chdir(cwd)
