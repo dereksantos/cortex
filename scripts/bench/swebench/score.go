@@ -35,10 +35,17 @@ type harnessReport map[string]struct {
 	Resolved                 bool `json:"resolved"`
 }
 
+// harnessRunID is the run id handed to the harness. The harness puts it in
+// docker container names ([a-zA-Z0-9_.-] only), so a nested store run id like
+// pair-x/cortex is flattened — the same rule run_mini.sh applies.
+func harnessRunID(runID string) string {
+	return strings.ReplaceAll(runID, "/", "_")
+}
+
 // harnessLogDir mirrors the harness's own layout:
 // logs/run_evaluation/<run_id>/<model_name_or_path with / → __>/<instance_id>.
 func harnessLogDir(evalDir, runID, model, instanceID string) string {
-	return filepath.Join(evalDir, "logs", "run_evaluation", runID,
+	return filepath.Join(evalDir, "logs", "run_evaluation", harnessRunID(runID),
 		strings.ReplaceAll(model, "/", "__"), instanceID)
 }
 
@@ -106,7 +113,7 @@ func ScoreOne(ctx context.Context, python, datasetFile, evalDir, runID string, p
 		"--dataset_name", datasetFile,
 		"--instance_ids", pred.InstanceID,
 		"--predictions_path", predPath,
-		"--run_id", runID,
+		"--run_id", harnessRunID(runID),
 		"--max_workers", "1",
 		"--timeout", fmt.Sprintf("%d", int(timeout.Seconds())),
 		"--report_dir", evalDir,
