@@ -303,6 +303,7 @@ var usageLines = []string{
 	"cortex model [--json]                     show model role bindings and what's served",
 	"cortex study-eval                         study acceptance test",
 	"cortex version                            print the version and exit",
+	"cortex completion <bash|zsh|fish>         print a shell completion script",
 }
 
 // printUsage is the CLI-level counterpart to printHelp: `cortex --help`
@@ -390,6 +391,12 @@ func main() {
 	if len(os.Args) >= 2 && (os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help") {
 		printUsage()
 		os.Exit(0)
+	}
+
+	// `cortex completion <bash|zsh|fish>` prints a shell completion script and exits.
+	if len(os.Args) >= 2 && os.Args[1] == "completion" {
+		runCompletionCLI(os.Args[2:])
+		return
 	}
 
 	// Unknown-subcommand guard (issue #262): the first word must name a
