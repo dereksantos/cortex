@@ -64,6 +64,9 @@ func CompactSegment(classDir string, n int) error {
 		os.Remove(tmp)
 		return fmt.Errorf("journal: rename %s -> %s: %w", tmp, dst, err)
 	}
+	// Close the source before removing it: Windows refuses to delete a file
+	// that is still open. The deferred Close then has nothing to do.
+	_ = in.Close()
 	if err := os.Remove(src); err != nil {
 		return fmt.Errorf("journal: remove original %s: %w", src, err)
 	}
