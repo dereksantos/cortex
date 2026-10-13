@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -28,7 +29,7 @@ func TestUsageLinesCoverSubcommands(t *testing.T) {
 }
 
 func TestUsageFlag(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "cortex")
+	bin := filepath.Join(t.TempDir(), exeName("cortex"))
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build cortex: %v\n%s", err, out)
 	}
@@ -83,4 +84,13 @@ func TestUsagePlainWhenStdoutNotATerminal(t *testing.T) {
 	if !strings.Contains(out, "Usage:") {
 		t.Errorf("printUsage() non-terminal output lost its headings:\n%s", out)
 	}
+}
+
+// exeName adds ".exe" on Windows, which won't run a built binary without
+// it (#288). Tests that `go build -o` the cortex binary name it with this.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
 }

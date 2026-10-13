@@ -36,7 +36,7 @@ func serveStopTestBinary(t *testing.T) string {
 			serveStopTestBinErr = err
 			return
 		}
-		bin := filepath.Join(dir, "cortex-servestop-test")
+		bin := filepath.Join(dir, exeName("cortex-servestop-test"))
 		cmd := exec.Command("go", "build", "-o", bin, ".")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
