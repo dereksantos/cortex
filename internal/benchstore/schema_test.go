@@ -124,3 +124,21 @@ func TestNormalizeMiniWallClockFromUsage(t *testing.T) {
 		}
 	}
 }
+
+// The harness skips an empty patch and writes no report: that is the agent
+// changing nothing (no_change), not a scoring failure (infra_error).
+func TestNormalizeMiniEmptyPatchWithoutReport(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "run.json"), `{"harness":"mini-swe-agent"}`)
+	writeFile(t, filepath.Join(dir, "predictions.jsonl"), `{"instance_id":"a","model_patch":""}`+"\n")
+	if err := Normalize("swebench", "p/mini", dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Summarize(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Fail != 1 || s.Skipped != 0 || s.Classes[FailNoChange] != 1 {
+		t.Errorf("summary = %+v, want one no_change fail", s)
+	}
+}
