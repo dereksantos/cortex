@@ -142,3 +142,35 @@ func TestNormalizeMiniEmptyPatchWithoutReport(t *testing.T) {
 		t.Errorf("summary = %+v, want one no_change fail", s)
 	}
 }
+
+// An instance mini was killed on (or crashed in) leaves a ledger entry but no
+// prediction; it is a failed attempt, not a missing one.
+func TestNormalizeMiniInstanceWithoutPrediction(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "run.json"), `{"harness":"mini-swe-agent"}`)
+	writeFile(t, filepath.Join(dir, "predictions.jsonl"), "")
+	writeFile(t, filepath.Join(dir, "usage.jsonl"),
+		`{"instance_id":"a","wall_s":1807,"timed_out":true}`+"\n"+
+			`{"instance_id":"b","wall_s":40,"timed_out":false}`+"\n"+
+			`{"instance_id":"c","skipped_for_budget":true}`+"\n")
+	if err := Normalize("swebench", "p/mini", dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readJSONL(filepath.Join(dir, ResultsFileV1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[str(r["task_id"])] = str(r["status"]) + "/" + str(r["failure_class"])
+	}
+	want := map[string]string{"a": "fail/" + FailTimeout, "b": "fail/" + FailAgentError}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v, want %v (the budget skip never ran)", got, want)
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s = %q, want %q", id, got[id], w)
+		}
+	}
+}
