@@ -102,6 +102,11 @@ model:
     api_base: ${endpoint%/}/v1
     api_key: none
     temperature: ${temperature}
+    # The same per-response cap cortex sends (codeMaxOutputTokens). A local
+    # server applies none of its own, so a response that loops never ends,
+    # and llama-server keeps decoding it after mini gives up, holding its one
+    # slot (the 2026-10-14 baseline's 50k-token runaway).
+    max_tokens: 16384
 agent:
   cost_limit: 0
 environment:
