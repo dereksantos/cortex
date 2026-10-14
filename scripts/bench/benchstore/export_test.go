@@ -22,6 +22,10 @@ func TestLogicalRun(t *testing.T) {
 			"ab-20261009/new-reason", "ab-20261009", "new-reason"},
 		{"single-segment run: the arm is the harness", "smoke-seed106", []string{"a__b-1", "c__d-2"}, "cortex",
 			"smoke-seed106", "smoke-seed106", "cortex"},
+		{"a re-run's .rN folds into the same arm", "baseline-sv50/cortex-matplotlib__matplotlib-23476.r2", []string{"matplotlib__matplotlib-23476"}, "cortex",
+			"baseline-sv50/cortex", "baseline-sv50", "cortex"},
+		{"a re-run still going", "baseline-sv50/mini-matplotlib__matplotlib-23476.r2/mini", nil, "mini-swe-agent",
+			"baseline-sv50/mini", "baseline-sv50", "mini"},
 		{"one-task run not named after its task", "probe-local-n1", []string{"astropy__astropy-7166"}, "cortex",
 			"probe-local-n1", "probe-local-n1", "cortex"},
 	}
