@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -296,10 +297,7 @@ func nativeRows(dir string) ([]map[string]any, error) {
 		return nil, err
 	}
 	preds, err := readJSONL(filepath.Join(dir, "predictions.jsonl"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	reports := map[string]map[string]any{}
@@ -354,6 +352,33 @@ func nativeRows(dir string) ([]map[string]any, error) {
 			default:
 				row["failure_class"] = "wrong_patch"
 			}
+		}
+		rows = append(rows, row)
+	}
+	// An instance the ledger ran but that left no prediction (mini killed at
+	// --wall-limit, or crashed) is still an attempt the agent failed: leaving
+	// it out would drop it from every paired comparison, so one harness's
+	// timeouts would vanish while the other's count. A budget skip never ran.
+	predicted := map[string]bool{}
+	for _, p := range preds {
+		predicted[str(p["instance_id"])] = true
+	}
+	ids := make([]string, 0, len(usage))
+	for id := range usage {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		u := usage[id]
+		if predicted[id] || truthy(u["skipped_for_budget"]) {
+			continue
+		}
+		row := map[string]any{"instance_id": id, "eval_status": "no_prediction", "failure_class": "error"}
+		if s, ok := u["wall_s"].(float64); ok {
+			row["wall_ms"] = s * 1000
+		}
+		if truthy(u["timed_out"]) {
+			row["failure_class"] = "timeout"
 		}
 		rows = append(rows, row)
 	}
