@@ -320,7 +320,7 @@ func printUsage() {
 func knownSubcommand(word string) bool {
 	switch word {
 	case "resume", "turn", "study", "learn", "change", "serve", "scan",
-		"project", "model", "discord", "study-eval", "version":
+		"project", "model", "discord", "study-eval", "version", "completion":
 		return true
 	default:
 		return false

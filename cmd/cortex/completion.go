@@ -68,15 +68,20 @@ func completionScript(shell string) (string, bool) {
 %s        *) COMPREPLY=() ;;
     esac
 }
-complete -F _cortex cortex
+# -o default: when no flag matches, bash falls back to file names, so
+# arguments like "cortex study <path>" still complete paths.
+complete -o default -F _cortex cortex
 `, strings.Join(names, " "), cases.String()), true
 	case "zsh":
 		var cases strings.Builder
 		for _, name := range names {
 			if len(flags[name]) > 0 {
-				fmt.Fprintf(&cases, "        %s) compadd -- %s ;;\n", name, strings.Join(flags[name], " "))
+				fmt.Fprintf(&cases, "        %s) if [[ $PREFIX == -* ]]; then compadd -- %s; else _files; fi ;;\n", name, strings.Join(flags[name], " "))
 			}
 		}
+		// The trailer handles both install styles: autoloaded from fpath as
+		// _cortex (the function is running, so complete), or sourced with
+		// `source <(cortex completion zsh)` (register it with compdef).
 		return fmt.Sprintf(`#compdef cortex
 _cortex() {
     if (( CURRENT == 2 )); then
@@ -84,16 +89,22 @@ _cortex() {
         return
     fi
     case "$words[2]" in
-%s    esac
+%s        *) _files ;;
+    esac
 }
-_cortex "$@"
+if [ "$funcstack[1]" = "_cortex" ]; then
+    _cortex "$@"
+else
+    compdef _cortex cortex
+fi
 `, strings.Join(names, " "), cases.String()), true
 	case "fish":
 		var out strings.Builder
 		fmt.Fprintf(&out, "complete -c cortex -f -n '__fish_use_subcommand' -a '%s'\n", strings.Join(names, " "))
+		// No -f on the flag rules: after a subcommand, file names stay available.
 		for _, name := range names {
 			for _, flag := range flags[name] {
-				fmt.Fprintf(&out, "complete -c cortex -f -n '__fish_seen_subcommand_from %s' -l %s\n", name, strings.TrimPrefix(flag, "--"))
+				fmt.Fprintf(&out, "complete -c cortex -n '__fish_seen_subcommand_from %s' -l %s\n", name, strings.TrimPrefix(flag, "--"))
 			}
 		}
 		return out.String(), true
