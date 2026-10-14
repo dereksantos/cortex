@@ -174,9 +174,24 @@ Restore a run: `wrangler r2 object get <bucket>/<key> --file run.tgz --remote
 
 `go run ./scripts/bench/benchstore export --out <dir>` writes the three
 tables the trend dashboard reads, from the v1 files: `runs.csv` (one row per
-logical run — benchmark, harness, model, commit, kind, counts, pass rate),
-`failures.csv` (run × failure class), and `tasks.csv` (one row per task
-attempt). `kind` separates measured runs from probes/smoke runs and aborted
-ones by run name, so trend lines don't mix them. Paths and host names are
-left out of the export. To refresh the dashboard after new runs: export,
-then upload the three files to it in place of the old ones.
+logical run — benchmark, harness, arm, model, commit, kind, counts, pass
+rate, labels), `failures.csv` (run × failure class), and `tasks.csv` (one
+row per task attempt, with its run's arm and model). A logical run is one
+**arm** of a **batch** (the run id's first segment): a runner that stores one
+run per instance (`<batch>/cortex-<instance>`, `<batch>/mini-<instance>/mini`)
+is folded back into its arm, and the arm is the rest of the run id
+(`ab-x/patch` → `patch`) or the harness when there is none. `kind` separates
+measured runs from probes/smoke runs and aborted ones by run name. Paths and
+host names are left out of the export.
+
+The dashboard (https://claude.ai/artifact/ARmnggXtMTif4zDFS3TPC1) derives
+everything from those three tables — comparisons are every batch with two or
+more arms, runs labeled `invalid=…` are left out — so new batches, models and
+A/B arms appear without touching the page. To refresh it:
+
+1. `./scripts/bench/dashboard-export.sh [--pull <host>]…` — copies runs other
+   hosts recorded (e.g. `--pull chatterbox`; rsync `--update`, never
+   deletes), reindexes, syncs, and exports to `$CORTEX_BENCH_HOME/exports/`.
+2. Upload the three CSVs to the dashboard and point its `runs`, `tasks` and
+   `failures` datasets at the new files (Claude does this: three asset
+   uploads and one store write; the page itself is not republished).
