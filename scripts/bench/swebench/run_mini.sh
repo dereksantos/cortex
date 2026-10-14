@@ -158,8 +158,11 @@ for id in "${id_list[@]}"; do
   while kill -0 "$mini_pid" 2>/dev/null; do
     if (( wall_limit_s > 0 && $(date +%s) - t0 >= wall_limit_s )); then
       timed_out=true
-      pkill -TERM -P "$mini_pid" 2>/dev/null; kill -TERM "$mini_pid" 2>/dev/null
-      sleep 5; pkill -KILL -P "$mini_pid" 2>/dev/null; kill -KILL "$mini_pid" 2>/dev/null
+      # || true on each: under set -e a pkill that matches no child (or a kill
+      # of a pid already gone) exits 1 and would end this script with mini
+      # still running — the 2026-10-14 baseline's orphaned instance.
+      pkill -TERM -P "$mini_pid" 2>/dev/null || true; kill -TERM "$mini_pid" 2>/dev/null || true
+      sleep 5; pkill -KILL -P "$mini_pid" 2>/dev/null || true; kill -KILL "$mini_pid" 2>/dev/null || true
       # mini's instance container outlives a killed driver; remove it.
       # (-w 1: one instance at a time, so any minisweagent-* container is this one's.)
       docker ps -q --filter "name=minisweagent-" | xargs docker rm -f >/dev/null 2>&1 || true

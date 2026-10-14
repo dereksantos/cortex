@@ -39,6 +39,12 @@ func export(root, outDir string) error {
 	groups := map[string]*agg{}
 	var tasks [][]string
 	for _, e := range benchstore.Latest(entries) {
+		// A run labeled invalid (it measured something other than its labels
+		// say: the wrong model served, two arms sharing one server slot) stays
+		// in the store with its reason, but out of every table.
+		if e.Labels["invalid"] != "" {
+			continue
+		}
 		harness := e.Labels["harness"]
 		if harness == "" {
 			harness = "cortex"
@@ -158,11 +164,13 @@ func export(root, outDir string) error {
 // folded back into one run per arm by dropping the instance id from the path
 // (and a segment it leaves repeated: mini/mini → mini). An instance id is one
 // of the run's own task ids, or — for a run with no results yet — a segment
-// shaped like one (<arm>-owner__repo-N, or the bare id). The batch is the first path segment;
+// shaped like one (<arm>-owner__repo-N, or the bare id). A re-run's ".rN"
+// suffix is dropped first, so it folds into the same arm. The batch is the first path segment;
 // the arm is the rest of the folded path, or the harness when there is none.
 func logicalRun(runID string, taskIDs []string, harness string) (id, batch, arm string) {
 	var segs []string
 	for _, seg := range strings.Split(runID, "/") {
+		seg = attemptSuffix.ReplaceAllString(seg, "")
 		if len(taskIDs) == 1 {
 			seg = strings.Replace(seg, "-"+taskIDs[0], "", 1)
 			seg = strings.Replace(seg, taskIDs[0], "", 1)
@@ -189,6 +197,9 @@ func logicalRun(runID string, taskIDs []string, harness string) (id, batch, arm 
 // an owner may: pytest-dev, scikit-learn); bareInstance a segment that is
 // only an instance id.
 var (
+	// attemptSuffix is a re-run's ".rN" (cortex-<instance>.r2): the same arm
+	// and instance attempted again, under a run id the store hasn't used.
+	attemptSuffix   = regexp.MustCompile(`\.r[0-9]+$`)
 	armWithInstance = regexp.MustCompile(`^([A-Za-z0-9]+)-[A-Za-z0-9_.-]*__[A-Za-z0-9_.-]+$`)
 	bareInstance    = regexp.MustCompile(`^[A-Za-z0-9_.-]*__[A-Za-z0-9_.-]+$`)
 )
