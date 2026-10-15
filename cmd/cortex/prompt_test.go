@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/decide"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -326,6 +327,15 @@ func harnessTextSurfaces() []harnessSurface {
 		{"planModeInstruction", planModeInstruction},
 		{"planStepPrompt", planStepPrompt("TASK", 1, 2, "STEP", nil)},
 		{"StudySeed", tools.StudySeed("GOAL", "PATH", "")},
+		// The parallel decider's micro-prompt (internal/decide): its system
+		// prompt and every question definition, rendered over an empty record.
+		{"decide.SystemPrompt", decide.SystemPrompt},
+		{"decide.RenderPrompt", decide.RenderPrompt(decide.Snapshot{Task: "TASK", Reply: "REPLY"}, []decide.Ask{
+			{Q: decide.NextMove, Choices: decide.Moves},
+			{Q: decide.RecallTarget, Choices: []string{decide.None}},
+			{Q: decide.Looping, Choices: []string{decide.None}, Multi: true},
+			{Q: decide.ClaimCheck, Choices: decide.ClaimChoices},
+		})},
 	}
 	for _, sa := range []tools.Subagent{tools.Study, tools.Agent, tools.Learn, tools.LearnUser} {
 		surfaces = append(surfaces, harnessSurface{"subagent " + sa.Role + " system", sa.System})
