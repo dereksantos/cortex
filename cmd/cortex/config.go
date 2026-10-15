@@ -641,6 +641,12 @@ type Config struct {
 	// seed loads, #152) declares the same keys and sits below this one
 	// (config beats instruction file beats discovery).
 	Project ProjectConfig `json:"project"`
+
+	// Decide configures the parallel shadow decider (docs/decide.md). Parsed
+	// here so a malformed block is reported like any other; it is HONORED
+	// only from the user config (decideFromUserConfig) — never merged from a
+	// project layer, which a repository controls.
+	Decide DecideConfig `json:"decide"`
 }
 
 // AttributionConfig collects configurable attribution markers for Cortex-authored
@@ -1677,6 +1683,9 @@ func validateConfig(cfg *Config) error {
 		return nil
 	}
 	if err := validateContextConfig(cfg.Context); err != nil {
+		return err
+	}
+	if err := validateDecideConfig(cfg.Decide); err != nil {
 		return err
 	}
 	switch cfg.Tools.EditFormat {
