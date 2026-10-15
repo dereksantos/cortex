@@ -955,6 +955,56 @@ env var, then the config's `tools.post_edit_hook`, then the default `all`).
 of the CWD-derived workspace root — the same pair the hook uses in a
 session.
 
+## `decide` — the parallel shadow decider
+
+A second, small model that watches each turn and answers closed-choice
+questions about it (next move, looping, whether the final reply's claims are
+backed by the record) — see [`decide.md`](decide.md). **Shadow only:** every
+answer is journaled (`.cortex/journal/decide/`, `decide.shadow`) with what the
+agent actually did next, and none is ever shown to the coding model. The
+coder never waits on it.
+
+**Off by default, and honored only from the user config**
+(`~/.cortex/config.json`). The decider sends excerpts of the turn — the task,
+recent tool calls and their clipped results, the final reply — to its own
+endpoint, which can differ from the coding model's: a new outbound path. A
+project's `.cortex/config.json` is controlled by the repository, so its
+`decide` block is never read (the `project.trusted` rule). The decider is also
+refused when `CORTEX_LOCAL_ONLY` is set, and a session that starts one says so
+once on stderr, naming the destination.
+
+```json
+{
+  "decide": {
+    "backend": "chat",
+    "endpoint": "https://openrouter.ai/api",
+    "key_service": "cortex-openrouter",
+    "model": "nvidia/nemotron-3-super-120b-a12b:free",
+    "questions": ["next_move", "looping", "claim_check"],
+    "max_calls": 200,
+    "timeout_sec": 30,
+    "drain_sec": 20
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `backend` | `""` (off) | `"chat"`: any OpenAI-compatible endpoint, asked for strict JSON. `"null"`: off. `"logprob"`: reserved, refused (not implemented). |
+| `endpoint` | — | Required for `chat`. Base URL; `/v1` is appended when missing. |
+| `key_env` / `key_service` | — | Where the endpoint's key lives — an env var, else a keychain service (the `models.<role>` resolution, no provider fallback). |
+| `model` | — | Required for `chat`. |
+| `questions` | `next_move`, `looping`, `claim_check` | Which questions to ask. `recall_target` is opt-in and asked only when the session outline has citations to offer. |
+| `max_calls` | `200` | Decider calls per session; past it, points are journaled as `budget`. |
+| `timeout_sec` | `30` | One decision's deadline. A slow, rate-limited, or off-menu answer becomes a non-`ok` status — never an error the agent sees. |
+| `drain_sec` | `20` | How long session close waits for decisions still in flight (the finalize claim check) after the answer is out. Delays process exit only. |
+
+At most one decision is in flight; a tool round that ends while one is
+running is journaled as `busy`. Because the engine sends the next request
+the moment a tool round ends, a decision can at best be ready for the send
+after the agent's next round — `rounds_late` in each row records how far
+behind it actually was.
+
 ## Validation
 
 Every field above is optional; 0 (or, for `route_confidence_threshold` and

@@ -455,6 +455,16 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	// coder turn gets it.
 	ts.BeforeSend = func(req *AgentRequest) {
 		cs.applyInTurnDemotion(req, turnStart)
+		cs.shadow.beforeSend()
+	}
+	// The parallel shadow decider (docs/decide.md): off (nil, every hook a
+	// no-op) unless the USER config switches it on. A decision starts when a
+	// tool round ends and is journaled with what the agent did next; it is
+	// never shown to the model, and nothing here waits on it.
+	cs.startShadow()
+	cs.shadow.beginTurn(cs.turns+1, input, cs.outlineCitations())
+	ts.AfterBatch = func(calls []ToolCall, observations []string) {
+		cs.shadow.afterBatch(shadowBatch(calls, observations))
 	}
 	// Issue #217: an image read_file attached rides the tool-result message
 	// as wire Parts (and its bytes go to the session side-car recall
@@ -565,6 +575,7 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 		send = cs.senderOverride
 	}
 	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, send), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	cs.shadow.endTurn(content, stats.StopReason)
 	if !cs.quiet {
 		cs.lastTurnCalls = tools.EndTurn() // also prints a read run still held
 	}

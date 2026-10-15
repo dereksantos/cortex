@@ -68,6 +68,12 @@ type options struct {
 	list        bool
 	ephemeral   bool
 	labels      benchstore.LabelFlag
+	// The shadow decider (docs/decide.md), off unless decideModel is set:
+	// written into the bench-owned CORTEX_HOME's config — the user layer,
+	// the only one cortex honors a decide block from.
+	decideModel      string
+	decideEndpoint   string
+	decideKeyService string
 }
 
 func main() {
@@ -97,6 +103,9 @@ func parseFlags() *options {
 	flag.DurationVar(&o.testTimeout, "test-timeout", 2*time.Minute, "per-exercise budget for `go test ./...`")
 	flag.BoolVar(&o.list, "list", false, "list the discovered exercises and exit")
 	flag.BoolVar(&o.ephemeral, "ephemeral", false, "allow --out inside a git working tree (throwaway runs only; such results are not durable)")
+	flag.StringVar(&o.decideModel, "decide-model", "", "run the shadow decider with this model (off when empty; docs/decide.md)")
+	flag.StringVar(&o.decideEndpoint, "decide-endpoint", "https://openrouter.ai/api", "the shadow decider's OpenAI-compatible endpoint")
+	flag.StringVar(&o.decideKeyService, "decide-key-service", "cortex-openrouter", "keychain service holding the decider endpoint's key")
 	flag.Var(o.labels, "label", "tag the run in the benchmark index, key=value (repeatable), e.g. --label arm=decider")
 	flag.Parse()
 	return o
@@ -181,6 +190,9 @@ func run() error {
 	benchHome := filepath.Join(runDir, "cortex-home")
 	if err := os.MkdirAll(benchHome, 0o755); err != nil {
 		return fmt.Errorf("failed to create bench home: %w", err)
+	}
+	if err := writeDecideHomeConfig(filepath.Join(benchHome, "config.json"), o); err != nil {
+		return err
 	}
 
 	cortexBin, err := filepath.Abs(o.cortexBin)
@@ -505,6 +517,31 @@ func writeWorkspaceConfig(path string, o *options) error {
 	}
 	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
 		return fmt.Errorf("failed to write workspace config %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeDecideHomeConfig enables the shadow decider for the run by writing a
+// decide block into the bench-owned CORTEX_HOME config (the user layer — a
+// project config's decide block is never honored). No-op when off. Auth is
+// named, never inlined. Each exercise's decisions land in its workspace
+// journal (work/<exercise>/.cortex/journal/decide/), inside the run dir.
+func writeDecideHomeConfig(path string, o *options) error {
+	if o.decideModel == "" {
+		return nil
+	}
+	cfg := map[string]any{"decide": map[string]any{
+		"backend":     "chat",
+		"endpoint":    o.decideEndpoint,
+		"key_service": o.decideKeyService,
+		"model":       o.decideModel,
+	}}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode decide config: %w", err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
+		return fmt.Errorf("failed to write decide config %s: %w", path, err)
 	}
 	return nil
 }

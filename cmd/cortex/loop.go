@@ -84,6 +84,13 @@ type Toolset struct {
 	// turn has already answered or is being recovered, and there the wire
 	// already carries the demoted stubs from the main loop's hook.
 	BeforeSend func(*AgentRequest)
+	// AfterBatch, when non-nil, is called once per tool round, right after
+	// the round's last tool result is appended, with the round's calls and
+	// their observations (same order). It must not block or perform a model
+	// round-trip: the next send follows immediately. The coder wires it to
+	// the shadow decider (docs/decide.md), which starts its decision off the
+	// critical path; nil (subagents, tests) = today's behavior, byte for byte.
+	AfterBatch func(calls []ToolCall, observations []string)
 	// SpliceImages, when non-nil, is called on every tool-result message
 	// just before it is appended (issue #217): an image observation's
 	// pending attachment (tools.TakeImageObservation) moves onto the
@@ -774,6 +781,9 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			if p != nil {
 				p(progressLine(call))
 			}
+		}
+		if ts.AfterBatch != nil {
+			ts.AfterBatch(msg.ToolCalls, batchObs)
 		}
 		// Stop at the iteration boundary if the user interrupted — history is
 		// valid and the model can pick up next turn.

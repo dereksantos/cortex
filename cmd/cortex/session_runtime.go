@@ -344,6 +344,13 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 }
 
 func (cs *CortexSession) Close() {
+	// The shadow decider's last decisions (the finalize claim_check) may
+	// still be in flight: the answer is already out, so waiting here delays
+	// only process exit, bounded by decide.drain_sec.
+	if cs.shadow != nil {
+		cs.shadow.drain(cs.shadowDrain)
+		cs.shadow = nil
+	}
 	if cs.transcript != nil {
 		cs.transcript.Close()
 		cs.transcript = nil
