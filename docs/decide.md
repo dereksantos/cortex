@@ -101,6 +101,69 @@ that rarely demote context, so there is nothing to recall. It needs a
 multi-turn benchmark (the pivot eval design, or SWE-bench tasks split across
 turns) before it can be measured.
 
+## First results (2026-10-15)
+
+All in the bench store; free OpenRouter models only.
+
+**Decider eval** (`decide-eval`, 14 cases): 14/14 for
+`nvidia/nemotron-3-super-120b-a12b:free` and 13/13 (pre-long-log case) for
+`cohere/north-mini-code:free`. A floor check, saturated — it cannot rank models.
+
+**Replay** (`decide-replay/replay-sv50-s106-nemotron-20261015`): the 50 cortex
+transcripts of `baseline-sv50-s106-20261013` (glm-4.7-flash; 24 resolved,
+26 failed), 12 points per task + finalize, 647 calls: 627 ok, 19 parse
+errors, 1 timeout; latency p50 6.7 s, p90 20.5 s.
+
+| Signal | Kind | AUROC vs failed |
+|---|---|---|
+| tool calls / rounds | mechanical | 0.71 |
+| looping flagged at any point | decider | 0.66 |
+| claim_check = unsupported | decider | 0.64 |
+| failed steps | mechanical | 0.63 |
+| next_move disagrees with the agent | decider | 0.39 |
+
+- Task length alone beats every decider signal. Split at the median length,
+  the decider's looping and claim signals still separate the shorter half
+  (0.68 each vs 0.63 for length) but not the longer one (0.51 / 0.57) — a
+  hint of information beyond length, at n=25 per half: not a result.
+- `next_move` carries nothing usable: it agrees with the agent 26–32% of the
+  time and answers `read` in about half of all points.
+- Readiness: agent rounds on the local model take a median 2.4 s; only 23%
+  of decisions fit inside one round. On a fast coder this decider runs two to
+  three rounds behind.
+- Unsupported claims: 65% of tasks whose reply was judged unsupported failed,
+  vs 33% of those judged supported.
+
+**Live probe** (`polyglot/decide-live-probe-20261015b`, 2 exercises, coder
+`poolside/laguna-s-2.1:free`): hooks and journaling worked end to end; on
+beer-song every decision was ready at the best possible point
+(`rounds_late` = 1). On wordy, 9 of 16 points were `busy`, and the coder's
+own turn died on a 429 `free-models-per-min` — **the decider shares the
+account's free-tier rate limit with the coder, so in that setup it is not a
+pure shadow: it can starve the coder.** Before any further live run the
+decider needs its own quota (another key, a paid model, or another
+provider).
+
+## Measurement plan (next, not built)
+
+1. **Fix the confound first.** The baseline's cortex arm had 26% of its bash
+   calls refused because the shell-risk classifier (study role on
+   glm-4.7-flash) returned unparseable replies; every one of the 50 tasks was
+   affected. Labels from that batch measure "cortex with a broken gate".
+2. **Replay at least two more decider models** on the same 50 transcripts
+   (one strong paid/long-context model, e.g. SubQ, one tiny local) — same
+   prompt version — to separate "this model" from "this prompt".
+3. **Test incremental value, not raw AUROC.** Per task: fit failure ~ length
+   with and without each decider signal (logistic, leave-one-out), report the
+   gain in log-loss with a bootstrap interval. Promote a signal only if the
+   interval excludes zero across two decider models.
+4. **Timing-aware labels.** Score `looping` by its *first* flag's round
+   relative to the end, and only from points that a live decider would have
+   had ready (latency ≤ window): a late-but-right flag that could never have
+   been acted on does not count.
+5. **Then and only then, step 2** — a paired hint-on/hint-off arm on fresh
+   instances, the hint limited to the promoted signal(s).
+
 ## Live wiring (shadow)
 
 `cmd/cortex/decide_shadow.go`, wired in `turn.go`:
