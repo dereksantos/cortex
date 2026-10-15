@@ -213,8 +213,14 @@ type CortexSession struct {
 
 	SessionID  string
 	transcript *os.File
-	capturer   *capture.Capture
-	memory     *memory.Store // project-tier notes (.cortex/memory)
+	// shadow is the parallel decider in shadow mode (decide_shadow.go,
+	// docs/decide.md): nil when off — the default — and every hook on it is
+	// nil-safe. Built once, on the first turn (shadowStarted).
+	shadow        *shadowDecider
+	shadowStarted bool
+	shadowDrain   time.Duration
+	capturer      *capture.Capture
+	memory        *memory.Store // project-tier notes (.cortex/memory)
 	// userMemory is the cross-project tier (~/.cortex/memory, via
 	// internal/userhome) — the SAME internal/memory.Store type as memory,
 	// pointed at the user's home instead of the project's .cortex dir
