@@ -13,6 +13,7 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/presence"
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/style"
@@ -168,6 +169,11 @@ type CortexSession struct {
 	// default, including every REPL/serve session) leaves gateShell's
 	// existing headless-Blocked fallback untouched.
 	approveRisky func(ctx context.Context, reason, command string) (approved, timedOut bool)
+	// presence reports the session's lifecycle to a terminal host that
+	// tracks running agents (Supacode's sidebar badge — internal/presence).
+	// Set only by the REPL and `cortex turn`; nil everywhere else, and nil
+	// is inert.
+	presence *presence.Emitter
 
 	// shellApprovals is the session-scoped bash approval list (issue #107):
 	// the records the user chose "always this session" for at the
