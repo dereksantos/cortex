@@ -14,6 +14,7 @@ import (
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/presence"
 	"github.com/dereksantos/cortex/internal/projectcmd"
 	"github.com/dereksantos/cortex/internal/redact"
 	"github.com/dereksantos/cortex/internal/shellrisk"
@@ -829,7 +830,9 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			// pre-change path unchanged.
 			prefix := commandPrefixPattern(command)
 			q := riskyQuestion(command, reason, prefix)
+			cs.presence.Emit(presence.AwaitingInput)
 			choice := cs.confirmRisky(q)
+			cs.presence.Emit(presence.Busy)
 			switch choice {
 			case lineedit.ConfirmAlwaysExact:
 				cs.ApproveShell("exact", command, command, v.Reason)

@@ -1036,6 +1036,7 @@ ignored, not errors — the same forward-compatible behavior
 | `CORTEX_LLM_DEBUG` | Non-empty dumps every outbound request/response body to stderr — debugging only, will print secrets in headers if you look; don't leave it on. |
 | `CORTEX_COMPAT_TIMEOUT_SEC` | Overrides the per-request HTTP timeout for every model call `cmd/cortex` makes — the coder turn, every subagent, the summarizer, and the shell-risk classifier — UNLESS the relevant `models.<role>.request_timeout_sec` is set explicitly (that always wins). Previously only reached `pkg/llm`'s OpenAI-compatible client; unified across the whole transport path in the same audit that added `network.compat_timeout_sec` (see above). |
 | `NO_COLOR` | Disables ANSI color output. |
+| `SUPACODE_SURFACE_ID`, `SUPACODE_SOCKET_PATH` | Set by the Supacode terminal, not by you. When `SUPACODE_SURFACE_ID` is present, the REPL and `cortex turn` report their lifecycle (session start/end, busy, awaiting input, compacting, idle, error, plus a turn-end notification carrying the reply) to Supacode's active-session sidebar as OSC 3008 sequences on the controlling terminal; `SUPACODE_SOCKET_PATH` adds the process id so a crashed session's badge clears (`internal/presence`). Absent, nothing is written. |
 | `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_SESSION_ID` | Discord adapter (`cortex discord`). |
 | `DISCORD_PROJECT` | Registered project the Discord bot binds to (CWD-implicit when unset); an unrecognized name fails `cortex discord` at startup with a fatal error. |
 

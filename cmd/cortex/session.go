@@ -12,6 +12,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/fslock"
+	"github.com/dereksantos/cortex/internal/presence"
 	"github.com/dereksantos/cortex/internal/redact"
 	"github.com/dereksantos/cortex/internal/style"
 )
@@ -712,6 +713,7 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	if cs.ws == nil {
 		return fmt.Errorf("working set unavailable; nothing to compact yet")
 	}
+	cs.presence.Emit(presence.Compacting)
 	base := cs.ws.Base()
 	end, content, ok := cs.compactPrefix()
 	if !ok {

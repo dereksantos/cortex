@@ -17,6 +17,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/loopui"
+	"github.com/dereksantos/cortex/internal/presence"
 	"github.com/dereksantos/cortex/internal/style"
 	"github.com/dereksantos/cortex/internal/tools"
 )
@@ -589,6 +590,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "greeting: %v\n", err)
 	}
 	stopGreet()
+	// After the greeting, which runs a turn of its own: the host badge starts
+	// with the first prompt the user sees.
+	session.startPresence()
 
 	// One static hint after the greeting, every run (not just first-run) — the
 	// discoverability surface for /help now that the REPL carries no icon set
@@ -717,6 +721,7 @@ func main() {
 		}
 		if input == "/compact" {
 			compactNow(session, "manual compact")
+			session.presence.Emit(presence.Idle)
 			continue
 		}
 
@@ -822,6 +827,7 @@ func main() {
 			printLintReceipt(plan.LintReceipt)
 			printTurnReceipt(plan.Receipt)
 			afterTurn(session, planErr)
+			session.reportTurnEnd(plan.Reply, false, planErr)
 			continue
 		}
 
@@ -1054,7 +1060,9 @@ func main() {
 			session.printTurnFooter()
 		}
 		afterTurn(session, err)
+		session.reportTurnEnd(res.Reply, res.Interrupted, err)
 	}
+	session.endPresence()
 
 	// Report and record the session. emitSessionMetrics rides the eval journal class.
 	if session.turns > 0 {

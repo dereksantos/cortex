@@ -134,6 +134,8 @@ func runTurnCLI(args []string) {
 	// deferred calls, so it must happen outside their scope.
 	exitCode := func() int {
 		defer session.Close()
+		session.startPresence()
+		defer session.endPresence()
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
@@ -156,6 +158,7 @@ func runTurnCLI(args []string) {
 		} else {
 			res, turnErr = session.Turn(ctx, a.input)
 		}
+		session.reportTurnEnd(res.Reply, res.Interrupted, turnErr)
 
 		if session.turns > 0 {
 			session.emitSessionMetrics()

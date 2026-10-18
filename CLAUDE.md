@@ -617,6 +617,7 @@ go test ./...                # full suite
 - `internal/journal/` — append-only event log (incl. `study.result` telemetry)
 - `internal/benchstore/` + `scripts/bench/` — the durable benchmark store and its runners (SWE-bench Verified + mini-SWE-agent, Aider polyglot); `docs/benchmarks.md`
 - `internal/shellrisk/` — command risk classifier
+- `internal/presence/` — reports the REPL / `cortex turn` lifecycle to Supacode's active-session sidebar (OSC 3008 on the controlling terminal, gated on `SUPACODE_SURFACE_ID`; wired in `cmd/cortex/presence.go`)
 - `internal/style/` — terminal styling: semantic color roles (`Dim`/`Accent`/`Action`/`OK`/`Warn`/`Err`), NO_COLOR, and width helpers (`Width`/`Clip`/`Justify`/`Wrap`); pick a role by meaning, never a hue ([`docs/tui-polish.md`](docs/tui-polish.md))
 - `pkg/llm/` — LLM providers
 - `pkg/config/` — layered config
