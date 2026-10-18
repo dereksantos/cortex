@@ -385,12 +385,8 @@ func matchJSONObject(s string, start int) int {
 // unrecognized risk value parses as Risky, not as a failure: the model
 // committed to a verdict, just not the word "safe".
 func parseClassifierResponse(raw string) (Level, string, bool) {
-	obj, ok := extractJSONObject(raw)
+	j, ok := decodeFirstVerdict(raw)
 	if !ok {
-		return Risky, "", false
-	}
-	var j classifierJSON
-	if err := json.Unmarshal([]byte(obj), &j); err != nil {
 		return Risky, "", false
 	}
 	risk := strings.ToLower(strings.TrimSpace(j.Risk))
@@ -403,14 +399,30 @@ func parseClassifierResponse(raw string) (Level, string, bool) {
 	return Risky, strings.TrimSpace(j.Reason), true
 }
 
-// extractJSONObject returns the substring from the first '{' to the matching
-// last '}'. Good enough for a single-object response wrapped in prose or
-// ```json fences.
-func extractJSONObject(s string) (string, bool) {
+// decodeFirstVerdict decodes the first complete JSON object in s, so a stray
+// closing brace after a well-formed verdict (qwen3.8-27b emits `{…}}` —
+// 2026-10-18 shell-classifier probe) no longer fails the parse. It accepts no
+// more than that: a tail with no braces is prose, read as before; a tail
+// with a '}' must be only braces, whitespace, and a closing fence, because
+// anything else after a stray brace is the model still talking — maybe
+// taking the verdict back. Any '{' in the tail is a second verdict. Every
+// other shape fails closed.
+func decodeFirstVerdict(s string) (classifierJSON, bool) {
+	var j classifierJSON
 	start := strings.IndexByte(s, '{')
-	end := strings.LastIndexByte(s, '}')
-	if start < 0 || end < start {
-		return "", false
+	if start < 0 {
+		return j, false
 	}
-	return s[start : end+1], true
+	dec := json.NewDecoder(strings.NewReader(s[start:]))
+	if err := dec.Decode(&j); err != nil {
+		return j, false
+	}
+	tail := s[start+int(dec.InputOffset()):]
+	switch {
+	case strings.ContainsRune(tail, '{'):
+		return j, false
+	case strings.ContainsRune(tail, '}') && strings.Trim(tail, "}` \t\r\n") != "":
+		return j, false
+	}
+	return j, true
 }

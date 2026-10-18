@@ -60,6 +60,7 @@ not seen finish, so losing the index loses nothing — losing `runs/` does.
 | `scripts/bench/swebench/run.sh` | SWE-bench Verified, scored by the official harness | `--backend litellm --endpoint <proxy>` for the local fleet; [README](../scripts/bench/swebench/README.md) |
 | `scripts/bench/swebench/run_mini.sh` | mini-SWE-agent on the same instances (the reference harness) | give it a sibling run id to the cortex side |
 | `scripts/bench/polyglot/run.sh` | Aider polyglot, Go slice | [README](../scripts/bench/polyglot/README.md) |
+| `go run ./scripts/bench/classifier --model <id>` | The `bash` gate's gray-zone classifier on 33 hand-labeled commands (bench `shell-classifier`) | an unparseable reply keeps its raw text in the row; `--reps`, `--temp` |
 
 Tag arms with `--label key=value` (repeatable) — `--label arm=decider`,
 `--label prompt=2026-10-07` — so trend views can group runs without parsing
