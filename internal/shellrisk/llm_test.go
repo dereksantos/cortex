@@ -46,6 +46,19 @@ func TestProviderClassifier_Parsing(t *testing.T) {
 		{"unknown-risk-value", `{"risk":"maybe","reason":"?"}`, Risky, false}, // committed verdict → risky
 		{"no-json", `I think this is fine`, Risky, true},                      // → fail closed
 		{"empty-risk", `{"reason":"x"}`, Risky, true},                         // → fail closed
+		// qwen3.8-27b, 2026-10-18 shell-classifier probe: 3/33 replies carried
+		// one stray closing brace after a well-formed verdict.
+		{"stray-closing-brace", "{\"risk\":\"safe\",\"reason\":\"routine build\"}}\n", Safe, false},
+		{"stray-brace-in-fence", "```json\n{\"risk\":\"safe\",\"reason\":\"ok\"}}\n```", Safe, false},
+		// A second object after the first is not a stray brace: fail closed
+		// rather than pick one of two verdicts.
+		{"two-objects", `{"risk":"safe","reason":"a"} {"risk":"risky","reason":"b"}`, Risky, true},
+		{"truncated", `{"risk":"safe","reason":"cut off`, Risky, true},
+		// Text after a stray brace is the model still talking, maybe taking
+		// the verdict back: only braces, whitespace, and a fence may follow.
+		{"stray-brace-then-retraction", `{"risk":"safe","reason":"ok"}} "risk":"risky"}`, Risky, true},
+		{"continued-object", `{"risk":"safe"}, "risk":"risky"}`, Risky, true},
+		{"stray-brace-then-prose", "{\"risk\":\"safe\"}}\nNote: this is RISKY", Risky, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

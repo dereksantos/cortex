@@ -10,6 +10,7 @@ import (
 	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/presence"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -239,6 +240,9 @@ func (cs *CortexSession) turnWithImages(ctx context.Context, input, checklistTas
 	cs.redactions = 0
 	cs.setPhase(phaseThinking)
 	defer cs.setPhase(phaseIdle)
+	// The host badge goes busy here; the caller reports the turn's end
+	// (reportTurnEnd), once per user input — a plan run is many turns.
+	cs.presence.Emit(presence.Busy)
 	began := time.Now()
 	cs.lastTurn = nil
 	cs.turnStep = 0
