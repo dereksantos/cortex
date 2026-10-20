@@ -196,3 +196,13 @@ A/B arms appear without touching the page. To refresh it:
 2. Upload the three CSVs to the dashboard and point its `runs`, `tasks` and
    `failures` datasets at the new files (Claude does this: three asset
    uploads and one store write; the page itself is not republished).
+
+## Results write-ups
+
+A batch worth reading later gets a write-up in [`docs/bench-results/`](bench-results/):
+setup, result, what went wrong during the run, analysis, and the commands
+(`scripts/bench/analysis/`) that reproduce every number from the store.
+
+- [2026-10 — first paired baseline, cortex vs mini-SWE-agent on glm-4.7-flash](bench-results/2026-10-glm-baseline.md):
+  24/50 vs 29/50, not a measured difference (sign test p = 0.30); red/green
+  prompt and tool-call-cap A/B; why cortex loses.
