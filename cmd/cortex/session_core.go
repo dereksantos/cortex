@@ -590,7 +590,7 @@ func NewCortexSession() *CortexSession {
 
 	var fleet Fleet
 	if !cfg.isOpenRouter() {
-		fleet = discoverFleet(context.Background(), cfg.backendEndpoint())
+		fleet = discoverFleet(context.Background(), cfg.backendEndpoint(), cfg.backendKey())
 		// The note is advice to pin models; a code model pinned with its
 		// window (what the first-run local-server setup writes) has
 		// already followed it, so the note stays quiet then.
