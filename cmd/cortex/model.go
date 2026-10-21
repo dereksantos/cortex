@@ -61,7 +61,8 @@ type ModelCatalogReport struct {
 // the configured backend for its live catalog. OpenRouter backends are
 // queried via ListModels (pkg/llm/openrouter.go — unauthenticated, no key
 // required); anything else is treated as a LiteLLM-compatible endpoint and
-// queried via discoverFleet's existing /model/info path. A probe failure
+// queried via discoverFleet's existing /model/info path (sent with the
+// backend key when one is configured). A probe failure
 // (timeout, connection refused, non-200) degrades to BackendReachable:false
 // with an explanatory Note — never an error return, so the caller always
 // has the config-side picture to show.
@@ -101,7 +102,7 @@ func buildModelCatalog(ctx context.Context, cfg *Config) ModelCatalogReport {
 		return report
 	}
 
-	fleet := discoverFleet(pctx, report.Endpoint)
+	fleet := discoverFleet(pctx, report.Endpoint, cfg.backendKey())
 	if fleet == nil {
 		report.Note = fmt.Sprintf("backend unreachable: no response from %s/model/info", strings.TrimRight(report.Endpoint, "/"))
 		return report
