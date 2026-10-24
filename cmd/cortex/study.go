@@ -103,6 +103,10 @@ func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentR
 // sessions with neither field set (in which case behavior is unchanged: "."
 // still means the working directory).
 func (cs *CortexSession) root() string {
+	// Test override for the startup banner's skill tier classification.
+	if cs.rootOverride != "" {
+		return cs.rootOverride
+	}
 	if cs.deleteRoot != "" {
 		return cs.deleteRoot
 	}
