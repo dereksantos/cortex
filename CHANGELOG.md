@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-24
+
+### Security
+- Built with Go 1.27.3, which fixes GO-2026-6809 (`crypto/x509` now
+  distrusts compromised intermediate certificates), reachable through
+  `net/http` TLS (#307).
+- The `bash` tool's environment no longer carries configured `key_env`
+  secrets or the Discord bot token.
+
+### Added
+- `apply_patch` edit format for model families trained on it, chosen with
+  `tools.edit_format` (`auto`, `replace`, `patch`). `edit_file` now refuses a
+  call with no `new_string` instead of deleting the matched text.
+- `cortex completion <bash|zsh|fish>` prints a shell completion script.
+- `backend.provider`: OpenRouter provider routing on every request path.
+- A built-in default skill that explains how to write Cortex config (#305).
+- Cortex reports its session lifecycle to Supacode's active-session sidebar.
+- A durable benchmark store (`internal/benchstore`) with a shared v1 result
+  format, off-machine sync, and a SWE-bench Verified runner. Results no
+  longer land in a repo or worktree.
+
+### Changed
+- An unknown subcommand now fails with an error instead of starting the REPL.
+- The README leads with the turn-key headline and a three-step Quick start.
+
+### Fixed
+- The shell-risk classifier accepts a verdict followed by a stray closing
+  brace.
+- Shell completion keeps file names and registers when sourced.
+
 ## [0.4.1] - 2026-10-12
 
 ### Fixed
