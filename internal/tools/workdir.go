@@ -67,3 +67,28 @@ func resolveWorkdir(deps ToolDeps, path string) string {
 	}
 	return filepath.Join(wd, path)
 }
+
+// DefaultConfigSkiller is an OPTIONAL ToolDeps capability, asserted
+// dynamically so existing ToolDeps implementations are untouched. A
+// session that implements it serves one or more built-in "default skills"
+// — SKILL.md texts embedded in the binary with no filesystem backing — to
+// a read_file of their virtual path. The map is from the virtual path (as
+// rendered in the skills index) to the skill's full SKILL.md text. A deps
+// without the capability (headless, a subagent that doesn't carry it)
+// never serves a default skill; the read falls through to the filesystem
+// and reports the virtual path as not-found.
+type DefaultConfigSkiller interface {
+	DefaultConfigSkill(path string) string
+}
+
+// defaultSkillFor returns the built-in skill's SKILL.md text for path when
+// deps implements DefaultConfigSkiller and recognizes the path; ""
+// otherwise. readFile calls it before any filesystem access so a virtual
+// path never has to exist on disk.
+func defaultSkillFor(deps ToolDeps, path string) string {
+	provider, ok := deps.(DefaultConfigSkiller)
+	if !ok {
+		return ""
+	}
+	return provider.DefaultConfigSkill(path)
+}

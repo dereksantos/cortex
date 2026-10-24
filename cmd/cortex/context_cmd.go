@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
-	"github.com/dereksantos/cortex/internal/skills"
 	"github.com/dereksantos/cortex/internal/style"
 )
 
@@ -250,7 +249,7 @@ func (cs *CortexSession) gridLegendLines() []string {
 		lines = append(lines, gridLegendRow(glyphMemory, style.HueMagenta, "memory", t, cs.memoryLegendDetail()))
 	}
 	if t := cs.skillsIndexTokens(); t > 0 {
-		lines = append(lines, gridLegendRow(glyphSkills, style.HueYellow, "skills", t, fmt.Sprintf("%d skills", len(skills.Discover(cs.skillsDirs())))))
+		lines = append(lines, gridLegendRow(glyphSkills, style.HueYellow, "skills", t, fmt.Sprintf("%d skills", cs.skillsCount())))
 	}
 	if t := cs.workspaceTokens(); t > 0 {
 		lines = append(lines, gridLegendRow(glyphWorkspace, style.HueCyan, "workspace", t, cs.workspaceLegendDetail()))

@@ -1229,6 +1229,18 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
+	// A default skill (an embedded SKILL.md with no filesystem backing) is
+	// served from the binary before any filesystem access — the virtual
+	// path it is indexed at never exists on disk. Ranged reads of a
+	// default skill are refused: the text is short (one screenful) and a
+	// line range over it is meaningless, like a range over an image.
+	if body := defaultSkillFor(deps, path); body != "" {
+		printToolAction(deps, fmt.Sprintf("read_file(%s) → default skill", path))
+		if _, ok := tc.IntArg("start"); ok {
+			return body + "\n(whole text above; line ranges are meaningless over a default skill's embedded text.)", nil
+		}
+		return body, nil
+	}
 	fsPath := resolveWorkdir(deps, path)
 	// A directory is not a read: os.ReadFile would return a bare "is a
 	// directory" error that dead-ends the model (issue #142 — the same

@@ -385,6 +385,17 @@ func (cs *CortexSession) workspaceRootForNote() string {
 	return ""
 }
 
+// DefaultConfigSkill serves the built-in default Agent Skill for path — the
+// one embedded SKILL.md (default_skills.go) with no filesystem backing — or
+// "" when path is not the default skill's virtual path. It satisfies the
+// tools.DefaultConfigSkiller capability so readFile (internal/tools) hands
+// the text back without touching the filesystem. A subagent that runs a
+// read_file against this session as its ToolDeps gets the same text —
+// the capability is caller-agnostic, exactly like the other deps seams.
+func (cs *CortexSession) DefaultConfigSkill(path string) string {
+	return defaultConfigSkillFor(path)
+}
+
 // workspaceNote renders the turn-start workspace injection (issue #142):
 // one line naming the absolute workspace root so the model never falls back
 // on remembered layouts from other environments (/testbed, /go/src/…, cd
