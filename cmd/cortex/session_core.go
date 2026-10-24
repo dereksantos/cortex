@@ -178,17 +178,23 @@ type CortexSession struct {
 	// shellApprovals is the session-scoped bash approval list (issue #107):
 	// the records the user chose "always this session" for at the
 	// risky-command prompt — an exact command (chosen "a") or a derived
-	// prefix (chosen "p", the program plus one subcommand + "*", e.g.
-	// "make test*" for "make test ./pkg/..."). The kind rides with each
-	// record on purpose: an exact approval of a command that ends in "*"
-	// (e.g. "rm -f build/*") must keep comparing byte for byte — it must
-	// never be re-read as a prefix by the pattern string alone. It is
-	// memory-only by design: a fresh session starts with an empty list, and
-	// persisting it to the config (a `tools.shell_allow` list) is a
-	// separate decision. gateShell checks it for Risky verdicts only —
-	// after classification, never before — so an approval can never
+	// command (chosen "b") or a prefix (chosen "p", the program plus one
+	// subcommand + "*", e.g. "make test*" for "make test ./pkg/..."). The
+	// kind rides with each record on purpose: an exact approval of a command
+	// that ends in "*" (e.g. "rm -f build/*") must keep comparing byte for
+	// byte — it must never be re-read as a prefix by the pattern string
+	// alone. It is memory-only by design: a fresh session starts with an
+	// empty list, and persisting it to the config (a `tools.shell_allow`
+	// list) is a separate decision. gateShell checks it for Risky verdicts
+	// only — after classification, never before — so an approval can never
 	// override a Blocked command.
 	shellApprovals []shellApproval
+	// Test seams for the startup banner's skill tier classification and
+	// one-shot project summary. These are nil/"" in production; tests set
+	// them to control discovery roots and the fake LLM summary.
+	rootOverride     string
+	userHomeOverride string
+	fakeSummary      string
 
 	// pendingImage is the image attachment read_file just recorded on
 	// THIS session via the ImageSink seam (#217): a per-session field, so

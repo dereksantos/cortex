@@ -32,7 +32,11 @@ func (cs *CortexSession) skillsDirs() []string {
 		filepath.Join(root, ".claude", "skills"),
 		filepath.Join(root, ".agents", "skills"),
 	}
-	if userDir, err := userhome.Path("skills"); err == nil {
+	// Use the test override for the user home when set (test seam);
+	// otherwise the real home.
+	if cs.userHomeOverride != "" {
+		dirs = append(dirs, filepath.Join(cs.userHomeOverride, ".cortex", "skills"))
+	} else if userDir, err := userhome.Path("skills"); err == nil {
 		dirs = append(dirs, userDir)
 	}
 	return dirs
