@@ -677,6 +677,19 @@ Study/Learn/Agent subagent profiles are seeded from their own static system
 prompt and never see it. `/context` surfaces it as a `skills` row (░ glyph)
 in the grid legend when non-empty.
 
+### The built-in default skill
+
+Beyond filesystem discovery, Cortex ships one built-in default skill —
+`writing-config` — embedded in the binary (`cmd/cortex/default_skills.go`).
+It appears in the turn-start index like any discovered skill, but its
+`SKILL.md` is served from the embedded text (a `read_file` of the virtual
+path `<default skills>/writing-config/SKILL.md` returns the body without
+touching the filesystem). A filesystem skill named `writing-config` in any
+discovery root **shadows** the built-in (the same name-collision rule:
+first definition wins), so a project can replace it with its own playbook.
+The `skills.enabled` kill-switch hides the default skill too — when
+disabled, the index is empty and the `read_file` intercept is not reached.
+
 ## `attribution.*` — commit and PR attribution markers
 
 Marks work Cortex authors: a trailer on commits, and a footer the agent is

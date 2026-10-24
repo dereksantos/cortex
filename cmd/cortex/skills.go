@@ -43,28 +43,48 @@ func (cs *CortexSession) skillsDirs() []string {
 // (read its SKILL.md with read_file for the full instructions; anything it
 // points at — scripts/references/assets — loads the same way, on demand —
 // the standard's progressive-disclosure design), then one line per
-// discovered skill. Capped at skills.index_max entries (default
-// skillsIndexMaxDefault); an "N more omitted" line replaces the rest when
-// discovery finds more. "" when discovery finds nothing (or skills.enabled
-// is false) — zero token cost, mirroring memoryIndexNote's empty behavior.
+// discovered skill PLUS the built-in default skill. Capped at
+// skills.index_max entries (default skillsIndexMaxDefault); an "N more
+// omitted" line replaces the rest when discovery finds more. "" only when
+// discovery finds nothing AND the default skill is hidden (a filesystem
+// skill of the same name shadows it) or skills.enabled is false.
 func (cs *CortexSession) skillsIndexNote() string {
 	if !cs.Config.skillsEnabled() {
 		return ""
 	}
 	found := skills.Discover(cs.skillsDirs())
-	if len(found) == 0 {
+	// Append the built-in default skill UNLESS a filesystem skill already
+	// claims its name — discovery dedupes by name (first dir wins), and the
+	// same rule applies here: a project's own writing-config skill replaces
+	// the built-in rather than co-existing with it.
+	all := found
+	hasDefault := false
+	for _, s := range found {
+		if s.Name == defaultConfigSkillName {
+			hasDefault = true
+			break
+		}
+	}
+	if !hasDefault {
+		all = append(all, skills.Skill{
+			Name:        defaultConfigSkillName,
+			Description: defaultConfigSkillDescription,
+			Path:        defaultConfigSkillPath,
+		})
+	}
+	if len(all) == 0 {
 		return ""
 	}
 	max := cs.Config.skillsIndexMax()
-	shown := found
+	shown := all
 	omitted := 0
-	if max > 0 && len(found) > max {
-		shown = found[:max]
-		omitted = len(found) - max
+	if max > 0 && len(all) > max {
+		shown = all[:max]
+		omitted = len(all) - max
 	}
 	var b strings.Builder
 	b.WriteString("## Skills\n\n")
-	b.WriteString("These are Agent Skills discovered in this workspace — on-demand playbooks " +
+	b.WriteString("These are Agent Skills available to you — on-demand playbooks " +
 		"(agentskills.io). To use one, read its SKILL.md with read_file for the full " +
 		"instructions; any scripts, references, or assets it points at load the same way, " +
 		"on demand.\n\n")
@@ -75,4 +95,35 @@ func (cs *CortexSession) skillsIndexNote() string {
 		fmt.Fprintf(&b, "… (%d more skill(s) omitted; raise skills.index_max to see them)\n", omitted)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// skillsCount returns the total number of skills the index would render:
+// the filesystem-discovered skills PLUS the built-in default (unless a
+// filesystem skill of the same name shadows it). Used by the /context
+// legend so the count matches what the model actually sees in the index.
+func (cs *CortexSession) skillsCount() int {
+	found := skills.Discover(cs.skillsDirs())
+	hasDefault := false
+	for _, s := range found {
+		if s.Name == defaultConfigSkillName {
+			hasDefault = true
+			break
+		}
+	}
+	if !hasDefault {
+		return len(found) + 1
+	}
+	return len(found)
+}
+
+// defaultConfigSkillFor intercepts a read_file of defaultConfigSkillPath and
+// returns the built-in skill's SKILL.md text, or "" when the path is not the
+// default skill. It is invoked by the read_file handler (the
+// DefaultConfigSkiller capability) before any filesystem access, so the
+// virtual path never has to exist on disk.
+func defaultConfigSkillFor(path string) string {
+	if path == defaultConfigSkillPath {
+		return defaultConfigSkillText
+	}
+	return ""
 }

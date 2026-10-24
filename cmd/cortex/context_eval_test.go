@@ -474,11 +474,17 @@ func TestTurnMemorySectionEphemeralSlot(t *testing.T) {
 	}
 
 	// 1. No notes, no outline: no memory index AND no memory section.
+	// The skills note (the built-in writing-config default skill) and the
+	// workspace note are always present, so the slot is not empty — but the
+	// memory section (memoryPromptSection) must be absent.
 	if _, err := cs.Turn(context.Background(), "plain first turn"); err != nil {
 		t.Fatal(err)
 	}
-	if got := ephemeralSlot(backend.lastWire()); got != "" {
-		t.Fatalf("no notes, no outline: ephemeral slot must be empty, got %q", got)
+	if got := ephemeralSlot(backend.lastWire()); strings.Contains(got, memoryPromptSection) {
+		t.Fatalf("no notes, no outline: ephemeral slot must not carry the memory section, got %q", got)
+	}
+	if strings.Contains(ephemeralSlot(backend.lastWire()), "These are notes you saved") {
+		t.Fatal("no notes, no outline: ephemeral slot must not carry the memory index")
 	}
 
 	system := cs.Request.Messages[0].Content

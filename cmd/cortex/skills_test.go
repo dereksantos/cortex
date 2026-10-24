@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,11 +29,25 @@ func writeTestSkill(t *testing.T, dir, name, description string) {
 	}
 }
 
-func TestSkillsIndexNoteEmptyWhenNoSkills(t *testing.T) {
+// TestSkillsIndexNoteShowsDefaultSkillWhenNoFilesystemSkills covers the
+// built-in default skill: when no filesystem skills are discovered, the
+// note is NOT empty — it renders only the default skill's line.
+func TestSkillsIndexNoteShowsDefaultSkillWhenNoFilesystemSkills(t *testing.T) {
 	dir := t.TempDir()
 	cs := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{dir}}}}
-	if note := cs.skillsIndexNote(); note != "" {
-		t.Errorf("skillsIndexNote() = %q, want \"\" (no skills discovered)", note)
+	note := cs.skillsIndexNote()
+	if note == "" {
+		t.Fatal("skillsIndexNote() is empty, want the default skill's line")
+	}
+	if !strings.Contains(note, defaultConfigSkillName) {
+		t.Errorf("skillsIndexNote() = %q, want the default skill name %q", note, defaultConfigSkillName)
+	}
+	if !strings.Contains(note, defaultConfigSkillPath) {
+		t.Errorf("skillsIndexNote() = %q, want the default skill path %q", note, defaultConfigSkillPath)
+	}
+	// Exactly one skill line (the default): no other "- " entries.
+	if n := strings.Count(note, "\n- "); n != 1 {
+		t.Errorf("skillsIndexNote() has %d skill lines, want 1 (the default only)", n)
 	}
 }
 
@@ -47,7 +62,8 @@ func TestSkillsIndexNoteDisabledByConfig(t *testing.T) {
 }
 
 // TestSkillsIndexNoteRendersTwoSkills pins the exact rendered note for a
-// 2-skill example.
+// 2-skill example: the two filesystem skills PLUS the built-in default
+// skill (3 lines total).
 func TestSkillsIndexNoteRendersTwoSkills(t *testing.T) {
 	dir := t.TempDir()
 	writeTestSkill(t, dir, "pdf-tools", "Extract text and tables from PDFs.")
@@ -56,13 +72,14 @@ func TestSkillsIndexNoteRendersTwoSkills(t *testing.T) {
 
 	note := cs.skillsIndexNote()
 	if note == "" {
-		t.Fatal("skillsIndexNote() is empty, want a rendered 2-skill index")
+		t.Fatal("skillsIndexNote() is empty, want a rendered 3-skill index")
 	}
 	wantLines := []string{
 		"## Skills",
 		"read_file",
 		"- pdf-tools: Extract text and tables from PDFs. (SKILL.md: " + filepath.Join(dir, "pdf-tools", "SKILL.md") + ")",
 		"- web-search: Search the web for current information. (SKILL.md: " + filepath.Join(dir, "web-search", "SKILL.md") + ")",
+		"- " + defaultConfigSkillName + ": " + defaultConfigSkillDescription + " (SKILL.md: " + defaultConfigSkillPath + ")",
 	}
 	for _, want := range wantLines {
 		if !strings.Contains(note, want) {
@@ -74,8 +91,29 @@ func TestSkillsIndexNoteRendersTwoSkills(t *testing.T) {
 	}
 }
 
+// TestSkillsIndexNoteDefaultSkillShadowedByFilesystemSkill covers the
+// shadow rule: a filesystem skill named "writing-config" replaces the
+// built-in rather than co-existing with it.
+func TestSkillsIndexNoteDefaultSkillShadowedByFilesystemSkill(t *testing.T) {
+	dir := t.TempDir()
+	writeTestSkill(t, dir, "writing-config", "User's own config playbook.")
+	cs := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{dir}}}}
+
+	note := cs.skillsIndexNote()
+	if !strings.Contains(note, "User's own config playbook.") {
+		t.Errorf("skillsIndexNote() = %q, want the user's writing-config skill", note)
+	}
+	// The built-in's virtual path must NOT appear — the user's skill
+	// shadowed it.
+	if strings.Contains(note, defaultConfigSkillPath) {
+		t.Errorf("skillsIndexNote() = %q, should not contain the built-in's virtual path (shadowed)", note)
+	}
+}
+
 // TestSkillsIndexNoteCap covers the skills.index_max cap: over-cap discovery
-// truncates to the first N (by discovery order) and appends an omission note.
+// truncates to the first N (by discovery order) and appends an omission
+// note. The default skill is appended AFTER filesystem skills, so with
+// IndexMax=2 and 3 filesystem skills the default is also past the cap.
 func TestSkillsIndexNoteCap(t *testing.T) {
 	dir := t.TempDir()
 	writeTestSkill(t, dir, "skill-a", "First.")
@@ -90,8 +128,9 @@ func TestSkillsIndexNoteCap(t *testing.T) {
 	if strings.Contains(note, "skill-c") {
 		t.Errorf("skillsIndexNote() = %q, want skill-c omitted past the cap", note)
 	}
-	if !strings.Contains(note, "1 more skill") {
-		t.Errorf("skillsIndexNote() = %q, want a line noting 1 skill was omitted", note)
+	// 2 filesystem skills shown + 1 filesystem + 1 default = 2 more omitted.
+	if !strings.Contains(note, "2 more skill") {
+		t.Errorf("skillsIndexNote() = %q, want a line noting 2 skills were omitted (skill-c + default)", note)
 	}
 }
 
@@ -166,20 +205,26 @@ func TestStudySubagentSeedExcludesSkillsIndex(t *testing.T) {
 	}
 }
 
-// TestContextReportShowsSkillsIndexLineOnlyWhenNonEmpty covers the /context
-// zone-A integration: the skills legend row (glyphSkills, "skills") appears
-// only when the note is non-empty, and headTokens() folds its token cost in
-// (alongside the workspace note's, issue #142).
-func TestContextReportShowsSkillsIndexLineOnlyWhenNonEmpty(t *testing.T) {
+// TestContextReportShowsSkillsIndexLineAlways covers the /context zone-A
+// integration: the skills legend row (glyphSkills, "skills") appears
+// whenever the note is non-empty — the default skill makes it non-empty in
+// every case — and headTokens() folds its token cost in.
+func TestContextReportShowsSkillsIndexLineAlways(t *testing.T) {
+	// Default skill only (no filesystem skills): the note is non-empty
+	// (the default line), so the legend row appears and the count is 1.
 	emptyDir := t.TempDir()
 	cs := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{emptyDir}}}, Request: CortexArgs{}.Request()}
-	if strings.Contains(cs.contextReport(), "skills") {
-		t.Error("contextReport() should not mention \"skills\" when no skills are discovered")
+	if !strings.Contains(cs.contextReport(), "skills") {
+		t.Error("contextReport() should mention \"skills\" (the default skill makes the note non-empty)")
 	}
-	if got := cs.headTokens(); got != cs.systemPromptTokens()+cs.outlineTokens()+cs.memoryIndexTokens()+cs.workspaceTokens() {
-		t.Errorf("headTokens() = %d with no skills, want it to equal the sum without a skills contribution", got)
+	if !strings.Contains(cs.contextReport(), "1 skills") {
+		t.Errorf("contextReport() = %q, want the skill count (1 skills) for the default alone", cs.contextReport())
+	}
+	if got, want := cs.headTokens(), cs.systemPromptTokens()+cs.outlineTokens()+cs.memoryIndexTokens()+cs.skillsIndexTokens()+cs.workspaceTokens(); got != want {
+		t.Errorf("headTokens() = %d, want %d (skills index token cost folded in)", got, want)
 	}
 
+	// One filesystem skill + the default: count is 2.
 	skillDir := t.TempDir()
 	writeTestSkill(t, skillDir, "a-skill", "Does a thing.")
 	cs2 := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{skillDir}}}, Request: CortexArgs{}.Request()}
@@ -187,10 +232,90 @@ func TestContextReportShowsSkillsIndexLineOnlyWhenNonEmpty(t *testing.T) {
 	if !strings.Contains(report, "skills") {
 		t.Errorf("contextReport() = %q, want a \"skills\" legend row when a skill is discovered", report)
 	}
-	if !strings.Contains(report, "1 skills") {
-		t.Errorf("contextReport() = %q, want the skill count (1 skills) in the detail column", report)
+	if !strings.Contains(report, "2 skills") {
+		t.Errorf("contextReport() = %q, want the skill count (2 skills: 1 filesystem + 1 default)", report)
 	}
 	if got, want := cs2.headTokens(), cs2.systemPromptTokens()+cs2.outlineTokens()+cs2.memoryIndexTokens()+cs2.skillsIndexTokens()+cs2.workspaceTokens(); got != want {
 		t.Errorf("headTokens() = %d, want %d (skills index token cost folded in)", got, want)
 	}
+}
+
+// TestDefaultConfigSkillFor returns the embedded SKILL.md text for the
+// default skill's virtual path and "" for anything else.
+func TestDefaultConfigSkillFor(t *testing.T) {
+	got := defaultConfigSkillFor(defaultConfigSkillPath)
+	if got == "" {
+		t.Fatal("defaultConfigSkillFor(defaultConfigSkillPath) is empty, want the embedded SKILL.md text")
+	}
+	if !strings.Contains(got, "name: writing-config") {
+		t.Errorf("defaultConfigSkillFor = %q, want frontmatter with name: writing-config", got)
+	}
+	if !strings.Contains(got, "# Writing Cortex config") {
+		t.Errorf("defaultConfigSkillFor = %q, want the skill's body heading", got)
+	}
+	// A non-default path returns "".
+	if got := defaultConfigSkillFor("some/other/path"); got != "" {
+		t.Errorf("defaultConfigSkillFor(%q) = %q, want \"\"", "some/other/path", got)
+	}
+}
+
+// TestDefaultConfigSkillServedByReadFile covers the read_file intercept:
+// a read_file of the default skill's virtual path returns the embedded
+// SKILL.md text (not a not-found error), and a read_file of a different
+// path is unaffected.
+func TestDefaultConfigSkillServedByReadFile(t *testing.T) {
+	cs := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{t.TempDir()}}}}
+
+	// The virtual path is served from the binary.
+	tc := tools.ToolCall{Function: tools.FunctionCall{
+		Name:      tools.FunctionReadFile,
+		Arguments: `{"path":"` + defaultConfigSkillPath + `"}`,
+	}}
+	out, _, err := tools.Execute(context.Background(), tc, cs)
+	if err != nil {
+		t.Fatalf("Execute(read_file %q) = error %v, want the embedded text", defaultConfigSkillPath, err)
+	}
+	if !strings.Contains(out, "name: writing-config") {
+		t.Errorf("read_file(%q) = %q, want the embedded SKILL.md frontmatter", defaultConfigSkillPath, out)
+	}
+
+	// A different path is unaffected (not the default skill).
+	tc2 := tools.ToolCall{Function: tools.FunctionCall{
+		Name:      tools.FunctionReadFile,
+		Arguments: `{"path":"not-the-default-skill.md"}`,
+	}}
+	_, _, err2 := tools.Execute(context.Background(), tc2, cs)
+	// Should be a not-found error (the path doesn't exist on disk).
+	if err2 == nil {
+		t.Error("read_file(non-default path) should return a not-found error")
+	}
+}
+
+// TestDefaultConfigSkillRangedRead returns the whole text plus a note
+// that line ranges are meaningless over an embedded skill.
+func TestDefaultConfigSkillRangedRead(t *testing.T) {
+	cs := &CortexSession{Config: &Config{Skills: SkillsConfig{Dirs: []string{t.TempDir()}}}}
+
+	tc := tools.ToolCall{Function: tools.FunctionCall{
+		Name:      tools.FunctionReadFile,
+		Arguments: `{"path":"` + defaultConfigSkillPath + `","start":5}`,
+	}}
+	out, _, err := tools.Execute(context.Background(), tc, cs)
+	if err != nil {
+		t.Fatalf("Execute(ranged read_file %q) = error %v", defaultConfigSkillPath, err)
+	}
+	if !strings.Contains(out, "name: writing-config") {
+		t.Errorf("ranged read_file = %q, want the full embedded text", out)
+	}
+	if !strings.Contains(out, "line ranges are meaningless") {
+		t.Errorf("ranged read_file = %q, want a note that ranges are meaningless", out)
+	}
+}
+
+// TestDefaultConfigSkillSatisfiedOnCortexSession verifies that
+// *CortexSession satisfies the tools.DefaultConfigSkiller interface, so
+// readFile (internal/tools) can serve the embedded text via the dynamic
+// type assertion.
+func TestDefaultConfigSkillSatisfiedOnCortexSession(t *testing.T) {
+	var _ tools.DefaultConfigSkiller = (*CortexSession)(nil)
 }
