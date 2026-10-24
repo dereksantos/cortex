@@ -23,7 +23,7 @@ everything else falls through. Neither file is required.
 | Key | Purpose |
 |---|---|
 | `backend` | `type` (`"openrouter"` is the only special value), `endpoint`, `key_env` (name of an env var, never the key itself), `key_service`, `provider` (OpenRouter routing) |
-| `models` | map of role → `model`, `window`, `thinking`, `effort` (e.g. `models.code`, `models.study`) |
+| `models` | map of role → `model`, `window`, `max_tokens`, `temperature`, `thinking` (reasoning-effort intent) (e.g. `models.code`, `models.study`) |
 | `tools` | per-tool gates (`allow_delete`, `enable_web`, `enable_agent`, `enable_scan`, …) and numeric caps |
 | `subagents` | `study`/`agent`/`learn` profile overrides (model, window, thinking) |
 | `limits` | byte/count ceilings (e.g. memory-index cap chars) |
