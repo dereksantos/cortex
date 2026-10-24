@@ -119,6 +119,9 @@ user-layer one wholesale rather than merging key by key. With
 - `key_service` — a macOS Keychain service name, read via
   `security find-generic-password -s <service> -w`. Used only if `key_env`
   is unset or its variable is empty.
+- Model discovery (`/model/info`, behind `cortex model`, `cortex turn`, and
+  the web UI model list) sends the backend-level key the same way, as a
+  `Bearer` token, so it works against a LiteLLM proxy with a master key.
 - Per-role `models.<role>.key_env` / `key_service` override
   `backend.key_env` / `backend.key_service` for that role only.
 
