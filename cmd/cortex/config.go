@@ -309,9 +309,10 @@ const defaultFleetDiscoveryTimeout = 4 * time.Second
 // it stays defaultFleetDiscoveryTimeout.
 var fleetDiscoveryTimeout = defaultFleetDiscoveryTimeout
 
-// discoverFleet GETs the backend's /model/info catalog. A non-empty key is
-// sent as a Bearer token (a LiteLLM proxy with a master key rejects the
-// probe otherwise); empty sends no Authorization header.
+// key is the backend's bearer token (Config.backendKey); LiteLLM has
+// required one on /model/info since the proxy gained a master key, and an
+// unauthenticated probe comes back 401/500, which read as "no fleet".
+// Empty sends no Authorization header (tests, keyless proxies).
 func discoverFleet(ctx context.Context, endpoint, key string) Fleet {
 	ctx, cancel := context.WithTimeout(ctx, fleetDiscoveryTimeout)
 	defer cancel()
