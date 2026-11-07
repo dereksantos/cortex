@@ -309,13 +309,20 @@ const defaultFleetDiscoveryTimeout = 4 * time.Second
 // it stays defaultFleetDiscoveryTimeout.
 var fleetDiscoveryTimeout = defaultFleetDiscoveryTimeout
 
-func discoverFleet(ctx context.Context, endpoint string) Fleet {
+// key is the backend's bearer token (Config.backendKey); LiteLLM has
+// required one on /model/info since the proxy gained a master key, and an
+// unauthenticated probe comes back 401/500, which read as "no fleet".
+// Empty sends no Authorization header (tests, keyless proxies).
+func discoverFleet(ctx context.Context, endpoint, key string) Fleet {
 	ctx, cancel := context.WithTimeout(ctx, fleetDiscoveryTimeout)
 	defer cancel()
 	url := strings.TrimRight(endpoint, "/") + "/model/info"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	res, err := httpClient.Do(req)
 	if err != nil {
@@ -1245,6 +1252,15 @@ func (c *Config) backendEndpoint() string {
 		return v
 	}
 	return defaultEndpoint
+}
+
+// backendKey resolves the backend-level API key (backend.key_env, then
+// backend.key_service — resolveKey's precedence); "" when none is configured.
+func (c *Config) backendKey() string {
+	if c == nil {
+		return ""
+	}
+	return resolveKey(ModelSpec{KeyEnv: c.Backend.KeyEnv, KeyService: c.Backend.KeyService})
 }
 
 // resolveBinding resolves one role's ModelSpec: role policy first, config

@@ -219,7 +219,7 @@ func fleetServer(t *testing.T, status int, body string) *httptest.Server {
 func TestDiscoverFleet(t *testing.T) {
 	t.Run("parses model_info, ignores extra keys", func(t *testing.T) {
 		srv := fleetServer(t, 200, fleetInfoJSON)
-		f := discoverFleet(context.Background(), srv.URL)
+		f := discoverFleet(context.Background(), srv.URL, "")
 		if f == nil {
 			t.Fatal("expected a fleet, got nil")
 		}
@@ -252,18 +252,62 @@ func TestDiscoverFleet(t *testing.T) {
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				srv := fleetServer(t, c.status, c.body)
-				if f := discoverFleet(context.Background(), srv.URL); f != nil {
+				if f := discoverFleet(context.Background(), srv.URL, ""); f != nil {
 					t.Errorf("want nil fleet, got %+v", f)
 				}
 			})
 		}
 	})
 
+	t.Run("sends Bearer key when given, no header when empty", func(t *testing.T) {
+		var got string
+		var seen bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Get("Authorization")
+			_, seen = r.Header["Authorization"]
+			w.Write([]byte(fleetInfoJSON))
+		}))
+		t.Cleanup(srv.Close)
+		if f := discoverFleet(context.Background(), srv.URL, "test-key"); f == nil || got != "Bearer test-key" {
+			t.Errorf("fleet=%v Authorization=%q, want Bearer test-key", f, got)
+		}
+		if f := discoverFleet(context.Background(), srv.URL, ""); f == nil || seen {
+			t.Errorf("fleet=%v Authorization sent=%v, want none", f, seen)
+		}
+	})
+
 	t.Run("nil on unreachable backend", func(t *testing.T) {
-		if f := discoverFleet(context.Background(), "http://127.0.0.1:1"); f != nil {
+		if f := discoverFleet(context.Background(), "http://127.0.0.1:1", ""); f != nil {
 			t.Errorf("want nil for unreachable, got %+v", f)
 		}
 	})
+}
+
+// backendKey is what the discovery callers send: backend.key_env wins, an
+// unset config sends nothing (key_service is empty, so no keychain lookup).
+func TestBackendKey(t *testing.T) {
+	t.Setenv("CORTEX_TEST_BACKEND_KEY", "test-key")
+	cfg := &Config{Backend: Backend{KeyEnv: "CORTEX_TEST_BACKEND_KEY"}}
+	if got := cfg.backendKey(); got != "test-key" {
+		t.Errorf("backendKey = %q, want test-key", got)
+	}
+	if got := (&Config{}).backendKey(); got != "" {
+		t.Errorf("backendKey with no key configured = %q, want empty", got)
+	}
+	var nilCfg *Config
+	if got := nilCfg.backendKey(); got != "" {
+		t.Errorf("nil config backendKey = %q, want empty", got)
+	}
+
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Write([]byte(fleetInfoJSON))
+	}))
+	t.Cleanup(srv.Close)
+	if f := discoverFleet(context.Background(), srv.URL, cfg.backendKey()); f == nil || auth != "Bearer test-key" {
+		t.Errorf("fleet=%v Authorization=%q, want Bearer test-key", f, auth)
+	}
 }
 
 // No backend address lives in source: the endpoint resolves config > env >

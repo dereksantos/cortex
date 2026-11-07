@@ -61,7 +61,7 @@ type modelsResponse struct {
 func handleModels(configPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := loadMergedConfig(configPath, "")
-		fleet := discoverFleet(r.Context(), cfg.backendEndpoint())
+		fleet := discoverFleet(r.Context(), cfg.backendEndpoint(), cfg.backendKey())
 		roles := make(map[string]ModelSpec, len(rolePolicies))
 		sources := make(map[string]string, len(rolePolicies))
 		for role := range rolePolicies {
