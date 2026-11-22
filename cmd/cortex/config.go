@@ -586,6 +586,13 @@ type Backend struct {
 	// classifier — so one session is served by one pinned upstream. Only
 	// honored when type is "openrouter"; ignored (never sent) otherwise.
 	Provider *llm.ProviderRouting `json:"provider,omitempty"`
+	// FleetControl is the base URL of a swap control plane for a fleet whose
+	// GPU slots hold one model at a time (e.g. "http://chatterbox:4000",
+	// switchboard). When set, /model loads the chosen model there and waits
+	// for it with an in-place status line (fleetswap.go), sending the backend
+	// key; a refused or failed load puts the previous model back. Unset:
+	// /model only renames the request model, as before.
+	FleetControl string `json:"fleet_control,omitempty"`
 }
 
 type Config struct {
@@ -2093,6 +2100,9 @@ func mergeBackend(base, over Backend) Backend {
 	// inherit a user-level `only`/`ignore` list that could contradict it.
 	if !over.Provider.IsZero() {
 		base.Provider = over.Provider
+	}
+	if over.FleetControl != "" {
+		base.FleetControl = over.FleetControl
 	}
 	return base
 }
