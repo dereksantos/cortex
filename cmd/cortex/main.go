@@ -935,8 +935,10 @@ func main() {
 				picker := newModelPicker(session)
 				if err := inspectSession(editor, picker); err == nil && picker.Accepted() {
 					if id := picker.SelectedID(); id != "" && id != session.Request.Model {
+						prev := session.Request.Model
 						session.SetModel(id)
 						fmt.Println(style.Paint("code model -> "+id, style.Dim))
+						switchFleetModel(session, id, prev)
 					}
 				}
 				continue
@@ -946,8 +948,10 @@ func main() {
 					session.Request.Model, session.Request.BaseURL,
 					session.Study.Model, session.Study.Endpoint)
 			} else {
+				prev := session.Request.Model
 				session.SetModel(name)
 				fmt.Printf("code model -> %s\n", name)
+				switchFleetModel(session, name, prev)
 			}
 			continue
 		}

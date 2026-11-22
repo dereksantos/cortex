@@ -79,6 +79,41 @@ and expects `models.<role>.window` to be set by hand. There is no
 Anthropic-native or Ollama-native request path in `cmd/cortex` — every
 backend receives the same OpenAI-style chat-completions request body.
 
+### `backend.fleet_control` — load the model `/model` switches to
+
+On a fleet whose GPUs hold one model at a time (a "swap slot"), switching
+models means loading one. A plain proxy such as LiteLLM answers a request for
+a model that isn't loaded with whatever model *is* loaded, so `/model north`
+appears to work while another model replies. A fleet-aware router such as
+switchboard refuses the
+request with a 409 instead. Either way, `/model` needs to load the model.
+
+`backend.fleet_control` names the fleet's swap control plane. With it set,
+`/model <name>` (and the `/model` picker) asks it to load the model and shows
+the swap on one line that repaints in place: `north · unloading
+glm-4.7-flash… 3s`, `north · loading… 12s`, then `north ready on RTX 3090 ·
+18s`. It returns once the model can serve.
+- Ctrl-C stops the wait, not the load.
+- If the control plane refuses the load (another agent holds a lease on the
+  slot, say) or the load fails, the session goes back to the previous model
+  and prints why.
+- If the control plane stops answering mid-swap, `/model` says so after a few
+  missed polls instead of waiting out the five-minute timeout.
+- On a non-interactive terminal each phase prints once, as a plain line.
+
+```json
+{ "backend": { "endpoint": "http://chatterbox:4000",
+               "key_service": "chatterbox-litellm",
+               "fleet_control": "http://chatterbox:4000" } }
+```
+
+The control plane answers `GET /v1/fleet/status?model=<id>` and
+`POST /v1/fleet/load {"model": "<id>"}` (`cmd/cortex/fleetswap.go` documents
+the shape). Both calls send the backend key (`key_env` / `key_service`) as a
+Bearer token. The older unauthenticated `fleetctl` on `:4001` speaks the same
+two calls. Unset, unreachable, or a model it doesn't manage (404): `/model`
+only renames the request model, as before.
+
 ### `backend.provider` — OpenRouter provider routing
 
 OpenRouter serves most open-weight models from several upstream providers
